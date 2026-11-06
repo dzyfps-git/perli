@@ -2,16 +2,23 @@
 //! The UI only ever holds the rows it is showing.
 
 use std::cmp::Ordering;
+use std::collections::HashMap;
+use std::ffi::OsString;
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde::Deserialize;
 use windows::core::{Result, HSTRING, PCWSTR};
-use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_NO_MORE_FILES};
 use windows::Win32::Storage::FileSystem::{
-    FindClose, FindExInfoBasic, FindExSearchNameMatch, FindFirstFileExW, FindNextFileW,
-    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_HIDDEN, FIND_FIRST_EX_LARGE_FETCH, WIN32_FIND_DATAW,
+    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_HIDDEN, WIN32_FIND_DATAW,
 };
 use windows::Win32::UI::Shell::StrCmpLogicalW;
+
+use crate::ops::{self, BinItem};
+
+/// Stands for the Recycle Bin, which has no folder of its own to open.
+pub const BIN_PATH: &str = "shell:RecycleBinFolder";
 
 const FLAG_FOLDER: u8 = 1;
 const FLAG_HIDDEN: u8 = 2;
@@ -25,6 +32,8 @@ pub enum SortKey {
     Created,
     Type,
     Size,
+    /// Where a deleted item came from. Only the Recycle Bin has one.
+    Location,
 }
 
 /// Where folders go among files.
@@ -78,6 +87,17 @@ impl Entry {
         })
     }
 
+    fn from_bin_item(item: &BinItem) -> Self {
+        Self {
+            name: null_terminated(item.original.file_name().unwrap_or_default().as_ref()),
+            size: item.size,
+            modified: item.deleted,
+            created: item.deleted,
+            is_dir: item.is_dir,
+            hidden: false,
+        }
+    }
+
     fn name(&self) -> &[u16] {
         &self.name[..self.name.len() - 1]
     }
@@ -97,40 +117,82 @@ impl Entry {
     }
 }
 
+fn null_terminated(text: &Path) -> Box<[u16]> {
+    text.as_os_str().encode_wide().chain([0]).collect()
+}
+
+/// What the Recycle Bin knows beyond a normal folder, in the same order as `Listing::entries`.
+/// It lives apart so normal rows stay small.
+struct Bin {
+    items: Vec<BinItem>,
+    locations: Vec<Box<[u16]>>,
+}
+
 /// One read of a folder. Rows are positions in `entries`, so a new sort or the hidden
 /// toggle needs no new read.
 #[derive(Clone, Default)]
 pub struct Listing {
+    folder: PathBuf,
     entries: Arc<Vec<Entry>>,
+    bin: Option<Arc<Bin>>,
     visible: Vec<u32>,
     order: Order,
 }
 
 impl Listing {
     pub fn read(path: &str, order: Order) -> Result<Self> {
-        Ok(Self::arrange(Arc::new(read_entries(path)?), order))
+        if path == BIN_PATH {
+            return Self::read_bin(order);
+        }
+        let full = resolve(path)?;
+        let entries = read_entries(&full)?;
+        let listing = Self {
+            folder: full.into(),
+            entries: Arc::new(entries),
+            ..Self::default()
+        };
+        Ok(listing.arrange(order))
+    }
+
+    fn read_bin(order: Order) -> Result<Self> {
+        Ok(Self::from_bin(ops::read_bin()?).arrange(order))
+    }
+
+    fn from_bin(items: Vec<BinItem>) -> Self {
+        let location = |item: &BinItem| null_terminated(item.original.parent().unwrap_or(Path::new("")));
+        let bin = Bin {
+            locations: items.iter().map(location).collect(),
+            items,
+        };
+        Self {
+            entries: Arc::new(bin.items.iter().map(Entry::from_bin_item).collect()),
+            bin: Some(Arc::new(bin)),
+            ..Self::default()
+        }
     }
 
     pub fn arranged(self, order: Order) -> Self {
         if order == self.order {
             self
         } else {
-            Self::arrange(self.entries, order)
+            self.arrange(order)
         }
     }
 
-    fn arrange(entries: Arc<Vec<Entry>>, order: Order) -> Self {
+    fn arrange(mut self, order: Order) -> Self {
+        let entries = &self.entries;
         let mut visible: Vec<u32> = (0..entries.len() as u32)
             .filter(|&row| order.show_hidden || !entries[row as usize].hidden)
             .collect();
-        visible.sort_unstable_by(|&a, &b| {
-            compare(&entries[a as usize], &entries[b as usize], order)
-        });
-        Self {
-            entries,
-            visible,
-            order,
-        }
+        let locations = self.locations();
+        visible.sort_unstable_by(|&a, &b| compare(entries, locations, a, b, order));
+        self.visible = visible;
+        self.order = order;
+        self
+    }
+
+    fn locations(&self) -> &[Box<[u16]>] {
+        self.bin.as_ref().map_or(&[], |bin| &bin.locations)
     }
 
     pub fn len(&self) -> usize {
@@ -144,6 +206,52 @@ impl Listing {
 
     fn rows(&self) -> impl Iterator<Item = &Entry> {
         self.visible.iter().map(|&row| &self.entries[row as usize])
+    }
+
+    /// The positions in `entries` of the rows the UI named. Rows no longer shown are left out.
+    fn chosen<'a>(&'a self, rows: &'a [u32]) -> impl Iterator<Item = usize> + 'a {
+        rows.iter()
+            .filter_map(|&row| self.visible.get(row as usize))
+            .map(|&entry| entry as usize)
+    }
+
+    /// What is on disk for each of `rows`: its full path, built from the raw name so that odd
+    /// names survive, or its `$R` item in the Recycle Bin.
+    pub fn paths(&self, rows: &[u32]) -> Vec<PathBuf> {
+        self.chosen(rows)
+            .map(|entry| match &self.bin {
+                Some(bin) => bin.items[entry].item.clone(),
+                None => self.folder.join(OsString::from_wide(self.entries[entry].name())),
+            })
+            .collect()
+    }
+
+    /// The Recycle Bin items at `rows`. Other folders have none.
+    pub fn bin_items(&self, rows: &[u32]) -> Vec<BinItem> {
+        let Some(bin) = &self.bin else {
+            return Vec::new();
+        };
+        self.chosen(rows).map(|entry| bin.items[entry].clone()).collect()
+    }
+
+    /// Lossy, which is fine because these are only ever shown or compared.
+    pub fn names(&self, rows: &[u32]) -> Vec<String> {
+        self.chosen(rows)
+            .map(|entry| String::from_utf16_lossy(self.entries[entry].name()))
+            .collect()
+    }
+
+    /// Where the entries called `names` sit, in the same order. Names no longer shown are
+    /// left out.
+    pub fn rows_named(&self, names: &[String]) -> Vec<u32> {
+        let rows: HashMap<&[u16], u32> = self.rows().map(Entry::name).zip(0..).collect();
+        names
+            .iter()
+            .filter_map(|name| {
+                let name: Vec<u16> = name.encode_utf16().collect();
+                rows.get(name.as_slice()).copied()
+            })
+            .collect()
     }
 
     /// Where `rows` of `before` sit in this listing, in the same order. Rows no longer
@@ -168,68 +276,50 @@ impl Listing {
             .find(|&row| self.entries[self.visible[row] as usize].starts_with(&prefix))
     }
 
-    /// Encodes rows as: row count (u32), then for each row the name length in bytes
-    /// (u32), size (u64), modified (u64), created (u64), flags (u8) and the UTF-16 name.
-    /// All numbers are little-endian. `src/api/index.ts` decodes this.
+    /// Encodes rows as: row count (u32), then for each row the name length in bytes (u32),
+    /// size (u64), modified (u64), created (u64), flags (u8), the location length in bytes
+    /// (u32), the UTF-16 name and the UTF-16 location. All numbers are little-endian.
+    /// `src/api/index.ts` decodes this.
     pub fn encode_rows(&self, start: usize, count: usize) -> Vec<u8> {
         let start = start.min(self.len());
         let rows = (start + count).min(self.len()) - start;
 
         let mut bytes = Vec::with_capacity(4 + rows * 64);
         bytes.extend((rows as u32).to_le_bytes());
-        for row in self.rows().skip(start).take(rows) {
+        for &entry in &self.visible[start..start + rows] {
+            let row = &self.entries[entry as usize];
             let folder = if row.is_dir { FLAG_FOLDER } else { 0 };
             let hidden = if row.hidden { FLAG_HIDDEN } else { 0 };
+            let location = location_of(self.locations(), entry);
+            let location = &location[..location.len() - 1];
             bytes.extend((row.name().len() as u32 * 2).to_le_bytes());
             bytes.extend(row.size.to_le_bytes());
             bytes.extend(row.modified.to_le_bytes());
             bytes.extend(row.created.to_le_bytes());
             bytes.push(folder | hidden);
+            bytes.extend((location.len() as u32 * 2).to_le_bytes());
             bytes.extend(row.name().iter().flat_map(|unit| unit.to_le_bytes()));
+            bytes.extend(location.iter().flat_map(|unit| unit.to_le_bytes()));
         }
         bytes
     }
 }
 
-fn read_entries(path: &str) -> Result<Vec<Entry>> {
-    let pattern = search_pattern(path)?;
-    let mut data = WIN32_FIND_DATAW::default();
-    let found = unsafe {
-        FindFirstFileExW(
-            &pattern,
-            FindExInfoBasic,
-            (&raw mut data).cast(),
-            FindExSearchNameMatch,
-            None,
-            FIND_FIRST_EX_LARGE_FETCH,
-        )
-    };
-    let handle = match found {
-        Ok(handle) => handle,
-        // An empty drive root has no "." entry, so nothing matches.
-        Err(error) if error.code() == ERROR_FILE_NOT_FOUND.to_hresult() => return Ok(Vec::new()),
-        Err(error) => return Err(error),
-    };
-
+/// `full` comes from `resolve`.
+fn read_entries(full: &str) -> Result<Vec<Entry>> {
     let mut entries = Vec::new();
-    let finished = loop {
-        entries.extend(Entry::from_find_data(&data));
-        if let Err(error) = unsafe { FindNextFileW(handle, &mut data) } {
-            break if error.code() == ERROR_NO_MORE_FILES.to_hresult() {
-                Ok(())
-            } else {
-                Err(error)
-            };
-        }
-    };
-    unsafe { FindClose(handle) }?;
-    finished?;
+    ops::sys::each_entry(&search_pattern(full), |data| {
+        entries.extend(Entry::from_find_data(data));
+    })?;
     Ok(entries)
 }
 
 /// Resolves relative parts and forward slashes into a full path, with no trailing
 /// backslash except on a drive root.
 pub fn resolve(path: &str) -> Result<String> {
+    if path == BIN_PATH {
+        return Ok(path.to_string());
+    }
     let full = std::path::absolute(path)?;
     let full = full.to_string_lossy();
     let trimmed = full.trim_end_matches('\\');
@@ -243,15 +333,17 @@ pub fn resolve(path: &str) -> Result<String> {
 /// Builds the extended-length search pattern. The `\\?\` prefix turns off Windows path
 /// parsing, so the path must be resolved before adding it.
 // ponytail: local drive paths only, UNC paths arrive with network drives in Phase 3.
-fn search_pattern(path: &str) -> Result<HSTRING> {
-    let full = resolve(path)?;
-    Ok(HSTRING::from(format!(
-        r"\\?\{}\*",
-        full.trim_end_matches('\\')
-    )))
+fn search_pattern(full: &str) -> HSTRING {
+    HSTRING::from(format!(r"\\?\{}\*", full.trim_end_matches('\\')))
 }
 
-fn compare(a: &Entry, b: &Entry, order: Order) -> Ordering {
+/// Null-terminated, and empty outside the Recycle Bin.
+fn location_of(locations: &[Box<[u16]>], entry: u32) -> &[u16] {
+    locations.get(entry as usize).map_or(&[0], |location| location)
+}
+
+fn compare(entries: &[Entry], locations: &[Box<[u16]>], first: u32, second: u32, order: Order) -> Ordering {
+    let (a, b) = (&entries[first as usize], &entries[second as usize]);
     let groups = match order.group {
         Grouping::FoldersFirst => b.is_dir.cmp(&a.is_dir),
         Grouping::FilesFirst => a.is_dir.cmp(&b.is_dir),
@@ -264,6 +356,7 @@ fn compare(a: &Entry, b: &Entry, order: Order) -> Ordering {
             SortKey::Created => a.created.cmp(&b.created),
             SortKey::Type => natural(a.extension(), b.extension()),
             SortKey::Size => a.size.cmp(&b.size),
+            SortKey::Location => natural(location_of(locations, first), location_of(locations, second)),
         };
         let by_key = if order.descending {
             by_key.reverse()
@@ -283,7 +376,6 @@ fn natural(a: &[u16], b: &[u16]) -> Ordering {
 mod tests {
     use super::*;
     use std::fs;
-    use std::path::{Path, PathBuf};
     use std::time::{Duration, SystemTime};
     use windows::Win32::Storage::FileSystem::SetFileAttributesW;
 
@@ -539,6 +631,76 @@ mod tests {
         assert_eq!(resolve("C:/Users/./Public/..").unwrap(), r"C:\Users");
     }
 
+    fn bin_listing(order: Order) -> Listing {
+        let item = |id: &str, original: &str, deleted| BinItem {
+            item: PathBuf::from(format!(r"D:\$Recycle.Bin\$R{id}")),
+            original: PathBuf::from(original),
+            size: 7,
+            deleted,
+            is_dir: false,
+        };
+        Listing::from_bin(vec![
+            item("A", r"D:\work\b.txt", 1),
+            item("B", r"C:\home\a.txt", 2),
+        ])
+        .arrange(order)
+    }
+
+    #[test]
+    fn recycle_bin_rows_carry_their_location_and_item() {
+        let listing = bin_listing(Order::default());
+
+        assert_eq!(names(&listing), ["a.txt", "b.txt"]);
+        assert_eq!(listing.paths(&[1]), [PathBuf::from(r"D:\$Recycle.Bin\$RA")]);
+        assert_eq!(listing.bin_items(&[0])[0].original, Path::new(r"C:\home\a.txt"));
+
+        let bytes = listing.encode_rows(0, 1);
+        let location_bytes = u32::from_le_bytes(bytes[33..37].try_into().unwrap()) as usize;
+        let location: Vec<u16> = bytes[47..47 + location_bytes]
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect();
+        assert_eq!(String::from_utf16(&location).unwrap(), r"C:\home");
+    }
+
+    #[test]
+    fn recycle_bin_sorts_by_location() {
+        let order = Order {
+            key: SortKey::Location,
+            ..Order::default()
+        };
+        let descending = Order {
+            descending: true,
+            ..order
+        };
+
+        assert_eq!(names(&bin_listing(order)), ["a.txt", "b.txt"]);
+        assert_eq!(names(&bin_listing(descending)), ["b.txt", "a.txt"]);
+    }
+
+    #[test]
+    fn rows_turn_into_full_paths_with_raw_names() {
+        let folder = TempFolder::new("paths");
+        fs::write(folder.0.join("a.txt"), "").unwrap();
+        fs::write(folder.0.join("b.txt"), "").unwrap();
+        let listing = Listing::read(folder.0.to_str().unwrap(), Order::default()).unwrap();
+
+        assert_eq!(listing.paths(&[1, 99]), [folder.0.join("b.txt")]);
+        assert_eq!(listing.names(&[1, 0]), ["b.txt", "a.txt"]);
+    }
+
+    #[test]
+    fn rows_named_follows_names_and_drops_missing_ones() {
+        let folder = TempFolder::new("named");
+        for file in ["a", "b", "c"] {
+            fs::write(folder.0.join(file), "").unwrap();
+        }
+        let listing = Listing::read(folder.0.to_str().unwrap(), Order::default()).unwrap();
+
+        let wanted = ["c".to_string(), "nope".to_string(), "a".to_string()];
+        assert_eq!(listing.rows_named(&wanted), [2, 0]);
+    }
+
     #[test]
     fn missing_folder_is_an_error() {
         let folder = TempFolder::new("missing");
@@ -564,7 +726,7 @@ mod tests {
         assert_eq!(bytes[..4], 2u32.to_le_bytes());
         assert_eq!(bytes[4..8], 2u32.to_le_bytes());
         assert_eq!(bytes[32], FLAG_HIDDEN);
-        assert_eq!(bytes[33..35], [b'b', 0]);
+        assert_eq!(bytes[37..39], [b'b', 0]);
         assert_eq!(listing.encode_rows(99, 10)[..4], 0u32.to_le_bytes());
     }
 }

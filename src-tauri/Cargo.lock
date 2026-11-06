@@ -2147,6 +2147,7 @@ dependencies = [
  "tauri",
  "tauri-build",
  "windows",
+ "windows-core",
 ]
 
 [[package]]
