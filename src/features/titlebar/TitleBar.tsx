@@ -75,7 +75,9 @@ export function TitleBar(props: { tabs: Tabs; onNewTab: () => void }) {
               onAuxClick={(event) => event.button === 1 && props.tabs.close(view)}
               onContextMenu={(event) => {
                 event.preventDefault();
-                setMenu({ x: event.clientX, y: event.clientY, view });
+                // A native window sits over the maximize button and would take the menu's clicks.
+                const below = maximizeButton.getBoundingClientRect().bottom;
+                setMenu({ x: event.clientX, y: Math.max(event.clientY, below), view });
               }}
             >
               <span class="tab-title">{tabTitle(view)}</span>

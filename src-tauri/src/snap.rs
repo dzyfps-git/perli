@@ -4,7 +4,7 @@
 //! WebView2 covers the whole window and never gives that answer. So a small invisible
 //! child window sits over the HTML button and answers instead. It takes the mouse from
 //! that button, so it handles the click and reports hover. The keyboard still reaches
-//! the HTML button.
+//! the HTML button. Its top edge stays free, so the window can still be resized from there.
 
 use std::mem::size_of;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -12,16 +12,18 @@ use std::sync::OnceLock;
 
 use tauri::{Emitter, WebviewWindow};
 use windows::core::{w, Result};
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     TrackMouseEvent, TME_LEAVE, TME_NONCLIENT, TRACKMOUSEEVENT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, GetParent, IsZoomed, LoadCursorW, RegisterClassW,
-    SendMessageW, SetWindowPos, HTMAXBUTTON, HWND_TOP, IDC_ARROW, SC_MAXIMIZE, SC_RESTORE,
-    SWP_NOACTIVATE, WM_NCHITTEST, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSELEAVE,
-    WM_NCMOUSEMOVE, WM_SYSCOMMAND, WNDCLASSW, WS_CHILD, WS_VISIBLE,
+    CreateWindowExW, DefWindowProcW, GetParent, GetWindowRect, IsZoomed, LoadCursorW,
+    RegisterClassW, SendMessageW, SetWindowPos, HTMAXBUTTON, HTTRANSPARENT, HWND_TOP, IDC_ARROW,
+    SC_MAXIMIZE, SC_RESTORE, SM_CYFRAME, SWP_NOACTIVATE, WM_NCHITTEST, WM_NCLBUTTONDOWN,
+    WM_NCLBUTTONUP, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE, WM_SYSCOMMAND, WNDCLASSW, WS_CHILD,
+    WS_VISIBLE,
 };
 
 struct Area {
@@ -107,6 +109,22 @@ fn toggle_maximized(area: HWND) {
     }
 }
 
+/// Whether the pointer is on the window's top resize border. A maximized window has none, so
+/// the very top of the screen still reaches the button there.
+fn on_resize_border(area: HWND, lparam: LPARAM) -> bool {
+    let pointer_y = (lparam.0 as u32 >> 16) as i16 as i32;
+    let mut rect = RECT::default();
+    unsafe {
+        let Ok(parent) = GetParent(area) else {
+            return false;
+        };
+        if IsZoomed(parent).as_bool() || GetWindowRect(area, &mut rect).is_err() {
+            return false;
+        }
+        pointer_y < rect.top + GetSystemMetricsForDpi(SM_CYFRAME, GetDpiForWindow(area))
+    }
+}
+
 unsafe extern "system" fn procedure(
     hwnd: HWND,
     message: u32,
@@ -115,6 +133,8 @@ unsafe extern "system" fn procedure(
 ) -> LRESULT {
     let on_button = wparam.0 == HTMAXBUTTON as usize;
     match message {
+        // Windows then asks the window below, which is Tauri's resize border.
+        WM_NCHITTEST if on_resize_border(hwnd, lparam) => LRESULT(HTTRANSPARENT as isize),
         WM_NCHITTEST => LRESULT(HTMAXBUTTON as isize),
         WM_NCMOUSEMOVE => {
             if !HOVERED.swap(true, Ordering::Relaxed) {
