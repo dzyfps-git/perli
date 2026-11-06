@@ -1,0 +1,47 @@
+.places ul {
+  margin: var(--space-3) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.place {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  height: var(--row-height);
+  padding: 0 var(--space-2);
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  transition: background var(--motion);
+}
+
+.place:hover {
+  background: var(--surface-hover);
+}
+
+.place[aria-current] {
+  background: var(--surface-selected);
+}
+
+.place:focus-visible {
+  outline: 2px solid var(--accent-from);
+  outline-offset: -2px;
+}
+
+.place-icon {
+  flex: none;
+  font-family: var(--font-icons);
+  font-size: 14px;
+}
+
+.place-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

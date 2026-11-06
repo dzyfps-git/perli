@@ -1,0 +1,58 @@
+import { createSignal, For, onMount } from "solid-js";
+import { listPlaces, type Places } from "../../api";
+import type { FolderView } from "../navigation/folderView";
+import { samePath } from "../navigation/path";
+import "./sidebar.css";
+
+const ICON_DRIVE = "";
+
+const FOLDERS: Record<string, { label: string; icon: string }> = {
+  home: { label: "Home", icon: "" },
+  desktop: { label: "Desktop", icon: "" },
+  documents: { label: "Documents", icon: "" },
+  downloads: { label: "Downloads", icon: "" },
+  pictures: { label: "Pictures", icon: "" },
+  music: { label: "Music", icon: "" },
+  videos: { label: "Videos", icon: "" },
+};
+
+function Place(props: { view: FolderView; path: string; label: string; icon: string }) {
+  return (
+    <li>
+      <button
+        class="place"
+        aria-current={samePath(props.view.folder()?.path, props.path) ? "location" : undefined}
+        onClick={() => props.view.open(props.path)}
+      >
+        <span class="place-icon" aria-hidden="true">
+          {props.icon}
+        </span>
+        <span class="place-label">{props.label}</span>
+      </button>
+    </li>
+  );
+}
+
+export function Sidebar(props: { view: FolderView }) {
+  const [places, setPlaces] = createSignal<Places>();
+
+  // ponytail: read once, so a newly plugged drive needs a restart. Watch for drive changes in Phase 3.
+  onMount(() => {
+    listPlaces().then(setPlaces).catch(console.error);
+  });
+
+  return (
+    <nav class="places" aria-label="Places">
+      <ul>
+        <For each={places()?.folders}>
+          {(folder) => <Place view={props.view} path={folder.path} {...FOLDERS[folder.kind]} />}
+        </For>
+      </ul>
+      <ul>
+        <For each={places()?.drives}>
+          {(drive) => <Place view={props.view} path={drive.path} label={drive.name} icon={ICON_DRIVE} />}
+        </For>
+      </ul>
+    </nav>
+  );
+}

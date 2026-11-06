@@ -1,0 +1,122 @@
+//! The folders and drives the sidebar offers.
+
+use std::mem::size_of;
+
+use serde::Serialize;
+use windows::core::{Result, GUID, HSTRING};
+use windows::Win32::Storage::FileSystem::{GetLogicalDrives, FILE_FLAGS_AND_ATTRIBUTES};
+use windows::Win32::System::Com::{
+    CoInitializeEx, CoTaskMemFree, CoUninitialize, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE,
+};
+use windows::Win32::UI::Shell::{
+    FOLDERID_Desktop, FOLDERID_Documents, FOLDERID_Downloads, FOLDERID_Music, FOLDERID_Pictures,
+    FOLDERID_Profile, FOLDERID_Videos, SHGetFileInfoW, SHGetKnownFolderPath, KF_FLAG_DEFAULT,
+    SHFILEINFOW, SHGFI_DISPLAYNAME,
+};
+
+const FOLDERS: [(&str, GUID); 7] = [
+    ("home", FOLDERID_Profile),
+    ("desktop", FOLDERID_Desktop),
+    ("documents", FOLDERID_Documents),
+    ("downloads", FOLDERID_Downloads),
+    ("pictures", FOLDERID_Pictures),
+    ("music", FOLDERID_Music),
+    ("videos", FOLDERID_Videos),
+];
+
+#[derive(Serialize)]
+pub struct Folder {
+    kind: &'static str,
+    path: String,
+}
+
+#[derive(Serialize)]
+pub struct Drive {
+    name: String,
+    path: String,
+}
+
+#[derive(Serialize)]
+pub struct Places {
+    folders: Vec<Folder>,
+    drives: Vec<Drive>,
+}
+
+/// Blocks, because asking about a drive can wake it, so call it off the main thread.
+pub fn read() -> Result<Places> {
+    let folders = FOLDERS
+        .iter()
+        .filter_map(|(kind, id)| known_folder(id).map(|path| Folder { kind, path }))
+        .collect();
+
+    unsafe {
+        // Windows requires COM on this thread for `SHGetFileInfoW`.
+        CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE).ok()?;
+        let drives = read_drives();
+        CoUninitialize();
+        Ok(Places { folders, drives })
+    }
+}
+
+/// Follows redirection, so a Documents folder moved to OneDrive or D: is found.
+fn known_folder(id: &GUID) -> Option<String> {
+    unsafe {
+        let path = SHGetKnownFolderPath(id, KF_FLAG_DEFAULT, None).ok()?;
+        let text = path.to_string().ok();
+        CoTaskMemFree(Some(path.as_ptr().cast()));
+        text
+    }
+}
+
+fn read_drives() -> Vec<Drive> {
+    let letters = unsafe { GetLogicalDrives() };
+    (0..26)
+        .filter(|bit| letters & (1 << bit) != 0)
+        .map(|bit| {
+            let path = format!(r"{}:\", char::from(b'A' + bit));
+            let name = display_name(&path).unwrap_or_else(|| path.clone());
+            Drive { name, path }
+        })
+        .collect()
+}
+
+/// The name Explorer shows, such as "Local Disk (C:)".
+fn display_name(path: &str) -> Option<String> {
+    let mut info = SHFILEINFOW::default();
+    let found = unsafe {
+        SHGetFileInfoW(
+            &HSTRING::from(path),
+            FILE_FLAGS_AND_ATTRIBUTES(0),
+            Some(&raw mut info),
+            size_of::<SHFILEINFOW>() as u32,
+            SHGFI_DISPLAYNAME,
+        )
+    };
+    let name = info.szDisplayName;
+    let length = name.iter().position(|&unit| unit == 0)?;
+    (found != 0 && length > 0).then(|| String::from_utf16_lossy(&name[..length]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finds_the_home_folder_and_the_system_drive() {
+        let places = read().unwrap();
+
+        let home = places.folders.iter().find(|folder| folder.kind == "home");
+        assert_eq!(
+            home.unwrap().path.to_lowercase(),
+            std::env::var("USERPROFILE").unwrap().to_lowercase()
+        );
+
+        let system = std::env::var("SystemDrive").unwrap();
+        let drive = places
+            .drives
+            .iter()
+            .find(|drive| drive.path == format!(r"{system}\"))
+            .unwrap();
+        assert!(drive.name.contains(&system), "{}", drive.name);
+    }
+}

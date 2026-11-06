@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { join, nextTrail, parentOf, toCrumbs } from "./path.ts";
+import { join, nextTrail, parentOf, samePath, toCrumbs } from "./path.ts";
+
+test("samePath ignores case and handles no folder yet", () => {
+  assert.equal(samePath("C:\\Users\\Me", "c:\\users\\me"), true);
+  assert.equal(samePath("C:\\Users", "C:\\Users\\me"), false);
+  assert.equal(samePath(undefined, "C:\\"), false);
+});
 
 test("toCrumbs starts at the drive root", () => {
   assert.deepEqual(toCrumbs("C:\\Users\\me"), [

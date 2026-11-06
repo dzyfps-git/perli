@@ -5,6 +5,7 @@ import type { FolderView } from "./features/navigation/folderView";
 import { join } from "./features/navigation/path";
 import { Palette } from "./features/palette/Palette";
 import { PathBar } from "./features/pathbar/PathBar";
+import { Sidebar } from "./features/sidebar/Sidebar";
 import { createTabs } from "./features/tabs/tabs";
 import { TitleBar } from "./features/titlebar/TitleBar";
 
@@ -56,6 +57,7 @@ export function App() {
       <TitleBar tabs={tabs} onNewTab={newTab} />
       <aside class="sidebar">
         <span class="logo">Perli</span>
+        <Sidebar view={tabs.active()} />
       </aside>
       <main class="files">
         <PathBar view={tabs.active()} />
