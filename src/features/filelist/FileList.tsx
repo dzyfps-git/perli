@@ -1,6 +1,6 @@
 import { createEffect, createMemo, on, onCleanup, onMount, Show } from "solid-js";
 import { fetchRows, findRow, type Row, type Sort, type SortKey } from "../../api";
-import { ColumnHeader } from "./ColumnHeader";
+import { ColumnHeader, SortStrip } from "./ColumnHeader";
 import { formatSize } from "../../ui/format";
 import { columnsWidth, gridTemplate } from "./columns";
 import { clampTile, moveTarget, TILE_STEP, type Layout } from "./layout";
@@ -78,6 +78,7 @@ export function FileList(props: {
   onMenu: (event: MouseEvent, row: Row) => void;
   onBackgroundMenu: (event: MouseEvent) => void;
   onHeaderMenu: (event: MouseEvent) => void;
+  onGroup: () => void;
   /** The rows are a new order of the folder already shown. */
   rearranged?: boolean;
   onFirstPaint: () => void;
@@ -382,12 +383,16 @@ export function FileList(props: {
             : undefined,
       }}
     >
-      <Show when={props.layout === "list"}>
+      <Show
+        when={props.layout === "list"}
+        fallback={<SortStrip sort={props.sort} onSort={props.onSort} onGroup={props.onGroup} />}
+      >
         <ColumnHeader
           ref={(element) => (header = element)}
           sort={props.sort}
           onSort={props.onSort}
           onMenu={props.onHeaderMenu}
+          onGroup={props.onGroup}
         />
       </Show>
       <div

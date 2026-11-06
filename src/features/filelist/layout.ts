@@ -1,8 +1,8 @@
 export type Layout = "list" | "grid";
 
 export const TILE_STEP = 16;
-const MIN_TILE = 80;
-const MAX_TILE = 240;
+export const MIN_TILE = 80;
+export const MAX_TILE = 240;
 
 export const clampTile = (size: number) => Math.min(MAX_TILE, Math.max(MIN_TILE, size));
 export const isSmallestTile = (size: number) => size <= MIN_TILE;

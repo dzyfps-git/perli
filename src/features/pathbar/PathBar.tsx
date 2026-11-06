@@ -1,5 +1,7 @@
 import { createEffect, For, onCleanup, onMount, Show } from "solid-js";
 import { expandPath, isFile, openFile } from "../../api";
+import type { Layout } from "../filelist/layout";
+import { showHidden } from "../filelist/prefs";
 import type { FolderView } from "../navigation/folderView";
 import { toCrumbs, typedPath } from "../navigation/path";
 import "./pathbar.css";
@@ -8,11 +10,14 @@ const ICON_BACK = "";
 const ICON_FORWARD = "";
 const ICON_UP = "";
 
-const ICON_OPTIONS = "\uE712";
+const ICON_LIST = "\uE8FD";
+const ICON_GRID = "\uF0E2";
+const ICON_SHOWN = "\uE7B3";
+const ICON_HIDDEN = "\uED1A";
 
 export function PathBar(props: {
   view: FolderView;
-  onOptions: (x: number, y: number) => void;
+  onToggleHidden: () => void;
   onInputMenu: (event: MouseEvent) => void;
 }) {
   const crumbs = () => toCrumbs(props.view.trail());
@@ -29,9 +34,16 @@ export function PathBar(props: {
     });
   }
 
+  const focusList = () => list.closest(".pane")?.querySelector<HTMLElement>(".file-grid")?.focus();
+
   function closeInput() {
     props.view.setEditingPath(false);
-    list.closest(".pane")?.querySelector<HTMLElement>(".file-grid")?.focus();
+    focusList();
+  }
+
+  function setLayout(layout: Layout) {
+    props.view.setLayout(layout);
+    focusList();
   }
 
   async function openTyped(text: string) {
@@ -57,11 +69,6 @@ export function PathBar(props: {
   function closeOnBlur(event: FocusEvent) {
     const movedToMenu = (event.relatedTarget as HTMLElement | null)?.closest(".menu");
     if (document.hasFocus() && !movedToMenu) props.view.setEditingPath(false);
-  }
-
-  function showOptions(event: MouseEvent) {
-    const button = (event.currentTarget as HTMLElement).getBoundingClientRect();
-    props.onOptions(button.right, button.bottom);
   }
 
   createEffect(() => {
@@ -127,9 +134,24 @@ export function PathBar(props: {
           )}
         </For>
       </ol>
-      <button class="nav-button" aria-label="View options" onClick={showOptions}>
-        {ICON_OPTIONS}
-      </button>
+      <Show when={props.view.folder()?.hiddenCount}>
+        {(count) => (
+          <button class="hidden-count" aria-pressed={showHidden()} onClick={props.onToggleHidden}>
+            <span class="hidden-icon" aria-hidden="true">
+              {showHidden() ? ICON_SHOWN : ICON_HIDDEN}
+            </span>
+            {count()} hidden
+          </button>
+        )}
+      </Show>
+      <div class="layout-pill" role="group" aria-label="Layout" data-layout={props.view.layout()}>
+        <button aria-label="List" aria-pressed={props.view.layout() === "list"} onClick={() => setLayout("list")}>
+          {ICON_LIST}
+        </button>
+        <button aria-label="Grid" aria-pressed={props.view.layout() === "grid"} onClick={() => setLayout("grid")}>
+          {ICON_GRID}
+        </button>
+      </div>
     </nav>
   );
 }

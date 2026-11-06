@@ -100,6 +100,79 @@
   color: var(--text-muted);
 }
 
+.hidden-count {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: var(--space-1);
+  height: 28px;
+  padding: 0 var(--space-2);
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 12px;
+  transition: background var(--motion), color var(--motion);
+}
+
+.hidden-count:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.hidden-count[aria-pressed="true"] {
+  color: var(--accent);
+}
+
+.hidden-icon {
+  font-family: var(--font-icons);
+  font-size: 12px;
+}
+
+.layout-pill {
+  position: relative;
+  display: flex;
+  flex: none;
+  padding: 2px;
+  border-radius: var(--radius);
+}
+
+.layout-pill::before {
+  content: "";
+  position: absolute;
+  inset: 2px auto 2px 2px;
+  width: 28px;
+  border-radius: 6px;
+  background: var(--surface-selected);
+  transition: transform var(--motion-glide);
+}
+
+.layout-pill[data-layout="grid"]::before {
+  transform: translateX(28px);
+}
+
+.layout-pill button {
+  position: relative;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  font-family: var(--font-icons);
+  font-size: 12px;
+  transition: color var(--motion);
+}
+
+.layout-pill button:hover,
+.layout-pill button[aria-pressed="true"] {
+  color: var(--text);
+}
+
+.hidden-count:focus-visible,
+.layout-pill button:focus-visible,
 .nav-button:focus-visible,
 .crumb:focus-visible {
   outline: 2px solid var(--accent);

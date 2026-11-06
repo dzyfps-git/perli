@@ -1,4 +1,4 @@
-import type { Sort, SortKey } from "../../api";
+import type { Grouping, Sort, SortKey } from "../../api";
 
 export interface Column {
   id: SortKey;
@@ -24,6 +24,11 @@ export function nextSort(sort: Sort, key: SortKey): Sort {
   if (sort.key === key) return { key, descending: !sort.descending };
   return { key, descending: LARGEST_FIRST.includes(key) };
 }
+
+const GROUPINGS: Grouping[] = ["foldersFirst", "filesFirst", "mixed"];
+
+export const nextGrouping = (grouping: Grouping) =>
+  GROUPINGS[(GROUPINGS.indexOf(grouping) + 1) % GROUPINGS.length];
 
 export function gridTemplate(columns: Column[]) {
   return columns

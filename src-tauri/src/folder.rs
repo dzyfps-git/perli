@@ -137,6 +137,11 @@ impl Listing {
         self.visible.len()
     }
 
+    /// Hidden entries in the folder, whether or not they are being shown.
+    pub fn hidden_count(&self) -> usize {
+        self.entries.iter().filter(|entry| entry.hidden).count()
+    }
+
     fn rows(&self) -> impl Iterator<Item = &Entry> {
         self.visible.iter().map(|&row| &self.entries[row as usize])
     }
@@ -429,6 +434,22 @@ mod tests {
 
         assert_eq!(sorted(&folder, Order::default()), ["seen"]);
         assert_eq!(sorted(&folder, order), ["secret", "seen"]);
+    }
+
+    #[test]
+    fn hidden_count_ignores_whether_they_are_shown() {
+        let folder = TempFolder::new("hidden-count");
+        fs::write(folder.0.join("seen"), "").unwrap();
+        fs::write(folder.0.join("secret"), "").unwrap();
+        hide(&folder.0.join("secret"));
+        let path = folder.0.to_str().unwrap();
+        let shown = Order {
+            show_hidden: true,
+            ..Order::default()
+        };
+
+        assert_eq!(Listing::read(path, Order::default()).unwrap().hidden_count(), 1);
+        assert_eq!(Listing::read(path, shown).unwrap().hidden_count(), 1);
     }
 
     #[test]

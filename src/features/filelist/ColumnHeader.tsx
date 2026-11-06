@@ -1,12 +1,39 @@
-import { createMemo, Index } from "solid-js";
-import type { Sort, SortKey } from "../../api";
+import { createMemo, createSignal, For, Index } from "solid-js";
+import type { Grouping, Sort, SortKey } from "../../api";
 import { dragTarget, MIN_COLUMN_WIDTH, type Column } from "./columns";
-import { columns, moveColumn, setColumnWidth } from "./prefs";
+import { MAX_TILE, MIN_TILE, TILE_STEP } from "./layout";
+import { columns, grouping, moveColumn, setColumnWidth, setTileSize, tileSize, toggleColumn } from "./prefs";
 
 const ICON_ASCENDING = "";
 const ICON_DESCENDING = "";
 
+const ICON_ADD = "\uE710";
+const ICON_DONE = "\uE73E";
+const ICON_REMOVE = "\uE711";
+
+const GROUPING: Record<Grouping, { icon: string; label: string }> = {
+  foldersFirst: { icon: "\uE8B7", label: "Folders first" },
+  filesFirst: { icon: "\uE8A5", label: "Files first" },
+  mixed: { icon: "\uE8CB", label: "Mixed" },
+};
+
 const DRAG_START_PX = 5;
+
+/** Stays out of the way until the pointer is near, unless it is showing a changed setting. */
+function GroupToggle(props: { onChange: () => void }) {
+  const current = () => GROUPING[grouping()];
+  return (
+    <button
+      class="strip-extra strip-icon"
+      data-on={grouping() === "foldersFirst" ? undefined : ""}
+      title={current().label}
+      aria-label={`Grouping: ${current().label}`}
+      onClick={props.onChange}
+    >
+      {current().icon}
+    </button>
+  );
+}
 
 /** The name column flexes, so every other column resizes from its left edge. */
 function startResize(event: PointerEvent, column: Column) {
@@ -28,8 +55,11 @@ export function ColumnHeader(props: {
   sort: Sort;
   onSort: (key: SortKey) => void;
   onMenu: (event: MouseEvent) => void;
+  onGroup: () => void;
 }) {
   const visible = createMemo(() => columns().filter((column) => column.visible));
+  const addable = createMemo(() => columns().filter((column) => !column.visible));
+  const [editing, setEditing] = createSignal(false);
   let header!: HTMLDivElement;
   let dragged = false;
 
@@ -66,41 +96,101 @@ export function ColumnHeader(props: {
     );
   }
 
+  const removable = (id: SortKey) => editing() && id !== "name";
+
+  function clickTitle(id: SortKey) {
+    if (dragged) return;
+    if (removable(id)) toggleColumn(id);
+    else props.onSort(id);
+  }
+
   return (
-    <div
-      ref={(element) => {
-        header = element;
-        props.ref(element);
-      }}
-      class="column-header"
-      role="group"
-      aria-label="Columns"
-      onContextMenu={props.onMenu}
-    >
-      {/* Index keeps each title in place during a resize, which would lose the drag otherwise. */}
-      <Index each={visible()}>
+    <div class="column-strip" onPointerLeave={() => setEditing(false)}>
+      <div
+        ref={(element) => {
+          header = element;
+          props.ref(element);
+        }}
+        class="column-header"
+        role="group"
+        aria-label="Columns"
+        onContextMenu={props.onMenu}
+      >
+        {/* Index keeps each title in place during a resize, which would lose the drag otherwise. */}
+        <Index each={visible()}>
+          {(column) => (
+            <div class="column-title" classList={{ "column-size": column().id === "size" }}>
+              <button
+                class="column-button"
+                aria-label={removable(column().id) ? `Remove ${column().label} column` : undefined}
+                onPointerDown={(event) => startDrag(event, column().id)}
+                onClick={() => clickTitle(column().id)}
+              >
+                {column().label}
+                <span class="column-arrow" hidden={!removable(column().id) && props.sort.key !== column().id}>
+                  {removable(column().id) ? ICON_REMOVE : props.sort.descending ? ICON_DESCENDING : ICON_ASCENDING}
+                </span>
+              </button>
+              {column().id === "name" && (
+                <>
+                  <GroupToggle onChange={props.onGroup} />
+                  <For each={editing() ? addable() : []}>
+                    {(extra) => (
+                      <button class="column-ghost" onClick={() => toggleColumn(extra.id)}>
+                        {extra.label}
+                      </button>
+                    )}
+                  </For>
+                </>
+              )}
+              {column().id !== "name" && (
+                <div
+                  class="column-resize"
+                  role="presentation"
+                  onPointerDown={(event) => startResize(event, column())}
+                />
+              )}
+            </div>
+          )}
+        </Index>
+      </div>
+      <button
+        class="strip-extra strip-icon column-edit"
+        data-on={editing() ? "" : undefined}
+        aria-label={editing() ? "Finish editing columns" : "Edit columns"}
+        onClick={() => setEditing(!editing())}
+      >
+        {editing() ? ICON_DONE : ICON_ADD}
+      </button>
+    </div>
+  );
+}
+
+/** Grid has no columns to click, so it keeps the same titles as a plain row. */
+export function SortStrip(props: { sort: Sort; onSort: (key: SortKey) => void; onGroup: () => void }) {
+  return (
+    <div class="column-strip sort-strip" role="group" aria-label="Sort">
+      <For each={columns()}>
         {(column) => (
-          <div class="column-title" classList={{ "column-size": column().id === "size" }}>
-            <button
-              class="column-button"
-              onPointerDown={(event) => startDrag(event, column().id)}
-              onClick={() => dragged || props.onSort(column().id)}
-            >
-              {column().label}
-              <span class="column-arrow" hidden={props.sort.key !== column().id}>
-                {props.sort.descending ? ICON_DESCENDING : ICON_ASCENDING}
-              </span>
-            </button>
-            {column().id !== "name" && (
-              <div
-                class="column-resize"
-                role="presentation"
-                onPointerDown={(event) => startResize(event, column())}
-              />
-            )}
-          </div>
+          <button class="column-button" onClick={() => props.onSort(column.id)}>
+            {column.label}
+            <span class="column-arrow" hidden={props.sort.key !== column.id}>
+              {props.sort.descending ? ICON_DESCENDING : ICON_ASCENDING}
+            </span>
+          </button>
         )}
-      </Index>
+      </For>
+      <GroupToggle onChange={props.onGroup} />
+      <input
+        class="strip-extra tile-size"
+        type="range"
+        aria-label="Tile size"
+        min={MIN_TILE}
+        max={MAX_TILE}
+        step={TILE_STEP}
+        value={tileSize()}
+        onInput={(event) => setTileSize(event.currentTarget.valueAsNumber)}
+      />
     </div>
   );
 }
