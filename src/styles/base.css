@@ -1,0 +1,46 @@
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+/* Stays transparent so the Mica window material shows through the sidebar. */
+html,
+body {
+  background: transparent;
+  color: var(--text);
+  font-family: var(--font);
+  font-size: var(--font-size);
+  user-select: none;
+  overflow: hidden;
+}
+
+.shell {
+  display: grid;
+  grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
+  height: 100%;
+}
+
+.sidebar {
+  padding: var(--space-4);
+  background: var(--glass-tint);
+  border-right: 1px solid var(--border);
+}
+
+.logo {
+  font-size: 16px;
+  font-weight: 600;
+  background: var(--accent-gradient);
+  background-clip: text;
+  color: transparent;
+}
+
+.files {
+  min-width: 0;
+  background: var(--surface);
+}
