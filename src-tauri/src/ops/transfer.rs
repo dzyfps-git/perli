@@ -19,6 +19,22 @@ fn temp_path(folder: &Path) -> PathBuf {
     folder.join(format!("~perli-{}-{number}.part", std::process::id()))
 }
 
+/// Holds the source of a move while the file it replaces leaves. This is the only copy of
+/// that file, so unlike a `temp_path` file it never counts as a leftover.
+fn staged_path(folder: &Path) -> PathBuf {
+    temp_path(folder).with_extension("moved")
+}
+
+/// Returns a staged file to `source`, or beside it if something took that name meanwhile.
+pub fn put_back(staged: &Path, source: &Path) -> windows::core::Result<()> {
+    let folder = sys::parent(source);
+    sys::create_dirs(&folder)?;
+    if sys::rename(staged, source).is_ok() {
+        return Ok(());
+    }
+    sys::rename(staged, &names::keep_both(&folder, file_name(source), false))
+}
+
 /// Removes what a process that is gone left behind in `folder`, as `temp_path` named it.
 pub fn remove_leftovers(folder: &Path, process: u32) -> io::Result<()> {
     let prefix = format!("~perli-{process}-");
@@ -205,16 +221,18 @@ impl Run<'_> {
                 }
             }
             Plan::Replace(target) => {
-                let temp = self.temp_beside(target);
+                let staged = staged_path(&sys::parent(target));
+                self.host.staged(&staged, source);
                 let elevated = Elevated::Move {
                     source: source.to_path_buf(),
                     target: target.clone(),
                 };
-                match self.first_rename(source, &temp, elevated)? {
+                match self.first_rename(source, &staged, elevated)? {
                     Renamed::Done => {
-                        let swapped = self.swap_in(&temp, target, true);
+                        let swapped = self.swap_in(&staged, target, true);
                         if !matches!(swapped, Ok(true)) {
-                            let _ = sys::rename(&temp, source);
+                            // If this fails too, the list stays and the next start tries again.
+                            let _ = put_back(&staged, source);
                         }
                         if swapped? {
                             self.done.push(Done::Moved {

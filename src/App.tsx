@@ -1,10 +1,11 @@
-import { getCurrentWindow, type CloseRequestedEvent } from "@tauri-apps/api/window";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { createEffect, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import {
   cancelJobsAndClose,
   clipboardHasFiles,
   clipboardText,
   holdClose,
+  onCloseAsked,
   openFile,
   saveSession,
   startState,
@@ -106,15 +107,14 @@ export function App() {
     confirm: () => cancelJobsAndClose().catch(jobs.report),
   };
 
-  async function onClose(event: CloseRequestedEvent) {
-    const [held] = await Promise.all([holdClose(), flushSession()]);
-    if (!held) return;
-    event.preventDefault();
-    setDeleting(stopJobs);
+  async function onClose(request: number) {
+    const [held] = await Promise.all([holdClose(request), flushSession()]);
+    if (held) setDeleting(stopJobs);
+    else await getCurrentWindow().destroy();
   }
 
   // Covers every way to close, including Alt+F4 and the taskbar.
-  const closeListener = getCurrentWindow().onCloseRequested(onClose);
+  const closeListener = onCloseAsked(onClose);
 
   function openRow(view: FolderView, row: Row, toSide: boolean) {
     if (view.isBin()) return;

@@ -22,7 +22,7 @@ use windows::core::{Error, Result};
 
 pub use bin::{read as read_bin, BinItem};
 pub use names::check_rename;
-pub use transfer::remove_leftovers;
+pub use transfer::{put_back, remove_leftovers};
 pub use tree::measure;
 
 /// One unit of work, run to the end by `run`.
@@ -128,6 +128,9 @@ pub trait Host {
 
     /// The job is about to write partial files in `folder`. Called once for each folder.
     fn temp_folder(&self, _folder: &Path) {}
+
+    /// The job is about to move `source` to `staged`, which then holds the only copy of it.
+    fn staged(&self, _staged: &Path, _source: &Path) {}
 }
 
 /// Pauses or cancels a running job from another thread.

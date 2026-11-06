@@ -439,6 +439,10 @@ impl Host for Bridge {
     fn temp_folder(&self, folder: &Path) {
         parts::note(self.id, folder);
     }
+
+    fn staged(&self, staged: &Path, source: &Path) {
+        parts::note_staged(self.id, staged, source);
+    }
 }
 
 /// The main window, which UAC prompts and the clipboard need.

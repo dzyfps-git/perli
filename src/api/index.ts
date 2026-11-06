@@ -195,7 +195,10 @@ export const undoJob = (origin?: number, step?: number) => invoke<void>("undo_jo
 export const redoJob = (origin?: number) => invoke<void>("redo_job", { origin });
 export const undoState = () => invoke<Undoable>("undo_state");
 /** With jobs running, this keeps the window open past the close limit. True if it did. */
-export const holdClose = () => invoke<boolean>("hold_close");
+/** `request` is the number `onCloseAsked` gave, so a late answer can't hold a newer request. */
+export const holdClose = (request: number) => invoke<boolean>("hold_close", { request });
+export const onCloseAsked = (handler: (request: number) => void) =>
+  listen<number>("close-asked", (event) => handler(event.payload));
 export const cancelJobsAndClose = () => invoke<void>("cancel_jobs_and_close");
 export const pauseJob = (id: number) => invoke<void>("pause_job", { id });
 export const resumeJob = (id: number) => invoke<void>("resume_job", { id });

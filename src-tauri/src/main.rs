@@ -18,7 +18,9 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
-use tauri::{async_runtime, ipc::Response, AppHandle, Manager, State, WebviewWindow, WindowEvent};
+use tauri::{
+    async_runtime, ipc::Response, AppHandle, Emitter, Manager, State, WebviewWindow, WindowEvent,
+};
 
 use jobs::{Jobs, Plan};
 use ops::{Job, Reply};
@@ -35,6 +37,21 @@ const CANCEL_CHECK: Duration = Duration::from_millis(50);
 struct Closing {
     asked: AtomicU64,
     held: AtomicU64,
+}
+
+impl Closing {
+    fn ask(&self) -> u64 {
+        self.asked.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    /// An answer names its request, so a late one can't speak for a newer request.
+    fn hold(&self, request: u64) {
+        self.held.fetch_max(request, Ordering::SeqCst);
+    }
+
+    fn holds(&self, request: u64) -> bool {
+        self.held.load(Ordering::SeqCst) >= request
+    }
 }
 
 /// A folder's rows, named by the request that made them.
@@ -453,11 +470,10 @@ async fn undo_state(app: AppHandle) -> Result<jobs::Undoable, String> {
 
 /// With jobs running, this keeps the window open so the user can choose. True if it did.
 #[tauri::command]
-fn hold_close(closing: State<'_, Closing>, jobs: State<'_, Jobs>) -> bool {
+fn hold_close(request: u64, closing: State<'_, Closing>, jobs: State<'_, Jobs>) -> bool {
     let running = jobs.running();
     if running {
-        let asked = closing.asked.load(Ordering::SeqCst);
-        closing.held.store(asked, Ordering::SeqCst);
+        closing.hold(request);
     }
     running
 }
@@ -686,15 +702,17 @@ fn main() {
     });
 
     tauri::Builder::default()
-        // The UI saves the session and then closes the window, unless it is frozen or holds
-        // the close back because jobs are running.
+        // The UI saves the session and then closes the window, unless it holds the close back
+        // because jobs are running. A frozen UI does neither, so the window goes anyway.
         .on_window_event(|window, event| {
-            if matches!(event, WindowEvent::CloseRequested { .. }) {
-                let asked = window.state::<Closing>().asked.fetch_add(1, Ordering::SeqCst) + 1;
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let request = window.state::<Closing>().ask();
+                let _ = window.emit("close-asked", request);
                 let window = window.clone();
                 thread::spawn(move || {
                     thread::sleep(CLOSE_LIMIT);
-                    if window.state::<Closing>().held.load(Ordering::SeqCst) < asked {
+                    if !window.state::<Closing>().holds(request) {
                         let _ = window.destroy();
                     }
                 });
@@ -746,6 +764,20 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_answer_holds_only_its_own_request_and_older_ones() {
+        let closing = Closing::default();
+        let (older, newer) = (closing.ask(), closing.ask());
+
+        closing.hold(older);
+        assert!(closing.holds(older));
+        assert!(!closing.holds(newer));
+
+        closing.hold(newer);
+        closing.hold(older);
+        assert!(closing.holds(newer));
+    }
 
     fn held(view: &View) -> Vec<u64> {
         view.snapshots

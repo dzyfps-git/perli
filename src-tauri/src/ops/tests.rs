@@ -724,6 +724,39 @@ fn failed_replace_keeps_both_files_where_they_were() {
     assert_eq!(sandbox.names("to"), ["a.txt"]);
 }
 
+/// Sweeps as a later start would, while the job waits on a question.
+struct SweepingAsk {
+    script: Script,
+    folder: PathBuf,
+}
+
+impl Host for SweepingAsk {
+    fn progress(&self, _progress: &Progress) {}
+
+    fn ask(&self, question: Question) -> Reply {
+        remove_leftovers(&self.folder, std::process::id()).unwrap();
+        self.script.ask(question)
+    }
+}
+
+#[test]
+fn a_sweep_never_takes_the_only_copy_of_a_move_that_stopped_midway() {
+    let sandbox = Sandbox::new();
+    let source = sandbox.file(r"from\a.txt", "new");
+    let old = sandbox.file(r"to\a.txt", "old");
+    let _held = lock(&old);
+    let host = SweepingAsk {
+        script: Script::answering(&[Answer::Replace, Answer::Skip]),
+        folder: sandbox.path("to"),
+    };
+
+    run(moving(&source, &sandbox.path("to")), &host, &Arc::new(Control::default()));
+
+    drop(_held);
+    assert_eq!(read(&source), "new");
+    assert_eq!(read(&old), "old");
+}
+
 #[test]
 fn replace_through_a_junction_alias_never_destroys_the_source() {
     let sandbox = Sandbox::new();
