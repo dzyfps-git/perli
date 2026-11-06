@@ -78,6 +78,8 @@ export function FileList(props: {
   onMenu: (event: MouseEvent, row: Row) => void;
   onBackgroundMenu: (event: MouseEvent) => void;
   onHeaderMenu: (event: MouseEvent) => void;
+  /** The rows are a new order of the folder already shown. */
+  rearranged?: boolean;
   onFirstPaint: () => void;
   shareSelection: (read: () => number[]) => void;
 }) {
@@ -173,9 +175,10 @@ export function FileList(props: {
 
   function playRowsIn() {
     const now = performance.now();
-    const paused = now - lastFolderOpen > ROWS_IN_PAUSE_MS;
+    // A new order is the user's own request, so it plays however soon it follows the last one.
+    const earned = props.rearranged || now - lastFolderOpen > ROWS_IN_PAUSE_MS;
     lastFolderOpen = now;
-    if (!paused || reducedMotion.matches) return;
+    if (!earned || reducedMotion.matches) return;
 
     for (const { element, index } of pool) {
       element.animate(

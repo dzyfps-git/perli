@@ -302,6 +302,7 @@ export function App() {
               <FileList
                 view={view.id}
                 snapshot={opened.request}
+                rearranged={opened.rearranged}
                 count={opened.count}
                 selected={opened.selected}
                 active={tab === tabs.active() && view === tab.active()}

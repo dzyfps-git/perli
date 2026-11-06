@@ -21,7 +21,7 @@ export type FolderView = ReturnType<typeof createFolderView>;
  * for `openSaved`, so tabs restored behind the active one cost nothing at startup.
  */
 export function createFolderView(id: number, saved?: SavedPane) {
-  const [folder, setFolder] = createSignal<Opened>();
+  const [folder, setFolder] = createSignal<Opened & { rearranged?: boolean }>();
   const [error, setError] = createSignal<string>();
   const [trail, setTrail] = createSignal("");
   const [backStack, setBackStack] = createSignal<string[]>([]);
@@ -76,7 +76,7 @@ export function createFolderView(id: number, saved?: SavedPane) {
     const request = ++latestRequest;
     try {
       const arranged = await arrangeView(id, request, current.request, order(), selectedRows());
-      if (request === latestRequest) setFolder({ ...current, request, ...arranged });
+      if (request === latestRequest) setFolder({ ...current, request, ...arranged, rearranged: true });
     } catch (failure) {
       if (request === latestRequest) setError(String(failure));
     }
