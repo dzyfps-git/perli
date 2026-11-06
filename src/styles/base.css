@@ -42,5 +42,12 @@ body {
 
 .files {
   min-width: 0;
+  min-height: 0;
   background: var(--surface);
+}
+
+.message {
+  margin: 0;
+  padding: var(--space-4);
+  color: var(--text-muted);
 }
