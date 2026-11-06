@@ -1,6 +1,11 @@
-import { createEffect, onCleanup, onMount } from "solid-js";
-import { fetchRows, type Row } from "../../api";
+import { createEffect, createMemo, on, onCleanup, onMount, Show } from "solid-js";
+import { fetchRows, findRow, type Row, type Sort, type SortKey } from "../../api";
+import { ColumnHeader } from "./ColumnHeader";
+import { gridTemplate, typeLabel } from "./columns";
+import { clampTile, moveTarget, TILE_STEP, type Layout } from "./layout";
+import { columns, setTileSize, tileSize } from "./prefs";
 import { createSelection } from "./selection";
+import { createTypeJump } from "./typeJump";
 import "./filelist.css";
 
 const PAGE_SIZE = 256;
@@ -17,9 +22,7 @@ let lastFolderOpen = 0;
 
 interface PooledRow {
   element: HTMLDivElement;
-  name: HTMLSpanElement;
-  modified: HTMLSpanElement;
-  size: HTMLSpanElement;
+  cells: { id: SortKey; element: HTMLSpanElement }[];
   index: number;
   filled: boolean;
 }
@@ -38,23 +41,34 @@ function formatSize(bytes: number) {
   return `${value.toFixed(value < 10 ? 1 : 0)} ${units[unit]}`;
 }
 
-function createCell(parent: HTMLElement, className: string) {
-  const cell = document.createElement("span");
-  cell.className = className;
-  cell.setAttribute("role", "gridcell");
-  parent.append(cell);
-  return cell;
+const CELL_TEXT: Record<SortKey, (row: Row) => string> = {
+  name: (row) => row.name,
+  modified: (row) => dates.format(row.modified),
+  created: (row) => dates.format(row.created),
+  type: (row) => typeLabel(row.name, row.isDir),
+  size: (row) => (row.isDir ? "" : formatSize(row.size)),
+};
+
+const CELL_CLASS: Partial<Record<SortKey, string>> = {
+  name: "file-name",
+  size: "file-meta file-size",
+};
+
+function createCell(parent: HTMLElement, id: SortKey) {
+  const element = document.createElement("span");
+  element.className = CELL_CLASS[id] ?? "file-meta";
+  element.setAttribute("role", "gridcell");
+  parent.append(element);
+  return { id, element };
 }
 
-function createRow(): PooledRow {
+function createRow(cells: SortKey[]): PooledRow {
   const element = document.createElement("div");
   element.className = "file-row";
   element.setAttribute("role", "row");
   return {
     element,
-    name: createCell(element, "file-name"),
-    modified: createCell(element, "file-meta"),
-    size: createCell(element, "file-meta file-size"),
+    cells: cells.map((id) => createCell(element, id)),
     index: -1,
     filled: false,
   };
@@ -64,20 +78,43 @@ export function FileList(props: {
   view: number;
   snapshot: number;
   count: number;
+  /** Rows to select on arrival. */
+  selected?: number[];
   active: boolean;
+  layout: Layout;
+  sort: Sort;
+  onSort: (key: SortKey) => void;
   onOpen: (row: Row, toSide: boolean) => void;
   onMenu: (event: MouseEvent, row: Row) => void;
+  onBackgroundMenu: (event: MouseEvent) => void;
+  onHeaderMenu: (event: MouseEvent) => void;
   onFirstPaint: () => void;
+  shareSelection: (read: () => number[]) => void;
 }) {
   const pages = new Map<number, Row[]>();
   const loading = new Set<number>();
   const selection = createSelection();
+  const typed = createTypeJump();
   let pool: PooledRow[] = [];
   let rowHeight = 0;
+  let itemHeight = 0;
+  let perRow = 1;
+  let builtFor = "";
+  let latestJump = 0;
   let firstPaintDone = false;
   let grid!: HTMLDivElement;
   let spacer!: HTMLDivElement;
   let marker!: HTMLDivElement;
+
+  /** What the row elements depend on, so a column resize does not rebuild them. */
+  const cells = createMemo(
+    (): SortKey[] =>
+      props.layout === "grid"
+        ? ["name"]
+        : columns().filter((column) => column.visible).map((column) => column.id),
+    [],
+    { equals: (a, b) => a.join() === b.join() },
+  );
 
   function loadPage(page: number) {
     if (loading.has(page)) return;
@@ -99,6 +136,10 @@ export function FileList(props: {
     return rows?.[index % PAGE_SIZE];
   }
 
+  // Percent moves by whole tiles, so a width change needs no JS at all.
+  const placeOf = (index: number) =>
+    `translate(${(index % perRow) * 100}%, ${Math.floor(index / perRow) * itemHeight}px)`;
+
   function decorate(pooled: PooledRow) {
     const focused = pooled.index === selection.focused();
     pooled.element.setAttribute("aria-selected", String(selection.has(pooled.index)));
@@ -109,20 +150,19 @@ export function FileList(props: {
     if (pooled.index !== index) {
       pooled.index = index;
       pooled.element.id = `file-row-${props.view}-${index}`;
-      pooled.element.style.transform = `translateY(${index * rowHeight}px)`;
+      pooled.element.style.transform = placeOf(index);
       pooled.element.setAttribute("aria-rowindex", String(index + 1));
       decorate(pooled);
     }
     pooled.filled = row !== undefined;
     pooled.element.toggleAttribute("data-empty", !row);
     pooled.element.toggleAttribute("data-folder", row?.isDir ?? false);
-    pooled.name.textContent = row?.name ?? "";
-    pooled.modified.textContent = row ? dates.format(row.modified) : "";
-    pooled.size.textContent = row && !row.isDir ? formatSize(row.size) : "";
+    pooled.element.toggleAttribute("data-hidden", row?.isHidden ?? false);
+    for (const cell of pooled.cells) cell.element.textContent = row ? CELL_TEXT[cell.id](row) : "";
   }
 
   function paint() {
-    const first = Math.max(0, Math.floor(grid.scrollTop / rowHeight) - OVERSCAN);
+    const first = Math.max(0, Math.floor(grid.scrollTop / itemHeight) - OVERSCAN) * perRow;
     const last = Math.min(props.count, first + pool.length);
 
     for (let index = first; index < last; index++) {
@@ -162,13 +202,24 @@ export function FileList(props: {
   function resize() {
     // Inactive tabs are hidden and keep their rows until they come back.
     if (grid.clientHeight === 0) return;
-    const needed = Math.ceil(grid.clientHeight / rowHeight) + OVERSCAN * 2;
-    const size = Math.min(props.count, needed);
-    if (size === pool.length) return paint();
 
-    pool = Array.from({ length: size }, createRow);
+    const tile = props.layout === "grid" ? tileSize() : 0;
+    perRow = tile ? Math.max(1, Math.floor(grid.clientWidth / tile)) : 1;
+    itemHeight = tile || rowHeight;
+    grid.style.setProperty("--per-row", String(perRow));
+    grid.style.setProperty("--item-height", `${itemHeight}px`);
+    spacer.style.height = `${Math.ceil(props.count / perRow) * itemHeight}px`;
+
+    const needed = (Math.ceil(grid.clientHeight / itemHeight) + OVERSCAN * 2) * perRow;
+    const size = Math.min(props.count, needed);
+    const shape = `${cells().join()} ${perRow} ${itemHeight}`;
+    if (size === pool.length && shape === builtFor) return paint();
+
+    builtFor = shape;
+    pool = Array.from({ length: size }, () => createRow(cells()));
     spacer.replaceChildren(...pool.map((pooled) => pooled.element));
     paint();
+    moveMarker(true);
   }
 
   function moveMarker(instant: boolean) {
@@ -177,7 +228,7 @@ export function FileList(props: {
     grid.toggleAttribute("data-slide", lone);
     marker.hidden = !lone;
     marker.style.transition = instant ? "none" : "";
-    if (lone) marker.style.transform = `translateY(${focused * rowHeight}px)`;
+    if (lone) marker.style.transform = placeOf(focused);
   }
 
   function selectionChanged(instant = false) {
@@ -187,10 +238,10 @@ export function FileList(props: {
     if (focused < 0) return grid.removeAttribute("aria-activedescendant");
 
     grid.setAttribute("aria-activedescendant", `file-row-${props.view}-${focused}`);
-    const top = focused * rowHeight;
+    const top = Math.floor(focused / perRow) * itemHeight;
     if (top < grid.scrollTop) grid.scrollTop = top;
-    else if (top + rowHeight > grid.scrollTop + grid.clientHeight) {
-      grid.scrollTop = top + rowHeight - grid.clientHeight;
+    else if (top + itemHeight > grid.scrollTop + grid.clientHeight) {
+      grid.scrollTop = top + itemHeight - grid.clientHeight;
     }
   }
 
@@ -216,7 +267,8 @@ export function FileList(props: {
   function onContextMenu(event: MouseEvent) {
     event.preventDefault();
     const index = indexFromEvent(event);
-    const row = index >= 0 ? rowAt(index) : undefined;
+    if (index < 0) return props.onBackgroundMenu(event);
+    const row = rowAt(index);
     if (!row) return;
     if (!selection.has(index)) {
       selection.select(index);
@@ -225,27 +277,37 @@ export function FileList(props: {
     props.onMenu(event, row);
   }
 
-  function onKeyDown(event: KeyboardEvent) {
-    const pageRows = Math.max(1, Math.floor(grid.clientHeight / rowHeight) - 1);
-    const focused = selection.focused();
-    const targets: Record<string, number> = {
-      ArrowDown: focused + 1,
-      ArrowUp: focused - 1,
-      PageDown: focused + pageRows,
-      PageUp: focused - pageRows,
-      Home: 0,
-      End: props.count - 1,
-    };
+  function jumpTo(key: string) {
+    const jump = typed(key);
+    if (!jump) return;
+    const ticket = ++latestJump;
+    const start = Math.max(0, selection.focused() + jump.offset);
+    findRow(props.view, props.snapshot, jump.prefix, start)
+      .then((index) => {
+        if (ticket !== latestJump || index === null) return;
+        selection.select(index);
+        selectionChanged();
+      })
+      .catch(console.error);
+  }
 
-    if (event.key in targets) {
-      if (props.count === 0) return;
-      const target = Math.min(props.count - 1, Math.max(0, targets[event.key]));
+  function onKeyDown(event: KeyboardEvent) {
+    if (event.altKey) return;
+    const focused = selection.focused();
+    const pageRows = Math.max(1, Math.floor(grid.clientHeight / itemHeight) - 1);
+    const shape = { count: props.count, perRow, pageRows };
+    const target = props.count > 0 ? moveTarget(event.key, focused, shape) : undefined;
+
+    if (target !== undefined) {
       if (event.shiftKey) selection.extendTo(target, false);
       else selection.select(target);
     } else if (event.key === "Enter" && focused >= 0) {
       openIndex(focused, event.ctrlKey);
     } else if (event.ctrlKey && event.key.toLowerCase() === "a") {
       selection.selectAll(props.count);
+    } else if (event.key.length === 1 && !event.ctrlKey && !event.metaKey) {
+      event.preventDefault();
+      return jumpTo(event.key);
     } else {
       return;
     }
@@ -254,15 +316,36 @@ export function FileList(props: {
     selectionChanged(event.repeat);
   }
 
+  function onWheel(event: WheelEvent) {
+    if (!event.ctrlKey || props.layout !== "grid") return;
+    setTileSize(clampTile(tileSize() + Math.sign(-event.deltaY) * TILE_STEP));
+  }
+
   onMount(() => {
     rowHeight = parseFloat(getComputedStyle(grid).getPropertyValue("--row-height"));
-    spacer.style.height = `${props.count * rowHeight}px`;
+    itemHeight = rowHeight;
     resize();
+    props.shareSelection(selection.rows);
+    if (props.selected?.length) {
+      selection.restore(props.selected);
+      selectionChanged(true);
+    }
 
     const observer = new ResizeObserver(resize);
     observer.observe(grid);
     onCleanup(() => observer.disconnect());
   });
+
+  createEffect(
+    on(
+      [cells, () => props.layout, tileSize],
+      () => {
+        resize();
+        selectionChanged(true);
+      },
+      { defer: true },
+    ),
+  );
 
   createEffect(() => {
     if (props.active) grid.focus({ preventScroll: true });
@@ -270,21 +353,34 @@ export function FileList(props: {
 
   return (
     <div
-      ref={grid}
-      class="file-grid"
-      role="grid"
-      aria-multiselectable="true"
-      aria-rowcount={props.count}
-      tabindex="0"
-      onScroll={paint}
-      onClick={onClick}
-      onDblClick={(event) => openIndex(indexFromEvent(event), event.ctrlKey)}
-      onContextMenu={onContextMenu}
-      onKeyDown={onKeyDown}
+      class="file-list"
+      style={{
+        "--file-columns": gridTemplate(columns()),
+        "--tile-size": `${tileSize()}px`,
+      }}
     >
-      <div ref={marker} class="file-marker" role="presentation" hidden />
-      <div ref={spacer} class="file-spacer" role="presentation" />
-      {props.count === 0 && <p class="message">This folder is empty.</p>}
+      <Show when={props.layout === "list"}>
+        <ColumnHeader sort={props.sort} onSort={props.onSort} onMenu={props.onHeaderMenu} />
+      </Show>
+      <div
+        ref={grid}
+        class="file-grid"
+        data-layout={props.layout}
+        role="grid"
+        aria-multiselectable="true"
+        aria-rowcount={props.count}
+        tabindex="0"
+        onScroll={paint}
+        onClick={onClick}
+        onDblClick={(event) => openIndex(indexFromEvent(event), event.ctrlKey)}
+        onContextMenu={onContextMenu}
+        onKeyDown={onKeyDown}
+        onWheel={onWheel}
+      >
+        <div ref={marker} class="file-marker" role="presentation" hidden />
+        <div ref={spacer} class="file-spacer" role="presentation" />
+        {props.count === 0 && <p class="message">This folder is empty.</p>}
+      </div>
     </div>
   );
 }

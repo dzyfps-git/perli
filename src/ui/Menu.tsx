@@ -6,7 +6,13 @@ export interface MenuItem {
   label: string;
   action: () => void;
   disabled?: boolean;
+  /** Set on items that show an on or off state. */
+  checked?: boolean;
+  /** Draws a line above this item, to start a new group. */
+  divider?: boolean;
 }
+
+const EDGE_GAP = 4;
 
 /** A floating glass menu. It closes on outside click, Escape or after choosing an item. */
 export function Menu(props: { x: number; y: number; items: MenuItem[]; onClose: () => void }) {
@@ -30,7 +36,10 @@ export function Menu(props: { x: number; y: number; items: MenuItem[]; onClose: 
 
   onMount(() => {
     window.addEventListener("pointerdown", onPointerDown, true);
-    menu.querySelector("button")?.focus();
+    const { width, height } = menu.getBoundingClientRect();
+    menu.style.left = `${Math.max(EDGE_GAP, Math.min(props.x, innerWidth - width - EDGE_GAP))}px`;
+    menu.style.top = `${Math.max(EDGE_GAP, Math.min(props.y, innerHeight - height - EDGE_GAP))}px`;
+    menu.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus();
   });
   onCleanup(() => {
     window.removeEventListener("pointerdown", onPointerDown, true);
@@ -49,8 +58,10 @@ export function Menu(props: { x: number; y: number; items: MenuItem[]; onClose: 
         <For each={props.items}>
           {(item) => (
             <button
-              role="menuitem"
+              role={item.checked === undefined ? "menuitem" : "menuitemcheckbox"}
               class="menu-item"
+              classList={{ "menu-divider": item.divider }}
+              aria-checked={item.checked}
               disabled={item.disabled}
               onClick={() => {
                 props.onClose();

@@ -12,10 +12,10 @@ use std::time::Instant;
 use serde::Serialize;
 use tauri::{async_runtime, ipc::Response, State};
 
-/// A folder's rows, named by the open request that read them.
+/// A folder's rows, named by the request that made them.
 struct Snapshot {
     request: u64,
-    entries: Vec<folder::Entry>,
+    listing: folder::Listing,
 }
 
 #[derive(Default)]
@@ -33,17 +33,17 @@ impl View {
         self.snapshots.retain(|snapshot| snapshot.request == shown);
     }
 
-    fn finish(&mut self, request: u64, entries: Vec<folder::Entry>) {
+    fn finish(&mut self, request: u64, listing: folder::Listing) {
         if request == self.latest {
-            self.snapshots.push(Snapshot { request, entries });
+            self.snapshots.push(Snapshot { request, listing });
         }
     }
 
-    fn entries(&self, request: u64) -> &[folder::Entry] {
+    fn listing(&self, request: u64) -> Option<&folder::Listing> {
         self.snapshots
             .iter()
             .find(|snapshot| snapshot.request == request)
-            .map_or(&[], |snapshot| &snapshot.entries)
+            .map(|snapshot| &snapshot.listing)
     }
 
     /// The UI only asks for rows of a snapshot it accepted, so older ones are finished with.
@@ -66,7 +66,7 @@ struct Views(RwLock<HashMap<u32, View>>);
 /// The start folder, read while WebView2 loads so that opening it costs no extra wait.
 struct Preload(Mutex<Option<(String, JoinHandle<ReadResult>)>>);
 
-type ReadResult = windows::core::Result<Vec<folder::Entry>>;
+type ReadResult = windows::core::Result<folder::Listing>;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -76,6 +76,13 @@ struct Opened {
     path: String,
     count: usize,
     load_ms: f64,
+}
+
+#[derive(Serialize)]
+struct Arranged {
+    count: usize,
+    /// The rows the UI had selected, at their new positions.
+    selected: Vec<u32>,
 }
 
 /// The folder passed on the command line, otherwise the user's home folder.
@@ -104,6 +111,7 @@ async fn open_folder(
     request: u64,
     shown: u64,
     path: String,
+    order: folder::Order,
     views: State<'_, Views>,
     preload: State<'_, Preload>,
 ) -> Result<Opened, String> {
@@ -123,9 +131,12 @@ async fn open_folder(
         .take()
         .filter(|(preloaded, _)| *preloaded == path);
     let resolved = folder::resolve(&path).map_err(|error| error.message())?;
-    let entries = async_runtime::spawn_blocking(move || match waiting {
-        Some((_, reader)) => reader.join().unwrap_or_else(|_| folder::read(&path)),
-        None => folder::read(&path),
+    let listing = async_runtime::spawn_blocking(move || match waiting {
+        Some((_, reader)) => reader
+            .join()
+            .unwrap_or_else(|_| folder::Listing::read(&path, order))
+            .map(|listing| listing.arranged(order)),
+        None => folder::Listing::read(&path, order),
     })
     .await
     .map_err(|error| error.to_string())?
@@ -134,14 +145,50 @@ async fn open_folder(
     let opened = Opened {
         request,
         path: resolved,
-        count: entries.len(),
+        count: listing.len(),
         load_ms: started.elapsed().as_secs_f64() * 1000.0,
     };
     let mut views = views.0.write().unwrap_or_else(|error| error.into_inner());
     if let Some(current) = views.get_mut(&view) {
-        current.finish(request, entries);
+        current.finish(request, listing);
     }
     Ok(opened)
+}
+
+/// Puts the shown folder in a new order as a new snapshot, the same way an open would.
+#[tauri::command]
+async fn arrange_view(
+    view: u32,
+    request: u64,
+    shown: u64,
+    order: folder::Order,
+    selected: Vec<u32>,
+    views: State<'_, Views>,
+) -> Result<Arranged, String> {
+    let before = {
+        let mut views = views.0.write().unwrap_or_else(|error| error.into_inner());
+        let current = views.entry(view).or_default();
+        current.begin(request, shown);
+        current.listing(shown).cloned()
+    }
+    .ok_or("This folder is no longer open")?;
+
+    let (listing, arranged) = async_runtime::spawn_blocking(move || {
+        let listing = before.clone().arranged(order);
+        let arranged = Arranged {
+            count: listing.len(),
+            selected: listing.carried_rows(&before, &selected),
+        };
+        (listing, arranged)
+    })
+    .await
+    .map_err(|error| error.to_string())?;
+
+    let mut views = views.0.write().unwrap_or_else(|error| error.into_inner());
+    if let Some(current) = views.get_mut(&view) {
+        current.finish(request, listing);
+    }
+    Ok(arranged)
 }
 
 #[tauri::command]
@@ -154,8 +201,12 @@ async fn rows(
 ) -> Result<Response, String> {
     let readable = views.0.read().unwrap_or_else(|error| error.into_inner());
     let current = readable.get(&view);
-    let entries = current.map_or(&[][..], |current| current.entries(request));
-    let bytes = folder::encode_rows(entries, start, count);
+    let bytes = current
+        .and_then(|current| current.listing(request))
+        .map_or_else(
+            || folder::Listing::default().encode_rows(0, 0),
+            |listing| listing.encode_rows(start, count),
+        );
     let replaced = current.is_some_and(|current| current.replaced_by(request));
     drop(readable);
 
@@ -166,6 +217,22 @@ async fn rows(
         }
     }
     Ok(Response::new(bytes))
+}
+
+/// The first row at or after `start` whose name starts with `prefix`, for type to jump.
+#[tauri::command]
+async fn find_row(
+    view: u32,
+    request: u64,
+    prefix: String,
+    start: usize,
+    views: State<'_, Views>,
+) -> Result<Option<usize>, String> {
+    let readable = views.0.read().unwrap_or_else(|error| error.into_inner());
+    Ok(readable
+        .get(&view)
+        .and_then(|current| current.listing(request))
+        .and_then(|listing| listing.find(&prefix, start)))
 }
 
 #[tauri::command]
@@ -191,10 +258,21 @@ async fn open_file(path: String) -> Result<(), String> {
         .map_err(|error| error.message())
 }
 
+#[tauri::command]
+async fn clipboard_text() -> Result<String, String> {
+    async_runtime::spawn_blocking(shell::clipboard_text)
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.message())
+}
+
 fn main() {
     let preload = first_folder().map(|path| {
         let reader = path.clone();
-        (path, thread::spawn(move || folder::read(&reader)))
+        (
+            path,
+            thread::spawn(move || folder::Listing::read(&reader, folder::Order::default())),
+        )
     });
 
     tauri::Builder::default()
@@ -204,10 +282,13 @@ fn main() {
             start_folder,
             list_places,
             open_folder,
+            arrange_view,
             rows,
+            find_row,
             close_view,
             show_snap_layouts,
-            open_file
+            open_file,
+            clipboard_text
         ])
         .run(tauri::generate_context!())
         .expect("failed to start Perli");
@@ -228,11 +309,11 @@ mod tests {
     fn shown_snapshot_survives_a_dropped_result_and_a_failed_open() {
         let mut view = View::default();
         view.begin(1, 0);
-        view.finish(1, Vec::new());
+        view.finish(1, folder::Listing::default());
 
         // B finishes, but the UI starts C before accepting it, and C fails.
         view.begin(2, 1);
-        view.finish(2, Vec::new());
+        view.finish(2, folder::Listing::default());
         view.begin(3, 1);
 
         assert_eq!(held(&view), [1]);
@@ -243,8 +324,8 @@ mod tests {
         let mut view = View::default();
         view.begin(1, 0);
         view.begin(2, 0);
-        view.finish(2, Vec::new());
-        view.finish(1, Vec::new());
+        view.finish(2, folder::Listing::default());
+        view.finish(1, folder::Listing::default());
 
         assert_eq!(held(&view), [2]);
     }
@@ -253,9 +334,9 @@ mod tests {
     fn old_snapshot_stays_until_rows_of_the_new_one_are_asked_for() {
         let mut view = View::default();
         view.begin(1, 0);
-        view.finish(1, Vec::new());
+        view.finish(1, folder::Listing::default());
         view.begin(2, 1);
-        view.finish(2, Vec::new());
+        view.finish(2, folder::Listing::default());
 
         assert!(!view.replaced_by(1));
         assert!(view.replaced_by(2));

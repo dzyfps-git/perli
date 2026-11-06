@@ -2,14 +2,40 @@
 //! The UI only ever holds the rows it is showing.
 
 use std::cmp::Ordering;
+use std::sync::Arc;
 
+use serde::Deserialize;
 use windows::core::{Result, HSTRING, PCWSTR};
 use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_NO_MORE_FILES};
 use windows::Win32::Storage::FileSystem::{
     FindClose, FindExInfoBasic, FindExSearchNameMatch, FindFirstFileExW, FindNextFileW,
-    FILE_ATTRIBUTE_DIRECTORY, FIND_FIRST_EX_LARGE_FETCH, WIN32_FIND_DATAW,
+    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_HIDDEN, FIND_FIRST_EX_LARGE_FETCH, WIN32_FIND_DATAW,
 };
 use windows::Win32::UI::Shell::StrCmpLogicalW;
+
+const FLAG_FOLDER: u8 = 1;
+const FLAG_HIDDEN: u8 = 2;
+
+#[derive(Clone, Copy, Default, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum SortKey {
+    #[default]
+    Name,
+    Modified,
+    Created,
+    Type,
+    Size,
+}
+
+/// Which rows a view shows and in what order. The default is the first folder's preload.
+#[derive(Clone, Copy, Default, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Order {
+    key: SortKey,
+    descending: bool,
+    files_first: bool,
+    show_hidden: bool,
+}
 
 pub struct Entry {
     /// UTF-16 and null-terminated, ready for `StrCmpLogicalW`.
@@ -17,7 +43,10 @@ pub struct Entry {
     size: u64,
     /// FILETIME ticks.
     modified: u64,
+    /// FILETIME ticks.
+    created: u64,
     is_dir: bool,
+    hidden: bool,
 }
 
 impl Entry {
@@ -32,17 +61,122 @@ impl Entry {
             size: (u64::from(data.nFileSizeHigh) << 32) | u64::from(data.nFileSizeLow),
             modified: (u64::from(data.ftLastWriteTime.dwHighDateTime) << 32)
                 | u64::from(data.ftLastWriteTime.dwLowDateTime),
+            created: (u64::from(data.ftCreationTime.dwHighDateTime) << 32)
+                | u64::from(data.ftCreationTime.dwLowDateTime),
             is_dir: data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0,
+            hidden: data.dwFileAttributes & FILE_ATTRIBUTE_HIDDEN.0 != 0,
         })
     }
 
     fn name(&self) -> &[u16] {
         &self.name[..self.name.len() - 1]
     }
+
+    /// The null-terminated extension with its dot. Folders have none.
+    fn extension(&self) -> &[u16] {
+        let dot = self.name.iter().rposition(|&unit| unit == b'.' as u16);
+        let start = dot.filter(|_| !self.is_dir);
+        &self.name[start.unwrap_or(self.name.len() - 1)..]
+    }
+
+    fn starts_with(&self, lowercase_prefix: &str) -> bool {
+        let mut name = char::decode_utf16(self.name().iter().copied())
+            .map(|unit| unit.unwrap_or(char::REPLACEMENT_CHARACTER))
+            .flat_map(char::to_lowercase);
+        lowercase_prefix.chars().all(|c| name.next() == Some(c))
+    }
 }
 
-/// Reads and sorts a folder: folders first, then Explorer's natural name order.
-pub fn read(path: &str) -> Result<Vec<Entry>> {
+/// One read of a folder. Rows are positions in `entries`, so a new sort or the hidden
+/// toggle needs no new read.
+#[derive(Clone, Default)]
+pub struct Listing {
+    entries: Arc<Vec<Entry>>,
+    visible: Vec<u32>,
+    order: Order,
+}
+
+impl Listing {
+    pub fn read(path: &str, order: Order) -> Result<Self> {
+        Ok(Self::arrange(Arc::new(read_entries(path)?), order))
+    }
+
+    pub fn arranged(self, order: Order) -> Self {
+        if order == self.order {
+            self
+        } else {
+            Self::arrange(self.entries, order)
+        }
+    }
+
+    fn arrange(entries: Arc<Vec<Entry>>, order: Order) -> Self {
+        let mut visible: Vec<u32> = (0..entries.len() as u32)
+            .filter(|&row| order.show_hidden || !entries[row as usize].hidden)
+            .collect();
+        visible.sort_unstable_by(|&a, &b| {
+            compare(&entries[a as usize], &entries[b as usize], order)
+        });
+        Self {
+            entries,
+            visible,
+            order,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.visible.len()
+    }
+
+    fn rows(&self) -> impl Iterator<Item = &Entry> {
+        self.visible.iter().map(|&row| &self.entries[row as usize])
+    }
+
+    /// Where `rows` of `before` sit in this listing, in the same order. Rows no longer
+    /// shown are left out.
+    pub fn carried_rows(&self, before: &Listing, rows: &[u32]) -> Vec<u32> {
+        let mut positions = vec![None; self.entries.len()];
+        for (row, &entry) in self.visible.iter().enumerate() {
+            positions[entry as usize] = Some(row as u32);
+        }
+        rows.iter()
+            .filter_map(|&row| before.visible.get(row as usize))
+            .filter_map(|&entry| positions[entry as usize])
+            .collect()
+    }
+
+    /// The first row at or after `start` whose name starts with `prefix`, wrapping around.
+    pub fn find(&self, prefix: &str, start: usize) -> Option<usize> {
+        let prefix = prefix.to_lowercase();
+        let start = start.min(self.len());
+        (start..self.len())
+            .chain(0..start)
+            .find(|&row| self.entries[self.visible[row] as usize].starts_with(&prefix))
+    }
+
+    /// Encodes rows as: row count (u32), then for each row the name length in bytes
+    /// (u32), size (u64), modified (u64), created (u64), flags (u8) and the UTF-16 name.
+    /// All numbers are little-endian. `src/api/index.ts` decodes this.
+    pub fn encode_rows(&self, start: usize, count: usize) -> Vec<u8> {
+        let start = start.min(self.len());
+        let rows = (start + count).min(self.len()) - start;
+
+        let mut bytes = Vec::with_capacity(4 + rows * 64);
+        bytes.extend((rows as u32).to_le_bytes());
+        for row in self.rows().skip(start).take(rows) {
+            let folder = if row.is_dir { FLAG_FOLDER } else { 0 };
+            let hidden = if row.hidden { FLAG_HIDDEN } else { 0 };
+            bytes.extend((row.name().len() as u32 * 2).to_le_bytes());
+            bytes.extend(row.size.to_le_bytes());
+            bytes.extend(row.modified.to_le_bytes());
+            bytes.extend(row.created.to_le_bytes());
+            bytes.push(folder | hidden);
+            bytes.extend(row.name().iter().flat_map(|unit| unit.to_le_bytes()));
+        }
+        bytes
+    }
+}
+
+fn read_entries(path: &str) -> Result<Vec<Entry>> {
     let pattern = search_pattern(path)?;
     let mut data = WIN32_FIND_DATAW::default();
     let found = unsafe {
@@ -75,8 +209,6 @@ pub fn read(path: &str) -> Result<Vec<Entry>> {
     };
     unsafe { FindClose(handle) }?;
     finished?;
-
-    entries.sort_unstable_by(compare);
     Ok(entries)
 }
 
@@ -104,36 +236,41 @@ fn search_pattern(path: &str) -> Result<HSTRING> {
     )))
 }
 
-fn compare(a: &Entry, b: &Entry) -> Ordering {
-    b.is_dir.cmp(&a.is_dir).then_with(|| {
-        unsafe { StrCmpLogicalW(PCWSTR(a.name.as_ptr()), PCWSTR(b.name.as_ptr())) }.cmp(&0)
+fn compare(a: &Entry, b: &Entry, order: Order) -> Ordering {
+    let folders = if order.files_first {
+        a.is_dir.cmp(&b.is_dir)
+    } else {
+        b.is_dir.cmp(&a.is_dir)
+    };
+    folders.then_with(|| {
+        let by_key = match order.key {
+            SortKey::Name => natural(&a.name, &b.name),
+            SortKey::Modified => a.modified.cmp(&b.modified),
+            SortKey::Created => a.created.cmp(&b.created),
+            SortKey::Type => natural(a.extension(), b.extension()),
+            SortKey::Size => a.size.cmp(&b.size),
+        };
+        let by_key = if order.descending {
+            by_key.reverse()
+        } else {
+            by_key
+        };
+        by_key.then_with(|| natural(&a.name, &b.name))
     })
 }
 
-/// Encodes rows as: row count (u32), then for each row the name length in bytes
-/// (u32), size (u64), modified (u64), is-folder (u8) and the UTF-16 name.
-/// All numbers are little-endian. `src/api/index.ts` decodes this.
-pub fn encode_rows(entries: &[Entry], start: usize, count: usize) -> Vec<u8> {
-    let start = start.min(entries.len());
-    let rows = &entries[start..(start + count).min(entries.len())];
-
-    let mut bytes = Vec::with_capacity(4 + rows.len() * 64);
-    bytes.extend((rows.len() as u32).to_le_bytes());
-    for row in rows {
-        bytes.extend((row.name().len() as u32 * 2).to_le_bytes());
-        bytes.extend(row.size.to_le_bytes());
-        bytes.extend(row.modified.to_le_bytes());
-        bytes.push(u8::from(row.is_dir));
-        bytes.extend(row.name().iter().flat_map(|unit| unit.to_le_bytes()));
-    }
-    bytes
+/// Explorer's natural order. Both slices must be null-terminated.
+fn natural(a: &[u16], b: &[u16]) -> Ordering {
+    unsafe { StrCmpLogicalW(PCWSTR(a.as_ptr()), PCWSTR(b.as_ptr())) }.cmp(&0)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
+    use std::time::{Duration, SystemTime};
+    use windows::Win32::Storage::FileSystem::SetFileAttributesW;
 
     struct TempFolder(PathBuf);
 
@@ -151,11 +288,30 @@ mod tests {
         }
     }
 
-    fn names(entries: &[Entry]) -> Vec<String> {
-        entries
-            .iter()
+    fn names(listing: &Listing) -> Vec<String> {
+        listing
+            .rows()
             .map(|entry| String::from_utf16(entry.name()).unwrap())
             .collect()
+    }
+
+    fn sorted(folder: &TempFolder, order: Order) -> Vec<String> {
+        names(&Listing::read(folder.0.to_str().unwrap(), order).unwrap())
+    }
+
+    fn set_modified(file: &Path, seconds: u64) {
+        let time = SystemTime::UNIX_EPOCH + Duration::from_secs(seconds);
+        fs::File::options()
+            .write(true)
+            .open(file)
+            .unwrap()
+            .set_modified(time)
+            .unwrap();
+    }
+
+    fn hide(file: &Path) {
+        unsafe { SetFileAttributesW(&HSTRING::from(file.as_os_str()), FILE_ATTRIBUTE_HIDDEN) }
+            .unwrap();
     }
 
     #[test]
@@ -166,12 +322,146 @@ mod tests {
         }
         fs::create_dir(folder.0.join("zebra")).unwrap();
 
-        let entries = read(folder.0.to_str().unwrap()).unwrap();
-
         assert_eq!(
-            names(&entries),
+            sorted(&folder, Order::default()),
             ["zebra", "file1.txt", "file2.txt", "file10.txt"]
         );
+    }
+
+    #[test]
+    fn sorts_by_size_largest_first_with_names_breaking_ties() {
+        let folder = TempFolder::new("size");
+        fs::write(folder.0.join("small"), "1").unwrap();
+        fs::write(folder.0.join("big"), "12345").unwrap();
+        fs::write(folder.0.join("also-small"), "2").unwrap();
+        fs::create_dir(folder.0.join("sub")).unwrap();
+
+        let order = Order {
+            key: SortKey::Size,
+            descending: true,
+            ..Order::default()
+        };
+
+        assert_eq!(sorted(&folder, order), ["sub", "big", "also-small", "small"]);
+    }
+
+    #[test]
+    fn sorts_by_modified_time() {
+        let folder = TempFolder::new("modified");
+        for (file, seconds) in [("old", 1_000_000), ("new", 3_000_000), ("mid", 2_000_000)] {
+            fs::write(folder.0.join(file), "").unwrap();
+            set_modified(&folder.0.join(file), seconds);
+        }
+
+        let order = Order {
+            key: SortKey::Modified,
+            ..Order::default()
+        };
+
+        assert_eq!(sorted(&folder, order), ["old", "mid", "new"]);
+    }
+
+    #[test]
+    fn sorts_by_extension_for_type() {
+        let folder = TempFolder::new("type");
+        for file in ["b.txt", "a.zip", "c.png", "noext"] {
+            fs::write(folder.0.join(file), "").unwrap();
+        }
+
+        let order = Order {
+            key: SortKey::Type,
+            ..Order::default()
+        };
+
+        assert_eq!(sorted(&folder, order), ["noext", "c.png", "b.txt", "a.zip"]);
+    }
+
+    #[test]
+    fn files_first_moves_folders_after_files() {
+        let folder = TempFolder::new("files-first");
+        fs::write(folder.0.join("z.txt"), "").unwrap();
+        fs::create_dir(folder.0.join("a")).unwrap();
+
+        let order = Order {
+            files_first: true,
+            ..Order::default()
+        };
+
+        assert_eq!(sorted(&folder, order), ["z.txt", "a"]);
+    }
+
+    #[test]
+    fn hidden_files_stay_out_until_asked_for() {
+        let folder = TempFolder::new("hidden");
+        fs::write(folder.0.join("seen"), "").unwrap();
+        fs::write(folder.0.join("secret"), "").unwrap();
+        hide(&folder.0.join("secret"));
+
+        let order = Order {
+            show_hidden: true,
+            ..Order::default()
+        };
+
+        assert_eq!(sorted(&folder, Order::default()), ["seen"]);
+        assert_eq!(sorted(&folder, order), ["secret", "seen"]);
+    }
+
+    #[test]
+    fn rearranging_needs_no_new_read() {
+        let folder = TempFolder::new("rearrange");
+        fs::write(folder.0.join("seen"), "").unwrap();
+        fs::write(folder.0.join("secret"), "").unwrap();
+        hide(&folder.0.join("secret"));
+        let listing = Listing::read(folder.0.to_str().unwrap(), Order::default()).unwrap();
+
+        fs::remove_file(folder.0.join("seen")).unwrap();
+        let order = Order {
+            descending: true,
+            show_hidden: true,
+            ..Order::default()
+        };
+
+        assert_eq!(names(&listing.arranged(order)), ["seen", "secret"]);
+    }
+
+    #[test]
+    fn selected_rows_follow_their_files_to_new_positions() {
+        let folder = TempFolder::new("carry");
+        for file in ["a", "b", "c"] {
+            fs::write(folder.0.join(file), "").unwrap();
+        }
+        let shown = Order {
+            show_hidden: true,
+            ..Order::default()
+        };
+        hide(&folder.0.join("c"));
+        let before = Listing::read(folder.0.to_str().unwrap(), shown).unwrap();
+
+        let reversed = before.clone().arranged(Order {
+            descending: true,
+            ..shown
+        });
+        let without_hidden = before.clone().arranged(Order::default());
+
+        assert_eq!(reversed.carried_rows(&before, &[0, 2]), [2, 0]);
+        assert_eq!(without_hidden.carried_rows(&before, &[2, 1]), [1]);
+        assert_eq!(without_hidden.carried_rows(&before, &[99]), [0u32; 0]);
+    }
+
+    #[test]
+    fn find_ignores_case_and_wraps_around() {
+        let folder = TempFolder::new("find");
+        for file in ["Apple", "avocado", "Banana", "Ärger"] {
+            fs::write(folder.0.join(file), "").unwrap();
+        }
+        let listing = Listing::read(folder.0.to_str().unwrap(), Order::default()).unwrap();
+        let at = |name: &str| names(&listing).iter().position(|row| row == name);
+
+        assert_eq!(listing.find("AV", 0), at("avocado"));
+        assert_eq!(listing.find("a", at("Apple").unwrap() + 1), at("avocado"));
+        assert_eq!(listing.find("a", at("avocado").unwrap() + 1), at("Apple"));
+        assert_eq!(listing.find("ärg", 0), at("Ärger"));
+        assert_eq!(listing.find("zzz", 0), None);
     }
 
     #[test]
@@ -180,18 +470,19 @@ mod tests {
         fs::write(folder.0.join("five.txt"), "12345").unwrap();
         fs::create_dir(folder.0.join("sub")).unwrap();
 
-        let entries = read(folder.0.to_str().unwrap()).unwrap();
+        let listing = Listing::read(folder.0.to_str().unwrap(), Order::default()).unwrap();
+        let rows: Vec<&Entry> = listing.rows().collect();
 
-        assert!(entries[0].is_dir);
-        assert_eq!(entries[1].size, 5);
+        assert!(rows[0].is_dir);
+        assert_eq!(rows[1].size, 5);
     }
 
     #[test]
     fn resolves_relative_paths_and_forward_slashes() {
         // Cargo runs tests from the package folder, which holds `src/main.rs`.
         for path in [r".\src", "src", "src/", r"..\src-tauri\src"] {
-            let entries = read(path).unwrap();
-            assert!(names(&entries).contains(&"main.rs".to_string()), "{path}");
+            let listing = Listing::read(path, Order::default()).unwrap();
+            assert!(names(&listing).contains(&"main.rs".to_string()), "{path}");
         }
     }
 
@@ -205,7 +496,8 @@ mod tests {
     #[test]
     fn missing_folder_is_an_error() {
         let folder = TempFolder::new("missing");
-        assert!(read(folder.0.join("nope").to_str().unwrap()).is_err());
+        let missing = folder.0.join("nope");
+        assert!(Listing::read(missing.to_str().unwrap(), Order::default()).is_err());
     }
 
     #[test]
@@ -214,13 +506,19 @@ mod tests {
         for file in ["a", "b", "c"] {
             fs::write(folder.0.join(file), "").unwrap();
         }
-        let entries = read(folder.0.to_str().unwrap()).unwrap();
+        hide(&folder.0.join("b"));
+        let order = Order {
+            show_hidden: true,
+            ..Order::default()
+        };
+        let listing = Listing::read(folder.0.to_str().unwrap(), order).unwrap();
 
-        let bytes = encode_rows(&entries, 1, 10);
+        let bytes = listing.encode_rows(1, 10);
 
         assert_eq!(bytes[..4], 2u32.to_le_bytes());
         assert_eq!(bytes[4..8], 2u32.to_le_bytes());
-        assert_eq!(bytes[25..27], [b'b', 0]);
-        assert_eq!(encode_rows(&entries, 99, 10)[..4], 0u32.to_le_bytes());
+        assert_eq!(bytes[32], FLAG_HIDDEN);
+        assert_eq!(bytes[33..35], [b'b', 0]);
+        assert_eq!(listing.encode_rows(99, 10)[..4], 0u32.to_le_bytes());
     }
 }

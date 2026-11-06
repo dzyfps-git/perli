@@ -82,6 +82,7 @@ export function createTabs() {
     tabs,
     active,
     activeView: () => active().active(),
+    allViews: () => tabs().flatMap((tab) => tab.panes()),
     add,
     close,
     closePane,

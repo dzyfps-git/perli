@@ -1,5 +1,7 @@
 import { createSignal } from "solid-js";
-import { openFolder, type Opened } from "../../api";
+import { arrangeView, openFolder, type Opened, type Order, type Sort } from "../../api";
+import type { Layout } from "../filelist/layout";
+import { filesFirst, lastLayout, lastSort, setLastLayout, setLastSort, showHidden } from "../filelist/prefs";
 import { nextTrail, parentOf } from "./path";
 
 export type FolderView = ReturnType<typeof createFolderView>;
@@ -11,12 +13,21 @@ export function createFolderView(id: number) {
   const [trail, setTrail] = createSignal("");
   const [backStack, setBackStack] = createSignal<string[]>([]);
   const [forwardStack, setForwardStack] = createSignal<string[]>([]);
+  const [sort, setSortValue] = createSignal(lastSort());
+  const [layout, setLayoutValue] = createSignal(lastLayout());
+  const [editingPath, setEditingPath] = createSignal(false);
   let latestRequest = 0;
+  let opening = false;
+  let rearrangeAfterOpen = false;
+  let selectedRows = (): number[] => [];
+
+  const order = (): Order => ({ ...sort(), filesFirst: filesFirst(), showHidden: showHidden() });
 
   async function load(path: string) {
     const request = ++latestRequest;
+    opening = true;
     try {
-      const opened = await openFolder(id, request, folder()?.request ?? 0, path);
+      const opened = await openFolder(id, request, folder()?.request ?? 0, path, order());
       if (request !== latestRequest) return undefined;
       setError(undefined);
       setFolder(opened);
@@ -25,7 +36,42 @@ export function createFolderView(id: number) {
     } catch (failure) {
       if (request === latestRequest) setError(String(failure));
       return undefined;
+    } finally {
+      if (request === latestRequest) {
+        opening = false;
+        if (rearrangeAfterOpen) rearrange();
+      }
     }
+  }
+
+  /** Applies a changed order to the shown folder. An open in flight must not be cancelled. */
+  async function rearrange() {
+    if (opening) {
+      rearrangeAfterOpen = true;
+      return;
+    }
+    rearrangeAfterOpen = false;
+    const current = folder();
+    if (!current) return;
+
+    const request = ++latestRequest;
+    try {
+      const arranged = await arrangeView(id, request, current.request, order(), selectedRows());
+      if (request === latestRequest) setFolder({ ...current, request, ...arranged });
+    } catch (failure) {
+      if (request === latestRequest) setError(String(failure));
+    }
+  }
+
+  function setSort(next: Sort) {
+    setSortValue(next);
+    setLastSort(next);
+    rearrange();
+  }
+
+  function setLayout(next: Layout) {
+    setLayoutValue(next);
+    setLastLayout(next);
   }
 
   async function open(path: string) {
@@ -65,6 +111,17 @@ export function createFolderView(id: number) {
     folder,
     error,
     trail,
+    sort,
+    setSort,
+    layout,
+    setLayout,
+    editingPath,
+    setEditingPath,
+    rearrange,
+    /** The file list reports its selection here, so a new order can keep it. */
+    readSelectionFrom(read: () => number[]) {
+      selectedRows = read;
+    },
     canGoBack: () => backStack().length > 0,
     canGoForward: () => forwardStack().length > 0,
     canGoUp: () => {

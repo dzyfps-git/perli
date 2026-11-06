@@ -20,6 +20,13 @@ export function join(folder: string, name: string) {
   return folder.endsWith("\\") ? `${folder}${name}` : `${folder}\\${name}`;
 }
 
+/** What to open for text typed into the path bar. Text with no drive is read from `folder`. */
+export function typedPath(folder: string, text: string) {
+  const path = text.trim().replace(/^"|"$/g, "");
+  if (/^[a-z]:$/i.test(path)) return `${path}\\`;
+  return /^([a-z]:[\\/]|\\\\)/i.test(path) ? path : join(folder, path);
+}
+
 export function samePath(a: string | undefined, b: string) {
   return a?.toLowerCase() === b.toLowerCase();
 }

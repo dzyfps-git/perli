@@ -2,6 +2,23 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createSelection } from "./selection.ts";
 
+test("rows lists the focused row first and restore brings the selection back", () => {
+  const selection = createSelection();
+  selection.select(2);
+  selection.extendTo(4, false);
+  assert.equal(selection.rows()[0], 4);
+  assert.deepEqual(selection.rows().sort(), [2, 3, 4]);
+
+  const restored = createSelection();
+  restored.restore(selection.rows());
+  assert.equal(restored.focused(), 4);
+  assert.equal(restored.size(), 3);
+  assert.equal(restored.has(3), true);
+
+  restored.restore([]);
+  assert.equal(restored.focused(), -1);
+});
+
 test("select replaces the selection", () => {
   const selection = createSelection();
   selection.select(1);
