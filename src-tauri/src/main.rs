@@ -2,6 +2,7 @@
 
 mod folder;
 mod shell;
+mod snap;
 
 use std::collections::HashMap;
 use std::sync::{Mutex, RwLock};
@@ -9,7 +10,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
 use serde::Serialize;
-use tauri::{async_runtime, ipc::Response, State};
+use tauri::{async_runtime, ipc::Response, State, WebviewWindow};
 
 /// A folder's rows, named by the open request that read them.
 struct Snapshot {
@@ -169,9 +170,16 @@ async fn close_view(view: u32, views: State<'_, Views>) -> Result<(), String> {
     Ok(())
 }
 
+/// Not async, so it runs on the main thread, which must own the area's window.
 #[tauri::command]
-fn show_snap_layouts() -> Result<(), String> {
-    shell::show_snap_layouts().map_err(|error| error.message())
+fn place_snap_area(
+    window: WebviewWindow,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+) -> Result<(), String> {
+    snap::place(&window, x, y, width, height).map_err(|error| error.message())
 }
 
 #[tauri::command]
@@ -196,7 +204,7 @@ fn main() {
             open_folder,
             rows,
             close_view,
-            show_snap_layouts,
+            place_snap_area,
             open_file
         ])
         .run(tauri::generate_context!())
