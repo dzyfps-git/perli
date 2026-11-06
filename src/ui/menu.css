@@ -34,7 +34,8 @@
 }
 
 .menu-item:not(:disabled):hover,
-.menu-item:focus-visible {
+.menu-item:focus-visible,
+.menu-item[aria-expanded="true"] {
   background: var(--surface-hover);
   outline: none;
 }
@@ -47,6 +48,14 @@
   content: "\E73E";
   color: var(--accent);
   font-family: var(--font-icons);
+}
+
+.menu-item[aria-haspopup]::after {
+  align-self: center;
+  content: "\E76C";
+  color: var(--text-muted);
+  font-family: var(--font-icons);
+  font-size: 0.75em;
 }
 
 .menu-divider {

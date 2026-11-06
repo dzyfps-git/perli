@@ -1,28 +1,54 @@
-import { For, onCleanup, onMount } from "solid-js";
+import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { Portal } from "solid-js/web";
 import "./menu.css";
 
 export interface MenuItem {
   label: string;
-  action: () => void;
+  action?: () => void;
   disabled?: boolean;
   /** Set on items that show an on or off state. */
   checked?: boolean;
   /** Draws a line above this item, to start a new group. */
   divider?: boolean;
+  /** Opens a side menu instead of running an action. */
+  items?: MenuItem[];
 }
 
 const EDGE_GAP = 4;
+const SIDE_GAP = 2;
+/** Lines a side menu's first item up with the item that opened it. */
+const SIDE_INSET = 5;
+const SIDE_DELAY_MS = 150;
 
 /** A floating glass menu. It closes on outside click, Escape or after choosing an item. */
-export function Menu(props: { x: number; y: number; items: MenuItem[]; onClose: () => void }) {
+export function Menu(props: {
+  x: number;
+  y: number;
+  items: MenuItem[];
+  onClose: () => void;
+  /** Set on side menus: where to flip to at the window edge, and how to go back. */
+  parent?: { left: number; onBack: () => void };
+}) {
   let menu!: HTMLDivElement;
+  let sideTimer: ReturnType<typeof setTimeout> | undefined;
   const focusedBefore = document.activeElement as HTMLElement | null;
+  const [side, setSide] = createSignal<{ item: MenuItem; x: number; y: number; left: number }>();
+
+  function openSide(item: MenuItem, button: HTMLElement) {
+    if (side()?.item === item) return;
+    const { left, right } = menu.getBoundingClientRect();
+    const y = button.getBoundingClientRect().top - SIDE_INSET;
+    setSide({ item, x: right + SIDE_GAP, y, left });
+  }
 
   function onKeyDown(event: KeyboardEvent) {
     const buttons = [...menu.querySelectorAll<HTMLButtonElement>("button:not(:disabled)")];
     const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
-    if (event.key === "Escape") props.onClose();
+    if (event.key === "Escape") (props.parent?.onBack ?? props.onClose)();
+    else if (event.key === "ArrowLeft" && props.parent) props.parent.onBack();
+    else if (event.key === "ArrowRight") {
+      if (buttons[index]?.ariaHasPopup) buttons[index].click();
+    }
     else if (event.key === "ArrowDown") buttons[(index + 1) % buttons.length]?.focus();
     else if (event.key === "ArrowUp") buttons[(index - 1 + buttons.length) % buttons.length]?.focus();
     else return;
@@ -31,17 +57,20 @@ export function Menu(props: { x: number; y: number; items: MenuItem[]; onClose: 
   }
 
   function onPointerDown(event: PointerEvent) {
-    if (!menu.contains(event.target as Node)) props.onClose();
+    if (!(event.target as Element).closest(".menu")) props.onClose();
   }
 
   onMount(() => {
     window.addEventListener("pointerdown", onPointerDown, true);
     const { width, height } = menu.getBoundingClientRect();
-    menu.style.left = `${Math.max(EDGE_GAP, Math.min(props.x, innerWidth - width - EDGE_GAP))}px`;
+    const overflows = props.x + width + EDGE_GAP > innerWidth;
+    const x = props.parent && overflows ? props.parent.left - SIDE_GAP - width : props.x;
+    menu.style.left = `${Math.max(EDGE_GAP, Math.min(x, innerWidth - width - EDGE_GAP))}px`;
     menu.style.top = `${Math.max(EDGE_GAP, Math.min(props.y, innerHeight - height - EDGE_GAP))}px`;
     menu.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus();
   });
   onCleanup(() => {
+    clearTimeout(sideTimer);
     window.removeEventListener("pointerdown", onPointerDown, true);
     focusedBefore?.focus();
   });
@@ -54,6 +83,7 @@ export function Menu(props: { x: number; y: number; items: MenuItem[]; onClose: 
         role="menu"
         style={{ left: `${props.x}px`, top: `${props.y}px` }}
         onKeyDown={onKeyDown}
+        onPointerLeave={() => clearTimeout(sideTimer)}
       >
         <For each={props.items}>
           {(item) => (
@@ -62,10 +92,21 @@ export function Menu(props: { x: number; y: number; items: MenuItem[]; onClose: 
               class="menu-item"
               classList={{ "menu-divider": item.divider }}
               aria-checked={item.checked}
+              aria-haspopup={item.items ? "menu" : undefined}
+              aria-expanded={item.items ? side()?.item === item : undefined}
               disabled={item.disabled}
-              onClick={() => {
+              onPointerEnter={(event) => {
+                const button = event.currentTarget;
+                clearTimeout(sideTimer);
+                sideTimer = setTimeout(
+                  () => (item.items ? openSide(item, button) : setSide(undefined)),
+                  SIDE_DELAY_MS,
+                );
+              }}
+              onClick={(event) => {
+                if (item.items) return openSide(item, event.currentTarget);
                 props.onClose();
-                item.action();
+                item.action?.();
               }}
             >
               {item.label}
@@ -73,6 +114,17 @@ export function Menu(props: { x: number; y: number; items: MenuItem[]; onClose: 
           )}
         </For>
       </div>
+      <Show when={side()} keyed>
+        {(open) => (
+          <Menu
+            x={open.x}
+            y={open.y}
+            items={open.item.items ?? []}
+            onClose={props.onClose}
+            parent={{ left: open.left, onBack: () => setSide(undefined) }}
+          />
+        )}
+      </Show>
     </Portal>
   );
 }

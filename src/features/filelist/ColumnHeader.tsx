@@ -26,7 +26,6 @@ function GroupToggle(props: { onChange: () => void }) {
     <button
       class="strip-extra strip-icon"
       data-on={grouping() === "foldersFirst" ? undefined : ""}
-      title={current().label}
       aria-label={`Grouping: ${current().label}`}
       onClick={props.onChange}
     >

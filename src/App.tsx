@@ -32,6 +32,7 @@ import { parseSession } from "./features/tabs/session";
 import { createTabs, type Tab } from "./features/tabs/tabs";
 import { TitleBar } from "./features/titlebar/TitleBar";
 import { Menu, type MenuItem } from "./ui/Menu";
+import { Tooltip } from "./ui/Tooltip";
 
 const SAVE_DELAY_MS = 300;
 const MOUSE_BACK = 3;
@@ -140,21 +141,20 @@ export function App() {
       checked: view.layout() === layout,
       action: () => view.setLayout(layout),
     });
-    const groupItem = (label: string, group: Grouping, divider = false) => ({
+    const groupItem = (label: string, group: Grouping) => ({
       label,
-      divider,
       checked: grouping() === group,
       action: () => changeOrder(() => setGrouping(group)),
     });
-    const sortItem = (label: string, key: SortKey, divider = false) => ({
+    const sortItem = (label: string, key: SortKey) => ({
       label,
-      divider,
       checked: view.sort().key === key,
       action: () => view.setSort(nextSort(view.sort(), key)),
     });
     const tileItems = [
       {
         label: "Larger tiles",
+        divider: true,
         disabled: isLargestTile(tileSize()),
         action: () => setTileSize(clampTile(tileSize() + TILE_STEP)),
       },
@@ -165,22 +165,38 @@ export function App() {
       },
     ];
     const items: MenuItem[] = [
-      layoutItem("List", "list"),
-      layoutItem("Grid", "grid"),
-      ...(view.layout() === "grid" ? tileItems : []),
-      sortItem("Sort by name", "name", true),
-      sortItem("Sort by date modified", "modified"),
-      sortItem("Sort by date created", "created"),
-      sortItem("Sort by type", "type"),
-      sortItem("Sort by size", "size"),
       {
-        label: "Descending",
-        checked: view.sort().descending,
-        action: () => view.setSort({ ...view.sort(), descending: !view.sort().descending }),
+        label: "View",
+        items: [
+          layoutItem("List", "list"),
+          layoutItem("Grid", "grid"),
+          ...(view.layout() === "grid" ? tileItems : []),
+        ],
       },
-      groupItem("Folders first", "foldersFirst", true),
-      groupItem("Files first", "filesFirst"),
-      groupItem("Mixed", "mixed"),
+      {
+        label: "Sort by",
+        items: [
+          sortItem("Name", "name"),
+          sortItem("Date modified", "modified"),
+          sortItem("Date created", "created"),
+          sortItem("Type", "type"),
+          sortItem("Size", "size"),
+          {
+            label: "Descending",
+            divider: true,
+            checked: view.sort().descending,
+            action: () => view.setSort({ ...view.sort(), descending: !view.sort().descending }),
+          },
+        ],
+      },
+      {
+        label: "Grouping",
+        items: [
+          groupItem("Folders first", "foldersFirst"),
+          groupItem("Files first", "filesFirst"),
+          groupItem("Mixed", "mixed"),
+        ],
+      },
       {
         label: "Show hidden files",
         divider: true,
@@ -355,6 +371,7 @@ export function App() {
       </Show>
       <Palette />
       <Settings open={settingsOpen()} onClose={() => setSettingsOpen(false)} />
+      <Tooltip />
     </div>
   );
 }

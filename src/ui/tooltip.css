@@ -1,0 +1,22 @@
+@keyframes tooltip-in {
+  from {
+    opacity: 0;
+    transform: translateY(-2px);
+  }
+}
+
+.tooltip {
+  position: fixed;
+  inset: auto;
+  margin: 0;
+  padding: var(--space-1) var(--space-2);
+  color: var(--text);
+  white-space: nowrap;
+  background: var(--overlay-tint);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  backdrop-filter: var(--blur);
+  animation: tooltip-in var(--motion);
+  pointer-events: none;
+}
