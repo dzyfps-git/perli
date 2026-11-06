@@ -1,6 +1,49 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { DEFAULT_COLUMNS, gridTemplate, nextSort, restoreColumns, typeLabel } from "./columns.ts";
+import {
+  columnsWidth,
+  DEFAULT_COLUMNS,
+  dragTarget,
+  gridTemplate,
+  movedColumn,
+  nextSort,
+  restoreColumns,
+  typeLabel,
+} from "./columns.ts";
+
+const ids = (columns: { id: string }[]) => columns.map((column) => column.id).join();
+
+test("movedColumn takes the target's place in either direction", () => {
+  assert.equal(ids(movedColumn(DEFAULT_COLUMNS, "modified", "type")), "name,created,type,modified,size");
+  assert.equal(ids(movedColumn(DEFAULT_COLUMNS, "size", "created")), "name,modified,size,created,type");
+});
+
+test("movedColumn keeps name first", () => {
+  assert.equal(movedColumn(DEFAULT_COLUMNS, "name", "size"), DEFAULT_COLUMNS);
+  assert.equal(movedColumn(DEFAULT_COLUMNS, "size", "name"), DEFAULT_COLUMNS);
+});
+
+test("dragTarget waits for the pointer to pass a title's middle", () => {
+  const middles = [100, 200, 300, 400];
+  assert.equal(dragTarget(middles, 1, 290), -1);
+  assert.equal(dragTarget(middles, 1, 310), 2);
+  assert.equal(dragTarget(middles, 3, 310), -1);
+  assert.equal(dragTarget(middles, 3, 290), 2);
+  assert.equal(dragTarget(middles, 3, 190), 1);
+});
+
+test("dragTarget never picks name", () => {
+  assert.equal(dragTarget([100, 200, 300], 1, 10), -1);
+});
+
+test("restoreColumns keeps the saved order and adds new columns at the end", () => {
+  const saved = [{ id: "size", width: 90, visible: true }, { id: "name" }, { id: "type", width: 90, visible: true }];
+  assert.equal(ids(restoreColumns(saved)), "name,size,type,modified,created");
+});
+
+test("columnsWidth adds visible columns with name at its minimum", () => {
+  assert.equal(columnsWidth(DEFAULT_COLUMNS), 120 + 160 + 90);
+});
 
 test("nextSort flips the same column", () => {
   assert.deepEqual(nextSort({ key: "name", descending: false }, "name"), { key: "name", descending: true });

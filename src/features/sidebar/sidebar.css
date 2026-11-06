@@ -58,6 +58,41 @@
   font-size: 14px;
 }
 
+.place-free {
+  flex: none;
+  margin-left: auto;
+  color: var(--text-muted);
+  font-size: 11px;
+  opacity: 0;
+  transition: opacity var(--motion);
+}
+
+.place:hover .place-free,
+.place:focus-visible .place-free {
+  opacity: 1;
+}
+
+.place-bar {
+  position: absolute;
+  inset: auto var(--space-2) 2px calc(var(--space-2) + 14px + var(--space-2));
+  height: 2px;
+  overflow: hidden;
+  border-radius: 1px;
+  background: var(--border);
+}
+
+.place-used {
+  display: block;
+  height: 100%;
+  background: var(--accent-line);
+  transform-origin: left;
+  transition: transform var(--motion-glide);
+}
+
+.place-used-full {
+  background: var(--danger);
+}
+
 .place-label {
   min-width: 0;
   overflow: hidden;

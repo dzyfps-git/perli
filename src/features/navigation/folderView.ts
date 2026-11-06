@@ -1,33 +1,52 @@
-import { createSignal } from "solid-js";
+import { createSignal, untrack } from "solid-js";
 import { arrangeView, openFolder, type Opened, type Order, type Sort } from "../../api";
 import type { Layout } from "../filelist/layout";
-import { filesFirst, lastLayout, lastSort, setLastLayout, setLastSort, showHidden } from "../filelist/prefs";
-import { nextTrail, parentOf } from "./path";
+import {
+  grouping,
+  lastLayout,
+  lastSort,
+  rememberedSort,
+  rememberSort,
+  setLastLayout,
+  setLastSort,
+  showHidden,
+} from "../filelist/prefs";
+import type { SavedPane } from "../tabs/session";
+import { nextTrail, parentOf, samePath } from "./path";
 
 export type FolderView = ReturnType<typeof createFolderView>;
 
-/** One browsing location: its open folder, history and path bar trail. */
-export function createFolderView(id: number) {
+/**
+ * One browsing location: its open folder, history and path bar trail. A `saved` pane waits
+ * for `openSaved`, so tabs restored behind the active one cost nothing at startup.
+ */
+export function createFolderView(id: number, saved?: SavedPane) {
   const [folder, setFolder] = createSignal<Opened>();
   const [error, setError] = createSignal<string>();
   const [trail, setTrail] = createSignal("");
   const [backStack, setBackStack] = createSignal<string[]>([]);
   const [forwardStack, setForwardStack] = createSignal<string[]>([]);
-  const [sort, setSortValue] = createSignal(lastSort());
-  const [layout, setLayoutValue] = createSignal(lastLayout());
+  const [sort, setSortValue] = createSignal(saved?.sort ?? lastSort());
+  const [layout, setLayoutValue] = createSignal(saved?.layout ?? lastLayout());
   const [editingPath, setEditingPath] = createSignal(false);
   let latestRequest = 0;
   let opening = false;
   let rearrangeAfterOpen = false;
   let selectedRows = (): number[] => [];
+  let savedOpened = false;
 
-  const order = (): Order => ({ ...sort(), filesFirst: filesFirst(), showHidden: showHidden() });
+  /** The folder shown, or the saved one that has not been opened yet. */
+  const path = () => folder()?.path ?? saved?.path;
+  const order = (): Order => ({ ...sort(), group: grouping(), showHidden: showHidden() });
 
-  async function load(path: string) {
+  async function load(target: string) {
     const request = ++latestRequest;
+    // Memory is for arriving at a folder. A refresh or restore keeps this pane's own sort.
+    const folderSort = samePath(path(), target) ? undefined : rememberedSort(target);
+    if (folderSort) setSortValue(folderSort);
     opening = true;
     try {
-      const opened = await openFolder(id, request, folder()?.request ?? 0, path, order());
+      const opened = await openFolder(id, request, folder()?.request ?? 0, target, order());
       if (request !== latestRequest) return undefined;
       setError(undefined);
       setFolder(opened);
@@ -66,6 +85,8 @@ export function createFolderView(id: number) {
   function setSort(next: Sort) {
     setSortValue(next);
     setLastSort(next);
+    const path = folder()?.path;
+    if (path) rememberSort(path, next);
     rearrange();
   }
 
@@ -82,6 +103,12 @@ export function createFolderView(id: number) {
       setForwardStack([]);
     }
     return opened;
+  }
+
+  /** Also retries a saved folder that failed to open. */
+  async function refresh() {
+    const target = path();
+    if (target) await load(target);
   }
 
   async function back() {
@@ -109,6 +136,12 @@ export function createFolderView(id: number) {
   return {
     id,
     folder,
+    path,
+    openSaved() {
+      if (saved && !savedOpened) untrack(() => open(saved.path));
+      savedOpened = true;
+    },
+    order,
     error,
     trail,
     sort,
@@ -129,6 +162,7 @@ export function createFolderView(id: number) {
       return !!path && !!parentOf(path);
     },
     open,
+    refresh,
     back,
     forward,
     up,

@@ -30,10 +30,24 @@ export interface Sort {
   descending: boolean;
 }
 
+export type Grouping = "foldersFirst" | "filesFirst" | "mixed";
+
 /** Which rows a view shows and in what order. */
 export interface Order extends Sort {
-  filesFirst: boolean;
+  group: Grouping;
   showHidden: boolean;
+}
+
+export interface Start {
+  /** The folder from the command line. It replaces the saved session for this run. */
+  folder: string | null;
+  session: string | null;
+  home: string | null;
+}
+
+export interface DriveSpace {
+  free: number;
+  total: number;
 }
 
 export interface Places {
@@ -50,9 +64,21 @@ const FILETIME_TO_UNIX_MS = 11_644_473_600_000;
 
 const names = new TextDecoder("utf-16le");
 
-export const startFolder = () => invoke<string>("start_folder");
+export const startState = () => invoke<Start>("start_state");
+
+export const saveSession = (text: string) => invoke<void>("save_session", { text });
 
 export const listPlaces = () => invoke<Places>("list_places");
+
+export const driveSpace = (path: string) => invoke<DriveSpace>("drive_space", { path });
+
+export const typeNames = (extensions: string[]) =>
+  invoke<Record<string, string>>("type_names", { extensions });
+
+/** Turns `~` and `%NAME%` in typed text into a real path. */
+export const expandPath = (text: string) => invoke<string>("expand_path", { text });
+
+export const isFile = (path: string) => invoke<boolean>("is_file", { path });
 
 /** `shown` is the request of the folder on screen, whose rows must outlive this open. */
 export const openFolder = (view: number, request: number, shown: number, path: string, order: Order) =>

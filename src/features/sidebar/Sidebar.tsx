@@ -1,5 +1,6 @@
-import { createSignal, For, onMount } from "solid-js";
-import { listPlaces, type Places } from "../../api";
+import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import { driveSpace, listPlaces, type DriveSpace, type Places } from "../../api";
+import { formatSize } from "../../ui/format";
 import type { FolderView } from "../navigation/folderView";
 import { samePath } from "../navigation/path";
 import "./sidebar.css";
@@ -16,9 +17,19 @@ const FOLDERS: Record<string, { label: string; icon: string }> = {
   videos: { label: "Videos", icon: "" },
 };
 
+const FULL_SHARE = 0.9;
+
 type PlaceMenu = (event: MouseEvent, path: string) => void;
 
-function Place(props: { view: FolderView; path: string; label: string; icon: string; onMenu: PlaceMenu }) {
+function Place(props: {
+  view: FolderView;
+  path: string;
+  label: string;
+  icon: string;
+  onMenu: PlaceMenu;
+  space?: DriveSpace;
+}) {
+  const used = () => (props.space ? 1 - props.space.free / props.space.total : 0);
   return (
     <li>
       <button
@@ -31,6 +42,20 @@ function Place(props: { view: FolderView; path: string; label: string; icon: str
           {props.icon}
         </span>
         <span class="place-label">{props.label}</span>
+        <Show when={props.space}>
+          {(space) => (
+            <>
+              <span class="place-free">{formatSize(space().free)} free</span>
+              <span class="place-bar" role="presentation">
+                <span
+                  class="place-used"
+                  classList={{ "place-used-full": used() >= FULL_SHARE }}
+                  style={{ transform: `scaleX(${used()})` }}
+                />
+              </span>
+            </>
+          )}
+        </Show>
       </button>
     </li>
   );
@@ -38,6 +63,8 @@ function Place(props: { view: FolderView; path: string; label: string; icon: str
 
 export function Sidebar(props: { view: FolderView; onMenu: PlaceMenu }) {
   const [places, setPlaces] = createSignal<Places>();
+  const [spaces, setSpaces] = createSignal<Record<string, DriveSpace>>({});
+  const asking = new Set<string>();
   let nav!: HTMLElement;
   let glide!: HTMLSpanElement;
 
@@ -55,10 +82,25 @@ export function Sidebar(props: { view: FolderView; onMenu: PlaceMenu }) {
     glide.classList.add("place-glide-on");
   }
 
+  /** Each drive answers on its own, so a slow network drive holds up only its own bar. */
+  function readSpaces() {
+    for (const { path } of places()?.drives ?? []) {
+      if (asking.has(path)) continue;
+      asking.add(path);
+      driveSpace(path)
+        .then((space) => space.total > 0 && setSpaces({ ...spaces(), [path]: space }))
+        // An empty card reader or a lost drive has nothing to show.
+        .catch(() => undefined)
+        .finally(() => asking.delete(path));
+    }
+  }
+
   // ponytail: read once, so a newly plugged drive needs a restart. Watch for drive changes in Phase 3.
   onMount(() => {
-    listPlaces().then(setPlaces).catch(console.error);
+    listPlaces().then(setPlaces).then(readSpaces).catch(console.error);
+    window.addEventListener("focus", readSpaces);
   });
+  onCleanup(() => window.removeEventListener("focus", readSpaces));
 
   return (
     <nav
@@ -77,7 +119,14 @@ export function Sidebar(props: { view: FolderView; onMenu: PlaceMenu }) {
       <ul>
         <For each={places()?.drives}>
           {(drive) => (
-            <Place view={props.view} path={drive.path} label={drive.name} icon={ICON_DRIVE} onMenu={props.onMenu} />
+            <Place
+              view={props.view}
+              path={drive.path}
+              label={drive.name}
+              icon={ICON_DRIVE}
+              onMenu={props.onMenu}
+              space={spaces()[drive.path]}
+            />
           )}
         </For>
       </ul>

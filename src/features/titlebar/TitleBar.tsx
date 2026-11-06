@@ -13,7 +13,7 @@ const ICON_MAXIMIZE = "";
 const ICON_RESTORE = "";
 
 function tabTitle(tab: Tab) {
-  const titles = tab.panes().map((view) => toCrumbs(view.folder()?.path ?? "").at(-1)?.label ?? "New tab");
+  const titles = tab.panes().map((view) => toCrumbs(view.path() ?? "").at(-1)?.label ?? "New tab");
   return titles.join(" | ");
 }
 
@@ -73,6 +73,7 @@ export function TitleBar(props: { tabs: Tabs; onNewTab: () => void }) {
     const path = tab.active().folder()?.path;
     return [
       { label: "New tab", action: props.onNewTab },
+      { label: "Reopen closed tab", action: tabs.reopenClosed, disabled: !tabs.canReopen() },
       { label: "Duplicate", action: () => tabs.duplicate(tab) },
       { label: "Split view", action: () => tabs.openToSide(path!, tab), disabled: split || !path },
       { label: "Swap panes", action: tab.swap, disabled: !split },

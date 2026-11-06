@@ -20,6 +20,14 @@ body {
   overflow: hidden;
 }
 
+/* With Windows transparency off, Mica is gone and nothing else fills the sidebar. */
+@media (prefers-reduced-transparency: reduce) {
+  html,
+  body {
+    background: var(--surface);
+  }
+}
+
 /* The clear border keeps the thumb thin inside a wider, easier to grab bar. */
 ::-webkit-scrollbar {
   width: var(--scrollbar-size);
@@ -46,13 +54,50 @@ body {
   grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
   grid-template-rows: var(--title-bar-height) minmax(0, 1fr);
   height: 100%;
+  background: var(--glass-tint);
 }
 
 .sidebar {
+  display: flex;
+  flex-direction: column;
   padding: var(--space-4);
   overflow-y: auto;
-  background: var(--glass-tint);
-  border-right: 1px solid var(--border);
+}
+
+.sidebar .places {
+  flex: 1;
+}
+
+.settings-button {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  height: var(--row-height);
+  padding: 0 var(--space-2);
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  text-align: left;
+  transition:
+    background var(--motion),
+    color var(--motion);
+}
+
+.settings-button:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.settings-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.settings-icon {
+  font-family: var(--font-icons);
+  font-size: 14px;
 }
 
 .logo {
@@ -81,17 +126,17 @@ html[data-blurred] .logo {
   }
 }
 
+/* Each pane is a panel floating on the window material. */
 .files {
   min-width: 0;
   min-height: 0;
-  background: var(--surface);
+  padding: 0 var(--space-1) var(--space-1) 0;
 }
 
 .panes {
   display: flex;
-  gap: 1px;
+  gap: var(--space-1);
   height: 100%;
-  background: var(--border);
 }
 
 .panes[hidden] {
@@ -109,7 +154,10 @@ html[data-blurred] .logo {
   grid-template-columns: minmax(0, 1fr);
   grid-template-rows: auto minmax(0, 1fr);
   min-width: 0;
+  overflow: hidden;
   background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-large);
 }
 
 .pane-active .pathbar {

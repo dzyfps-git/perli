@@ -1,0 +1,125 @@
+.settings {
+  width: min(420px, 80vw);
+  padding: var(--space-4);
+  color: var(--text);
+  background: var(--overlay-tint);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-large);
+  box-shadow: var(--shadow);
+  backdrop-filter: var(--blur);
+}
+
+.settings::backdrop {
+  background: rgb(0 0 0 / 28%);
+}
+
+.settings[open] {
+  animation: settings-in var(--motion-slide);
+}
+
+@keyframes settings-in {
+  from {
+    opacity: 0;
+    translate: 0 -8px;
+  }
+}
+
+.settings:focus {
+  outline: none;
+}
+
+.settings-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.settings h2 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.settings h3 {
+  margin: var(--space-4) 0 var(--space-2);
+  color: var(--text-muted);
+  font-size: var(--font-size);
+  font-weight: 400;
+}
+
+.settings-close {
+  width: var(--row-height);
+  height: var(--row-height);
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text);
+  font-family: var(--font-icons);
+  font-size: 10px;
+  transition: background var(--motion);
+}
+
+.settings-close:hover {
+  background: var(--surface-hover);
+}
+
+.settings-themes {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--space-1);
+}
+
+.settings-accents {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--space-1);
+}
+
+.settings-theme,
+.settings-accent {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  height: 32px;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  transition:
+    background var(--motion),
+    border-color var(--motion);
+}
+
+.settings-accent {
+  justify-content: flex-start;
+}
+
+.settings-theme:hover,
+.settings-accent:hover {
+  background: var(--surface-hover);
+}
+
+.settings-theme[aria-checked="true"],
+.settings-accent[aria-checked="true"] {
+  border-color: var(--accent);
+  background: var(--surface-selected);
+}
+
+.settings-theme:focus-visible,
+.settings-accent:focus-visible,
+.settings-close:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.settings-swatch {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--accent-line);
+}

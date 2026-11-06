@@ -3,7 +3,6 @@
   display: flex;
   justify-content: space-between;
   min-width: 0;
-  background: var(--glass-tint);
 }
 
 .tabs {
@@ -12,7 +11,7 @@
   gap: var(--space-1);
   min-width: 0;
   position: relative;
-  padding: var(--space-1) var(--space-2) 0;
+  padding: var(--space-1) var(--space-2);
   overflow: hidden;
 }
 
@@ -25,7 +24,7 @@
   min-width: 72px;
   height: 100%;
   padding: 0 var(--space-2) 0 var(--space-3);
-  border-radius: var(--radius) var(--radius) 0 0;
+  border-radius: var(--radius);
   color: var(--text-muted);
   transition:
     background var(--motion),
@@ -44,7 +43,7 @@
 /* One line that glides between tabs. The padding insets it from the tab's edges. */
 .tab-ink {
   position: absolute;
-  bottom: 0;
+  bottom: calc(var(--space-1) + 2px);
   left: 0;
   height: 2px;
   padding: 0 var(--space-2);

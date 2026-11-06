@@ -1,34 +1,23 @@
-/* Every color, size and timing in the app comes from here. */
+/* Every color, size and timing in the app comes from here. `light-dark` follows the Windows
+   setting until the theme setting forces one side. */
 :root {
-  color-scheme: dark;
+  color-scheme: light dark;
 
-  --surface: #0e0e11;
-  --surface-hover: #1a1a1f;
-  --surface-selected: #2a2230;
-  --glass-tint: rgb(14 14 17 / 45%);
-  --overlay-tint: rgb(28 28 34 / 62%);
-  --border: rgb(255 255 255 / 8%);
+  --surface: color-mix(in srgb, var(--accent) 3%, light-dark(#fbfafc, #0e0e11));
+  --surface-hover: color-mix(in srgb, var(--accent) 6%, light-dark(#efedf2, #1a1a1f));
+  --surface-selected: color-mix(in srgb, var(--accent) 18%, var(--surface));
+  --glass-tint: color-mix(in srgb, var(--surface) 45%, transparent);
+  --overlay-tint: light-dark(rgb(255 255 255 / 62%), rgb(28 28 34 / 62%));
+  --border: light-dark(rgb(0 0 0 / 8%), rgb(255 255 255 / 8%));
+  --shadow: 0 8px 24px light-dark(rgb(0 0 0 / 12%), rgb(0 0 0 / 40%));
 
-  --text: #f0eff2;
-  --text-muted: #9a99a3;
+  --text: light-dark(#1c1b20, #f0eff2);
+  --text-muted: light-dark(#66646e, #9a99a3);
   --danger: #c42b1c;
 
-  --accent-start: #9db4ff;
-  --accent: #c4b5fd;
-  --accent-end: #f0a6d4;
-  --accent-line: linear-gradient(90deg, var(--accent-start), var(--accent), var(--accent-end));
-  --accent-drift: linear-gradient(
-    90deg,
-    var(--accent-start),
-    var(--accent),
-    var(--accent-end),
-    var(--accent),
-    var(--accent-start)
-  );
-
   --scrollbar-size: 10px;
-  --scrollbar-thumb: rgb(255 255 255 / 18%);
-  --scrollbar-thumb-hover: rgb(255 255 255 / 32%);
+  --scrollbar-thumb: light-dark(rgb(0 0 0 / 20%), rgb(255 255 255 / 18%));
+  --scrollbar-thumb-hover: light-dark(rgb(0 0 0 / 36%), rgb(255 255 255 / 32%));
 
   --font: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
   --font-size: 13px;
@@ -39,6 +28,7 @@
   --space-3: 12px;
   --space-4: 16px;
   --radius: 8px;
+  --radius-large: 12px;
   --row-height: 28px;
 
   --sidebar-width: 220px;
@@ -50,32 +40,77 @@
   --drift-time: 7s;
 }
 
-@media (prefers-color-scheme: light) {
-  :root {
-    color-scheme: light;
+:root[data-theme="light"] {
+  color-scheme: light;
+}
 
-    --surface: #fbfafc;
-    --surface-hover: #efedf2;
-    --surface-selected: #f3e3ee;
-    --glass-tint: rgb(251 250 252 / 45%);
-    --overlay-tint: rgb(255 255 255 / 62%);
-    --border: rgb(0 0 0 / 8%);
+:root[data-theme="dark"] {
+  color-scheme: dark;
+}
 
-    --text: #1c1b20;
-    --text-muted: #66646e;
+/* An accent is three close colors. Swatches use the same rule to show each one. */
+:root,
+[data-accent="perli"] {
+  --accent-start: light-dark(#4f6bed, #9db4ff);
+  --accent: light-dark(#7a5fe0, #c4b5fd);
+  --accent-end: light-dark(#d6479f, #f0a6d4);
+}
 
-    --accent-start: #4f6bed;
-    --accent: #7a5fe0;
-    --accent-end: #d6479f;
+[data-accent="ocean"] {
+  --accent-start: light-dark(#0e7fc2, #6cc4f5);
+  --accent: light-dark(#0f9aa8, #5fd6d6);
+  --accent-end: light-dark(#1aa37a, #7ee8b8);
+}
 
-    --scrollbar-thumb: rgb(0 0 0 / 20%);
-    --scrollbar-thumb-hover: rgb(0 0 0 / 36%);
-  }
+[data-accent="forest"] {
+  --accent-start: light-dark(#2e8b57, #86d9a3);
+  --accent: light-dark(#5e9c2f, #b4dc7a);
+  --accent-end: light-dark(#a39a1a, #e6d96e);
+}
+
+[data-accent="ember"] {
+  --accent-start: light-dark(#d9731a, #ffb36b);
+  --accent: light-dark(#d9483b, #ff8f7a);
+  --accent-end: light-dark(#c92f7a, #f57ab0);
+}
+
+[data-accent="rose"] {
+  --accent-start: light-dark(#c9367e, #f59ac6);
+  --accent: light-dark(#b83fbf, #e19aeb);
+  --accent-end: light-dark(#7a5fe0, #b8a4ff);
+}
+
+[data-accent="mono"] {
+  --accent-start: light-dark(#55535c, #d6d5db);
+  --accent: light-dark(#77757f, #aeadb5);
+  --accent-end: light-dark(#55535c, #d6d5db);
+}
+
+:root,
+[data-accent] {
+  --accent-line: linear-gradient(90deg, var(--accent-start), var(--accent), var(--accent-end));
+  --accent-drift: linear-gradient(
+    90deg,
+    var(--accent-start),
+    var(--accent),
+    var(--accent-end),
+    var(--accent),
+    var(--accent-start)
+  );
 }
 
 @media (prefers-reduced-motion: reduce) {
   :root {
     --motion-slide: 0ms;
     --motion-glide: 0ms;
+  }
+}
+
+/* Follows the Windows transparency setting, which also turns off Mica. */
+@media (prefers-reduced-transparency: reduce) {
+  :root {
+    --glass-tint: var(--surface);
+    --overlay-tint: var(--surface);
+    --blur: none;
   }
 }

@@ -2,16 +2,20 @@
 
 mod folder;
 mod places;
+mod session;
 mod shell;
 mod snap;
 
 use std::collections::HashMap;
 use std::sync::{Mutex, RwLock};
 use std::thread::{self, JoinHandle};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
-use tauri::{async_runtime, ipc::Response, State, WebviewWindow};
+use tauri::{async_runtime, ipc::Response, State, WebviewWindow, WindowEvent};
+
+/// How long the UI gets to finish closing before the window goes anyway.
+const CLOSE_LIMIT: Duration = Duration::from_secs(1);
 
 /// A folder's rows, named by the request that made them.
 struct Snapshot {
@@ -86,16 +90,48 @@ struct Arranged {
     selected: Vec<u32>,
 }
 
-/// The folder passed on the command line, otherwise the user's home folder.
-fn first_folder() -> Option<String> {
-    std::env::args()
-        .nth(1)
-        .or_else(|| std::env::var("USERPROFILE").ok())
+/// What the app starts with. A folder from the command line replaces the saved session.
+#[derive(Clone, Serialize)]
+struct Start {
+    folder: Option<String>,
+    session: Option<String>,
+    home: Option<String>,
+}
+
+impl Start {
+    fn read() -> Self {
+        let folder = std::env::args().nth(1);
+        let session = folder.is_none().then(session::read).flatten();
+        let home = std::env::var("USERPROFILE").ok();
+        Self {
+            folder,
+            session,
+            home,
+        }
+    }
+
+    /// The folder most likely to be opened first, and its order.
+    fn first_folder(&self) -> Option<(String, folder::Order)> {
+        let plain = |path: &String| (path.clone(), folder::Order::default());
+        self.folder
+            .as_ref()
+            .map(plain)
+            .or_else(|| self.session.as_deref().and_then(session::start))
+            .or_else(|| self.home.as_ref().map(plain))
+    }
 }
 
 #[tauri::command]
-fn start_folder() -> Result<String, String> {
-    first_folder().ok_or_else(|| "No start folder found".to_string())
+fn start_state(start: State<'_, Start>) -> Start {
+    start.inner().clone()
+}
+
+#[tauri::command]
+async fn save_session(text: String) -> Result<(), String> {
+    async_runtime::spawn_blocking(move || session::save(&text))
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -129,8 +165,7 @@ async fn open_folder(
         .0
         .lock()
         .unwrap_or_else(|error| error.into_inner())
-        .take()
-        .filter(|(preloaded, _)| *preloaded == path);
+        .take_if(|(preloaded, _)| *preloaded == path);
     let resolved = folder::resolve(&path).map_err(|error| error.message())?;
     let listing = async_runtime::spawn_blocking(move || match waiting {
         Some((_, reader)) => reader
@@ -246,6 +281,37 @@ async fn close_view(view: u32, views: State<'_, Views>) -> Result<(), String> {
     Ok(())
 }
 
+/// Runs off the main thread because a network drive can take a long time to answer.
+#[tauri::command]
+async fn drive_space(path: String) -> Result<places::DriveSpace, String> {
+    async_runtime::spawn_blocking(move || places::drive_space(&path))
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.message())
+}
+
+#[tauri::command]
+async fn type_names(extensions: Vec<String>) -> Result<HashMap<String, String>, String> {
+    async_runtime::spawn_blocking(move || shell::type_names(extensions))
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.message())
+}
+
+#[tauri::command]
+fn expand_path(text: String) -> String {
+    shell::expand_path(&text)
+}
+
+#[tauri::command]
+async fn is_file(path: String) -> Result<bool, String> {
+    async_runtime::spawn_blocking(move || {
+        std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file())
+    })
+    .await
+    .map_err(|error| error.to_string())
+}
+
 /// Not async, so it runs on the main thread, which must own the area's window.
 #[tauri::command]
 fn place_snap_area(
@@ -275,20 +341,37 @@ async fn clipboard_text() -> Result<String, String> {
 }
 
 fn main() {
-    let preload = first_folder().map(|path| {
+    let start = Start::read();
+    let preload = start.first_folder().map(|(path, order)| {
         let reader = path.clone();
         (
             path,
-            thread::spawn(move || folder::Listing::read(&reader, folder::Order::default())),
+            thread::spawn(move || folder::Listing::read(&reader, order)),
         )
     });
 
     tauri::Builder::default()
+        // The UI saves the session and then closes the window, unless it is frozen.
+        .on_window_event(|window, event| {
+            if matches!(event, WindowEvent::CloseRequested { .. }) {
+                let window = window.clone();
+                thread::spawn(move || {
+                    thread::sleep(CLOSE_LIMIT);
+                    let _ = window.destroy();
+                });
+            }
+        })
+        .manage(start)
         .manage(Views::default())
         .manage(Preload(Mutex::new(preload)))
         .invoke_handler(tauri::generate_handler![
-            start_folder,
+            start_state,
+            save_session,
             list_places,
+            drive_space,
+            type_names,
+            expand_path,
+            is_file,
             open_folder,
             arrange_view,
             rows,

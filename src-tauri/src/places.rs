@@ -4,7 +4,9 @@ use std::mem::size_of;
 
 use serde::Serialize;
 use windows::core::{Result, GUID, HSTRING};
-use windows::Win32::Storage::FileSystem::{GetLogicalDrives, FILE_FLAGS_AND_ATTRIBUTES};
+use windows::Win32::Storage::FileSystem::{
+    GetDiskFreeSpaceExW, GetLogicalDrives, FILE_FLAGS_AND_ATTRIBUTES,
+};
 use windows::Win32::System::Com::{
     CoInitializeEx, CoTaskMemFree, CoUninitialize, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE,
 };
@@ -40,6 +42,26 @@ pub struct Drive {
 pub struct Places {
     folders: Vec<Folder>,
     drives: Vec<Drive>,
+}
+
+#[derive(Serialize)]
+pub struct DriveSpace {
+    free: u64,
+    total: u64,
+}
+
+/// Can hang for as long as a network drive takes to answer, so call it off the main thread.
+pub fn drive_space(path: &str) -> Result<DriveSpace> {
+    let (mut free, mut total) = (0, 0);
+    unsafe {
+        GetDiskFreeSpaceExW(
+            &HSTRING::from(path),
+            Some(&raw mut free),
+            Some(&raw mut total),
+            None,
+        )?;
+    }
+    Ok(DriveSpace { free, total })
 }
 
 /// Blocks, because asking about a drive can wake it, so call it off the main thread.
@@ -118,5 +140,8 @@ mod tests {
             .find(|drive| drive.path == format!(r"{system}\"))
             .unwrap();
         assert!(drive.name.contains(&system), "{}", drive.name);
+
+        let space = drive_space(&drive.path).unwrap();
+        assert!(space.total > 0 && space.free <= space.total);
     }
 }
