@@ -195,6 +195,7 @@ export function SortStrip(props: {
         class="strip-extra tile-size"
         type="range"
         aria-label="Tile size"
+        aria-keyshortcuts="Control+= Control+-"
         min={MIN_TILE}
         max={MAX_TILE}
         step={TILE_STEP}

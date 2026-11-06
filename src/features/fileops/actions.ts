@@ -1,6 +1,7 @@
 import {
   binSummary,
   measureSelection,
+  redoJob,
   setClipboard,
   startJob,
   undoJob,
@@ -100,5 +101,6 @@ export function createFileActions(
     },
 
     undo: (view: FolderView) => undoJob(view.id).catch(report),
+    redo: (view: FolderView) => redoJob(view.id).catch(report),
   };
 }

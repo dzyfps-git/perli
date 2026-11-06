@@ -20,3 +20,8 @@
   animation: tooltip-in var(--motion);
   pointer-events: none;
 }
+
+.tooltip-keys {
+  margin-left: var(--space-2);
+  color: var(--text-muted);
+}

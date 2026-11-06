@@ -1,6 +1,8 @@
 //! Copy and move.
 
 use std::ffi::OsStr;
+use std::fs;
+use std::io;
 use std::mem;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -15,6 +17,25 @@ static TEMP_NUMBER: AtomicU64 = AtomicU64::new(0);
 fn temp_path(folder: &Path) -> PathBuf {
     let number = TEMP_NUMBER.fetch_add(1, Ordering::Relaxed);
     folder.join(format!("~perli-{}-{number}.part", std::process::id()))
+}
+
+/// Removes what a process that is gone left behind in `folder`, as `temp_path` named it.
+pub fn remove_leftovers(folder: &Path, process: u32) -> io::Result<()> {
+    let prefix = format!("~perli-{process}-");
+    for entry in fs::read_dir(folder)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let number = name
+            .to_str()
+            .and_then(|name| name.strip_prefix(&prefix)?.strip_suffix(".part"));
+        let digits = number.is_some_and(|number| {
+            !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit())
+        });
+        if digits && entry.file_type()?.is_file() {
+            let _ = sys::delete_file(&entry.path());
+        }
+    }
+    Ok(())
 }
 
 fn file_name(path: &Path) -> &OsStr {
@@ -184,7 +205,7 @@ impl Run<'_> {
                 }
             }
             Plan::Replace(target) => {
-                let temp = temp_path(&sys::parent(target));
+                let temp = self.temp_beside(target);
                 let elevated = Elevated::Move {
                     source: source.to_path_buf(),
                     target: target.clone(),
@@ -395,8 +416,17 @@ impl Run<'_> {
         Ok(())
     }
 
+    /// A temp name in the folder of `target`.
+    fn temp_beside(&mut self, target: &Path) -> PathBuf {
+        let folder = sys::parent(target);
+        if self.temp_folders.insert(folder.clone()) {
+            self.host.temp_folder(&folder);
+        }
+        temp_path(&folder)
+    }
+
     fn place_file(&mut self, node: &mut Node, target: &Path, replace: bool, moving: bool) -> Flow {
-        let temp = temp_path(&sys::parent(target));
+        let temp = self.temp_beside(target);
         let base = self.progress.bytes;
         let path = node.path.clone();
         let elevated = Self::elevated_copy(node, target, moving);

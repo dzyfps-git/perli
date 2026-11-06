@@ -2,18 +2,20 @@
 
 use std::cell::Cell;
 use std::collections::HashMap;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::thread;
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::clipboard;
 use crate::ops::{self, Answer, Control, Done, Host, Job, Outcome, Progress, Question, Reply};
+use crate::{parts, session};
 
 /// Scanning goes one call deeper per folder level, and paths allow about 16,000 levels.
 pub const STACK_BYTES: usize = 64 * 1024 * 1024;
@@ -21,6 +23,7 @@ pub const STACK_BYTES: usize = 64 * 1024 * 1024;
 const EVENT: &str = "job";
 const REPORT_GAP: Duration = Duration::from_millis(100);
 const UNDO_LIMIT: usize = 100;
+const UNDO_FILE: &str = "undo.json";
 /// Selecting more new items than this helps nobody, and sending them all is slow.
 const SELECT_LIMIT: usize = 10_000;
 const CANCEL: Reply = Reply {
@@ -39,6 +42,15 @@ pub struct Plan {
     pub origin: Option<u32>,
     /// The clipboard's sequence number, when this pastes a cut.
     pub cut: Option<u32>,
+    pub history: History,
+}
+
+/// Where a job's changes go in the undo log.
+#[derive(Clone, Copy)]
+pub enum History {
+    New,
+    Undo,
+    Redo,
 }
 
 impl From<Job> for Plan {
@@ -47,6 +59,7 @@ impl From<Job> for Plan {
             job,
             origin: None,
             cut: None,
+            history: History::New,
         }
     }
 }
@@ -59,6 +72,7 @@ enum Change {
         origin: Option<u32>,
         /// The job makes a new item, whose name the UI opens for editing.
         new_item: bool,
+        recycle: bool,
     },
     Progress(Progress),
     Asked {
@@ -71,9 +85,18 @@ enum Change {
         cancelled: bool,
         /// The undo step this job added.
         step: Option<u64>,
-        /// The step Undo would reverse next.
-        latest_step: Option<u64>,
+        #[serde(flatten)]
+        undoable: Undoable,
     },
+}
+
+/// What Undo and Redo can do now.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Undoable {
+    /// The step Undo would reverse next.
+    latest_step: Option<u64>,
+    redo: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -99,29 +122,79 @@ impl Entry {
 }
 
 /// One job's changes, undone together.
+#[derive(Deserialize, Serialize)]
 struct Step {
     id: u64,
     records: Vec<Done>,
 }
 
-/// What can be undone, oldest first. Ids are never reused, so an old job can't pass for the
-/// newest step.
-#[derive(Default)]
+/// What can be undone and redone, oldest first. Ids are never reused, so an old job can't pass
+/// for the newest step. The log outlives the app, and what it holds may be out of date by then,
+/// but undo never deletes for good and asks about anything it can't do.
+#[derive(Default, Deserialize)]
 struct UndoLog {
     next: u64,
     steps: Vec<Step>,
+    redo: Vec<Step>,
 }
 
 impl UndoLog {
-    /// Stores what a job did, if anything, and gives the new step's id. A cancelled job still
-    /// stores what landed before the cancel.
-    fn push(&mut self, records: Vec<Done>) -> Option<u64> {
+    fn load() -> Self {
+        let file = session::data_file(UNDO_FILE);
+        let text = file.and_then(|file| fs::read_to_string(file).ok());
+        text.map_or_else(Self::default, |text| Self::parse(&text))
+    }
+
+    /// Damaged text starts fresh, because a lost undo log harms nothing.
+    fn parse(text: &str) -> Self {
+        serde_json::from_str(text).unwrap_or_default()
+    }
+
+    /// A step that can't be written, which a path that isn't valid Unicode causes, stays in
+    /// memory only.
+    fn text(&self) -> String {
+        let saved = |steps: &[Step]| -> Vec<serde_json::Value> {
+            let values = steps.iter().map(serde_json::to_value);
+            values.filter_map(std::result::Result::ok).collect()
+        };
+        let log = serde_json::json!({
+            "next": self.next,
+            "steps": saved(&self.steps),
+            "redo": saved(&self.redo),
+        });
+        log.to_string()
+    }
+
+    // ponytail: rewrites the whole log per job and two windows overwrite each other. Fine for
+    // 100 steps of normal size, append-only per step if huge steps make this slow.
+    fn save(&self) {
+        if let Some(file) = session::data_file(UNDO_FILE) {
+            if let Err(error) = session::write(&file, &self.text()) {
+                eprintln!("saving the undo log failed: {error}");
+            }
+        }
+    }
+
+    /// Stores what a job did, if anything, and gives the id of a new undo step. A cancelled job
+    /// still stores what landed before the cancel, and an undo stores how to redo itself.
+    fn record(&mut self, history: History, records: Vec<Done>) -> Option<u64> {
         if records.is_empty() {
             return None;
         }
         let id = self.next;
         self.next += 1;
-        self.steps.push(Step { id, records });
+        let step = Step { id, records };
+        match history {
+            History::Undo => {
+                self.redo.push(step);
+                return None;
+            }
+            History::New => {
+                self.redo.clear();
+                self.steps.push(step);
+            }
+            History::Redo => self.steps.push(step),
+        }
         if self.steps.len() > UNDO_LIMIT {
             self.steps.remove(0);
         }
@@ -139,6 +212,17 @@ impl UndoLog {
         }
         self.steps.pop().map(|step| step.records)
     }
+
+    fn take_redo(&mut self) -> Option<Vec<Done>> {
+        self.redo.pop().map(|step| step.records)
+    }
+
+    fn undoable(&self) -> Undoable {
+        Undoable {
+            latest_step: self.latest(),
+            redo: !self.redo.is_empty(),
+        }
+    }
 }
 
 /// Every running job, and what can be undone.
@@ -147,9 +231,41 @@ pub struct Jobs {
     next: AtomicU64,
     running: Mutex<HashMap<u64, Arc<Entry>>>,
     undo: Mutex<UndoLog>,
+    /// Reads the saved log off the main thread, so a big one can't slow the start.
+    loading: Mutex<Option<JoinHandle<UndoLog>>>,
 }
 
 impl Jobs {
+    pub fn loading_history() -> Self {
+        Self {
+            loading: Mutex::new(Some(thread::spawn(UndoLog::load))),
+            ..Self::default()
+        }
+    }
+
+    fn log(&self) -> MutexGuard<'_, UndoLog> {
+        let mut log = lock(&self.undo);
+        if let Some(loading) = lock(&self.loading).take() {
+            *log = loading.join().unwrap_or_default();
+        }
+        log
+    }
+
+    pub fn undoable(&self) -> Undoable {
+        self.log().undoable()
+    }
+
+    pub fn running(&self) -> bool {
+        !lock(&self.running).is_empty()
+    }
+
+    pub fn cancel_all(&self) {
+        for entry in lock(&self.running).values() {
+            entry.control.cancel();
+            entry.reply(CANCEL);
+        }
+    }
+
     fn entry(&self, id: u64) -> Option<Arc<Entry>> {
         lock(&self.running).get(&id).cloned()
     }
@@ -205,19 +321,35 @@ pub fn start(app: &AppHandle, plan: Plan) -> Result<(), String> {
         })
 }
 
-/// Reverses the newest step. Does nothing if there is none, or if `step` is no longer it.
-pub fn undo(app: &AppHandle, origin: Option<u32>, step: Option<u64>) -> Result<(), String> {
-    let records = lock(&app.state::<Jobs>().undo).take(step);
+fn replay(
+    app: &AppHandle,
+    records: Option<Vec<Done>>,
+    origin: Option<u32>,
+    history: History,
+) -> Result<(), String> {
     match records {
         Some(records) => start(
             app,
             Plan {
                 origin,
+                history,
                 ..Job::Undo { records }.into()
             },
         ),
         None => Ok(()),
     }
+}
+
+/// Reverses the newest step. Does nothing if there is none, or if `step` is no longer it.
+pub fn undo(app: &AppHandle, origin: Option<u32>, step: Option<u64>) -> Result<(), String> {
+    let records = app.state::<Jobs>().log().take(step);
+    replay(app, records, origin, History::Undo)
+}
+
+/// An undo's own records are the way back, so a redo is an undo of those.
+pub fn redo(app: &AppHandle, origin: Option<u32>) -> Result<(), String> {
+    let records = app.state::<Jobs>().log().take_redo();
+    replay(app, records, origin, History::Redo)
 }
 
 /// Connects a running job to the UI.
@@ -237,17 +369,20 @@ impl Bridge {
     }
 
     fn work(&self, plan: Plan) {
-        let undoable = !matches!(plan.job, Job::Undo { .. });
         self.send(Change::Started {
-            title: title(&plan.job),
+            title: match plan.history {
+                History::Redo => "Redoing".to_string(),
+                _ => title(&plan.job),
+            },
             origin: plan.origin,
             new_item: matches!(plan.job, Job::New { .. }),
+            recycle: matches!(plan.job, Job::Recycle { .. }),
         });
 
         let outcome = ops::run(plan.job, self, &self.entry.control);
 
         let jobs = self.app.state::<Jobs>();
-        lock(&jobs.running).remove(&self.id);
+        parts::forget(self.id);
         if let (Some(seen), false) = (plan.cut, outcome.cancelled) {
             let _ = clipboard::clear_if_unchanged(seen);
         }
@@ -258,17 +393,20 @@ impl Bridge {
             kept,
             cancelled,
         } = outcome;
-        let mut undo = lock(&jobs.undo);
-        let step = undo.push(if undoable { done } else { Vec::new() });
-        let latest_step = undo.latest();
-        drop(undo);
+        let mut log = jobs.log();
+        let step = log.record(plan.history, done);
+        log.save();
+        let undoable = log.undoable();
+        drop(log);
+        // Only now is the job over, so closing waits for its undo step to be saved.
+        lock(&jobs.running).remove(&self.id);
         self.send(Change::Finished {
             touched: touched.iter().map(|path| text(path)).collect(),
             created,
             kept: kept.iter().map(|path| text(path)).collect(),
             cancelled,
             step,
-            latest_step,
+            undoable,
         });
     }
 }
@@ -296,6 +434,10 @@ impl Host for Bridge {
 
     fn owner(&self) -> isize {
         owner(&self.app)
+    }
+
+    fn temp_folder(&self, folder: &Path) {
+        parts::note(self.id, folder);
     }
 }
 
@@ -346,6 +488,9 @@ fn title(job: &Job) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::OsStringExt;
+
     use super::*;
 
     fn step(number: usize) -> Vec<Done> {
@@ -372,10 +517,10 @@ mod tests {
     fn undo_log_keeps_the_newest_steps() {
         let mut log = UndoLog::default();
         for number in 0..=UNDO_LIMIT {
-            assert_eq!(log.push(step(number)), Some(number as u64));
+            assert_eq!(log.record(History::New, step(number)), Some(number as u64));
         }
 
-        assert_eq!(log.push(Vec::new()), None);
+        assert_eq!(log.record(History::New, Vec::new()), None);
         assert_eq!(log.latest(), Some(UNDO_LIMIT as u64));
         assert_eq!(log.steps.len(), UNDO_LIMIT);
         assert_eq!(log.steps[0].records, step(1));
@@ -384,11 +529,11 @@ mod tests {
     #[test]
     fn an_old_job_cannot_undo_a_newer_one() {
         let mut log = UndoLog::default();
-        let first = log.push(step(1));
+        let first = log.record(History::New, step(1));
         assert_eq!(log.take(first), Some(step(1)));
 
         // The log is as long as it was when the first job ended, but this is another step.
-        let second = log.push(step(2));
+        let second = log.record(History::New, step(2));
         assert_ne!(first, second);
         assert_eq!(log.take(first), None);
         assert_eq!(log.take(second), Some(step(2)));
@@ -398,12 +543,102 @@ mod tests {
     #[test]
     fn ctrl_z_takes_whatever_is_newest() {
         let mut log = UndoLog::default();
-        log.push(step(1));
-        log.push(step(2));
+        log.record(History::New, step(1));
+        log.record(History::New, step(2));
 
         assert_eq!(log.take(None), Some(step(2)));
         assert_eq!(log.take(None), Some(step(1)));
         assert_eq!(log.take(None), None);
+    }
+
+    #[test]
+    fn redo_walks_back_through_what_undo_did() {
+        let mut log = UndoLog::default();
+        log.record(History::New, step(1));
+
+        let records = log.take(None).unwrap();
+        // What the undo job did, which is how to redo it.
+        assert_eq!(log.record(History::Undo, step(2)), None);
+        assert_eq!(records, step(1));
+        assert_eq!(log.latest(), None);
+        assert!(log.undoable().redo);
+
+        let records = log.take_redo().unwrap();
+        assert_eq!(records, step(2));
+        assert!(log.record(History::Redo, step(3)).is_some());
+        assert!(!log.undoable().redo);
+        assert_eq!(log.take(None), Some(step(3)));
+    }
+
+    #[test]
+    fn a_new_change_ends_redo_but_a_job_that_changed_nothing_does_not() {
+        let mut log = UndoLog::default();
+        log.record(History::New, step(1));
+        log.take(None);
+        log.record(History::Undo, step(2));
+
+        log.record(History::New, Vec::new());
+        assert!(log.undoable().redo);
+
+        log.record(History::New, step(3));
+        assert!(!log.undoable().redo);
+    }
+
+    #[test]
+    fn redo_leaves_later_redo_steps_alone() {
+        let mut log = UndoLog::default();
+        log.record(History::New, step(1));
+        log.record(History::New, step(2));
+        for number in [3, 4] {
+            log.take(None);
+            log.record(History::Undo, step(number));
+        }
+
+        log.take_redo();
+        log.record(History::Redo, step(5));
+
+        assert!(log.undoable().redo);
+    }
+
+    #[test]
+    fn the_log_survives_a_restart_and_keeps_ids_unique() {
+        let mut log = UndoLog::default();
+        let kept = log.record(History::New, step(1));
+        log.record(History::New, step(2));
+        log.take(None);
+        log.record(History::Undo, step(3));
+
+        let mut restarted = UndoLog::parse(&log.text());
+
+        assert_eq!(restarted.latest(), kept);
+        assert!(restarted.undoable().redo);
+        assert!(restarted.record(History::New, step(4)) > kept);
+        assert_eq!(restarted.take(None), Some(step(4)));
+        assert_eq!(restarted.take(kept), Some(step(1)));
+    }
+
+    #[test]
+    fn damaged_log_starts_fresh() {
+        for text in ["", "{", r#"{"next":"x"}"#, r#"{"next":1,"steps":[{"id":0}],"redo":[]}"#] {
+            assert_eq!(UndoLog::parse(text).latest(), None);
+        }
+    }
+
+    #[test]
+    fn a_step_that_cannot_be_written_stays_out_of_the_file() {
+        let mut log = UndoLog::default();
+        let good = log.record(History::New, step(1));
+        log.record(
+            History::New,
+            vec![Done::Created {
+                path: OsString::from_wide(&[0xD800]).into(),
+            }],
+        );
+
+        let restarted = UndoLog::parse(&log.text());
+
+        assert_eq!(restarted.steps.len(), 1);
+        assert_eq!(restarted.latest(), good);
     }
 
     #[test]
@@ -416,7 +651,10 @@ mod tests {
                 kept: Vec::new(),
                 cancelled: false,
                 step: None,
-                latest_step: Some(3),
+                undoable: Undoable {
+                    latest_step: Some(3),
+                    redo: true,
+                },
             },
         };
         let json = serde_json::to_value(event).unwrap();
@@ -424,6 +662,7 @@ mod tests {
         assert_eq!(json["id"], 7);
         assert_eq!(json["kind"], "finished");
         assert_eq!(json["latestStep"], 3);
+        assert_eq!(json["redo"], true);
         assert_eq!(json["step"], serde_json::Value::Null);
 
         let event = Event {

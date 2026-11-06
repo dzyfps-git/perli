@@ -11,7 +11,7 @@ mod tree;
 #[cfg(test)]
 mod tests;
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::mem;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -22,6 +22,7 @@ use windows::core::{Error, Result};
 
 pub use bin::{read as read_bin, BinItem};
 pub use names::check_rename;
+pub use transfer::remove_leftovers;
 pub use tree::measure;
 
 /// One unit of work, run to the end by `run`.
@@ -39,7 +40,7 @@ pub enum Job {
 }
 
 /// One change a job made, in a form that can be undone.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub enum Done {
     Created { path: PathBuf },
     Moved { from: PathBuf, to: PathBuf },
@@ -124,6 +125,9 @@ pub trait Host {
     fn owner(&self) -> isize {
         0
     }
+
+    /// The job is about to write partial files in `folder`. Called once for each folder.
+    fn temp_folder(&self, _folder: &Path) {}
 }
 
 /// Pauses or cancels a running job from another thread.
@@ -214,6 +218,7 @@ struct Run<'a> {
     elevated: Vec<Elevated>,
     /// An undo only ever moves things back, so it never deletes for good.
     undoing: bool,
+    temp_folders: HashSet<PathBuf>,
 }
 
 impl<'a> Run<'a> {
@@ -229,6 +234,7 @@ impl<'a> Run<'a> {
             emptied: Vec::new(),
             elevated: Vec::new(),
             undoing: false,
+            temp_folders: HashSet::new(),
         }
     }
 

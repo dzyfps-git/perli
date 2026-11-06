@@ -4,6 +4,7 @@ mod clipboard;
 mod folder;
 mod jobs;
 mod ops;
+mod parts;
 mod places;
 mod session;
 mod shell;
@@ -11,18 +12,30 @@ mod snap;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
-use tauri::{async_runtime, ipc::Response, AppHandle, State, WebviewWindow, WindowEvent};
+use tauri::{async_runtime, ipc::Response, AppHandle, Manager, State, WebviewWindow, WindowEvent};
 
 use jobs::{Jobs, Plan};
 use ops::{Job, Reply};
 
-/// How long the UI gets to finish closing before the window goes anyway.
+/// How long the UI gets to answer a close request before the window goes anyway, so a frozen
+/// UI can't keep it open.
 const CLOSE_LIMIT: Duration = Duration::from_secs(1);
+/// How long cancelled jobs get to clean up their partial files before Perli closes anyway.
+const CANCEL_LIMIT: Duration = Duration::from_secs(5);
+const CANCEL_CHECK: Duration = Duration::from_millis(50);
+
+/// Close requests so far, and the newest one the UI held back.
+#[derive(Default)]
+struct Closing {
+    asked: AtomicU64,
+    held: AtomicU64,
+}
 
 /// A folder's rows, named by the request that made them.
 struct Snapshot {
@@ -426,6 +439,46 @@ async fn undo_job(origin: Option<u32>, step: Option<u64>, app: AppHandle) -> Res
 }
 
 #[tauri::command]
+async fn redo_job(origin: Option<u32>, app: AppHandle) -> Result<(), String> {
+    jobs::redo(&app, origin)
+}
+
+/// Waits for the saved undo log, which can be slow to read, so it stays off the main thread.
+#[tauri::command]
+async fn undo_state(app: AppHandle) -> Result<jobs::Undoable, String> {
+    async_runtime::spawn_blocking(move || app.state::<Jobs>().undoable())
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// With jobs running, this keeps the window open so the user can choose. True if it did.
+#[tauri::command]
+fn hold_close(closing: State<'_, Closing>, jobs: State<'_, Jobs>) -> bool {
+    let running = jobs.running();
+    if running {
+        let asked = closing.asked.load(Ordering::SeqCst);
+        closing.held.store(asked, Ordering::SeqCst);
+    }
+    running
+}
+
+#[tauri::command]
+async fn cancel_jobs_and_close(window: WebviewWindow) -> Result<(), String> {
+    let app = window.app_handle().clone();
+    async_runtime::spawn_blocking(move || {
+        let jobs = app.state::<Jobs>();
+        jobs.cancel_all();
+        let end = Instant::now() + CANCEL_LIMIT;
+        while jobs.running() && Instant::now() < end {
+            thread::sleep(CANCEL_CHECK);
+        }
+    })
+    .await
+    .map_err(|error| error.to_string())?;
+    window.destroy().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn pause_job(id: u64, jobs: State<'_, Jobs>) {
     jobs.pause(id);
 }
@@ -622,6 +675,7 @@ async fn clipboard_text() -> Result<String, String> {
 }
 
 fn main() {
+    thread::spawn(parts::sweep);
     let start = Start::read();
     let preload = start.first_folder().map(|(path, order)| {
         let reader = path.clone();
@@ -632,19 +686,24 @@ fn main() {
     });
 
     tauri::Builder::default()
-        // The UI saves the session and then closes the window, unless it is frozen.
+        // The UI saves the session and then closes the window, unless it is frozen or holds
+        // the close back because jobs are running.
         .on_window_event(|window, event| {
             if matches!(event, WindowEvent::CloseRequested { .. }) {
+                let asked = window.state::<Closing>().asked.fetch_add(1, Ordering::SeqCst) + 1;
                 let window = window.clone();
                 thread::spawn(move || {
                     thread::sleep(CLOSE_LIMIT);
-                    let _ = window.destroy();
+                    if window.state::<Closing>().held.load(Ordering::SeqCst) < asked {
+                        let _ = window.destroy();
+                    }
                 });
             }
         })
         .manage(start)
         .manage(Views::default())
-        .manage(Jobs::default())
+        .manage(Jobs::loading_history())
+        .manage(Closing::default())
         .manage(Preload(Mutex::new(preload)))
         .invoke_handler(tauri::generate_handler![
             start_state,
@@ -659,6 +718,10 @@ fn main() {
             reload_view,
             start_job,
             undo_job,
+            redo_job,
+            undo_state,
+            hold_close,
+            cancel_jobs_and_close,
             pause_job,
             resume_job,
             cancel_job,

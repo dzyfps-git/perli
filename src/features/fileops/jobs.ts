@@ -7,10 +7,12 @@ import {
   pauseJob,
   resumeJob,
   undoJob,
+  undoState,
   type Answer,
   type JobEvent,
   type Progress,
   type Question,
+  type Undoable,
 } from "../../api";
 import type { FolderView } from "../navigation/folderView";
 import { baseName, join, samePath } from "../navigation/path";
@@ -19,6 +21,8 @@ import { nextRate, startRate, type Rate } from "./progress";
 
 const SHOW_AFTER_MS = 300;
 const LINGER_MS = 3000;
+/** Long enough to notice a slip and reach for Undo. */
+const UNDO_TOAST_MS = 6000;
 
 export interface JobCard {
   id: number;
@@ -26,6 +30,7 @@ export interface JobCard {
   /** The view that asked, which selects what the job makes. */
   origin: number | null;
   newItem: boolean;
+  recycle: boolean;
   /** Quick jobs end before anyone could read a card, so they never show one. */
   shown: boolean;
   paused: boolean;
@@ -48,15 +53,22 @@ type Finished = Extract<JobEvent, { kind: "finished" }>;
 export function createJobs(views: () => FolderView[]) {
   const [cards, setCards] = createStore<JobCard[]>([]);
   const [latestStep, setLatestStep] = createSignal<number | null>(null);
+  const [canRedo, setCanRedo] = createSignal(false);
   let failures = 0;
 
   const find = (id: number) => cards.find((card) => card.id === id);
   const patch = (id: number, change: Partial<JobCard>) => setCards((card) => card.id === id, change);
   const remove = (id: number) => setCards((list) => list.filter((card) => card.id !== id));
 
-  function started(id: number, title: string, origin: number | null, newItem: boolean) {
+  function undoable(state: Undoable) {
+    setLatestStep(state.latestStep);
+    setCanRedo(state.redo);
+  }
+
+  function started(event: Extract<JobEvent, { kind: "started" }>) {
+    const { id, title, origin, newItem, recycle } = event;
     const rate = startRate(performance.now());
-    setCards(cards.length, { id, title, origin, newItem, shown: false, paused: false, rate });
+    setCards(cards.length, { id, title, origin, newItem, recycle, shown: false, paused: false, rate });
     setTimeout(() => patch(id, { shown: true }), SHOW_AFTER_MS);
   }
 
@@ -76,23 +88,27 @@ export function createJobs(views: () => FolderView[]) {
   function finished(event: Finished) {
     const card = find(event.id);
     if (!card) return;
-    setLatestStep(event.latestStep);
+    undoable(event);
     reloadViews(event, card);
     // A finished cut paste empties the clipboard. A cancelled one leaves the cut standing.
     checkCut().catch(console.error);
 
     const { kept } = event;
-    if (!card.shown && kept.length === 0) return remove(event.id);
-    const note = event.cancelled ? "Cancelled" : "Done";
-    const ended = { note, kept, step: event.step };
+    // A delete asks nothing, so even a quick one leaves a way back.
+    const toast = card.recycle && event.step !== null;
+    if (!card.shown && kept.length === 0 && !toast) return remove(event.id);
+    // Only the newest delete keeps its card, so pressing Delete again and again stacks nothing.
+    if (toast) setCards((list) => list.filter((other) => !(other.recycle && other.ended)));
+    const done = toast ? "In the Recycle Bin" : "Done";
+    const ended = { note: event.cancelled ? "Cancelled" : done, kept, step: event.step };
     patch(event.id, { shown: true, question: undefined, ended });
     // What a move left behind stays on screen until the user has seen it.
-    if (kept.length === 0) setTimeout(() => remove(event.id), LINGER_MS);
+    if (kept.length === 0) setTimeout(() => remove(event.id), toast ? UNDO_TOAST_MS : LINGER_MS);
   }
 
   function onEvent(event: JobEvent) {
     const { id } = event;
-    if (event.kind === "started") started(id, event.title, event.origin, event.newItem);
+    if (event.kind === "started") started(event);
     else if (event.kind === "asked") patch(id, { question: event.question, shown: true });
     else if (event.kind === "finished") finished(event);
     else {
@@ -103,10 +119,13 @@ export function createJobs(views: () => FolderView[]) {
 
   const listener = onJobEvent(onEvent);
   onCleanup(() => listener.then((stop) => stop()));
+  // The undo log outlives the app, so Undo can work before any job runs.
+  undoState().then(undoable).catch(console.error);
 
   return {
     cards,
     latestStep,
+    canRedo,
     /** Undo reverses the newest step only, so an older job can no longer offer it. */
     canUndo: (card: JobCard) => card.ended?.step != null && card.ended.step === latestStep(),
     undo(card: JobCard) {
@@ -120,6 +139,7 @@ export function createJobs(views: () => FolderView[]) {
         title: String(failure),
         origin: null,
         newItem: false,
+        recycle: false,
         shown: true,
         paused: false,
         rate: startRate(0),

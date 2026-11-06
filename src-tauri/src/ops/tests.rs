@@ -153,6 +153,24 @@ fn moving(source: &Path, folder: &Path) -> Job {
     }
 }
 
+/// Writes down which folders a job said it would use.
+#[derive(Default)]
+struct Noting {
+    folders: RefCell<Vec<PathBuf>>,
+}
+
+impl Host for Noting {
+    fn progress(&self, _progress: &Progress) {}
+
+    fn ask(&self, _question: Question) -> Reply {
+        panic!("nothing here should ask");
+    }
+
+    fn temp_folder(&self, folder: &Path) {
+        self.folders.borrow_mut().push(folder.to_path_buf());
+    }
+}
+
 /// Removes what a test put in the real Recycle Bin, one item at a time, then the test's own
 /// permission to touch it.
 fn purge(outcome: &Outcome) {
@@ -1161,6 +1179,55 @@ fn drive_with_no_bin_asks_before_deleting_for_good() {
     assert!(!exists(&file), "answering permanent deletes it");
     assert_eq!(script.asked(), 2);
     test_guard::enter(&sandbox.0);
+}
+
+#[test]
+fn a_job_names_each_folder_before_writing_temp_files_there() {
+    let sandbox = Sandbox::new();
+    sandbox.file(r"from\a.txt", "a");
+    sandbox.file(r"from\b.txt", "b");
+    let folder = sandbox.folder("to");
+    let host = Noting::default();
+
+    let job = Job::Copy {
+        sources: vec![sandbox.path(r"from\a.txt"), sandbox.path(r"from\b.txt")],
+        folder: folder.clone(),
+    };
+    run(job, &host, &Arc::new(Control::default()));
+
+    assert_eq!(*host.folders.borrow(), [folder]);
+}
+
+#[test]
+fn leftovers_go_only_for_the_exact_process_and_name() {
+    let sandbox = Sandbox::new();
+    let gone = sandbox.file(r"here\~perli-4242-7.part", "half");
+    let kept = [
+        sandbox.file(r"here\~perli-4243-7.part", "another process"),
+        sandbox.file(r"here\~perli-4242-x.part", "not a number"),
+        sandbox.file(r"here\~perli-4242-.part", "no number"),
+        sandbox.file(r"here\~perli-4242-7.part.txt", "another name"),
+        sandbox.file(r"here\a.txt", "a"),
+    ];
+    let folder = sandbox.folder(r"here\~perli-4242-8.part");
+    sandbox.file(r"here\~perli-4242-8.part\inside.txt", "a folder is never ours");
+
+    remove_leftovers(&sandbox.path("here"), 4242).unwrap();
+
+    assert!(!gone.exists());
+    assert!(kept.iter().all(|path| path.exists()));
+    assert!(folder.exists());
+}
+
+#[test]
+fn only_a_process_that_ended_counts_as_gone() {
+    assert!(sys::is_running(std::process::id()));
+
+    let mut ended = Command::new("cmd").args(["/c", "exit"]).spawn().unwrap();
+    let id = ended.id();
+    ended.wait().unwrap();
+    drop(ended);
+    assert!(!sys::is_running(id));
 }
 
 #[test]
