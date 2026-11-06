@@ -1,0 +1,45 @@
+/* Every color, size and timing in the app comes from here. */
+:root {
+  color-scheme: dark;
+
+  --surface: #0e0e11;
+  --surface-hover: #1a1a1f;
+  --glass-tint: rgb(14 14 17 / 45%);
+  --overlay-tint: rgb(28 28 34 / 62%);
+  --border: rgb(255 255 255 / 8%);
+
+  --text: #f0eff2;
+  --text-muted: #9a99a3;
+
+  --accent-from: #e58bc0;
+  --accent-to: #a9c7f5;
+  --accent-gradient: linear-gradient(90deg, var(--accent-from), var(--accent-to));
+
+  --font: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  --font-size: 13px;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --radius: 8px;
+
+  --sidebar-width: 220px;
+  --blur: blur(24px);
+  --motion: 150ms ease-out;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    color-scheme: light;
+
+    --surface: #fbfafc;
+    --surface-hover: #efedf2;
+    --glass-tint: rgb(251 250 252 / 45%);
+    --overlay-tint: rgb(255 255 255 / 62%);
+    --border: rgb(0 0 0 / 8%);
+
+    --text: #1c1b20;
+    --text-muted: #66646e;
+  }
+}

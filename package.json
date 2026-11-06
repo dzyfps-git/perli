@@ -1,0 +1,23 @@
+{
+  "name": "perli",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "tauri": "tauri",
+    "test": "cargo test --manifest-path src-tauri/Cargo.toml",
+    "check:budgets": "node scripts/check-budgets.mjs"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.12.4",
+    "solid-js": "^1.9.18"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.12.4",
+    "typescript": "^5.9.0",
+    "vite": "^8.3.6",
+    "vite-plugin-solid": "^2.11.15"
+  }
+}
