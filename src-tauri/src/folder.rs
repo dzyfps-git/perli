@@ -42,9 +42,8 @@ impl Entry {
 }
 
 /// Reads and sorts a folder: folders first, then Explorer's natural name order.
-// ponytail: local drive paths only, UNC paths arrive with network drives in Phase 3.
 pub fn read(path: &str) -> Result<Vec<Entry>> {
-    let pattern = HSTRING::from(format!(r"\\?\{}\*", path.trim_end_matches('\\')));
+    let pattern = search_pattern(path)?;
     let mut data = WIN32_FIND_DATAW::default();
     let found = unsafe {
         FindFirstFileExW(
@@ -79,6 +78,18 @@ pub fn read(path: &str) -> Result<Vec<Entry>> {
 
     entries.sort_unstable_by(compare);
     Ok(entries)
+}
+
+/// Builds the extended-length search pattern. The `\\?\` prefix turns off Windows path
+/// parsing, so relative parts and forward slashes must be resolved before adding it.
+// ponytail: local drive paths only, UNC paths arrive with network drives in Phase 3.
+fn search_pattern(path: &str) -> Result<HSTRING> {
+    let full = std::path::absolute(path)?;
+    let full = full.to_string_lossy();
+    Ok(HSTRING::from(format!(
+        r"\\?\{}\*",
+        full.trim_end_matches('\\')
+    )))
 }
 
 fn compare(a: &Entry, b: &Entry) -> Ordering {
@@ -161,6 +172,15 @@ mod tests {
 
         assert!(entries[0].is_dir);
         assert_eq!(entries[1].size, 5);
+    }
+
+    #[test]
+    fn resolves_relative_paths_and_forward_slashes() {
+        // Cargo runs tests from the package folder, which holds `src/main.rs`.
+        for path in [r".\src", "src", "src/", r"..\src-tauri\src"] {
+            let entries = read(path).unwrap();
+            assert!(names(&entries).contains(&"main.rs".to_string()), "{path}");
+        }
     }
 
     #[test]
