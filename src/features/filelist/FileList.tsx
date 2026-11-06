@@ -1,11 +1,13 @@
 import { createEffect, createMemo, on, onCleanup, onMount, Show } from "solid-js";
 import { fetchRows, findRow, type Row, type Sort, type SortKey } from "../../api";
 import { ColumnHeader } from "./ColumnHeader";
-import { gridTemplate, typeLabel } from "./columns";
+import { formatSize } from "../../ui/format";
+import { columnsWidth, gridTemplate } from "./columns";
 import { clampTile, moveTarget, TILE_STEP, type Layout } from "./layout";
 import { columns, setTileSize, tileSize } from "./prefs";
 import { createSelection } from "./selection";
 import { createTypeJump } from "./typeJump";
+import { typesLearned, typeText } from "./typeNames";
 import "./filelist.css";
 
 const PAGE_SIZE = 256;
@@ -29,23 +31,11 @@ interface PooledRow {
 
 const dates = new Intl.DateTimeFormat(undefined, { dateStyle: "short", timeStyle: "short" });
 
-function formatSize(bytes: number) {
-  if (bytes < 1024) return `${bytes} B`;
-  const units = ["KB", "MB", "GB", "TB"];
-  let value = bytes;
-  let unit = -1;
-  while (value >= 1024 && unit < units.length - 1) {
-    value /= 1024;
-    unit++;
-  }
-  return `${value.toFixed(value < 10 ? 1 : 0)} ${units[unit]}`;
-}
-
 const CELL_TEXT: Record<SortKey, (row: Row) => string> = {
   name: (row) => row.name,
   modified: (row) => dates.format(row.modified),
   created: (row) => dates.format(row.created),
-  type: (row) => typeLabel(row.name, row.isDir),
+  type: (row) => typeText(row.name, row.isDir),
   size: (row) => (row.isDir ? "" : formatSize(row.size)),
 };
 
@@ -105,6 +95,7 @@ export function FileList(props: {
   let grid!: HTMLDivElement;
   let spacer!: HTMLDivElement;
   let marker!: HTMLDivElement;
+  let header: HTMLDivElement | undefined;
 
   /** What the row elements depend on, so a column resize does not rebuild them. */
   const cells = createMemo(
@@ -266,7 +257,9 @@ export function FileList(props: {
 
   function onContextMenu(event: MouseEvent) {
     event.preventDefault();
-    const index = indexFromEvent(event);
+    // The Menu key and Shift+F10 report the list itself, not a row, and no right button.
+    const fromKeyboard = event.button !== 2;
+    const index = fromKeyboard ? selection.focused() : indexFromEvent(event);
     if (index < 0) return props.onBackgroundMenu(event);
     const row = rowAt(index);
     if (!row) return;
@@ -274,7 +267,16 @@ export function FileList(props: {
       selection.select(index);
       selectionChanged();
     }
-    props.onMenu(event, row);
+    if (!fromKeyboard) return props.onMenu(event, row);
+
+    const element = grid.querySelector(".file-row[data-focused]") ?? grid;
+    const { left, bottom } = element.getBoundingClientRect();
+    props.onMenu(new MouseEvent("contextmenu", { clientX: left + rowHeight, clientY: bottom }), row);
+  }
+
+  function onScroll() {
+    paint();
+    if (header) header.scrollLeft = grid.scrollLeft;
   }
 
   function jumpTo(key: string) {
@@ -305,6 +307,8 @@ export function FileList(props: {
       openIndex(focused, event.ctrlKey);
     } else if (event.ctrlKey && event.key.toLowerCase() === "a") {
       selection.selectAll(props.count);
+    } else if (event.key === "Escape") {
+      selection.clear();
     } else if (event.key.length === 1 && !event.ctrlKey && !event.metaKey) {
       event.preventDefault();
       return jumpTo(event.key);
@@ -347,6 +351,17 @@ export function FileList(props: {
     ),
   );
 
+  createEffect(
+    on(
+      typesLearned,
+      () => {
+        for (const pooled of pool) pooled.filled = false;
+        paint();
+      },
+      { defer: true },
+    ),
+  );
+
   createEffect(() => {
     if (props.active) grid.focus({ preventScroll: true });
   });
@@ -357,10 +372,20 @@ export function FileList(props: {
       style={{
         "--file-columns": gridTemplate(columns()),
         "--tile-size": `${tileSize()}px`,
+        // Columns wider than the pane scroll sideways instead of being cut off.
+        "--columns-min":
+          props.layout === "list"
+            ? `calc(${columnsWidth(columns())}px + ${cells().length - 1} * var(--space-3) + 2 * var(--space-4))`
+            : undefined,
       }}
     >
       <Show when={props.layout === "list"}>
-        <ColumnHeader sort={props.sort} onSort={props.onSort} onMenu={props.onHeaderMenu} />
+        <ColumnHeader
+          ref={(element) => (header = element)}
+          sort={props.sort}
+          onSort={props.onSort}
+          onMenu={props.onHeaderMenu}
+        />
       </Show>
       <div
         ref={grid}
@@ -370,7 +395,7 @@ export function FileList(props: {
         aria-multiselectable="true"
         aria-rowcount={props.count}
         tabindex="0"
-        onScroll={paint}
+        onScroll={onScroll}
         onClick={onClick}
         onDblClick={(event) => openIndex(indexFromEvent(event), event.ctrlKey)}
         onContextMenu={onContextMenu}

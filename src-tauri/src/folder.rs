@@ -27,13 +27,23 @@ pub enum SortKey {
     Size,
 }
 
+/// Where folders go among files.
+#[derive(Clone, Copy, Default, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum Grouping {
+    #[default]
+    FoldersFirst,
+    FilesFirst,
+    Mixed,
+}
+
 /// Which rows a view shows and in what order. The default is the first folder's preload.
 #[derive(Clone, Copy, Default, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Order {
     key: SortKey,
     descending: bool,
-    files_first: bool,
+    group: Grouping,
     show_hidden: bool,
 }
 
@@ -237,12 +247,12 @@ fn search_pattern(path: &str) -> Result<HSTRING> {
 }
 
 fn compare(a: &Entry, b: &Entry, order: Order) -> Ordering {
-    let folders = if order.files_first {
-        a.is_dir.cmp(&b.is_dir)
-    } else {
-        b.is_dir.cmp(&a.is_dir)
+    let groups = match order.group {
+        Grouping::FoldersFirst => b.is_dir.cmp(&a.is_dir),
+        Grouping::FilesFirst => a.is_dir.cmp(&b.is_dir),
+        Grouping::Mixed => Ordering::Equal,
     };
-    folders.then_with(|| {
+    groups.then_with(|| {
         let by_key = match order.key {
             SortKey::Name => natural(&a.name, &b.name),
             SortKey::Modified => a.modified.cmp(&b.modified),
@@ -383,11 +393,26 @@ mod tests {
         fs::create_dir(folder.0.join("a")).unwrap();
 
         let order = Order {
-            files_first: true,
+            group: Grouping::FilesFirst,
             ..Order::default()
         };
 
         assert_eq!(sorted(&folder, order), ["z.txt", "a"]);
+    }
+
+    #[test]
+    fn mixed_sorts_folders_among_files() {
+        let folder = TempFolder::new("mixed");
+        fs::write(folder.0.join("a.txt"), "").unwrap();
+        fs::create_dir(folder.0.join("b")).unwrap();
+        fs::write(folder.0.join("c.txt"), "").unwrap();
+
+        let order = Order {
+            group: Grouping::Mixed,
+            ..Order::default()
+        };
+
+        assert_eq!(sorted(&folder, order), ["a.txt", "b", "c.txt"]);
     }
 
     #[test]

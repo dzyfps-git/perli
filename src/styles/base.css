@@ -20,6 +20,14 @@ body {
   overflow: hidden;
 }
 
+/* With Windows transparency off, Mica is gone and nothing else fills the sidebar. */
+@media (prefers-reduced-transparency: reduce) {
+  html,
+  body {
+    background: var(--surface);
+  }
+}
+
 /* The clear border keeps the thumb thin inside a wider, easier to grab bar. */
 ::-webkit-scrollbar {
   width: var(--scrollbar-size);
@@ -49,10 +57,48 @@ body {
 }
 
 .sidebar {
+  display: flex;
+  flex-direction: column;
   padding: var(--space-4);
   overflow-y: auto;
   background: var(--glass-tint);
   border-right: 1px solid var(--border);
+}
+
+.sidebar .places {
+  flex: 1;
+}
+
+.settings-button {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  height: var(--row-height);
+  padding: 0 var(--space-2);
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  text-align: left;
+  transition:
+    background var(--motion),
+    color var(--motion);
+}
+
+.settings-button:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.settings-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.settings-icon {
+  font-family: var(--font-icons);
+  font-size: 14px;
 }
 
 .logo {

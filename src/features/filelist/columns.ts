@@ -32,19 +32,46 @@ export function gridTemplate(columns: Column[]) {
     .join(" ");
 }
 
+/** The narrowest the visible columns can go, gaps not included. */
+export function columnsWidth(columns: Column[]) {
+  return columns
+    .filter((column) => column.visible)
+    .reduce((total, column) => total + (column.id === "name" ? NAME_MIN_WIDTH : column.width), 0);
+}
+
+/** Moves a column to where `target` is. Name always stays first. */
+export function movedColumn(columns: Column[], id: SortKey, target: SortKey) {
+  if (id === "name" || target === "name") return columns;
+  const moving = columns.find((column) => column.id === id)!;
+  const others = columns.filter((column) => column !== moving);
+  others.splice(columns.findIndex((column) => column.id === target), 0, moving);
+  return others;
+}
+
+/** The title to trade places with: the pointer must pass its middle, or wide and narrow titles
+    would trade back and forth. `middles` are x positions in title order. Name is never a target. */
+export function dragTarget(middles: number[], from: number, x: number) {
+  return middles.findIndex((middle, index) => index > 0 && (index > from ? x > middle : index < from && x < middle));
+}
+
 export function typeLabel(name: string, isDir: boolean) {
   if (isDir) return "Folder";
   const dot = name.lastIndexOf(".");
   return dot < 0 ? "File" : `${name.slice(dot + 1).toUpperCase()} file`;
 }
 
-/** Applies widths and visibility saved earlier onto the current set of columns. */
+/** Applies order, widths and visibility saved earlier onto the current set of columns. */
 export function restoreColumns(saved: unknown): Column[] {
   if (!Array.isArray(saved)) return DEFAULT_COLUMNS;
+  const position = ({ id }: Column) => {
+    const index = saved.findIndex((other) => other?.id === id);
+    if (id === "name") return -1;
+    return index < 0 ? saved.length : index;
+  };
   return DEFAULT_COLUMNS.map((column) => {
     const found = saved.find((other) => other?.id === column.id);
     return found
       ? { ...column, width: found.width, visible: column.id === "name" || found.visible }
       : column;
-  });
+  }).sort((a, b) => position(a) - position(b));
 }

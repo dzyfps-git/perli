@@ -1,12 +1,20 @@
-import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
-import { clipboardText, openFile, startFolder, type Row, type SortKey } from "./api";
+import { createEffect, createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import {
+  clipboardText,
+  openFile,
+  saveSession,
+  startState,
+  type Grouping,
+  type Row,
+  type SortKey,
+} from "./api";
 import { nextSort } from "./features/filelist/columns";
 import { FileList } from "./features/filelist/FileList";
 import { clampTile, isLargestTile, isSmallestTile, TILE_STEP, type Layout } from "./features/filelist/layout";
 import {
   columns,
-  filesFirst,
-  setFilesFirst,
+  grouping,
+  setGrouping,
   setShowHidden,
   setTileSize,
   showHidden,
@@ -17,10 +25,17 @@ import type { FolderView } from "./features/navigation/folderView";
 import { join } from "./features/navigation/path";
 import { Palette } from "./features/palette/Palette";
 import { PathBar } from "./features/pathbar/PathBar";
+import { Settings } from "./features/settings/Settings";
 import { Sidebar } from "./features/sidebar/Sidebar";
+import { parseSession } from "./features/tabs/session";
 import { createTabs, type Tab } from "./features/tabs/tabs";
 import { TitleBar } from "./features/titlebar/TitleBar";
 import { Menu, type MenuItem } from "./ui/Menu";
+
+const SAVE_DELAY_MS = 300;
+const MOUSE_BACK = 3;
+const MOUSE_FORWARD = 4;
+const ICON_SETTINGS = "\uE713";
 
 // Waits for the frame after the rows are drawn, so this means the user can see them.
 function markReady() {
@@ -43,6 +58,17 @@ const trackWindowFocus = (event: FocusEvent) =>
 export function App() {
   const tabs = createTabs();
   const [menu, setMenu] = createSignal<{ x: number; y: number; items: MenuItem[] }>();
+  const [settingsOpen, setSettingsOpen] = createSignal(false);
+  // A run started on one folder is a detour, so it must not replace the saved tabs.
+  const [keepSession, setKeepSession] = createSignal(false);
+  let saveTimer: number | undefined;
+
+  createEffect(() => {
+    const session = keepSession() ? tabs.session() : undefined;
+    if (!session) return;
+    window.clearTimeout(saveTimer);
+    saveTimer = window.setTimeout(() => saveSession(JSON.stringify(session)).catch(console.error), SAVE_DELAY_MS);
+  });
 
   function openRow(view: FolderView, row: Row, toSide: boolean) {
     const path = join(view.folder()!.path, row.name);
@@ -88,11 +114,19 @@ export function App() {
     for (const view of tabs.allViews()) view.rearrange();
   }
 
+  const toggleHidden = () => changeOrder(() => setShowHidden(!showHidden()));
+
   function showViewMenu(view: FolderView, x: number, y: number) {
     const layoutItem = (label: string, layout: Layout) => ({
       label,
       checked: view.layout() === layout,
       action: () => view.setLayout(layout),
+    });
+    const groupItem = (label: string, group: Grouping, divider = false) => ({
+      label,
+      divider,
+      checked: grouping() === group,
+      action: () => changeOrder(() => setGrouping(group)),
     });
     const sortItem = (label: string, key: SortKey, divider = false) => ({
       label,
@@ -126,16 +160,14 @@ export function App() {
         checked: view.sort().descending,
         action: () => view.setSort({ ...view.sort(), descending: !view.sort().descending }),
       },
-      {
-        label: "Files first",
-        divider: true,
-        checked: filesFirst(),
-        action: () => changeOrder(() => setFilesFirst(!filesFirst())),
-      },
+      groupItem("Folders first", "foldersFirst", true),
+      groupItem("Files first", "filesFirst"),
+      groupItem("Mixed", "mixed"),
       {
         label: "Show hidden files",
+        divider: true,
         checked: showHidden(),
-        action: () => changeOrder(() => setShowHidden(!showHidden())),
+        action: toggleHidden,
       },
     ];
     setMenu({ x, y, items });
@@ -155,6 +187,14 @@ export function App() {
     const view = tabs.activeView();
     const tab = tabs.active();
     const key = event.key.toLowerCase();
+    // Shift changes what a digit key reports, so read which key it is.
+    const digit = Number(event.code.match(/^Digit([1-9])$/)?.[1]);
+
+    if (settingsOpen()) {
+      // The dialog covers the tabs, so nothing behind it may change.
+      if (isBrowserKey(event, key)) event.preventDefault();
+      return;
+    }
 
     if (event.altKey && key === "arrowleft") view.back();
     else if (event.altKey && key === "arrowright") view.forward();
@@ -166,22 +206,45 @@ export function App() {
     else if (event.ctrlKey && key === "w") tabs.closePane(tab, view);
     else if (event.ctrlKey && key === "\\") splitView();
     else if (key === "f6") tab.activate(tab.other() ?? view);
+    else if (key === "f5") view.refresh();
     else if (event.ctrlKey && key === "tab") tabs.cycle(event.shiftKey ? -1 : 1);
+    else if (event.ctrlKey && key === "pagedown") tabs.cycle(1);
+    else if (event.ctrlKey && key === "pageup") tabs.cycle(-1);
+    else if (event.ctrlKey && event.shiftKey && digit === 1) view.setLayout("list");
+    else if (event.ctrlKey && event.shiftKey && digit === 2) view.setLayout("grid");
+    else if (event.ctrlKey && !event.shiftKey && digit) tabs.activateAt(digit - 1);
+    else if (event.ctrlKey && key === "h") toggleHidden();
+    else if (event.ctrlKey && key === ",") setSettingsOpen(true);
     else if (key === "backspace" || !isBrowserKey(event, key)) return;
     event.preventDefault();
   }
 
+  function onMouseButton(event: MouseEvent) {
+    if (event.button === MOUSE_BACK) tabs.activeView().back();
+    else if (event.button === MOUSE_FORWARD) tabs.activeView().forward();
+  }
+
   onMount(async () => {
     window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("mouseup", onMouseButton);
     window.addEventListener("contextmenu", hideBrowserMenu);
     window.addEventListener("wheel", blockBrowserZoom, { passive: false });
     window.addEventListener("focus", trackWindowFocus);
     window.addEventListener("blur", trackWindowFocus);
-    const opened = await tabs.activeView().open(await startFolder());
-    if (opened) performance.mark("perli-folder-open", { detail: opened });
+    const start = await startState();
+    const session = start.folder ? undefined : parseSession(start.session);
+    if (session) {
+      tabs.restore(session);
+    } else {
+      const opened = await tabs.activeView().open(start.folder ?? start.home ?? "");
+      if (opened) performance.mark("perli-folder-open", { detail: opened });
+    }
+    setKeepSession(!start.folder);
   });
   onCleanup(() => {
+    window.clearTimeout(saveTimer);
     window.removeEventListener("keydown", onKeyDown);
+    window.removeEventListener("mouseup", onMouseButton);
     window.removeEventListener("contextmenu", hideBrowserMenu);
     window.removeEventListener("wheel", blockBrowserZoom);
     window.removeEventListener("focus", trackWindowFocus);
@@ -243,6 +306,12 @@ export function App() {
           view={tabs.activeView()}
           onMenu={(event, path) => showFolderMenu(event, tabs.activeView(), path)}
         />
+        <button class="settings-button" onClick={() => setSettingsOpen(true)}>
+          <span class="settings-icon" aria-hidden="true">
+            {ICON_SETTINGS}
+          </span>
+          Settings
+        </button>
       </aside>
       <main class="files">
         <For each={tabs.tabs()}>
@@ -257,6 +326,7 @@ export function App() {
         {(open) => <Menu x={open.x} y={open.y} items={open.items} onClose={() => setMenu(undefined)} />}
       </Show>
       <Palette />
+      <Settings open={settingsOpen()} onClose={() => setSettingsOpen(false)} />
     </div>
   );
 }

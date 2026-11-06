@@ -1,6 +1,7 @@
-import { createSignal } from "solid-js";
+import { createEffect, createSignal } from "solid-js";
 import { closeView } from "../../api";
 import { createFolderView, type FolderView } from "../navigation/folderView";
+import type { SavedPane, Session } from "./session";
 import { cycled, moved, nextActive, otherPane } from "./tabList";
 
 export type Tabs = ReturnType<typeof createTabs>;
@@ -19,21 +20,26 @@ function createTab(views: FolderView[]) {
     swapped,
     swap: () => setSwapped(!swapped()),
     other: () => otherPane(panes(), active()),
-    paths: () => panes().flatMap((view) => view.folder()?.path ?? []),
+    paths: () => panes().flatMap((view) => view.path() ?? []),
   };
 }
 
 export function createTabs() {
   let nextId = 0;
-  const newView = () => createFolderView(nextId++);
+  const newView = (saved?: SavedPane) => createFolderView(nextId++, saved);
 
   const first = createTab([newView()]);
   const [tabs, setTabs] = createSignal([first]);
   const [active, setActive] = createSignal(first);
   const closed: string[][] = [];
 
+  // Only tabs the user looks at read their folders.
+  createEffect(() => {
+    for (const view of active().panes()) view.openSaved();
+  });
+
   async function add(paths: string[], after = active()) {
-    const views = paths.map(newView);
+    const views = paths.map(() => newView());
     const results = await Promise.all(views.map((view, index) => view.open(paths[index])));
     const opened = views.filter((_, index) => results[index]);
     if (opened.length === 0) return;
@@ -60,7 +66,7 @@ export function createTabs() {
     const panes = tab.panes();
     if (panes.length === 1) return close(tab);
 
-    const path = view.folder()?.path;
+    const path = view.path();
     if (path) closed.push([path]);
     tab.activate(nextActive(panes, view, tab.active()));
     tab.setPanes(panes.filter((pane) => pane !== view));
@@ -78,9 +84,39 @@ export function createTabs() {
     return view.open(path);
   }
 
+  function restore(session: Omit<Session, "start">) {
+    const restored = session.tabs.map((saved) => {
+      const tab = createTab(saved.panes.map((pane) => newView(pane)));
+      tab.activate(tab.panes()[saved.active]);
+      if (saved.swapped) tab.swap();
+      return tab;
+    });
+    for (const view of first.panes()) closeView(view.id).catch(console.error);
+    setTabs(restored);
+    setActive(restored[session.active]);
+  }
+
+  /** What to save, or undefined until a folder is open. Reading it tracks every part. */
+  function session(): Session | undefined {
+    const view = active().active();
+    const path = view.path();
+    if (!path) return undefined;
+    const saved = tabs().map((tab) => ({
+      panes: tab.panes().flatMap((pane) => {
+        const panePath = pane.path();
+        return panePath ? [{ path: panePath, sort: pane.sort(), layout: pane.layout() }] : [];
+      }),
+      active: tab.panes().indexOf(tab.active()),
+      swapped: tab.swapped(),
+    }));
+    return { start: { path, order: view.order() }, tabs: saved, active: tabs().indexOf(active()) };
+  }
+
   return {
     tabs,
     active,
+    restore,
+    session,
     activeView: () => active().active(),
     allViews: () => tabs().flatMap((tab) => tab.panes()),
     add,
@@ -94,6 +130,11 @@ export function createTabs() {
     duplicate: (tab: Tab) => add(tab.paths(), tab),
     move: (tab: Tab, offset: number) => setTabs(moved(tabs(), tab, offset)),
     cycle: (offset: number) => setActive(cycled(tabs(), active(), offset)),
+    activateAt(index: number) {
+      const tab = tabs()[index];
+      if (tab) setActive(tab);
+    },
+    canReopen: () => closed.length > 0,
     reopenClosed() {
       const paths = closed.pop();
       if (paths?.length) add(paths);

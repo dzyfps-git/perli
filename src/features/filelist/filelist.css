@@ -42,6 +42,10 @@
   transition: color var(--motion);
 }
 
+.column-header[data-dragging] .column-button {
+  cursor: grabbing;
+}
+
 .column-button:hover,
 .column-button:focus-visible {
   color: var(--text);
@@ -84,6 +88,7 @@
   position: absolute;
   inset: 0 auto auto 0;
   width: calc(100% / var(--per-row, 1));
+  min-width: var(--columns-min, 0);
   height: var(--item-height, var(--row-height));
   padding: 0 var(--space-4);
   display: grid;
@@ -98,6 +103,7 @@
   position: absolute;
   inset: 0 auto auto 0;
   width: calc(100% / var(--per-row, 1));
+  min-width: var(--columns-min, 0);
   height: var(--item-height, var(--row-height));
   background: var(--surface-selected);
   transition: transform var(--motion-slide);

@@ -1,4 +1,5 @@
 import { createEffect, For, onCleanup, onMount, Show } from "solid-js";
+import { expandPath, isFile, openFile } from "../../api";
 import type { FolderView } from "../navigation/folderView";
 import { toCrumbs, typedPath } from "../navigation/path";
 import "./pathbar.css";
@@ -28,16 +29,27 @@ export function PathBar(props: {
     });
   }
 
-  async function onInputKey(event: KeyboardEvent) {
-    const input = event.currentTarget as HTMLInputElement;
+  function closeInput() {
+    props.view.setEditingPath(false);
+    list.closest(".pane")?.querySelector<HTMLElement>(".file-grid")?.focus();
+  }
+
+  async function openTyped(text: string) {
+    const path = typedPath(props.view.folder()?.path ?? "", await expandPath(text));
+    if (await isFile(path)) {
+      closeInput();
+      await openFile(path);
+    } else if (await props.view.open(path)) {
+      props.view.setEditingPath(false);
+    }
+  }
+
+  function onInputKey(event: KeyboardEvent) {
     if (event.key === "Escape") {
       event.stopPropagation();
-      props.view.setEditingPath(false);
-      list.closest(".pane")?.querySelector<HTMLElement>(".file-grid")?.focus();
+      closeInput();
     } else if (event.key === "Enter") {
-      const folder = props.view.folder()?.path ?? "";
-      const opened = await props.view.open(typedPath(folder, input.value));
-      if (opened) props.view.setEditingPath(false);
+      openTyped((event.currentTarget as HTMLInputElement).value).catch(console.error);
     }
   }
 
