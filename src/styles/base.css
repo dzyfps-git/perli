@@ -29,6 +29,7 @@ body {
 
 .sidebar {
   padding: var(--space-4);
+  overflow-y: auto;
   background: var(--glass-tint);
   border-right: 1px solid var(--border);
 }
