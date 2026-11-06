@@ -236,6 +236,30 @@ async function measureScroll(page, step) {
   };
 }
 
+async function measureSlowed(page) {
+  const scroll = {};
+  scroll.slowed = await measureScroll(page, 84);
+  // Very fast scrolling varies a lot between runs, so this keeps the middle of three.
+  const fastRuns = [];
+  for (let run = 0; run < 3; run++) fastRuns.push(await measureScroll(page, 1200));
+  scroll.slowedFast = fastRuns.sort((a, b) => a.p99Ms - b.p99Ms)[1];
+  await page.evaluate(toggleOverlay);
+  await sleep(300);
+  scroll.slowedGlass = await measureScroll(page, 84);
+  await page.evaluate(toggleOverlay);
+  return scroll;
+}
+
+// CPU throttling only slows the renderer's main thread, so this slows the whole process tree.
+async function measureCappedScroll(folder) {
+  process.env.WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = SCROLL_ARGS;
+  const { pid, page } = await open(folder, true);
+  const scroll = await measureSlowed(page);
+  page.socket.close();
+  close(pid);
+  return scroll;
+}
+
 async function measureRunning(folder) {
   process.env.WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = SCROLL_ARGS;
   const { pid, page } = await open(folder);
@@ -245,16 +269,8 @@ async function measureRunning(folder) {
   const scroll = {};
   scroll.normal = await measureScroll(page, 84);
   await page.send("Emulation.setCPUThrottlingRate", { rate: CPU_SLOWDOWN });
-  scroll.slowed = await measureScroll(page, 84);
-  // Very fast scrolling varies a lot between runs, so this keeps the middle of three.
-  const fastRuns = [];
-  for (let run = 0; run < 3; run++) fastRuns.push(await measureScroll(page, 1200));
-  scroll.slowedFast = fastRuns.sort((a, b) => a.p99Ms - b.p99Ms)[1];
-  await page.evaluate(toggleOverlay);
-  await sleep(300);
-  scroll.slowedGlass = await measureScroll(page, 84);
+  Object.assign(scroll, await measureSlowed(page));
   await page.send("Emulation.setCPUThrottlingRate", { rate: 1 });
-  await page.evaluate(toggleOverlay);
 
   await sleep(SETTLE_MS);
   const afterScroll = measureRamMB(pid);
@@ -285,7 +301,9 @@ try {
   const hddStart = hddFolder && (await measureStart(hddFolder, false));
   console.log("Measuring RAM and scrolling...");
   const running = await measureRunning(ssdFolder);
-  results = { installerMB: installerMB(), start, slowedStart, hddStart, ...running };
+  console.log("Measuring capped scrolling...");
+  const cappedScroll = await measureCappedScroll(ssdFolder);
+  results = { installerMB: installerMB(), start, slowedStart, hddStart, ...running, cappedScroll };
 } finally {
   deleteTestFolder(ssdFolder);
   if (hddFolder) deleteTestFolder(hddFolder);
@@ -302,6 +320,8 @@ const checks = [
   ["RAM after use (MB)", results.afterScroll.mb, budgets.ramAfterUseMB],
   ["Slowed scroll p99 (ms)", results.scroll.slowed.p99Ms, budgets.scrollP99Ms],
   ["Slowed fast scroll p99 (ms)", results.scroll.slowedFast.p99Ms, budgets.fastScrollP99Ms],
+  ["Capped scroll p99 (ms)", results.cappedScroll.slowed.p99Ms, budgets.scrollP99Ms],
+  ["Capped fast scroll p99 (ms)", results.cappedScroll.slowedFast.p99Ms, budgets.fastScrollP99Ms],
 ];
 
 let over = false;

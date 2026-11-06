@@ -1,6 +1,7 @@
-# Starts Perli slowed to about a quarter speed, then prints "<start time ms> <process id>".
-# A job object limits it to 8 logical CPUs and to 2 CPUs' worth of time on a 16-thread PC,
-# and child processes such as WebView2 inherit the same limit.
+# Starts Perli like a quarter-speed dual core, then prints "<start time ms> <process id>".
+# A job object limits it to 2 logical CPUs and to half a CPU's worth of time on a 16-thread PC,
+# and child processes such as WebView2 inherit the same limit. Startup never used 2 CPUs' worth,
+# so a looser cap slows nothing.
 param(
     [Parameter(Mandatory)][string]$Exe,
     [Parameter(Mandatory)][string]$Folder
@@ -59,4 +60,4 @@ public static class Capped {
 }
 '@
 
-[Capped]::Start($Exe, $Folder, 0xFF, 1250)
+[Capped]::Start($Exe, $Folder, 0x3, 313)
