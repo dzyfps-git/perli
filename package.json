@@ -8,7 +8,6 @@
     "build": "tsc --noEmit && vite build",
     "tauri": "tauri",
     "test": "cargo test --manifest-path src-tauri/Cargo.toml",
-    "check:budgets": "node scripts/check-budgets.mjs",
     "bench": "node scripts/bench.mjs"
   },
   "dependencies": {

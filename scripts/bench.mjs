@@ -1,4 +1,4 @@
-// Measures the release build on this PC and compares it with budgets.json.
+// Measures the release build on this PC and compares it with budgets.json. Runs at phase ends.
 // Run `npm run tauri build` first. Perli's window opens and closes several times.
 //
 // Usage: node scripts/bench.mjs [--hdd D:\]
@@ -246,7 +246,10 @@ async function measureRunning(folder) {
   scroll.normal = await measureScroll(page, 84);
   await page.send("Emulation.setCPUThrottlingRate", { rate: CPU_SLOWDOWN });
   scroll.slowed = await measureScroll(page, 84);
-  scroll.slowedFast = await measureScroll(page, 1200);
+  // Very fast scrolling varies a lot between runs, so this keeps the middle of three.
+  const fastRuns = [];
+  for (let run = 0; run < 3; run++) fastRuns.push(await measureScroll(page, 1200));
+  scroll.slowedFast = fastRuns.sort((a, b) => a.p99Ms - b.p99Ms)[1];
   await page.evaluate(toggleOverlay);
   await sleep(300);
   scroll.slowedGlass = await measureScroll(page, 84);
@@ -296,7 +299,9 @@ const checks = [
   ["Start (ms)", results.start.medianMs, budgets.startMs],
   ["Slowed start (ms)", results.slowedStart.medianMs, budgets.slowedStartMs],
   ["Idle RAM (MB)", results.idle.mb, budgets.idleRamMB],
+  ["RAM after use (MB)", results.afterScroll.mb, budgets.ramAfterUseMB],
   ["Slowed scroll p99 (ms)", results.scroll.slowed.p99Ms, budgets.scrollP99Ms],
+  ["Slowed fast scroll p99 (ms)", results.scroll.slowedFast.p99Ms, budgets.fastScrollP99Ms],
 ];
 
 let over = false;

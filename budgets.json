@@ -3,5 +3,7 @@
   "startMs": 550,
   "slowedStartMs": 750,
   "idleRamMB": 125,
-  "scrollP99Ms": 8.4
+  "ramAfterUseMB": 160,
+  "scrollP99Ms": 8.4,
+  "fastScrollP99Ms": 25
 }
