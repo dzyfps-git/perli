@@ -212,6 +212,8 @@ struct Run<'a> {
     /// Folders a merge moved everything out of, children first.
     emptied: Vec<PathBuf>,
     elevated: Vec<Elevated>,
+    /// An undo only ever moves things back, so it never deletes for good.
+    undoing: bool,
 }
 
 impl<'a> Run<'a> {
@@ -226,6 +228,7 @@ impl<'a> Run<'a> {
             kept: Vec::new(),
             emptied: Vec::new(),
             elevated: Vec::new(),
+            undoing: false,
         }
     }
 
@@ -293,6 +296,7 @@ impl<'a> Run<'a> {
 
     /// Applies records backwards, each kind in one batch where they sit together.
     fn undo(&mut self, records: Vec<Done>) -> Flow {
+        self.undoing = true;
         let backwards: Vec<Done> = records.into_iter().rev().collect();
         let same_kind = |a: &Done, b: &Done| mem::discriminant(a) == mem::discriminant(b);
         for group in backwards.chunk_by(same_kind) {

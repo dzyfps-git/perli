@@ -9,7 +9,7 @@ use std::thread;
 use std::time::Duration;
 
 use windows::core::{Error, Result};
-use windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL};
+use windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL, HWND};
 use windows::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, GetClipboardData, GetClipboardSequenceNumber,
     IsClipboardFormatAvailable, OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
@@ -39,14 +39,15 @@ struct Open;
 
 impl Open {
     /// Other programs hold the clipboard for a moment at a time, so it is worth a few tries.
-    fn new() -> Result<Self> {
+    fn new(owner: HWND) -> Result<Self> {
+        let owner = (!owner.is_invalid()).then_some(owner);
         for _ in 1..OPEN_TRIES {
-            if unsafe { OpenClipboard(None) }.is_ok() {
+            if unsafe { OpenClipboard(owner) }.is_ok() {
                 return Ok(Self);
             }
             thread::sleep(OPEN_WAIT);
         }
-        unsafe { OpenClipboard(None) }?;
+        unsafe { OpenClipboard(owner) }?;
         Ok(Self)
     }
 }
@@ -118,13 +119,15 @@ unsafe fn take(format: u32) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
-pub fn write(paths: &[PathBuf], cut: bool) -> Result<()> {
+/// `owner` is a window of this program. With none, `EmptyClipboard` leaves the clipboard
+/// without an owner, and Windows documents that `SetClipboardData` then fails.
+pub fn write(paths: &[PathBuf], cut: bool, owner: isize) -> Result<()> {
     let effect = if cut {
         DROPEFFECT_MOVE.0
     } else {
         DROPEFFECT_COPY.0 | DROPEFFECT_LINK.0
     };
-    let _open = Open::new()?;
+    let _open = Open::new(HWND(owner as _))?;
     unsafe {
         EmptyClipboard()?;
         put(CF_HDROP, &encode(paths))?;
@@ -137,7 +140,7 @@ pub fn read() -> Result<Option<Files>> {
     if !has_files() {
         return Ok(None);
     }
-    let _open = Open::new()?;
+    let _open = Open::new(HWND::default())?;
     let Some(paths) = (unsafe { take(CF_HDROP) }).as_deref().and_then(decode) else {
         return Ok(None);
     };
@@ -160,12 +163,24 @@ pub fn clear_if_unchanged(seen: u32) -> Result<()> {
     if sequence() != seen {
         return Ok(());
     }
-    let _open = Open::new()?;
+    let _open = Open::new(HWND::default())?;
     unsafe { EmptyClipboard() }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::process::Command;
+
+    use windows::core::{w, PCWSTR};
+    use windows::Win32::Foundation::GENERIC_ALL;
+    use windows::Win32::System::StationsAndDesktops::{
+        CreateDesktopW, CreateWindowStationW, SetProcessWindowStation, SetThreadDesktop,
+        DESKTOP_CONTROL_FLAGS,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, HWND_MESSAGE, WINDOW_EX_STYLE, WINDOW_STYLE,
+    };
+
     use super::*;
 
     #[test]
@@ -182,15 +197,54 @@ mod tests {
         assert_eq!(decode(&bytes), None);
     }
 
-    /// Only on CI, because it replaces what the clipboard holds.
+    /// A window station has a clipboard of its own, so the user's is never touched. Joining one
+    /// changes the whole process, so the real test gets a process to itself.
     #[test]
-    fn real_clipboard_round_trip() {
-        if std::env::var_os("GITHUB_ACTIONS").is_none() {
-            return;
-        }
+    fn files_survive_a_real_clipboard() {
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["clipboard::tests::private_round_trip", "--exact", "--ignored", "--nocapture"])
+            .args(["--test-threads=1"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"), "{output:?}");
+    }
+
+    #[test]
+    #[ignore = "files_survive_a_real_clipboard runs this in its own process"]
+    fn private_round_trip() {
+        let window = unsafe {
+            let station = CreateWindowStationW(PCWSTR::null(), 0, GENERIC_ALL.0, None).unwrap();
+            SetProcessWindowStation(station).unwrap();
+            let desktop = CreateDesktopW(
+                w!("perli-test"),
+                PCWSTR::null(),
+                None,
+                DESKTOP_CONTROL_FLAGS(0),
+                GENERIC_ALL.0,
+                None,
+            )
+            .unwrap();
+            SetThreadDesktop(desktop).unwrap();
+            CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                w!("STATIC"),
+                PCWSTR::null(),
+                WINDOW_STYLE(0),
+                0,
+                0,
+                0,
+                0,
+                Some(HWND_MESSAGE),
+                None,
+                None,
+                None,
+            )
+            .unwrap()
+        };
         let paths = vec![PathBuf::from(r"C:\a.txt"), PathBuf::from(r"C:\b.txt")];
 
-        write(&paths, true).unwrap();
+        write(&paths, true, window.0 as isize).unwrap();
         let files = read().unwrap().unwrap();
         assert_eq!(files.paths, paths);
         assert!(files.cut);

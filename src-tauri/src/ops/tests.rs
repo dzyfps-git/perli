@@ -8,7 +8,7 @@ use std::os::windows::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -21,11 +21,14 @@ use super::*;
 
 static NEXT_FOLDER: AtomicU32 = AtomicU32::new(0);
 
+/// Parallel tests must not pick the same drive letter.
+static DRIVE_LETTERS: Mutex<()> = Mutex::new(());
+
 /// The folder a test may touch, removed at the end.
-struct Sandbox(PathBuf);
+pub(super) struct Sandbox(PathBuf);
 
 impl Sandbox {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let number = NEXT_FOLDER.fetch_add(1, AtomicOrdering::Relaxed);
         let root = std::env::temp_dir().join(format!("perli-ops-{}-{number}", std::process::id()));
         fs::create_dir_all(&root).unwrap();
@@ -33,11 +36,11 @@ impl Sandbox {
         Self(root)
     }
 
-    fn path(&self, relative: &str) -> PathBuf {
+    pub(super) fn path(&self, relative: &str) -> PathBuf {
         self.0.join(relative)
     }
 
-    fn file(&self, relative: &str, text: &str) -> PathBuf {
+    pub(super) fn file(&self, relative: &str, text: &str) -> PathBuf {
         let path = self.path(relative);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, text).unwrap();
@@ -81,7 +84,7 @@ impl Drop for Sandbox {
 
 /// Answers questions from a list, then skips. `during` runs on every progress report.
 #[derive(Default)]
-struct Script {
+pub(super) struct Script {
     replies: RefCell<VecDeque<Reply>>,
     questions: RefCell<Vec<Question>>,
     during: Option<Box<dyn Fn(&Progress)>>,
@@ -204,6 +207,7 @@ struct SubstDrive(String);
 
 impl SubstDrive {
     fn new(folder: &Path) -> Self {
+        let _picking = DRIVE_LETTERS.lock().unwrap_or_else(|error| error.into_inner());
         let used = unsafe { GetLogicalDrives() };
         let letter = (b'P'..=b'Z')
             .rev()
@@ -1157,6 +1161,52 @@ fn drive_with_no_bin_asks_before_deleting_for_good() {
     assert!(!exists(&file), "answering permanent deletes it");
     assert_eq!(script.asked(), 2);
     test_guard::enter(&sandbox.0);
+}
+
+#[test]
+fn undo_never_offers_to_delete_for_good() {
+    let sandbox = Sandbox::new();
+    sandbox.file(r"drive\a.txt", "a");
+    let drive = SubstDrive::new(&sandbox.path("drive"));
+    let root = PathBuf::from(format!(r"{}\", drive.0));
+    test_guard::enter(&root);
+    let file = root.join("a.txt");
+    let script = Script::answering(&[Answer::Permanent]);
+
+    let outcome = run_with(
+        Job::Undo {
+            records: vec![Done::Created { path: file.clone() }],
+        },
+        &script,
+    );
+
+    assert!(exists(&file), "undo leaves what the bin refuses");
+    assert!(outcome.done.is_empty());
+    let questions = script.questions.borrow();
+    assert!(
+        matches!(&questions[0], Question::Problem { choices, .. } if !choices.contains(&Answer::Permanent)),
+        "{:?}",
+        questions[0]
+    );
+    test_guard::enter(&sandbox.0);
+}
+
+#[test]
+fn an_existing_target_does_not_prove_an_elevated_copy() {
+    let sandbox = Sandbox::new();
+    let target = sandbox.file("to.txt", "untouched");
+    let script = Script::default();
+    let control = Arc::new(Control::default());
+    let mut run = Run::new(&script, &control);
+    // The missing source stops this before anything could ask for admin rights.
+    run.elevated.push(Elevated::Copy {
+        source: sandbox.path("missing.txt"),
+        target: target.clone(),
+    });
+
+    assert!(run.finish_elevated().is_ok());
+
+    assert!(run.done.is_empty(), "undo would recycle the untouched file");
 }
 
 #[test]
