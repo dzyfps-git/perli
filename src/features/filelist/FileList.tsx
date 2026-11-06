@@ -1,5 +1,6 @@
 import { onCleanup, onMount } from "solid-js";
 import { fetchRows, type Row } from "../../api";
+import { createSelection } from "./selection";
 import "./filelist.css";
 
 const PAGE_SIZE = 256;
@@ -52,9 +53,16 @@ function createRow(): PooledRow {
   };
 }
 
-export function FileList(props: { count: number; onFirstPaint: () => void }) {
+export function FileList(props: {
+  view: number;
+  snapshot: number;
+  count: number;
+  onOpen: (row: Row) => void;
+  onFirstPaint: () => void;
+}) {
   const pages = new Map<number, Row[]>();
   const loading = new Set<number>();
+  const selection = createSelection();
   let pool: PooledRow[] = [];
   let rowHeight = 0;
   let firstPaintDone = false;
@@ -64,12 +72,13 @@ export function FileList(props: { count: number; onFirstPaint: () => void }) {
   function loadPage(page: number) {
     if (loading.has(page)) return;
     loading.add(page);
-    fetchRows(page * PAGE_SIZE, PAGE_SIZE)
+    fetchRows(props.view, props.snapshot, page * PAGE_SIZE, PAGE_SIZE)
       .then((rows) => {
         pages.set(page, rows);
         if (pages.size > MAX_PAGES) pages.delete(pages.keys().next().value!);
         paint();
       })
+      .catch(console.error)
       .finally(() => loading.delete(page));
   }
 
@@ -80,11 +89,19 @@ export function FileList(props: { count: number; onFirstPaint: () => void }) {
     return rows?.[index % PAGE_SIZE];
   }
 
+  function decorate(pooled: PooledRow) {
+    const focused = pooled.index === selection.focused();
+    pooled.element.setAttribute("aria-selected", String(selection.has(pooled.index)));
+    pooled.element.toggleAttribute("data-focused", focused);
+  }
+
   function fill(pooled: PooledRow, index: number, row: Row | undefined) {
     if (pooled.index !== index) {
       pooled.index = index;
+      pooled.element.id = `file-row-${props.view}-${index}`;
       pooled.element.style.transform = `translateY(${index * rowHeight}px)`;
       pooled.element.setAttribute("aria-rowindex", String(index + 1));
+      decorate(pooled);
     }
     pooled.filled = row !== undefined;
     pooled.element.toggleAttribute("data-empty", !row);
@@ -122,10 +139,71 @@ export function FileList(props: { count: number; onFirstPaint: () => void }) {
     paint();
   }
 
+  function selectionChanged() {
+    pool.forEach(decorate);
+    const focused = selection.focused();
+    if (focused < 0) return grid.removeAttribute("aria-activedescendant");
+
+    grid.setAttribute("aria-activedescendant", `file-row-${props.view}-${focused}`);
+    const top = focused * rowHeight;
+    if (top < grid.scrollTop) grid.scrollTop = top;
+    else if (top + rowHeight > grid.scrollTop + grid.clientHeight) {
+      grid.scrollTop = top + rowHeight - grid.clientHeight;
+    }
+  }
+
+  function indexFromEvent(event: MouseEvent) {
+    const element = (event.target as HTMLElement).closest(".file-row");
+    return element ? Number(element.getAttribute("aria-rowindex")) - 1 : -1;
+  }
+
+  function onClick(event: MouseEvent) {
+    const index = indexFromEvent(event);
+    if (index < 0) selection.clear();
+    else if (event.shiftKey) selection.extendTo(index, event.ctrlKey);
+    else if (event.ctrlKey) selection.toggle(index);
+    else selection.select(index);
+    selectionChanged();
+  }
+
+  function openIndex(index: number) {
+    const row = index >= 0 ? rowAt(index) : undefined;
+    if (row) props.onOpen(row);
+  }
+
+  function onKeyDown(event: KeyboardEvent) {
+    const pageRows = Math.max(1, Math.floor(grid.clientHeight / rowHeight) - 1);
+    const focused = selection.focused();
+    const targets: Record<string, number> = {
+      ArrowDown: focused + 1,
+      ArrowUp: focused - 1,
+      PageDown: focused + pageRows,
+      PageUp: focused - pageRows,
+      Home: 0,
+      End: props.count - 1,
+    };
+
+    if (event.key in targets) {
+      if (props.count === 0) return;
+      const target = Math.min(props.count - 1, Math.max(0, targets[event.key]));
+      if (event.shiftKey) selection.extendTo(target, false);
+      else selection.select(target);
+    } else if (event.key === "Enter" && focused >= 0) {
+      openIndex(focused);
+    } else if (event.ctrlKey && event.key.toLowerCase() === "a") {
+      selection.selectAll(props.count);
+    } else {
+      return;
+    }
+    event.preventDefault();
+    selectionChanged();
+  }
+
   onMount(() => {
     rowHeight = parseFloat(getComputedStyle(grid).getPropertyValue("--row-height"));
     spacer.style.height = `${props.count * rowHeight}px`;
     resize();
+    grid.focus({ preventScroll: true });
 
     const observer = new ResizeObserver(resize);
     observer.observe(grid);
@@ -133,8 +211,20 @@ export function FileList(props: { count: number; onFirstPaint: () => void }) {
   });
 
   return (
-    <div ref={grid} class="file-grid" role="grid" aria-rowcount={props.count} tabindex="0" onScroll={paint}>
+    <div
+      ref={grid}
+      class="file-grid"
+      role="grid"
+      aria-multiselectable="true"
+      aria-rowcount={props.count}
+      tabindex="0"
+      onScroll={paint}
+      onClick={onClick}
+      onDblClick={(event) => openIndex(indexFromEvent(event))}
+      onKeyDown={onKeyDown}
+    >
       <div ref={spacer} class="file-spacer" role="presentation" />
+      {props.count === 0 && <p class="message">This folder is empty.</p>}
     </div>
   );
 }

@@ -80,12 +80,24 @@ pub fn read(path: &str) -> Result<Vec<Entry>> {
     Ok(entries)
 }
 
-/// Builds the extended-length search pattern. The `\\?\` prefix turns off Windows path
-/// parsing, so relative parts and forward slashes must be resolved before adding it.
-// ponytail: local drive paths only, UNC paths arrive with network drives in Phase 3.
-fn search_pattern(path: &str) -> Result<HSTRING> {
+/// Resolves relative parts and forward slashes into a full path, with no trailing
+/// backslash except on a drive root.
+pub fn resolve(path: &str) -> Result<String> {
     let full = std::path::absolute(path)?;
     let full = full.to_string_lossy();
+    let trimmed = full.trim_end_matches('\\');
+    Ok(if trimmed.ends_with(':') {
+        format!(r"{trimmed}\")
+    } else {
+        trimmed.to_string()
+    })
+}
+
+/// Builds the extended-length search pattern. The `\\?\` prefix turns off Windows path
+/// parsing, so the path must be resolved before adding it.
+// ponytail: local drive paths only, UNC paths arrive with network drives in Phase 3.
+fn search_pattern(path: &str) -> Result<HSTRING> {
+    let full = resolve(path)?;
     Ok(HSTRING::from(format!(
         r"\\?\{}\*",
         full.trim_end_matches('\\')
@@ -181,6 +193,13 @@ mod tests {
             let entries = read(path).unwrap();
             assert!(names(&entries).contains(&"main.rs".to_string()), "{path}");
         }
+    }
+
+    #[test]
+    fn resolve_keeps_drive_roots_and_trims_other_trailing_slashes() {
+        assert_eq!(resolve(r"C:\").unwrap(), r"C:\");
+        assert_eq!(resolve(r"C:\Users\").unwrap(), r"C:\Users");
+        assert_eq!(resolve("C:/Users/./Public/..").unwrap(), r"C:\Users");
     }
 
     #[test]

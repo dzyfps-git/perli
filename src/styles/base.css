@@ -41,9 +41,17 @@ body {
 }
 
 .files {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
   min-width: 0;
   min-height: 0;
   background: var(--surface);
+}
+
+.file-area {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
 }
 
 .message {

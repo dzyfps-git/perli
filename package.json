@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "tauri": "tauri",
-    "test": "cargo test --manifest-path src-tauri/Cargo.toml",
+    "test": "cargo test --manifest-path src-tauri/Cargo.toml && node --test \"src/**/*.test.ts\"",
     "bench": "node scripts/bench.mjs"
   },
   "dependencies": {
