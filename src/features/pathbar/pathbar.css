@@ -1,0 +1,79 @@
+.pathbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: 0;
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border);
+}
+
+.nav-button,
+.crumb {
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  transition: background var(--motion);
+}
+
+.nav-button {
+  width: 32px;
+  height: 32px;
+  font-family: var(--font-icons);
+  font-size: 12px;
+}
+
+.nav-button:disabled {
+  color: var(--text-muted);
+  opacity: 50%;
+}
+
+.nav-button:not(:disabled):hover,
+.crumb:hover {
+  background: var(--surface-hover);
+}
+
+.crumbs {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: 0;
+  margin: 0 0 0 var(--space-2);
+  padding: 0;
+  overflow: hidden;
+  list-style: none;
+}
+
+.crumbs li {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  flex: none;
+}
+
+.crumbs li + li::before {
+  content: "\E76C";
+  color: var(--text-muted);
+  font-family: var(--font-icons);
+  font-size: 8px;
+}
+
+.crumb {
+  padding: var(--space-1) var(--space-2);
+}
+
+.crumb[aria-current] {
+  font-weight: 600;
+}
+
+/* Folders you came from, kept so you can jump back in. */
+.crumb-left {
+  color: var(--text-muted);
+}
+
+.nav-button:focus-visible,
+.crumb:focus-visible {
+  outline: 2px solid var(--accent-from);
+  outline-offset: -2px;
+}

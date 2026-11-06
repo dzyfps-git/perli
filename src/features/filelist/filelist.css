@@ -1,6 +1,7 @@
 .file-grid {
   position: relative;
-  height: 100%;
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
   outline: none;
   contain: strict;
@@ -24,6 +25,15 @@
 
 .file-row:hover {
   background: var(--surface-hover);
+}
+
+.file-row[aria-selected="true"] {
+  background: var(--surface-selected);
+}
+
+.file-grid:focus-visible .file-row[data-focused] {
+  outline: 1px solid var(--accent-from);
+  outline-offset: -1px;
 }
 
 .file-name {
