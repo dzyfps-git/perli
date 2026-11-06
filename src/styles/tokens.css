@@ -3,12 +3,13 @@
 :root {
   color-scheme: light dark;
 
-  --surface: light-dark(#fbfafc, #0e0e11);
-  --surface-hover: light-dark(#efedf2, #1a1a1f);
+  --surface: color-mix(in srgb, var(--accent) 3%, light-dark(#fbfafc, #0e0e11));
+  --surface-hover: color-mix(in srgb, var(--accent) 6%, light-dark(#efedf2, #1a1a1f));
   --surface-selected: color-mix(in srgb, var(--accent) 18%, var(--surface));
-  --glass-tint: light-dark(rgb(251 250 252 / 45%), rgb(14 14 17 / 45%));
+  --glass-tint: color-mix(in srgb, var(--surface) 45%, transparent);
   --overlay-tint: light-dark(rgb(255 255 255 / 62%), rgb(28 28 34 / 62%));
   --border: light-dark(rgb(0 0 0 / 8%), rgb(255 255 255 / 8%));
+  --shadow: 0 8px 24px light-dark(rgb(0 0 0 / 12%), rgb(0 0 0 / 40%));
 
   --text: light-dark(#1c1b20, #f0eff2);
   --text-muted: light-dark(#66646e, #9a99a3);
@@ -27,6 +28,7 @@
   --space-3: 12px;
   --space-4: 16px;
   --radius: 8px;
+  --radius-large: 12px;
   --row-height: 28px;
 
   --sidebar-width: 220px;

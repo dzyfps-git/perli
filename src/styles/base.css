@@ -54,6 +54,7 @@ body {
   grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
   grid-template-rows: var(--title-bar-height) minmax(0, 1fr);
   height: 100%;
+  background: var(--glass-tint);
 }
 
 .sidebar {
@@ -61,8 +62,6 @@ body {
   flex-direction: column;
   padding: var(--space-4);
   overflow-y: auto;
-  background: var(--glass-tint);
-  border-right: 1px solid var(--border);
 }
 
 .sidebar .places {
@@ -127,17 +126,17 @@ html[data-blurred] .logo {
   }
 }
 
+/* Each pane is a panel floating on the window material. */
 .files {
   min-width: 0;
   min-height: 0;
-  background: var(--surface);
+  padding: 0 var(--space-1) var(--space-1) 0;
 }
 
 .panes {
   display: flex;
-  gap: 1px;
+  gap: var(--space-1);
   height: 100%;
-  background: var(--border);
 }
 
 .panes[hidden] {
@@ -155,7 +154,10 @@ html[data-blurred] .logo {
   grid-template-columns: minmax(0, 1fr);
   grid-template-rows: auto minmax(0, 1fr);
   min-width: 0;
+  overflow: hidden;
   background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-large);
 }
 
 .pane-active .pathbar {

@@ -4,7 +4,8 @@
   color: var(--text);
   background: var(--overlay-tint);
   border: 1px solid var(--border);
-  border-radius: calc(var(--radius) * 1.5);
+  border-radius: var(--radius-large);
+  box-shadow: var(--shadow);
   backdrop-filter: var(--blur);
 }
 

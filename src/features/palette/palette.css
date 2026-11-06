@@ -7,7 +7,8 @@
   color: var(--text-muted);
   background: var(--overlay-tint);
   border: 1px solid var(--border);
-  border-radius: var(--radius);
+  border-radius: var(--radius-large);
+  box-shadow: var(--shadow);
   backdrop-filter: var(--blur);
   transform: translate(-50%, -8px);
   opacity: 0;
