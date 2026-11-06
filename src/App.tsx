@@ -1,3 +1,4 @@
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { createEffect, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import {
   clipboardText,
@@ -62,13 +63,29 @@ export function App() {
   // A run started on one folder is a detour, so it must not replace the saved tabs.
   const [keepSession, setKeepSession] = createSignal(false);
   let saveTimer: number | undefined;
+  let unsaved: unknown;
+  let saving = Promise.resolve();
+
+  /** Writes one at a time, so an older save can never land after a newer one. */
+  function flushSession() {
+    window.clearTimeout(saveTimer);
+    if (unsaved === undefined) return saving;
+    const text = JSON.stringify(unsaved);
+    unsaved = undefined;
+    saving = saving.then(() => saveSession(text)).catch(console.error);
+    return saving;
+  }
 
   createEffect(() => {
     const session = keepSession() ? tabs.session() : undefined;
     if (!session) return;
+    unsaved = session;
     window.clearTimeout(saveTimer);
-    saveTimer = window.setTimeout(() => saveSession(JSON.stringify(session)).catch(console.error), SAVE_DELAY_MS);
+    saveTimer = window.setTimeout(flushSession, SAVE_DELAY_MS);
   });
+
+  // Covers every way to close, including Alt+F4 and the taskbar.
+  const closeListener = getCurrentWindow().onCloseRequested(flushSession);
 
   function openRow(view: FolderView, row: Row, toSide: boolean) {
     const path = join(view.folder()!.path, row.name);
@@ -250,6 +267,7 @@ export function App() {
   });
   onCleanup(() => {
     window.clearTimeout(saveTimer);
+    closeListener.then((stop) => stop());
     window.removeEventListener("keydown", onKeyDown);
     window.removeEventListener("mouseup", onMouseButton);
     window.removeEventListener("contextmenu", hideBrowserMenu);

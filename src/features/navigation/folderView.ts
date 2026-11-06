@@ -12,7 +12,7 @@ import {
   showHidden,
 } from "../filelist/prefs";
 import type { SavedPane } from "../tabs/session";
-import { nextTrail, parentOf } from "./path";
+import { nextTrail, parentOf, samePath } from "./path";
 
 export type FolderView = ReturnType<typeof createFolderView>;
 
@@ -39,13 +39,14 @@ export function createFolderView(id: number, saved?: SavedPane) {
   const path = () => folder()?.path ?? saved?.path;
   const order = (): Order => ({ ...sort(), group: grouping(), showHidden: showHidden() });
 
-  async function load(path: string) {
+  async function load(target: string) {
     const request = ++latestRequest;
-    const folderSort = rememberedSort(path);
+    // Memory is for arriving at a folder. A refresh or restore keeps this pane's own sort.
+    const folderSort = samePath(path(), target) ? undefined : rememberedSort(target);
     if (folderSort) setSortValue(folderSort);
     opening = true;
     try {
-      const opened = await openFolder(id, request, folder()?.request ?? 0, path, order());
+      const opened = await openFolder(id, request, folder()?.request ?? 0, target, order());
       if (request !== latestRequest) return undefined;
       setError(undefined);
       setFolder(opened);

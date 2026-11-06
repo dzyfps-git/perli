@@ -41,13 +41,17 @@ pub fn save(text: &str) -> io::Result<()> {
 }
 
 /// Replaces the file in one step, so a crash mid-write cannot lose the last session.
+/// The partial file is per process, because two Perli windows can save at the same time.
 fn write(file: &Path, text: &str) -> io::Result<()> {
     if let Some(folder) = file.parent() {
         fs::create_dir_all(folder)?;
     }
-    let partial = file.with_extension("tmp");
-    fs::write(&partial, text)?;
-    fs::rename(partial, file)
+    let partial = file.with_extension(format!("{}.tmp", std::process::id()));
+    let written = fs::write(&partial, text).and_then(|()| fs::rename(&partial, file));
+    if written.is_err() {
+        let _ = fs::remove_file(&partial);
+    }
+    written
 }
 
 #[cfg(test)]
@@ -77,7 +81,7 @@ mod tests {
         write(&file, "two").unwrap();
 
         assert_eq!(fs::read_to_string(&file).unwrap(), "two");
-        assert!(!file.with_extension("tmp").exists());
+        assert_eq!(fs::read_dir(&folder).unwrap().count(), 1);
         fs::remove_dir_all(folder).unwrap();
     }
 }
