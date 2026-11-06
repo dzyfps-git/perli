@@ -32,7 +32,7 @@
 }
 
 .file-grid:focus-visible .file-row[data-focused] {
-  outline: 1px solid var(--accent-from);
+  outline: 1px solid var(--accent);
   outline-offset: -1px;
 }
 

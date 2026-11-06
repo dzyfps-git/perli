@@ -20,6 +20,27 @@ body {
   overflow: hidden;
 }
 
+/* The clear border keeps the thumb thin inside a wider, easier to grab bar. */
+::-webkit-scrollbar {
+  width: var(--scrollbar-size);
+  height: var(--scrollbar-size);
+}
+
+::-webkit-scrollbar-thumb {
+  border: 3px solid transparent;
+  border-radius: var(--scrollbar-size);
+  background: var(--scrollbar-thumb) padding-box;
+}
+
+::-webkit-scrollbar-thumb:hover,
+::-webkit-scrollbar-thumb:active {
+  background-color: var(--scrollbar-thumb-hover);
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
 .shell {
   display: grid;
   grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
@@ -37,9 +58,7 @@ body {
 .logo {
   font-size: 16px;
   font-weight: 600;
-  background: var(--accent-gradient);
-  background-clip: text;
-  color: transparent;
+  color: var(--accent);
 }
 
 .files {
@@ -73,7 +92,7 @@ body {
 }
 
 .pane-active .pathbar {
-  border-image: var(--accent-gradient) 1;
+  border-bottom-color: var(--accent);
 }
 
 .file-area {

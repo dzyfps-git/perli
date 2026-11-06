@@ -13,9 +13,11 @@
   --text-muted: #9a99a3;
   --danger: #c42b1c;
 
-  --accent-from: #e58bc0;
-  --accent-to: #a9c7f5;
-  --accent-gradient: linear-gradient(90deg, var(--accent-from), var(--accent-to));
+  --accent: #e58bc0;
+
+  --scrollbar-size: 10px;
+  --scrollbar-thumb: rgb(255 255 255 / 18%);
+  --scrollbar-thumb-hover: rgb(255 255 255 / 32%);
 
   --font: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
   --font-size: 13px;
@@ -47,5 +49,10 @@
 
     --text: #1c1b20;
     --text-muted: #66646e;
+
+    --accent: #c4478f;
+
+    --scrollbar-thumb: rgb(0 0 0 / 20%);
+    --scrollbar-thumb-hover: rgb(0 0 0 / 36%);
   }
 }
