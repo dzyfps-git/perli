@@ -61,7 +61,7 @@ export function createFolderView(id: number, saved?: SavedPane) {
   let latestRequest = 0;
   let opening = false;
   let rearrangeAfterOpen = false;
-  let reloadLater: (() => void) | undefined;
+  let reloadLater: { select: string[]; rename: boolean } | undefined;
   let list: ListHandle | undefined;
   let savedOpened = false;
 
@@ -73,7 +73,11 @@ export function createFolderView(id: number, saved?: SavedPane) {
     group: isBin(target) ? "mixed" : grouping(),
     showHidden: showHidden(),
   });
-  const selectedRows = () => list?.selection().rows ?? [];
+  /** Row numbers mean nothing outside the snapshot they came from. */
+  const selectedRows = (snapshot: number) => {
+    const selection = list?.selection();
+    return selection?.request === snapshot ? selection.rows : [];
+  };
 
   function show(next: ShownFolder) {
     batch(() => {
@@ -92,10 +96,10 @@ export function createFolderView(id: number, saved?: SavedPane) {
   }
 
   function runReloadLater() {
-    const run = reloadLater;
+    const wanted = reloadLater;
     reloadLater = undefined;
-    run?.();
-    return run !== undefined;
+    if (wanted) reload(wanted.select, wanted.rename);
+    return wanted !== undefined;
   }
 
   /** Lets what waited for the read in flight go ahead. A reload covers a new order too. */
@@ -129,12 +133,17 @@ export function createFolderView(id: number, saved?: SavedPane) {
   /**
    * Reads the shown folder again, after a job changed it. The list stays in place and only its
    * rows change. `select` names the rows to select, and without any the selection stays put.
+   * Nothing else starts until the list takes the new rows, because until then the selection
+   * still holds row numbers of the old ones.
    */
   async function reload(select: string[] = [], rename = false) {
     const current = folder();
     if (!current) return;
     if (opening || list?.isEditing()) {
-      reloadLater = () => reload(select, rename);
+      reloadLater = {
+        select: [...(reloadLater?.select ?? []), ...select],
+        rename: rename || !!reloadLater?.rename,
+      };
       return;
     }
 
@@ -147,17 +156,18 @@ export function createFolderView(id: number, saved?: SavedPane) {
         current.request,
         current.path,
         order(),
-        selectedRows(),
+        selectedRows(current.request),
         select,
       );
-      if (request !== latestRequest) return;
-      setError(undefined);
-      setFolder({ ...current, request, ...reloaded, reveal: select.length > 0, rename });
+      if (request === latestRequest) {
+        setError(undefined);
+        setFolder({ ...current, request, ...reloaded, reveal: select.length > 0, rename });
+        return;
+      }
     } catch (failure) {
       if (request === latestRequest) setError(String(failure));
-    } finally {
-      settle(request);
     }
+    settle(request);
   }
 
   /** Applies a changed order to the shown folder. An open in flight must not be cancelled. */
@@ -172,7 +182,8 @@ export function createFolderView(id: number, saved?: SavedPane) {
 
     const request = ++latestRequest;
     try {
-      const arranged = await arrangeView(id, request, current.request, order(), selectedRows());
+      const rows = selectedRows(current.request);
+      const arranged = await arrangeView(id, request, current.request, order(), rows);
       if (request === latestRequest) show({ ...current, request, ...arranged, rearranged: true });
     } catch (failure) {
       if (request === latestRequest) setError(String(failure));
@@ -259,6 +270,8 @@ export function createFolderView(id: number, saved?: SavedPane) {
     list: () => list,
     /** A reload that waited for an edit of a name can go ahead. */
     editEnded: runReloadLater,
+    /** The list took the rows of `snapshot`, or gave up on them. */
+    swapped: settle,
     canGoBack: () => backStack().length > 0,
     canGoForward: () => forwardStack().length > 0,
     canGoUp: () => {

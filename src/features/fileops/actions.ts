@@ -47,7 +47,6 @@ export function createFileActions(
     /** Pastes into `folder`, or else the folder on show. */
     paste(view: FolderView, folder = view.folder()?.path) {
       if (view.isBin() || !folder) return;
-      forgetCut();
       start(view, { kind: "paste", folder });
     },
 

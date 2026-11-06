@@ -99,6 +99,7 @@ export function FileList(props: {
   /** The rows are a new order of the folder already shown. */
   rearranged?: boolean;
   onFirstPaint: () => void;
+  onSwapped: (snapshot: number) => void;
   connect: (list: ListHandle) => void;
 }) {
   const pages = new Map<number, Row[]>();
@@ -514,7 +515,9 @@ export function FileList(props: {
     on(
       () => props.snapshot,
       (snapshot) => {
-        swapRows(snapshot).catch(console.error);
+        swapRows(snapshot)
+          .catch(console.error)
+          .finally(() => props.onSwapped(snapshot));
       },
       { defer: true },
     ),

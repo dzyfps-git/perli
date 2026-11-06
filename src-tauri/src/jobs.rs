@@ -69,7 +69,10 @@ enum Change {
         created: Vec<String>,
         kept: Vec<String>,
         cancelled: bool,
-        undo_steps: usize,
+        /// The undo step this job added.
+        step: Option<u64>,
+        /// The step Undo would reverse next.
+        latest_step: Option<u64>,
     },
 }
 
@@ -95,12 +98,55 @@ impl Entry {
     }
 }
 
+/// One job's changes, undone together.
+struct Step {
+    id: u64,
+    records: Vec<Done>,
+}
+
+/// What can be undone, oldest first. Ids are never reused, so an old job can't pass for the
+/// newest step.
+#[derive(Default)]
+struct UndoLog {
+    next: u64,
+    steps: Vec<Step>,
+}
+
+impl UndoLog {
+    /// Stores what a job did, if anything, and gives the new step's id. A cancelled job still
+    /// stores what landed before the cancel.
+    fn push(&mut self, records: Vec<Done>) -> Option<u64> {
+        if records.is_empty() {
+            return None;
+        }
+        let id = self.next;
+        self.next += 1;
+        self.steps.push(Step { id, records });
+        if self.steps.len() > UNDO_LIMIT {
+            self.steps.remove(0);
+        }
+        Some(id)
+    }
+
+    fn latest(&self) -> Option<u64> {
+        self.steps.last().map(|step| step.id)
+    }
+
+    /// Takes the newest step. With `wanted`, only if that is the newest.
+    fn take(&mut self, wanted: Option<u64>) -> Option<Vec<Done>> {
+        if wanted.is_some() && wanted != self.latest() {
+            return None;
+        }
+        self.steps.pop().map(|step| step.records)
+    }
+}
+
 /// Every running job, and what can be undone.
 #[derive(Default)]
 pub struct Jobs {
     next: AtomicU64,
     running: Mutex<HashMap<u64, Arc<Entry>>>,
-    undo: Mutex<Vec<Vec<Done>>>,
+    undo: Mutex<UndoLog>,
 }
 
 impl Jobs {
@@ -132,19 +178,6 @@ impl Jobs {
             entry.reply(reply);
         }
     }
-
-    /// Stores what a job did, returning how many steps can be undone. A cancelled job still
-    /// stores what landed before the cancel.
-    fn remember(&self, records: Vec<Done>) -> usize {
-        let mut undo = lock(&self.undo);
-        if !records.is_empty() {
-            undo.push(records);
-        }
-        if undo.len() > UNDO_LIMIT {
-            undo.remove(0);
-        }
-        undo.len()
-    }
 }
 
 /// Starts a job on its own thread and returns right away. One job per thread lets jobs run
@@ -172,9 +205,10 @@ pub fn start(app: &AppHandle, plan: Plan) -> Result<(), String> {
         })
 }
 
-/// Reverses the newest step. Does nothing if there is none.
-pub fn undo(app: &AppHandle, origin: Option<u32>) -> Result<(), String> {
-    match lock(&app.state::<Jobs>().undo).pop() {
+/// Reverses the newest step. Does nothing if there is none, or if `step` is no longer it.
+pub fn undo(app: &AppHandle, origin: Option<u32>, step: Option<u64>) -> Result<(), String> {
+    let records = lock(&app.state::<Jobs>().undo).take(step);
+    match records {
         Some(records) => start(
             app,
             Plan {
@@ -224,13 +258,17 @@ impl Bridge {
             kept,
             cancelled,
         } = outcome;
-        let undo_steps = jobs.remember(if undoable { done } else { Vec::new() });
+        let mut undo = lock(&jobs.undo);
+        let step = undo.push(if undoable { done } else { Vec::new() });
+        let latest_step = undo.latest();
+        drop(undo);
         self.send(Change::Finished {
             touched: touched.iter().map(|path| text(path)).collect(),
             created,
             kept: kept.iter().map(|path| text(path)).collect(),
             cancelled,
-            undo_steps,
+            step,
+            latest_step,
         });
     }
 }
@@ -310,6 +348,12 @@ fn title(job: &Job) -> String {
 mod tests {
     use super::*;
 
+    fn step(number: usize) -> Vec<Done> {
+        vec![Done::Created {
+            path: PathBuf::from(number.to_string()),
+        }]
+    }
+
     #[test]
     fn titles_name_one_item_and_count_several() {
         let one = Job::Copy {
@@ -326,19 +370,40 @@ mod tests {
 
     #[test]
     fn undo_log_keeps_the_newest_steps() {
-        let jobs = Jobs::default();
-        let step = |number: usize| {
-            vec![Done::Created {
-                path: PathBuf::from(number.to_string()),
-            }]
-        };
-
+        let mut log = UndoLog::default();
         for number in 0..=UNDO_LIMIT {
-            assert_eq!(jobs.remember(step(number)), (number + 1).min(UNDO_LIMIT));
+            assert_eq!(log.push(step(number)), Some(number as u64));
         }
 
-        assert_eq!(jobs.remember(Vec::new()), UNDO_LIMIT);
-        assert_eq!(lock(&jobs.undo)[0], step(1));
+        assert_eq!(log.push(Vec::new()), None);
+        assert_eq!(log.latest(), Some(UNDO_LIMIT as u64));
+        assert_eq!(log.steps.len(), UNDO_LIMIT);
+        assert_eq!(log.steps[0].records, step(1));
+    }
+
+    #[test]
+    fn an_old_job_cannot_undo_a_newer_one() {
+        let mut log = UndoLog::default();
+        let first = log.push(step(1));
+        assert_eq!(log.take(first), Some(step(1)));
+
+        // The log is as long as it was when the first job ended, but this is another step.
+        let second = log.push(step(2));
+        assert_ne!(first, second);
+        assert_eq!(log.take(first), None);
+        assert_eq!(log.take(second), Some(step(2)));
+        assert_eq!(log.latest(), None);
+    }
+
+    #[test]
+    fn ctrl_z_takes_whatever_is_newest() {
+        let mut log = UndoLog::default();
+        log.push(step(1));
+        log.push(step(2));
+
+        assert_eq!(log.take(None), Some(step(2)));
+        assert_eq!(log.take(None), Some(step(1)));
+        assert_eq!(log.take(None), None);
     }
 
     #[test]
@@ -350,14 +415,16 @@ mod tests {
                 created: Vec::new(),
                 kept: Vec::new(),
                 cancelled: false,
-                undo_steps: 3,
+                step: None,
+                latest_step: Some(3),
             },
         };
         let json = serde_json::to_value(event).unwrap();
 
         assert_eq!(json["id"], 7);
         assert_eq!(json["kind"], "finished");
-        assert_eq!(json["undoSteps"], 3);
+        assert_eq!(json["latestStep"], 3);
+        assert_eq!(json["step"], serde_json::Value::Null);
 
         let event = Event {
             id: 8,

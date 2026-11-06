@@ -266,7 +266,7 @@ export function App() {
 
   async function showBackgroundMenu(event: MouseEvent, view: FolderView) {
     const { clientX: x, clientY: y } = event;
-    const undo = { label: "Undo", disabled: jobs.undoSteps() === 0, action: () => actions.undo(view) };
+    const undo = { label: "Undo", disabled: jobs.latestStep() === null, action: () => actions.undo(view) };
     const fileItems: MenuItem[] = view.isBin()
       ? [
           {
@@ -444,6 +444,7 @@ export function App() {
                 onEditEnd={view.editEnded}
                 onInputMenu={showInputMenu}
                 onFirstPaint={markReady}
+                onSwapped={view.swapped}
                 connect={view.connectList}
               />
             )}

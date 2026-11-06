@@ -376,13 +376,13 @@ async fn reload_view(
     select: Vec<String>,
     views: State<'_, Views>,
 ) -> Result<Reloaded, String> {
-    let names = {
+    let keys = {
         let mut views = views.0.write().unwrap_or_else(|error| error.into_inner());
         let current = views.entry(view).or_default();
         current.begin(request, shown);
         match current.listing(shown) {
-            Some(listing) if select.is_empty() => listing.names(&selected),
-            _ => select,
+            Some(listing) if select.is_empty() => listing.keys(&selected),
+            _ => select.iter().map(|name| name.encode_utf16().collect()).collect(),
         }
     };
 
@@ -391,7 +391,7 @@ async fn reload_view(
             let reloaded = Reloaded {
                 count: listing.len(),
                 hidden_count: listing.hidden_count(),
-                selected: listing.rows_named(&names),
+                selected: listing.rows_keyed(&keys),
             };
             (listing, reloaded)
         })
@@ -421,8 +421,8 @@ async fn start_job(
 }
 
 #[tauri::command]
-async fn undo_job(origin: Option<u32>, app: AppHandle) -> Result<(), String> {
-    jobs::undo(&app, origin)
+async fn undo_job(origin: Option<u32>, step: Option<u64>, app: AppHandle) -> Result<(), String> {
+    jobs::undo(&app, origin, step)
 }
 
 #[tauri::command]

@@ -111,7 +111,10 @@ export type JobEvent = { id: number } & (
       /** Sources a move left alone because they changed while it ran. */
       kept: string[];
       cancelled: boolean;
-      undoSteps: number;
+      /** The undo step this job added. */
+      step: number | null;
+      /** The step Undo would reverse next. */
+      latestStep: number | null;
     }
 );
 
@@ -182,7 +185,8 @@ export const reloadView = (
 /** `origin` is the view that asked, which selects what the job makes. */
 export const startJob = (task: Task, origin?: number) => invoke<void>("start_job", { task, origin });
 
-export const undoJob = (origin?: number) => invoke<void>("undo_job", { origin });
+/** With `step`, this only undoes that step, and only while it is the newest. */
+export const undoJob = (origin?: number, step?: number) => invoke<void>("undo_job", { origin, step });
 export const pauseJob = (id: number) => invoke<void>("pause_job", { id });
 export const resumeJob = (id: number) => invoke<void>("resume_job", { id });
 export const cancelJob = (id: number) => invoke<void>("cancel_job", { id });

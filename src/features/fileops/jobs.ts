@@ -14,6 +14,7 @@ import {
 } from "../../api";
 import type { FolderView } from "../navigation/folderView";
 import { baseName, join, samePath } from "../navigation/path";
+import { checkCut } from "./clipboard";
 import { nextRate, startRate, type Rate } from "./progress";
 
 const SHOW_AFTER_MS = 300;
@@ -35,8 +36,8 @@ export interface JobCard {
   ended?: {
     note: string;
     kept: string[];
-    /** The undo log's length after this job, if it added a step. */
-    undoSteps?: number;
+    /** The undo step this job added. */
+    step: number | null;
   };
 }
 
@@ -46,7 +47,7 @@ type Finished = Extract<JobEvent, { kind: "finished" }>;
 /** Follows every running job, and reloads the views each one changed. */
 export function createJobs(views: () => FolderView[]) {
   const [cards, setCards] = createStore<JobCard[]>([]);
-  const [undoSteps, setUndoSteps] = createSignal(0);
+  const [latestStep, setLatestStep] = createSignal<number | null>(null);
   let failures = 0;
 
   const find = (id: number) => cards.find((card) => card.id === id);
@@ -75,14 +76,15 @@ export function createJobs(views: () => FolderView[]) {
   function finished(event: Finished) {
     const card = find(event.id);
     if (!card) return;
-    const addedStep = event.undoSteps > undoSteps();
-    setUndoSteps(event.undoSteps);
+    setLatestStep(event.latestStep);
     reloadViews(event, card);
+    // A finished cut paste empties the clipboard. A cancelled one leaves the cut standing.
+    checkCut().catch(console.error);
 
     const { kept } = event;
     if (!card.shown && kept.length === 0) return remove(event.id);
     const note = event.cancelled ? "Cancelled" : "Done";
-    const ended = { note, kept, undoSteps: addedStep ? event.undoSteps : undefined };
+    const ended = { note, kept, step: event.step };
     patch(event.id, { shown: true, question: undefined, ended });
     // What a move left behind stays on screen until the user has seen it.
     if (kept.length === 0) setTimeout(() => remove(event.id), LINGER_MS);
@@ -104,12 +106,12 @@ export function createJobs(views: () => FolderView[]) {
 
   return {
     cards,
-    undoSteps,
+    latestStep,
     /** Undo reverses the newest step only, so an older job can no longer offer it. */
-    canUndo: (card: JobCard) => card.ended?.undoSteps === undoSteps(),
+    canUndo: (card: JobCard) => card.ended?.step != null && card.ended.step === latestStep(),
     undo(card: JobCard) {
       remove(card.id);
-      undoJob(card.origin ?? undefined).catch(this.report);
+      undoJob(card.origin ?? undefined, card.ended?.step ?? undefined).catch(this.report);
     },
     /** A job that never started sends no events, so its reason gets a card of its own. */
     report(failure: unknown) {
@@ -121,7 +123,7 @@ export function createJobs(views: () => FolderView[]) {
         shown: true,
         paused: false,
         rate: startRate(0),
-        ended: { note: "Nothing changed", kept: [] },
+        ended: { note: "Nothing changed", kept: [], step: null },
       });
     },
     pause(id: number) {
