@@ -100,7 +100,9 @@ export const findRow = (view: number, request: number, prefix: string, start: nu
 
 export const closeView = (view: number) => invoke<void>("close_view", { view });
 
-export const showSnapLayouts = () => invoke<void>("show_snap_layouts");
+/** Physical pixels, relative to the window. */
+export const placeSnapArea = (x: number, y: number, width: number, height: number) =>
+  invoke<void>("place_snap_area", { x, y, width, height });
 
 export const openFile = (path: string) => invoke<void>("open_file", { path });
 

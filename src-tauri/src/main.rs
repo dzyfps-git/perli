@@ -4,6 +4,7 @@ mod folder;
 mod places;
 mod session;
 mod shell;
+mod snap;
 
 use std::collections::HashMap;
 use std::sync::{Mutex, RwLock};
@@ -11,7 +12,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
-use tauri::{async_runtime, ipc::Response, State, WindowEvent};
+use tauri::{async_runtime, ipc::Response, State, WebviewWindow, WindowEvent};
 
 /// How long the UI gets to finish closing before the window goes anyway.
 const CLOSE_LIMIT: Duration = Duration::from_secs(1);
@@ -311,9 +312,16 @@ async fn is_file(path: String) -> Result<bool, String> {
     .map_err(|error| error.to_string())
 }
 
+/// Not async, so it runs on the main thread, which must own the area's window.
 #[tauri::command]
-fn show_snap_layouts() -> Result<(), String> {
-    shell::show_snap_layouts().map_err(|error| error.message())
+fn place_snap_area(
+    window: WebviewWindow,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+) -> Result<(), String> {
+    snap::place(&window, x, y, width, height).map_err(|error| error.message())
 }
 
 #[tauri::command]
@@ -369,7 +377,7 @@ fn main() {
             rows,
             find_row,
             close_view,
-            show_snap_layouts,
+            place_snap_area,
             open_file,
             clipboard_text
         ])
