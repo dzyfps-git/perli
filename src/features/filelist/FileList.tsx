@@ -1,4 +1,4 @@
-import { onCleanup, onMount } from "solid-js";
+import { createEffect, onCleanup, onMount } from "solid-js";
 import { fetchRows, type Row } from "../../api";
 import { createSelection } from "./selection";
 import "./filelist.css";
@@ -56,6 +56,7 @@ function createRow(): PooledRow {
 export function FileList(props: {
   view: number;
   count: number;
+  active: boolean;
   onOpen: (row: Row) => void;
   onFirstPaint: () => void;
 }) {
@@ -129,6 +130,8 @@ export function FileList(props: {
   }
 
   function resize() {
+    // Inactive tabs are hidden and keep their rows until they come back.
+    if (grid.clientHeight === 0) return;
     const needed = Math.ceil(grid.clientHeight / rowHeight) + OVERSCAN * 2;
     const size = Math.min(props.count, needed);
     if (size === pool.length) return paint();
@@ -202,11 +205,14 @@ export function FileList(props: {
     rowHeight = parseFloat(getComputedStyle(grid).getPropertyValue("--row-height"));
     spacer.style.height = `${props.count * rowHeight}px`;
     resize();
-    grid.focus({ preventScroll: true });
 
     const observer = new ResizeObserver(resize);
     observer.observe(grid);
     onCleanup(() => observer.disconnect());
+  });
+
+  createEffect(() => {
+    if (props.active) grid.focus({ preventScroll: true });
   });
 
   return (

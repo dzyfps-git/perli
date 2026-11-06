@@ -104,6 +104,21 @@ async fn rows(
 }
 
 #[tauri::command]
+async fn close_view(view: u32, views: State<'_, Views>) -> Result<(), String> {
+    views
+        .0
+        .write()
+        .unwrap_or_else(|error| error.into_inner())
+        .remove(&view);
+    Ok(())
+}
+
+#[tauri::command]
+fn show_snap_layouts() -> Result<(), String> {
+    shell::show_snap_layouts().map_err(|error| error.message())
+}
+
+#[tauri::command]
 async fn open_file(path: String) -> Result<(), String> {
     async_runtime::spawn_blocking(move || shell::open(&path))
         .await
@@ -124,6 +139,8 @@ fn main() {
             start_folder,
             open_folder,
             rows,
+            close_view,
+            show_snap_layouts,
             open_file
         ])
         .run(tauri::generate_context!())
