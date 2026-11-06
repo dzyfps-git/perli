@@ -9,6 +9,8 @@ use serde::Deserialize;
 
 use crate::folder::Order;
 
+const SESSION_FILE: &str = "session.json";
+
 #[derive(Deserialize)]
 struct Saved {
     start: Start,
@@ -21,13 +23,14 @@ struct Start {
     order: Order,
 }
 
-fn file() -> Option<PathBuf> {
+/// `name` in the folder Perli keeps its own files in.
+pub fn data_file(name: &str) -> Option<PathBuf> {
     let data = std::env::var_os("LOCALAPPDATA")?;
-    Some(Path::new(&data).join("com.dzyfps.perli").join("session.json"))
+    Some(Path::new(&data).join("com.dzyfps.perli").join(name))
 }
 
 pub fn read() -> Option<String> {
-    fs::read_to_string(file()?).ok()
+    fs::read_to_string(data_file(SESSION_FILE)?).ok()
 }
 
 pub fn start(text: &str) -> Option<(String, Order)> {
@@ -36,13 +39,13 @@ pub fn start(text: &str) -> Option<(String, Order)> {
 }
 
 pub fn save(text: &str) -> io::Result<()> {
-    let file = file().ok_or(io::ErrorKind::NotFound)?;
+    let file = data_file(SESSION_FILE).ok_or(io::ErrorKind::NotFound)?;
     write(&file, text)
 }
 
 /// Replaces the file in one step, so a crash mid-write cannot lose the last session.
 /// The partial file is per process, because two Perli windows can save at the same time.
-fn write(file: &Path, text: &str) -> io::Result<()> {
+pub fn write(file: &Path, text: &str) -> io::Result<()> {
     if let Some(folder) = file.parent() {
         fs::create_dir_all(folder)?;
     }

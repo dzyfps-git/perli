@@ -1,6 +1,8 @@
 //! Copy and move.
 
 use std::ffi::OsStr;
+use std::fs;
+use std::io;
 use std::mem;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -15,6 +17,41 @@ static TEMP_NUMBER: AtomicU64 = AtomicU64::new(0);
 fn temp_path(folder: &Path) -> PathBuf {
     let number = TEMP_NUMBER.fetch_add(1, Ordering::Relaxed);
     folder.join(format!("~perli-{}-{number}.part", std::process::id()))
+}
+
+/// Holds the source of a move while the file it replaces leaves. This is the only copy of
+/// that file, so unlike a `temp_path` file it never counts as a leftover.
+fn staged_path(folder: &Path) -> PathBuf {
+    temp_path(folder).with_extension("moved")
+}
+
+/// Returns a staged file to `source`, or beside it if something took that name meanwhile.
+pub fn put_back(staged: &Path, source: &Path) -> windows::core::Result<()> {
+    let folder = sys::parent(source);
+    sys::create_dirs(&folder)?;
+    if sys::rename(staged, source).is_ok() {
+        return Ok(());
+    }
+    sys::rename(staged, &names::keep_both(&folder, file_name(source), false))
+}
+
+/// Removes what a process that is gone left behind in `folder`, as `temp_path` named it.
+pub fn remove_leftovers(folder: &Path, process: u32) -> io::Result<()> {
+    let prefix = format!("~perli-{process}-");
+    for entry in fs::read_dir(folder)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let number = name
+            .to_str()
+            .and_then(|name| name.strip_prefix(&prefix)?.strip_suffix(".part"));
+        let digits = number.is_some_and(|number| {
+            !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit())
+        });
+        if digits && entry.file_type()?.is_file() {
+            let _ = sys::delete_file(&entry.path());
+        }
+    }
+    Ok(())
 }
 
 fn file_name(path: &Path) -> &OsStr {
@@ -184,16 +221,18 @@ impl Run<'_> {
                 }
             }
             Plan::Replace(target) => {
-                let temp = temp_path(&sys::parent(target));
+                let staged = staged_path(&sys::parent(target));
+                self.host.staged(&staged, source);
                 let elevated = Elevated::Move {
                     source: source.to_path_buf(),
                     target: target.clone(),
                 };
-                match self.first_rename(source, &temp, elevated)? {
+                match self.first_rename(source, &staged, elevated)? {
                     Renamed::Done => {
-                        let swapped = self.swap_in(&temp, target, true);
+                        let swapped = self.swap_in(&staged, target, true);
                         if !matches!(swapped, Ok(true)) {
-                            let _ = sys::rename(&temp, source);
+                            // If this fails too, the list stays and the next start tries again.
+                            let _ = put_back(&staged, source);
                         }
                         if swapped? {
                             self.done.push(Done::Moved {
@@ -395,8 +434,17 @@ impl Run<'_> {
         Ok(())
     }
 
+    /// A temp name in the folder of `target`.
+    fn temp_beside(&mut self, target: &Path) -> PathBuf {
+        let folder = sys::parent(target);
+        if self.temp_folders.insert(folder.clone()) {
+            self.host.temp_folder(&folder);
+        }
+        temp_path(&folder)
+    }
+
     fn place_file(&mut self, node: &mut Node, target: &Path, replace: bool, moving: bool) -> Flow {
-        let temp = temp_path(&sys::parent(target));
+        let temp = self.temp_beside(target);
         let base = self.progress.bytes;
         let path = node.path.clone();
         let elevated = Self::elevated_copy(node, target, moving);

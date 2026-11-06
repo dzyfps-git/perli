@@ -85,18 +85,19 @@ export function PathBar(props: {
 
   return (
     <nav class="pathbar" aria-label="Folder navigation">
-      <button class="nav-button" aria-label="Back" disabled={!props.view.canGoBack()} onClick={() => props.view.back()}>
+      <button class="nav-button" aria-label="Back" aria-keyshortcuts="Alt+ArrowLeft" disabled={!props.view.canGoBack()} onClick={() => props.view.back()}>
         {ICON_BACK}
       </button>
       <button
         class="nav-button"
         aria-label="Forward"
+        aria-keyshortcuts="Alt+ArrowRight"
         disabled={!props.view.canGoForward()}
         onClick={() => props.view.forward()}
       >
         {ICON_FORWARD}
       </button>
-      <button class="nav-button" aria-label="Up" disabled={!props.view.canGoUp()} onClick={() => props.view.up()}>
+      <button class="nav-button" aria-label="Up" aria-keyshortcuts="Alt+ArrowUp" disabled={!props.view.canGoUp()} onClick={() => props.view.up()}>
         {ICON_UP}
       </button>
       <Show when={props.view.editingPath()}>
@@ -145,10 +146,10 @@ export function PathBar(props: {
         )}
       </Show>
       <div class="layout-pill" role="group" aria-label="Layout" data-layout={props.view.layout()}>
-        <button aria-label="List" aria-pressed={props.view.layout() === "list"} onClick={() => setLayout("list")}>
+        <button aria-label="List" aria-keyshortcuts="Control+Shift+1" aria-pressed={props.view.layout() === "list"} onClick={() => setLayout("list")}>
           {ICON_LIST}
         </button>
-        <button aria-label="Grid" aria-pressed={props.view.layout() === "grid"} onClick={() => setLayout("grid")}>
+        <button aria-label="Grid" aria-keyshortcuts="Control+Shift+2" aria-pressed={props.view.layout() === "grid"} onClick={() => setLayout("grid")}>
           {ICON_GRID}
         </button>
       </div>

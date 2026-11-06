@@ -1,8 +1,11 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { createEffect, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import {
+  cancelJobsAndClose,
   clipboardHasFiles,
   clipboardText,
+  holdClose,
+  onCloseAsked,
   openFile,
   saveSession,
   startState,
@@ -96,8 +99,22 @@ export function App() {
     saveTimer = window.setTimeout(flushSession, SAVE_DELAY_MS);
   });
 
+  const stopJobs: DeleteRequest = {
+    title: "Jobs are still running",
+    note: "Closing Perli cancels them. Anything already finished stays.",
+    cancelLabel: "Keep working",
+    confirmLabel: "Cancel jobs and close",
+    confirm: () => cancelJobsAndClose().catch(jobs.report),
+  };
+
+  async function onClose(request: number) {
+    const [held] = await Promise.all([holdClose(request), flushSession()]);
+    if (held) setDeleting(stopJobs);
+    else await getCurrentWindow().destroy();
+  }
+
   // Covers every way to close, including Alt+F4 and the taskbar.
-  const closeListener = getCurrentWindow().onCloseRequested(flushSession);
+  const closeListener = onCloseAsked(onClose);
 
   function openRow(view: FolderView, row: Row, toSide: boolean) {
     if (view.isBin()) return;
@@ -266,7 +283,10 @@ export function App() {
 
   async function showBackgroundMenu(event: MouseEvent, view: FolderView) {
     const { clientX: x, clientY: y } = event;
-    const undo = { label: "Undo", disabled: jobs.latestStep() === null, action: () => actions.undo(view) };
+    const undo = [
+      { label: "Undo", disabled: jobs.latestStep() === null, action: () => actions.undo(view) },
+      { label: "Redo", disabled: !jobs.canRedo(), action: () => actions.redo(view) },
+    ];
     const fileItems: MenuItem[] = view.isBin()
       ? [
           {
@@ -274,13 +294,13 @@ export function App() {
             disabled: view.folder()?.count === 0,
             action: () => actions.empty(view),
           },
-          undo,
+          ...undo,
         ]
       : [
           { label: "Paste", disabled: !(await clipboardHasFiles()), action: () => actions.paste(view) },
           { label: "New folder", action: () => actions.newItem(view, true) },
           { label: "New file", action: () => actions.newItem(view, false) },
-          undo,
+          ...undo,
         ];
     setMenu({ x, y, items: [...fileItems, ...viewItems(view)] });
   }
@@ -312,6 +332,7 @@ export function App() {
     if (ctrl && key === "x") return run(() => actions.cut(view));
     if (ctrl && key === "v") return run(() => actions.paste(view));
     if (ctrl && key === "z") return run(() => actions.undo(view));
+    if (ctrl && key === "y") return run(() => actions.redo(view));
     if (ctrl && key === "n") return run(() => actions.newItem(view, shift));
     if (key === "delete") return run(() => actions.remove(view, shift));
     if (key === "f2") return run(() => actions.startRename(view));
@@ -463,7 +484,12 @@ export function App() {
           view={tabs.activeView()}
           onMenu={(event, path) => showFolderMenu(event, tabs.activeView(), path)}
         />
-        <button class="settings-button" onClick={() => setSettingsOpen(true)}>
+        <button
+          class="settings-button"
+          aria-label="Settings"
+          aria-keyshortcuts="Control+,"
+          onClick={() => setSettingsOpen(true)}
+        >
           <span class="settings-icon" aria-hidden="true">
             {ICON_SETTINGS}
           </span>

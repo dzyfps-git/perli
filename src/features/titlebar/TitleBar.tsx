@@ -111,6 +111,7 @@ export function TitleBar(props: { tabs: Tabs; onNewTab: () => void }) {
                 <button
                   class="tab-close"
                   aria-label={`Close ${tabTitle(tab)}`}
+                  aria-keyshortcuts="Control+W"
                   onClick={(event) => {
                     event.stopPropagation();
                     props.tabs.close(tab);
@@ -122,7 +123,7 @@ export function TitleBar(props: { tabs: Tabs; onNewTab: () => void }) {
             </div>
           )}
         </For>
-        <button class="tab-add" aria-label="New tab" onClick={props.onNewTab}>
+        <button class="tab-add" aria-label="New tab" aria-keyshortcuts="Control+T" onClick={props.onNewTab}>
           {ICON_ADD}
         </button>
         <span ref={ink} class="tab-ink" />
@@ -141,7 +142,7 @@ export function TitleBar(props: { tabs: Tabs; onNewTab: () => void }) {
         >
           {maximized() ? ICON_RESTORE : ICON_MAXIMIZE}
         </button>
-        <button class="window-button window-close" aria-label="Close" onClick={() => appWindow.close()}>
+        <button class="window-button window-close" aria-label="Close" aria-keyshortcuts="Alt+F4" onClick={() => appWindow.close()}>
           {ICON_CLOSE}
         </button>
       </div>

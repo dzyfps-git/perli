@@ -1,4 +1,5 @@
 import { onCleanup, onMount } from "solid-js";
+import { shortcutText } from "./shortcut";
 import "./tooltip.css";
 
 const LABELLED = "button[aria-label], input[type=range][aria-label]";
@@ -7,7 +8,8 @@ const ANCHOR_GAP = 6;
 const EDGE_GAP = 4;
 
 /**
- * Perli's hover text for icon-only controls, read from each control's aria-label.
+ * Perli's hover text for icon-only controls, read from each control's aria-label, with the
+ * control's shortcut from aria-keyshortcuts.
  * It is a popover so it can sit above the modal settings dialog.
  */
 export function Tooltip() {
@@ -26,6 +28,13 @@ export function Tooltip() {
   function place() {
     if (!current) return;
     box.textContent = current.getAttribute("aria-label");
+    const keys = current.getAttribute("aria-keyshortcuts");
+    if (keys) {
+      const hint = document.createElement("span");
+      hint.className = "tooltip-keys";
+      hint.textContent = shortcutText(keys);
+      box.append(hint);
+    }
     box.togglePopover(true);
     const anchor = current.getBoundingClientRect();
     const { width, height } = box.getBoundingClientRect();

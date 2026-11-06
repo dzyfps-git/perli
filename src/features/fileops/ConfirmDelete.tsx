@@ -6,11 +6,16 @@ import "./fileops.css";
 
 export interface DeleteRequest {
   title: string;
-  measure: () => Promise<Measured>;
+  /** What the user would lose, which the confirm button waits for. */
+  measure?: () => Promise<Measured>;
+  /** The text to show instead, when there is nothing to measure. */
+  note?: string;
+  cancelLabel?: string;
+  confirmLabel?: string;
   confirm: () => void;
 }
 
-/** Cancel holds the focus, and Delete waits until the user can see what they would lose. */
+/** Cancel holds the focus, and the confirm button waits until the user can see what they would lose. */
 export function ConfirmDelete(props: { request: DeleteRequest; onClose: () => void }) {
   const [measured, setMeasured] = createSignal<Measured>();
   const [failure, setFailure] = createSignal<string>();
@@ -18,6 +23,7 @@ export function ConfirmDelete(props: { request: DeleteRequest; onClose: () => vo
   let cancel!: HTMLButtonElement;
 
   function summary() {
+    if (props.request.note) return props.request.note;
     const size = measured();
     if (!size) return failure() ?? "Measuring";
     const items = size.items === 1 ? "1 item" : `${size.items.toLocaleString()} items`;
@@ -33,7 +39,7 @@ export function ConfirmDelete(props: { request: DeleteRequest; onClose: () => vo
     dialog.showModal();
     cancel.focus();
     props.request
-      .measure()
+      .measure?.()
       .then(setMeasured)
       .catch((reason) => setFailure(String(reason)));
   });
@@ -44,10 +50,14 @@ export function ConfirmDelete(props: { request: DeleteRequest; onClose: () => vo
       <p class="confirm-summary">{summary()}</p>
       <div class="confirm-buttons">
         <button ref={cancel} class="job-choice" onClick={() => dialog.close()}>
-          Cancel
+          {props.request.cancelLabel ?? "Cancel"}
         </button>
-        <button class="job-choice confirm-delete" disabled={!measured()} onClick={confirm}>
-          Delete
+        <button
+          class="job-choice confirm-delete"
+          disabled={!props.request.note && !measured()}
+          onClick={confirm}
+        >
+          {props.request.confirmLabel ?? "Delete"}
         </button>
       </div>
     </dialog>

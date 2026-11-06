@@ -10,6 +10,7 @@ use windows::core::{Error, Owned, Result, HSTRING};
 use windows::Win32::Foundation::{
     ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_NOT_SAME_DEVICE,
     ERROR_NO_MORE_FILES, ERROR_PATH_NOT_FOUND, E_UNEXPECTED, FILETIME, GENERIC_WRITE, HANDLE,
+    STILL_ACTIVE,
 };
 use windows::Win32::Storage::FileSystem::{
     CopyFile2, CreateDirectoryW, CreateFileW, DeleteFileW, FindClose, FindExInfoBasic,
@@ -30,6 +31,9 @@ use windows::Win32::Storage::FileSystem::{
     VOLUME_NAME_NT, WIN32_FIND_DATAW,
 };
 use windows::Win32::System::Ioctl::{FSCTL_GET_REPARSE_POINT, FSCTL_SET_REPARSE_POINT};
+use windows::Win32::System::Threading::{
+    GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+};
 use windows::Win32::System::IO::DeviceIoControl;
 use windows::Win32::UI::Shell::{
     SHEmptyRecycleBinW, SHERB_NOCONFIRMATION, SHERB_NOPROGRESSUI, SHERB_NOSOUND,
@@ -368,6 +372,19 @@ fn retry_writable(path: &Path, error: Error, action: impl Fn() -> Result<()>) ->
     unsafe { SetFileInformationByHandle(*file, FileBasicInfo, (&raw const info).cast(), size) }?;
     drop(file);
     action()
+}
+
+/// False once process `id` has ended. A process this user may not look at is still running.
+pub fn is_running(id: u32) -> bool {
+    match unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, id) } {
+        Ok(process) => {
+            let process = unsafe { Owned::new(process) };
+            let mut code = 0;
+            let asked = unsafe { GetExitCodeProcess(*process, &mut code) };
+            asked.is_ok() && code == STILL_ACTIVE.0 as u32
+        }
+        Err(error) => is_access_denied(&error),
+    }
 }
 
 /// Deletes a file or a link to a file. A link's target is never touched.
