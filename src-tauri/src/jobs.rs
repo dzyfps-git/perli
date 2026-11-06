@@ -257,10 +257,15 @@ impl Host for Bridge {
     }
 
     fn owner(&self) -> isize {
-        let window = self.app.get_webview_window("main");
-        let handle = window.and_then(|window| window.hwnd().ok());
-        handle.map_or(0, |handle| handle.0 as isize)
+        owner(&self.app)
     }
+}
+
+/// The main window, which UAC prompts and the clipboard need.
+pub fn owner(app: &AppHandle) -> isize {
+    let window = app.get_webview_window("main");
+    let handle = window.and_then(|window| window.hwnd().ok());
+    handle.map_or(0, |handle| handle.0 as isize)
 }
 
 fn text(path: &Path) -> String {

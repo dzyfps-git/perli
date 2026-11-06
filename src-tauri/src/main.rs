@@ -480,11 +480,12 @@ async fn set_clipboard(
     selection: Selection,
     cut: bool,
     views: State<'_, Views>,
+    app: AppHandle,
 ) -> Result<Clipped, String> {
     let (paths, names) = views.read(&selection, |listing, rows| {
         (listing.paths(rows), listing.names(rows))
     })?;
-    clipboard::write(&paths, cut).map_err(|error| error.message())?;
+    clipboard::write(&paths, cut, jobs::owner(&app)).map_err(|error| error.message())?;
     Ok(Clipped {
         names,
         sequence: clipboard::sequence(),

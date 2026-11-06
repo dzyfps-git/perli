@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use windows::core::{implement, Error, Ref, Result, HRESULT, HSTRING, PCWSTR};
-use windows::Win32::Foundation::{E_FAIL, HWND};
+use windows::Win32::Foundation::{E_FAIL, HWND, S_OK};
 use windows::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL};
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_ALL,
@@ -13,7 +13,8 @@ use windows::Win32::System::Com::{
 };
 use windows::Win32::UI::Shell::{
     FileOperation, IFileOperation, IFileOperationProgressSink, IFileOperationProgressSink_Impl,
-    IShellItem, SHCreateItemFromParsingName, COPYENGINE_E_USER_CANCELLED, FILEOPERATION_FLAGS,
+    IShellItem, SHCreateItemFromParsingName, COPYENGINE_E_USER_CANCELLED,
+    COPYENGINE_S_DONT_PROCESS_CHILDREN, FILEOPERATION_FLAGS,
     FOFX_RECYCLEONDELETE, FOFX_REQUIREELEVATION, FOFX_SHOWELEVATIONPROMPT, FOF_ALLOWUNDO,
     FOF_NOCONFIRMMKDIR, FOF_NORECURSEREPARSE, FOF_NO_UI, SIGDN_FILESYSPATH,
     TSF_DELETE_RECYCLE_IF_POSSIBLE,
@@ -65,7 +66,23 @@ enum Slot {
     Recycled(PathBuf),
     /// The bin can't take it. Left alone, the shell would delete it for good.
     Refused,
+    /// A copy, move or new item the shell says it finished, under the name it really got.
+    Finished(PathBuf),
     Failed(HRESULT),
+}
+
+/// What a shell report on a copy, move or new item makes of its slot. A skip has a success code
+/// too, so only the two codes that mean it worked count: a move within a drive reports the
+/// second. A folder reports first and then each child, so a later report can't change the name,
+/// and any failure stays.
+fn reported(slot: Slot, result: HRESULT, created: Option<PathBuf>) -> Slot {
+    let worked = result == S_OK || result == COPYENGINE_S_DONT_PROCESS_CHILDREN;
+    match (slot, created) {
+        (slot @ Slot::Failed(_), _) => slot,
+        (slot @ Slot::Finished(_), _) if worked => slot,
+        (_, Some(path)) if worked => Slot::Finished(path),
+        _ => Slot::Failed(result),
+    }
 }
 
 #[implement(IFileOperationProgressSink)]
@@ -73,6 +90,7 @@ struct Sink {
     index: usize,
     slots: Arc<Mutex<Vec<Slot>>>,
     control: Arc<Control>,
+    recycling: bool,
 }
 
 impl Sink_Impl {
@@ -82,11 +100,20 @@ impl Sink_Impl {
             slots[self.index] = slot;
         }
     }
+
+    fn report(&self, result: HRESULT, created: Ref<IShellItem>) {
+        let created = created.ok().and_then(path_of).ok();
+        let mut slots = self.slots.lock().unwrap_or_else(|error| error.into_inner());
+        slots[self.index] = reported(slots[self.index].clone(), result, created);
+    }
 }
 
 #[allow(non_snake_case)]
 impl IFileOperationProgressSink_Impl for Sink_Impl {
     fn PreDeleteItem(&self, flags: u32, _item: Ref<IShellItem>) -> Result<()> {
+        if !self.recycling {
+            return Ok(());
+        }
         if !self.control.proceed() {
             return Err(COPYENGINE_E_USER_CANCELLED.into());
         }
@@ -104,7 +131,7 @@ impl IFileOperationProgressSink_Impl for Sink_Impl {
         result: HRESULT,
         created: Ref<IShellItem>,
     ) -> Result<()> {
-        if result == COPYENGINE_E_USER_CANCELLED {
+        if !self.recycling || result == COPYENGINE_E_USER_CANCELLED {
             return Ok(());
         }
         let in_bin = created.ok().and_then(path_of);
@@ -156,9 +183,10 @@ impl IFileOperationProgressSink_Impl for Sink_Impl {
         _: Ref<IShellItem>,
         _: Ref<IShellItem>,
         _: &PCWSTR,
-        _: HRESULT,
-        _: Ref<IShellItem>,
+        result: HRESULT,
+        created: Ref<IShellItem>,
     ) -> Result<()> {
+        self.report(result, created);
         Ok(())
     }
 
@@ -178,9 +206,10 @@ impl IFileOperationProgressSink_Impl for Sink_Impl {
         _: Ref<IShellItem>,
         _: Ref<IShellItem>,
         _: &PCWSTR,
-        _: HRESULT,
-        _: Ref<IShellItem>,
+        result: HRESULT,
+        created: Ref<IShellItem>,
     ) -> Result<()> {
+        self.report(result, created);
         Ok(())
     }
 
@@ -195,9 +224,10 @@ impl IFileOperationProgressSink_Impl for Sink_Impl {
         _: &PCWSTR,
         _: &PCWSTR,
         _: u32,
-        _: HRESULT,
-        _: Ref<IShellItem>,
+        result: HRESULT,
+        created: Ref<IShellItem>,
     ) -> Result<()> {
+        self.report(result, created);
         Ok(())
     }
 
@@ -247,6 +277,7 @@ fn recycle_pass(
                 index,
                 slots: slots.clone(),
                 control: control.clone(),
+                recycling: true,
             }
             .into();
             operation.DeleteItem(&item, &sink)?;
@@ -328,6 +359,15 @@ impl Run<'_> {
                 }
                 _ => Ok(false),
             },
+            _ if self.undoing => {
+                let question = Question::Problem {
+                    path: path.to_string_lossy().into_owned(),
+                    message: "The Recycle Bin can't take this, so it stays where it is.".into(),
+                    choices: vec![Answer::Skip, Answer::Cancel],
+                };
+                self.ask(Key::Refused, question)?;
+                Ok(false)
+            }
             _ => {
                 let question = Question::NoBin {
                     path: path.to_string_lossy().into_owned(),
@@ -360,28 +400,37 @@ impl Run<'_> {
             return Ok(());
         }
 
-        if let Err(error) = perform_elevated(&others, self.host.owner()) {
-            self.refuse(Path::new(""), &error.message())?;
+        let slots = Arc::new(Mutex::new(vec![Slot::Waiting; others.len()]));
+        let flags = FOF_NOCONFIRMMKDIR.0 | FOF_ALLOWUNDO.0 | FOF_NORECURSEREPARSE.0 | extra.0;
+        let performed = perform_elevated(
+            &others,
+            FILEOPERATION_FLAGS(flags),
+            self.host.owner(),
+            &slots,
+            self.control,
+        );
+        let slots = slots.lock().unwrap_or_else(|error| error.into_inner()).clone();
+        for (entry, slot) in others.into_iter().zip(slots) {
+            self.record_elevated(entry, slot);
         }
-        for entry in others {
-            self.record_elevated(entry);
+        if let Err(error) = performed {
+            self.refuse(Path::new(""), &error.message())?;
         }
         Ok(())
     }
 
-    fn record_elevated(&mut self, entry: Elevated) {
-        let exists = |path: &Path| matches!(sys::stat(path), Ok(Some(_)));
-        match entry {
-            Elevated::Copy { target, .. } | Elevated::New { target, .. } if exists(&target) => {
-                self.done.push(Done::Created { path: target });
+    /// Only the shell's own report counts. A target that exists proves nothing, because the
+    /// user may have told the shell to skip it or keep both, and undo would then remove their
+    /// old file.
+    fn record_elevated(&mut self, entry: Elevated, slot: Slot) {
+        match (entry, slot) {
+            (Elevated::Copy { .. } | Elevated::New { .. }, Slot::Finished(path)) => {
+                self.done.push(Done::Created { path });
             }
-            Elevated::Move { source, target } if exists(&target) && !exists(&source) => {
-                self.done.push(Done::Moved {
-                    from: source,
-                    to: target,
-                });
+            (Elevated::Move { source, .. }, Slot::Finished(to)) => {
+                self.done.push(Done::Moved { from: source, to });
             }
-            Elevated::Delete { path } => {
+            (Elevated::Delete { path }, _) => {
                 self.touched.insert(sys::parent(&path));
             }
             _ => {}
@@ -389,24 +438,32 @@ impl Run<'_> {
     }
 }
 
-fn perform_elevated(list: &[Elevated], owner: isize) -> Result<()> {
-    let flags = FOF_NOCONFIRMMKDIR.0
-        | FOF_ALLOWUNDO.0
-        | FOF_NORECURSEREPARSE.0
-        | FOFX_REQUIREELEVATION.0
-        | FOFX_SHOWELEVATIONPROMPT.0;
-    let operation = operation(FILEOPERATION_FLAGS(flags), owner)?;
+fn perform_elevated(
+    list: &[Elevated],
+    flags: FILEOPERATION_FLAGS,
+    owner: isize,
+    slots: &Arc<Mutex<Vec<Slot>>>,
+    control: &Arc<Control>,
+) -> Result<()> {
+    let operation = operation(flags, owner)?;
     let name_of = |path: &Path| HSTRING::from(path.file_name().unwrap_or(path.as_os_str()));
     unsafe {
-        for entry in list {
+        for (index, entry) in list.iter().enumerate() {
+            let sink: IFileOperationProgressSink = Sink {
+                index,
+                slots: slots.clone(),
+                control: control.clone(),
+                recycling: false,
+            }
+            .into();
             match entry {
                 Elevated::Copy { source, target } => {
                     let folder = shell_item(&sys::parent(target))?;
-                    operation.CopyItem(&shell_item(source)?, &folder, &name_of(target), None)?;
+                    operation.CopyItem(&shell_item(source)?, &folder, &name_of(target), &sink)?;
                 }
                 Elevated::Move { source, target } => {
                     let folder = shell_item(&sys::parent(target))?;
-                    operation.MoveItem(&shell_item(source)?, &folder, &name_of(target), None)?;
+                    operation.MoveItem(&shell_item(source)?, &folder, &name_of(target), &sink)?;
                 }
                 Elevated::New { target, directory } => {
                     let attributes = if *directory {
@@ -415,13 +472,92 @@ fn perform_elevated(list: &[Elevated], owner: isize) -> Result<()> {
                         FILE_ATTRIBUTE_NORMAL
                     };
                     let folder = shell_item(&sys::parent(target))?;
-                    operation.NewItem(&folder, attributes.0, &name_of(target), None, None)?;
+                    operation.NewItem(&folder, attributes.0, &name_of(target), None, &sink)?;
                 }
                 Elevated::Delete { path } | Elevated::Recycle { path } => {
-                    operation.DeleteItem(&shell_item(path)?, None)?;
+                    operation.DeleteItem(&shell_item(path)?, &sink)?;
                 }
             }
         }
         operation.PerformOperations()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use windows::Win32::UI::Shell::{COPYENGINE_S_USER_IGNORED, FOF_RENAMEONCOLLISION};
+
+    use super::super::tests::Sandbox;
+    use super::super::Run;
+    use super::*;
+
+    #[test]
+    fn only_a_plain_success_counts() {
+        let made = || Some(PathBuf::from("made"));
+        let finished = Slot::Finished(PathBuf::from("made"));
+
+        assert_eq!(reported(Slot::Waiting, S_OK, made()), finished);
+        assert_eq!(
+            reported(Slot::Waiting, COPYENGINE_S_DONT_PROCESS_CHILDREN, made()),
+            finished
+        );
+        assert_eq!(
+            reported(Slot::Waiting, COPYENGINE_S_USER_IGNORED, made()),
+            Slot::Failed(COPYENGINE_S_USER_IGNORED)
+        );
+        assert_eq!(reported(Slot::Waiting, S_OK, None), Slot::Failed(S_OK));
+        assert_eq!(reported(Slot::Failed(E_FAIL), S_OK, made()), Slot::Failed(E_FAIL));
+        assert_eq!(
+            reported(finished.clone(), S_OK, Some(PathBuf::from("child"))),
+            finished
+        );
+        assert_eq!(
+            reported(finished, COPYENGINE_S_USER_IGNORED, made()),
+            Slot::Failed(COPYENGINE_S_USER_IGNORED)
+        );
+    }
+
+    // Tests must never pass FOFX_REQUIREELEVATION here, or a real UAC prompt would appear.
+    #[test]
+    fn undo_records_the_name_the_shell_really_used() {
+        let sandbox = Sandbox::new();
+        let _com = Com::enter();
+        let old = sandbox.file(r"to\a.txt", "old");
+        let file = sandbox.file("a.txt", "new");
+        let moved = sandbox.file("b.txt", "move");
+        sandbox.file(r"folder\child.txt", "child");
+        let list = vec![
+            Elevated::Copy { source: file, target: old.clone() },
+            Elevated::Copy {
+                source: sandbox.path("folder"),
+                target: sandbox.path(r"to\folder"),
+            },
+            Elevated::Move { source: moved.clone(), target: sandbox.path(r"to\b.txt") },
+            Elevated::New { target: sandbox.path(r"to\new"), directory: true },
+        ];
+        let slots = Arc::new(Mutex::new(vec![Slot::Waiting; list.len()]));
+        let control = Arc::new(Control::default());
+        let flags = FILEOPERATION_FLAGS(FOF_NO_UI.0 | FOF_RENAMEONCOLLISION.0);
+
+        perform_elevated(&list, flags, 0, &slots, &control).unwrap();
+
+        let script = super::super::tests::Script::default();
+        let mut run = Run::new(&script, &control);
+        let slots = slots.lock().unwrap().clone();
+        for (entry, slot) in list.into_iter().zip(slots) {
+            run.record_elevated(entry, slot);
+        }
+        assert_eq!(fs::read_to_string(&old).unwrap(), "old");
+        assert_eq!(
+            run.done,
+            [
+                Done::Created { path: sandbox.path(r"to\a - Copy.txt") },
+                Done::Created { path: sandbox.path(r"to\folder") },
+                Done::Moved { from: moved, to: sandbox.path(r"to\b.txt") },
+                Done::Created { path: sandbox.path(r"to\new") },
+            ]
+        );
     }
 }
