@@ -1,5 +1,6 @@
 // The only place the UI talks to Rust.
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 
 export interface Opened {
   /** Names this folder's rows in later `fetchRows` calls. */
@@ -23,9 +24,11 @@ export interface Row {
   created: number;
   isDir: boolean;
   isHidden: boolean;
+  /** Where a deleted item came from. Empty outside the Recycle Bin. */
+  location: string;
 }
 
-export type SortKey = "name" | "modified" | "created" | "type" | "size";
+export type SortKey = "name" | "modified" | "created" | "type" | "size" | "location";
 
 export interface Sort {
   key: SortKey;
@@ -57,7 +60,67 @@ export interface Places {
   drives: { name: string; path: string }[];
 }
 
-const HEADER_BYTES = 29;
+/** Rows of one snapshot. */
+export interface Selection {
+  view: number;
+  request: number;
+  rows: number[];
+}
+
+/** What the UI can ask of the file engine. Folders are paths, and files are always rows. */
+export type Task =
+  | { kind: "copy" | "move"; selection: Selection; folder: string }
+  | { kind: "rename"; selection: Selection; name: string }
+  | { kind: "new"; folder: string; directory: boolean }
+  | { kind: "paste"; folder: string }
+  | { kind: "recycle" | "delete" | "restore" | "purge"; selection: Selection }
+  | { kind: "empty" };
+
+export interface Progress {
+  bytes: number;
+  totalBytes: number;
+  items: number;
+  totalItems: number;
+  current: string;
+}
+
+export type Answer = "replace" | "keepBoth" | "merge" | "skip" | "retry" | "elevate" | "permanent" | "cancel";
+
+export interface Facts {
+  size: number;
+  /** FILETIME ticks. */
+  modified: number;
+  folder: boolean;
+}
+
+export type Question =
+  | { kind: "conflict"; name: string; source: Facts; target: Facts; choices: Answer[] }
+  | { kind: "problem"; path: string; message: string; choices: Answer[] }
+  | { kind: "noBin"; path: string; choices: Answer[] };
+
+export type JobEvent = { id: number } & (
+  | { kind: "started"; title: string; origin: number | null }
+  | ({ kind: "progress" } & Progress)
+  | { kind: "asked"; question: Question }
+  | {
+      kind: "finished";
+      /** Folders whose contents changed. */
+      touched: string[];
+      /** Full paths of what the job made. */
+      created: string[];
+      /** Sources a move left alone because they changed while it ran. */
+      kept: string[];
+      cancelled: boolean;
+      undoSteps: number;
+    }
+);
+
+export interface Measured {
+  items: number;
+  bytes: number;
+}
+
+const HEADER_BYTES = 33;
 const FLAG_FOLDER = 1;
 const FLAG_HIDDEN = 2;
 const UINT32_RANGE = 2 ** 32;
@@ -96,6 +159,52 @@ export const arrangeView = (
 ) =>
   invoke<{ count: number; selected: number[] }>("arrange_view", { view, request, shown, order, selected });
 
+/** Reads the shown folder again. `select` names the new selection, or `selected` rows keep theirs. */
+export const reloadView = (
+  view: number,
+  request: number,
+  shown: number,
+  path: string,
+  order: Order,
+  selected: number[],
+  select: string[],
+) =>
+  invoke<{ count: number; hiddenCount: number; selected: number[] }>("reload_view", {
+    view,
+    request,
+    shown,
+    path,
+    order,
+    selected,
+    select,
+  });
+
+/** `origin` is the view that asked, which selects what the job makes. */
+export const startJob = (task: Task, origin?: number) => invoke<void>("start_job", { task, origin });
+
+export const undoJob = () => invoke<void>("undo_job");
+export const pauseJob = (id: number) => invoke<void>("pause_job", { id });
+export const resumeJob = (id: number) => invoke<void>("resume_job", { id });
+export const cancelJob = (id: number) => invoke<void>("cancel_job", { id });
+
+/** `all` uses the same answer for every later case of this kind. */
+export const answerJob = (id: number, answer: Answer, all: boolean) =>
+  invoke<void>("answer_job", { id, reply: { answer, all } });
+
+export const onJobEvent = (handler: (event: JobEvent) => void) =>
+  listen<JobEvent>("job", (event) => handler(event.payload));
+
+export const measureSelection = (selection: Selection) => invoke<Measured>("measure_selection", { selection });
+
+export const binSummary = () => invoke<Measured>("bin_summary");
+
+export const setClipboard = (selection: Selection, cut: boolean) =>
+  invoke<{ names: string[]; sequence: number }>("set_clipboard", { selection, cut });
+
+export const clipboardSequence = () => invoke<number>("clipboard_sequence");
+
+export const clipboardHasFiles = () => invoke<boolean>("clipboard_has_files");
+
 /** The first row at or after `start` whose name starts with `prefix`, wrapping around. */
 export const findRow = (view: number, request: number, prefix: string, start: number) =>
   invoke<number | null>("find_row", { view, request, prefix, start });
@@ -128,17 +237,20 @@ function decodeRows(buffer: ArrayBuffer): Row[] {
   let offset = 4;
   for (let i = 0; i < rows.length; i++) {
     const nameBytes = view.getUint32(offset, true);
+    const locationBytes = view.getUint32(offset + 29, true);
     const nameStart = offset + HEADER_BYTES;
+    const locationStart = nameStart + nameBytes;
     const flags = view.getUint8(offset + 28);
     rows[i] = {
-      name: names.decode(bytes.subarray(nameStart, nameStart + nameBytes)),
+      name: names.decode(bytes.subarray(nameStart, locationStart)),
+      location: names.decode(bytes.subarray(locationStart, locationStart + locationBytes)),
       size: readUint64(view, offset + 4),
       modified: readFiletime(view, offset + 12),
       created: readFiletime(view, offset + 20),
       isDir: (flags & FLAG_FOLDER) !== 0,
       isHidden: (flags & FLAG_HIDDEN) !== 0,
     };
-    offset = nameStart + nameBytes;
+    offset = locationStart + locationBytes;
   }
   return rows;
 }

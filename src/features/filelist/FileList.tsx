@@ -37,6 +37,7 @@ const CELL_TEXT: Record<SortKey, (row: Row) => string> = {
   created: (row) => dates.format(row.created),
   type: (row) => typeText(row.name, row.isDir),
   size: (row) => (row.isDir ? "" : formatSize(row.size)),
+  location: (row) => row.location,
 };
 
 const CELL_CLASS: Partial<Record<SortKey, string>> = {
