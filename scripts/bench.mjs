@@ -2,6 +2,7 @@
 // Run `npm run tauri build` first. Perli's window opens and closes several times.
 //
 // Usage: node scripts/bench.mjs [--hdd D:\]
+// Reboot test: run with --hdd D:\ --prepare-reboot, reboot, then run scripts/after-reboot.cmd.
 import { execFile, execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -288,6 +289,36 @@ function installerMB() {
 const hddIndex = process.argv.indexOf("--hdd");
 const hddRoot = hddIndex > 0 ? process.argv[hddIndex + 1] : undefined;
 
+if (process.argv.includes("--prepare-reboot")) {
+  createTestFolder(tmpdir());
+  createTestFolder(hddRoot);
+  console.log("Ready. Reboot, then run scripts/after-reboot.cmd.");
+  process.exit();
+}
+
+if (process.argv.includes("--after-reboot")) {
+  const ssdFolder = join(tmpdir(), FOLDER_NAME);
+  const hddFolder = join(hddRoot, FOLDER_NAME);
+  const once = async (folder) => {
+    const { pid, page, startMs, loadMs } = await open(folder);
+    page.socket.close();
+    close(pid);
+    await sleep(2000);
+    return { startMs, loadMs };
+  };
+  const results = {
+    firstLaunch: await once(ssdFolder),
+    hddUncached: await once(hddFolder),
+    hddCached: await once(hddFolder),
+  };
+  mkdirSync("bench-results", { recursive: true });
+  writeFileSync(join("bench-results", "after-reboot.json"), JSON.stringify(results, null, 2));
+  deleteTestFolder(ssdFolder);
+  deleteTestFolder(hddFolder);
+  console.log(JSON.stringify(results, null, 2));
+  process.exit();
+}
+
 console.log("Creating test folder...");
 const ssdFolder = createTestFolder(tmpdir());
 const hddFolder = hddRoot && createTestFolder(hddRoot);
@@ -320,8 +351,6 @@ const checks = [
   ["RAM after use (MB)", results.afterScroll.mb, budgets.ramAfterUseMB],
   ["Slowed scroll p99 (ms)", results.scroll.slowed.p99Ms, budgets.scrollP99Ms],
   ["Slowed fast scroll p99 (ms)", results.scroll.slowedFast.p99Ms, budgets.fastScrollP99Ms],
-  ["Capped scroll p99 (ms)", results.cappedScroll.slowed.p99Ms, budgets.scrollP99Ms],
-  ["Capped fast scroll p99 (ms)", results.cappedScroll.slowedFast.p99Ms, budgets.fastScrollP99Ms],
 ];
 
 let over = false;
@@ -330,5 +359,8 @@ for (const [name, value, budget] of checks) {
   over ||= value > budget;
   console.log(`${name}: ${value.toFixed(1)} (budget ${budget}) ${status}`);
 }
+// Report only: the job's rate control pauses the process, which real slow hardware does not do.
+console.log(`Capped scroll p99 (ms): ${results.cappedScroll.slowed.p99Ms.toFixed(1)} (report only)`);
+console.log(`Capped fast scroll p99 (ms): ${results.cappedScroll.slowedFast.p99Ms.toFixed(1)} (report only)`);
 console.log(JSON.stringify(results, null, 2));
 process.exitCode = over ? 1 : 0;
