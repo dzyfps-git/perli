@@ -3,6 +3,11 @@ name: CI
 on:
   pull_request:
 
+# A new push makes the run for the older commit pointless.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: windows-latest
