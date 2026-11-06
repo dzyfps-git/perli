@@ -1,6 +1,6 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { createEffect, createSignal, For, onCleanup, onMount, Show } from "solid-js";
-import { showSnapLayouts } from "../../api";
+import { placeSnapArea } from "../../api";
 import { Menu } from "../../ui/Menu";
 import { toCrumbs } from "../navigation/path";
 import type { Tab, Tabs } from "../tabs/tabs";
@@ -11,7 +11,6 @@ const ICON_CLOSE = "";
 const ICON_MINIMIZE = "";
 const ICON_MAXIMIZE = "";
 const ICON_RESTORE = "";
-const SNAP_HOVER_MS = 500;
 
 function tabTitle(tab: Tab) {
   const titles = tab.panes().map((view) => toCrumbs(view.folder()?.path ?? "").at(-1)?.label ?? "New tab");
@@ -22,23 +21,31 @@ export function TitleBar(props: { tabs: Tabs; onNewTab: () => void }) {
   const appWindow = getCurrentWindow();
   const [maximized, setMaximized] = createSignal(false);
   const [menu, setMenu] = createSignal<{ x: number; y: number; tab: Tab }>();
-  let snapTimer: number | undefined;
+  const [maximizeHovered, setMaximizeHovered] = createSignal(false);
+  let maximizeButton!: HTMLButtonElement;
   let strip!: HTMLDivElement;
   let ink!: HTMLSpanElement;
 
-  const stopSnapTimer = () => window.clearTimeout(snapTimer);
-
-  function startSnapTimer() {
-    snapTimer = window.setTimeout(() => showSnapLayouts().catch(console.error), SNAP_HOVER_MS);
+  // A native window covers the maximize button, so Windows sees a real one. See snap.rs.
+  function moveSnapArea() {
+    const { x, y, width, height } = maximizeButton.getBoundingClientRect();
+    const [left, top, right, bottom] = [x, y, x + width, y + height].map((edge) =>
+      Math.round(edge * window.devicePixelRatio),
+    );
+    placeSnapArea(left, top, right - left, bottom - top).catch(console.error);
   }
 
   onMount(async () => {
+    moveSnapArea();
+    window.addEventListener("resize", moveSnapArea);
+    onCleanup(() => window.removeEventListener("resize", moveSnapArea));
+
+    onCleanup(await appWindow.listen<boolean>("snap-hover", (event) => setMaximizeHovered(event.payload)));
+
     const update = async () => setMaximized(await appWindow.isMaximized());
-    const unlisten = await appWindow.onResized(update);
-    onCleanup(unlisten);
+    onCleanup(await appWindow.onResized(update));
     update();
   });
-  onCleanup(stopSnapTimer);
 
   function moveInk() {
     const tab = strip.querySelector<HTMLElement>(".tab-active");
@@ -93,7 +100,9 @@ export function TitleBar(props: { tabs: Tabs; onNewTab: () => void }) {
               onAuxClick={(event) => event.button === 1 && props.tabs.close(tab)}
               onContextMenu={(event) => {
                 event.preventDefault();
-                setMenu({ x: event.clientX, y: event.clientY, tab });
+                // A native window sits over the maximize button and would take the menu's clicks.
+                const below = maximizeButton.getBoundingClientRect().bottom;
+                setMenu({ x: event.clientX, y: Math.max(event.clientY, below), tab });
               }}
             >
               <span class="tab-title">{tabTitle(tab)}</span>
@@ -123,14 +132,11 @@ export function TitleBar(props: { tabs: Tabs; onNewTab: () => void }) {
           {ICON_MINIMIZE}
         </button>
         <button
+          ref={maximizeButton}
           class="window-button"
+          classList={{ "window-button-hover": maximizeHovered() }}
           aria-label={maximized() ? "Restore" : "Maximize"}
-          onClick={() => {
-            stopSnapTimer();
-            appWindow.toggleMaximize();
-          }}
-          onMouseEnter={startSnapTimer}
-          onMouseLeave={stopSnapTimer}
+          onClick={() => appWindow.toggleMaximize()}
         >
           {maximized() ? ICON_RESTORE : ICON_MAXIMIZE}
         </button>

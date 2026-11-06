@@ -109,7 +109,8 @@
   font-size: 10px;
 }
 
-.window-button:hover {
+.window-button:hover,
+.window-button-hover {
   background: var(--surface-hover);
 }
 
