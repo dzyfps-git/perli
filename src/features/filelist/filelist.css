@@ -1,0 +1,46 @@
+.file-grid {
+  position: relative;
+  height: 100%;
+  overflow-y: auto;
+  outline: none;
+  contain: strict;
+}
+
+.file-spacer {
+  position: relative;
+}
+
+.file-row {
+  position: absolute;
+  inset: 0 0 auto;
+  height: var(--row-height);
+  padding: 0 var(--space-4);
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 160px 90px;
+  gap: var(--space-3);
+  align-items: center;
+  contain: strict;
+}
+
+.file-row:hover {
+  background: var(--surface-hover);
+}
+
+.file-name {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.file-row[data-folder] .file-name {
+  font-weight: 600;
+}
+
+.file-meta {
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.file-size {
+  text-align: right;
+}
