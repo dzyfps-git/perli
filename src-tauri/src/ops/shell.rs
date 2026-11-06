@@ -550,13 +550,27 @@ mod tests {
             run.record_elevated(entry, slot);
         }
         assert_eq!(fs::read_to_string(&old).unwrap(), "old");
+        // Only the names, because the shell spells out a temp folder given in short 8.3 form.
+        let name = |path: &Path| path.file_name().unwrap().to_str().unwrap().to_string();
+        let made: Vec<_> = run
+            .done
+            .iter()
+            .map(|record| match record {
+                Done::Created { path } => ("created", name(path)),
+                Done::Moved { from, to } => {
+                    assert_eq!(*from, moved);
+                    ("moved", name(to))
+                }
+                Done::Recycled { .. } => unreachable!("nothing went to the bin"),
+            })
+            .collect();
         assert_eq!(
-            run.done,
+            made,
             [
-                Done::Created { path: sandbox.path(r"to\a - Copy.txt") },
-                Done::Created { path: sandbox.path(r"to\folder") },
-                Done::Moved { from: moved, to: sandbox.path(r"to\b.txt") },
-                Done::Created { path: sandbox.path(r"to\new") },
+                ("created", "a - Copy.txt".to_string()),
+                ("created", "folder".to_string()),
+                ("moved", "b.txt".to_string()),
+                ("created", "new".to_string()),
             ]
         );
     }
