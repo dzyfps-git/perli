@@ -18,6 +18,11 @@ export interface Row {
   isDir: boolean;
 }
 
+export interface Places {
+  folders: { kind: string; path: string }[];
+  drives: { name: string; path: string }[];
+}
+
 const HEADER_BYTES = 21;
 const UINT32_RANGE = 2 ** 32;
 const FILETIME_TICKS_PER_MS = 10_000;
@@ -26,6 +31,8 @@ const FILETIME_TO_UNIX_MS = 11_644_473_600_000;
 const names = new TextDecoder("utf-16le");
 
 export const startFolder = () => invoke<string>("start_folder");
+
+export const listPlaces = () => invoke<Places>("list_places");
 
 /** `shown` is the request of the folder on screen, whose rows must outlive this open. */
 export const openFolder = (view: number, request: number, shown: number, path: string) =>

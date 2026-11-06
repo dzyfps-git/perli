@@ -20,6 +20,10 @@ export function join(folder: string, name: string) {
   return folder.endsWith("\\") ? `${folder}${name}` : `${folder}\\${name}`;
 }
 
+export function samePath(a: string | undefined, b: string) {
+  return a?.toLowerCase() === b.toLowerCase();
+}
+
 function isInside(path: string, folder: string) {
   const a = path.toLowerCase();
   const b = folder.toLowerCase();

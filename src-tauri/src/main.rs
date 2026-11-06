@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod folder;
+mod places;
 mod shell;
 
 use std::collections::HashMap;
@@ -87,6 +88,14 @@ fn first_folder() -> Option<String> {
 #[tauri::command]
 fn start_folder() -> Result<String, String> {
     first_folder().ok_or_else(|| "No start folder found".to_string())
+}
+
+#[tauri::command]
+async fn list_places() -> Result<places::Places, String> {
+    async_runtime::spawn_blocking(places::read)
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.message())
 }
 
 #[tauri::command]
@@ -193,6 +202,7 @@ fn main() {
         .manage(Preload(Mutex::new(preload)))
         .invoke_handler(tauri::generate_handler![
             start_folder,
+            list_places,
             open_folder,
             rows,
             close_view,
