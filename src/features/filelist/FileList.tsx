@@ -95,7 +95,6 @@ export function FileList(props: { count: number; onFirstPaint: () => void }) {
   }
 
   function paint() {
-    if (pool.length === 0) return;
     const first = Math.max(0, Math.floor(grid.scrollTop / rowHeight) - OVERSCAN);
     const last = Math.min(props.count, first + pool.length);
 
