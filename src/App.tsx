@@ -1,9 +1,12 @@
 import { createResource, Match, Switch } from "solid-js";
 import { openFolder, startFolder } from "./api";
 import { FileList } from "./features/filelist/FileList";
+import { Palette } from "./features/palette/Palette";
 
 async function openStartFolder() {
-  return openFolder(await startFolder());
+  const opened = await openFolder(await startFolder());
+  performance.mark("perli-folder-open", { detail: opened });
+  return opened;
 }
 
 // Waits for the frame after the rows are drawn, so this means the user can see them.
@@ -32,6 +35,7 @@ export function App() {
           </Match>
         </Switch>
       </main>
+      <Palette />
     </div>
   );
 }

@@ -1,3 +1,9 @@
 {
-  "installerMB": 15
+  "installerMB": 5,
+  "startMs": 550,
+  "slowedStartMs": 750,
+  "idleRamMB": 125,
+  "ramAfterUseMB": 160,
+  "scrollP99Ms": 8.4,
+  "fastScrollP99Ms": 25
 }
