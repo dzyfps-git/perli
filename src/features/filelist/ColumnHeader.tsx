@@ -1,8 +1,8 @@
-import { createMemo, createSignal, For, Index } from "solid-js";
+import { createMemo, createSignal, For, Index, Show } from "solid-js";
 import type { Grouping, Sort, SortKey } from "../../api";
 import { dragTarget, MIN_COLUMN_WIDTH, type Column } from "./columns";
 import { MAX_TILE, MIN_TILE, TILE_STEP } from "./layout";
-import { columns, grouping, moveColumn, setColumnWidth, setTileSize, tileSize, toggleColumn } from "./prefs";
+import { grouping, moveColumn, setColumnWidth, setTileSize, tileSize, toggleColumn } from "./prefs";
 
 const ICON_ASCENDING = "";
 const ICON_DESCENDING = "";
@@ -51,13 +51,16 @@ function startResize(event: PointerEvent, column: Column) {
 
 export function ColumnHeader(props: {
   ref: (element: HTMLDivElement) => void;
+  columns: Column[];
+  /** The columns can't be moved, resized, added or removed, and grouping doesn't apply. */
+  fixed: boolean;
   sort: Sort;
   onSort: (key: SortKey) => void;
   onMenu: (event: MouseEvent) => void;
   onGroup: () => void;
 }) {
-  const visible = createMemo(() => columns().filter((column) => column.visible));
-  const addable = createMemo(() => columns().filter((column) => !column.visible));
+  const visible = createMemo(() => props.columns.filter((column) => column.visible));
+  const addable = createMemo(() => props.columns.filter((column) => !column.visible));
   const [editing, setEditing] = createSignal(false);
   let header!: HTMLDivElement;
   let dragged = false;
@@ -74,7 +77,7 @@ export function ColumnHeader(props: {
 
   function startDrag(event: PointerEvent, id: SortKey) {
     dragged = false;
-    if (id === "name" || event.button !== 0) return;
+    if (props.fixed || id === "name" || event.button !== 0) return;
     const button = event.currentTarget as HTMLElement;
     const startX = event.clientX;
     const move = (moved: PointerEvent) => {
@@ -132,7 +135,7 @@ export function ColumnHeader(props: {
               </button>
               {column().id === "name" && (
                 <>
-                  <GroupToggle onChange={props.onGroup} />
+                  {!props.fixed && <GroupToggle onChange={props.onGroup} />}
                   <For each={editing() ? addable() : []}>
                     {(extra) => (
                       <button class="column-ghost" onClick={() => toggleColumn(extra.id)}>
@@ -142,7 +145,7 @@ export function ColumnHeader(props: {
                   </For>
                 </>
               )}
-              {column().id !== "name" && (
+              {column().id !== "name" && !props.fixed && (
                 <div
                   class="column-resize"
                   role="presentation"
@@ -153,23 +156,31 @@ export function ColumnHeader(props: {
           )}
         </Index>
       </div>
-      <button
-        class="strip-extra strip-icon column-edit"
-        data-on={editing() ? "" : undefined}
-        aria-label={editing() ? "Finish editing columns" : "Edit columns"}
-        onClick={() => setEditing(!editing())}
-      >
-        {editing() ? ICON_DONE : ICON_ADD}
-      </button>
+      <Show when={!props.fixed}>
+        <button
+          class="strip-extra strip-icon column-edit"
+          data-on={editing() ? "" : undefined}
+          aria-label={editing() ? "Finish editing columns" : "Edit columns"}
+          onClick={() => setEditing(!editing())}
+        >
+          {editing() ? ICON_DONE : ICON_ADD}
+        </button>
+      </Show>
     </div>
   );
 }
 
 /** Grid has no columns to click, so it keeps the same titles as a plain row. */
-export function SortStrip(props: { sort: Sort; onSort: (key: SortKey) => void; onGroup: () => void }) {
+export function SortStrip(props: {
+  columns: Column[];
+  fixed: boolean;
+  sort: Sort;
+  onSort: (key: SortKey) => void;
+  onGroup: () => void;
+}) {
   return (
     <div class="column-strip sort-strip" role="group" aria-label="Sort">
-      <For each={columns()}>
+      <For each={props.columns}>
         {(column) => (
           <button class="column-button" onClick={() => props.onSort(column.id)}>
             {column.label}
@@ -179,7 +190,7 @@ export function SortStrip(props: { sort: Sort; onSort: (key: SortKey) => void; o
           </button>
         )}
       </For>
-      <GroupToggle onChange={props.onGroup} />
+      {!props.fixed && <GroupToggle onChange={props.onGroup} />}
       <input
         class="strip-extra tile-size"
         type="range"

@@ -1,5 +1,13 @@
-import { createSignal, untrack } from "solid-js";
-import { arrangeView, openFolder, type Opened, type Order, type Sort } from "../../api";
+import { batch, createSignal, untrack } from "solid-js";
+import {
+  arrangeView,
+  openFolder,
+  reloadView,
+  type Opened,
+  type Order,
+  type Selection,
+  type Sort,
+} from "../../api";
 import type { Layout } from "../filelist/layout";
 import {
   grouping,
@@ -12,16 +20,37 @@ import {
   showHidden,
 } from "../filelist/prefs";
 import type { SavedPane } from "../tabs/session";
-import { nextTrail, parentOf, samePath } from "./path";
+import { isBin, nextTrail, parentOf, samePath } from "./path";
 
 export type FolderView = ReturnType<typeof createFolderView>;
+
+/** The newest deletions are the ones worth seeing first. */
+const BIN_SORT: Sort = { key: "modified", descending: true };
+
+/** What the file list on screen tells its view. */
+export interface ListHandle {
+  /** The rows selected on screen, with the focused one first. */
+  selection: () => Selection;
+  rename: () => void;
+  isEditing: () => boolean;
+}
+
+export interface ShownFolder extends Opened {
+  rearranged?: boolean;
+  /** Scroll to the selection, because the user asked for these rows. */
+  reveal?: boolean;
+  /** Open the selected row's name for editing. */
+  rename?: boolean;
+}
 
 /**
  * One browsing location: its open folder, history and path bar trail. A `saved` pane waits
  * for `openSaved`, so tabs restored behind the active one cost nothing at startup.
  */
 export function createFolderView(id: number, saved?: SavedPane) {
-  const [folder, setFolder] = createSignal<Opened & { rearranged?: boolean }>();
+  const [folder, setFolder] = createSignal<ShownFolder>();
+  /** Changes when the list should start over. A reload keeps it, so nothing blinks. */
+  const [arrival, setArrival] = createSignal(0);
   const [error, setError] = createSignal<string>();
   const [trail, setTrail] = createSignal("");
   const [backStack, setBackStack] = createSignal<string[]>([]);
@@ -32,34 +61,102 @@ export function createFolderView(id: number, saved?: SavedPane) {
   let latestRequest = 0;
   let opening = false;
   let rearrangeAfterOpen = false;
-  let selectedRows = (): number[] => [];
+  let reloadLater: (() => void) | undefined;
+  let list: ListHandle | undefined;
   let savedOpened = false;
 
   /** The folder shown, or the saved one that has not been opened yet. */
   const path = () => folder()?.path ?? saved?.path;
-  const order = (): Order => ({ ...sort(), group: grouping(), showHidden: showHidden() });
+  // Date order is the point of the Recycle Bin, so folders don't jump ahead there.
+  const order = (target = path()): Order => ({
+    ...sort(),
+    group: isBin(target) ? "mixed" : grouping(),
+    showHidden: showHidden(),
+  });
+  const selectedRows = () => list?.selection().rows ?? [];
+
+  function show(next: ShownFolder) {
+    batch(() => {
+      setFolder(next);
+      setArrival(arrival() + 1);
+    });
+  }
+
+  /** Memory is for arriving at a folder. A refresh or restore keeps this pane's own sort. */
+  function arrivalSort(target: string) {
+    if (samePath(path(), target)) return undefined;
+    const remembered = rememberedSort(target);
+    if (remembered) return remembered;
+    if (isBin(target)) return BIN_SORT;
+    return isBin(path()) ? lastSort() : undefined;
+  }
+
+  function runReloadLater() {
+    const run = reloadLater;
+    reloadLater = undefined;
+    run?.();
+    return run !== undefined;
+  }
+
+  /** Lets what waited for the read in flight go ahead. A reload covers a new order too. */
+  function settle(request: number) {
+    if (request !== latestRequest) return;
+    opening = false;
+    if (runReloadLater()) rearrangeAfterOpen = false;
+    else if (rearrangeAfterOpen) rearrange();
+  }
 
   async function load(target: string) {
     const request = ++latestRequest;
-    // Memory is for arriving at a folder. A refresh or restore keeps this pane's own sort.
-    const folderSort = samePath(path(), target) ? undefined : rememberedSort(target);
+    const folderSort = arrivalSort(target);
     if (folderSort) setSortValue(folderSort);
     opening = true;
     try {
-      const opened = await openFolder(id, request, folder()?.request ?? 0, target, order());
+      const opened = await openFolder(id, request, folder()?.request ?? 0, target, order(target));
       if (request !== latestRequest) return undefined;
       setError(undefined);
-      setFolder(opened);
+      show(opened);
       setTrail(nextTrail(trail(), opened.path));
       return opened;
     } catch (failure) {
       if (request === latestRequest) setError(String(failure));
       return undefined;
     } finally {
-      if (request === latestRequest) {
-        opening = false;
-        if (rearrangeAfterOpen) rearrange();
-      }
+      settle(request);
+    }
+  }
+
+  /**
+   * Reads the shown folder again, after a job changed it. The list stays in place and only its
+   * rows change. `select` names the rows to select, and without any the selection stays put.
+   */
+  async function reload(select: string[] = [], rename = false) {
+    const current = folder();
+    if (!current) return;
+    if (opening || list?.isEditing()) {
+      reloadLater = () => reload(select, rename);
+      return;
+    }
+
+    const request = ++latestRequest;
+    opening = true;
+    try {
+      const reloaded = await reloadView(
+        id,
+        request,
+        current.request,
+        current.path,
+        order(),
+        selectedRows(),
+        select,
+      );
+      if (request !== latestRequest) return;
+      setError(undefined);
+      setFolder({ ...current, request, ...reloaded, reveal: select.length > 0, rename });
+    } catch (failure) {
+      if (request === latestRequest) setError(String(failure));
+    } finally {
+      settle(request);
     }
   }
 
@@ -76,7 +173,7 @@ export function createFolderView(id: number, saved?: SavedPane) {
     const request = ++latestRequest;
     try {
       const arranged = await arrangeView(id, request, current.request, order(), selectedRows());
-      if (request === latestRequest) setFolder({ ...current, request, ...arranged, rearranged: true });
+      if (request === latestRequest) show({ ...current, request, ...arranged, rearranged: true });
     } catch (failure) {
       if (request === latestRequest) setError(String(failure));
     }
@@ -84,8 +181,9 @@ export function createFolderView(id: number, saved?: SavedPane) {
 
   function setSort(next: Sort) {
     setSortValue(next);
-    setLastSort(next);
     const path = folder()?.path;
+    // Its sorts make no sense for normal folders, so new panes must not pick them up.
+    if (!isBin(path)) setLastSort(next);
     if (path) rememberSort(path, next);
     rearrange();
   }
@@ -136,7 +234,9 @@ export function createFolderView(id: number, saved?: SavedPane) {
   return {
     id,
     folder,
+    arrival,
     path,
+    isBin: () => isBin(folder()?.path),
     openSaved() {
       if (saved && !savedOpened) untrack(() => open(saved.path));
       savedOpened = true;
@@ -151,10 +251,14 @@ export function createFolderView(id: number, saved?: SavedPane) {
     editingPath,
     setEditingPath,
     rearrange,
-    /** The file list reports its selection here, so a new order can keep it. */
-    readSelectionFrom(read: () => number[]) {
-      selectedRows = read;
+    reload,
+    /** The file list on screen reports in here, so a new order can keep its selection. */
+    connectList(handle: ListHandle) {
+      list = handle;
     },
+    list: () => list,
+    /** A reload that waited for an edit of a name can go ahead. */
+    editEnded: runReloadLater,
     canGoBack: () => backStack().length > 0,
     canGoForward: () => forwardStack().length > 0,
     canGoUp: () => {

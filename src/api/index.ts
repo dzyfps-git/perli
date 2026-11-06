@@ -99,7 +99,7 @@ export type Question =
   | { kind: "noBin"; path: string; choices: Answer[] };
 
 export type JobEvent = { id: number } & (
-  | { kind: "started"; title: string; origin: number | null }
+  | { kind: "started"; title: string; origin: number | null; newItem: boolean }
   | ({ kind: "progress" } & Progress)
   | { kind: "asked"; question: Question }
   | {
@@ -182,7 +182,7 @@ export const reloadView = (
 /** `origin` is the view that asked, which selects what the job makes. */
 export const startJob = (task: Task, origin?: number) => invoke<void>("start_job", { task, origin });
 
-export const undoJob = () => invoke<void>("undo_job");
+export const undoJob = (origin?: number) => invoke<void>("undo_job", { origin });
 export const pauseJob = (id: number) => invoke<void>("pause_job", { id });
 export const resumeJob = (id: number) => invoke<void>("resume_job", { id });
 export const cancelJob = (id: number) => invoke<void>("cancel_job", { id });
@@ -200,6 +200,8 @@ export const binSummary = () => invoke<Measured>("bin_summary");
 
 export const setClipboard = (selection: Selection, cut: boolean) =>
   invoke<{ names: string[]; sequence: number }>("set_clipboard", { selection, cut });
+
+export const cancelCut = (sequence: number) => invoke<void>("cancel_cut", { sequence });
 
 export const clipboardSequence = () => invoke<number>("clipboard_sequence");
 
@@ -255,8 +257,11 @@ function decodeRows(buffer: ArrayBuffer): Row[] {
   return rows;
 }
 
+/** Milliseconds since 1970. */
+export const filetimeToMs = (ticks: number) => ticks / FILETIME_TICKS_PER_MS - FILETIME_TO_UNIX_MS;
+
 function readFiletime(view: DataView, offset: number) {
-  return readUint64(view, offset) / FILETIME_TICKS_PER_MS - FILETIME_TO_UNIX_MS;
+  return filetimeToMs(readUint64(view, offset));
 }
 
 function readUint64(view: DataView, offset: number) {

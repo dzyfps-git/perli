@@ -421,8 +421,8 @@ async fn start_job(
 }
 
 #[tauri::command]
-async fn undo_job(app: AppHandle) -> Result<(), String> {
-    jobs::undo(&app)
+async fn undo_job(origin: Option<u32>, app: AppHandle) -> Result<(), String> {
+    jobs::undo(&app, origin)
 }
 
 #[tauri::command]
@@ -489,6 +489,12 @@ async fn set_clipboard(
         names,
         sequence: clipboard::sequence(),
     })
+}
+
+/// Takes a cut back, unless something else was copied since.
+#[tauri::command]
+fn cancel_cut(sequence: u32) -> Result<(), String> {
+    clipboard::clear_if_unchanged(sequence).map_err(|error| error.message())
 }
 
 #[tauri::command]
@@ -659,6 +665,7 @@ fn main() {
             measure_selection,
             bin_summary,
             set_clipboard,
+            cancel_cut,
             clipboard_sequence,
             clipboard_has_files,
             rows,

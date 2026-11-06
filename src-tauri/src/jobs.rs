@@ -57,6 +57,8 @@ enum Change {
     Started {
         title: String,
         origin: Option<u32>,
+        /// The job makes a new item, whose name the UI opens for editing.
+        new_item: bool,
     },
     Progress(Progress),
     Asked {
@@ -171,9 +173,15 @@ pub fn start(app: &AppHandle, plan: Plan) -> Result<(), String> {
 }
 
 /// Reverses the newest step. Does nothing if there is none.
-pub fn undo(app: &AppHandle) -> Result<(), String> {
+pub fn undo(app: &AppHandle, origin: Option<u32>) -> Result<(), String> {
     match lock(&app.state::<Jobs>().undo).pop() {
-        Some(records) => start(app, Job::Undo { records }.into()),
+        Some(records) => start(
+            app,
+            Plan {
+                origin,
+                ..Job::Undo { records }.into()
+            },
+        ),
         None => Ok(()),
     }
 }
@@ -199,6 +207,7 @@ impl Bridge {
         self.send(Change::Started {
             title: title(&plan.job),
             origin: plan.origin,
+            new_item: matches!(plan.job, Job::New { .. }),
         });
 
         let outcome = ops::run(plan.job, self, &self.entry.control);
@@ -344,5 +353,17 @@ mod tests {
         assert_eq!(json["id"], 7);
         assert_eq!(json["kind"], "finished");
         assert_eq!(json["undoSteps"], 3);
+
+        let event = Event {
+            id: 8,
+            change: Change::Progress(Progress {
+                total_bytes: 9,
+                ..Progress::default()
+            }),
+        };
+        let json = serde_json::to_value(event).unwrap();
+
+        assert_eq!(json["kind"], "progress");
+        assert_eq!(json["totalBytes"], 9);
     }
 }

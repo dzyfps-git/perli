@@ -2,10 +2,11 @@ import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { driveSpace, listPlaces, type DriveSpace, type Places } from "../../api";
 import { formatSize } from "../../ui/format";
 import type { FolderView } from "../navigation/folderView";
-import { samePath } from "../navigation/path";
+import { BIN_PATH, samePath } from "../navigation/path";
 import "./sidebar.css";
 
 const ICON_DRIVE = "";
+const ICON_BIN = "";
 
 const FOLDERS: Record<string, { label: string; icon: string }> = {
   home: { label: "Home", icon: "" },
@@ -115,6 +116,9 @@ export function Sidebar(props: { view: FolderView; onMenu: PlaceMenu }) {
         <For each={places()?.folders}>
           {(folder) => <Place view={props.view} path={folder.path} onMenu={props.onMenu} {...FOLDERS[folder.kind]} />}
         </For>
+        <Show when={places()}>
+          <Place view={props.view} path={BIN_PATH} label="Recycle Bin" icon={ICON_BIN} onMenu={props.onMenu} />
+        </Show>
       </ul>
       <ul>
         <For each={places()?.drives}>

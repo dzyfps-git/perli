@@ -1,6 +1,7 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { createEffect, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import {
+  clipboardHasFiles,
   clipboardText,
   openFile,
   saveSession,
@@ -9,7 +10,12 @@ import {
   type Row,
   type SortKey,
 } from "./api";
-import { nextGrouping, nextSort } from "./features/filelist/columns";
+import { createFileActions } from "./features/fileops/actions";
+import { checkCut, cutNames, takeBackCut } from "./features/fileops/clipboard";
+import { ConfirmDelete, type DeleteRequest } from "./features/fileops/ConfirmDelete";
+import { createJobs } from "./features/fileops/jobs";
+import { JobsPanel } from "./features/fileops/JobsPanel";
+import { BIN_COLUMNS, nextGrouping, nextSort } from "./features/filelist/columns";
 import { FileList } from "./features/filelist/FileList";
 import { clampTile, isLargestTile, isSmallestTile, TILE_STEP, type Layout } from "./features/filelist/layout";
 import {
@@ -46,11 +52,13 @@ function markReady() {
 
 // WebView2's find bar, reload and save dialog would break the app's look, so these keys do nothing.
 function isBrowserKey(event: KeyboardEvent, key: string) {
-  const ctrlKeys = ["f", "g", "r", "s", "+", "=", "-", "0"];
+  const ctrlKeys = ["f", "g", "n", "r", "s", "+", "=", "-", "0"];
   return ["f3", "f5", "f7"].includes(key) || (event.ctrlKey && ctrlKeys.includes(key));
 }
 
 const isTyping = (event: Event) => event.target instanceof HTMLInputElement;
+// A job's Delete key must only ever mean the files, never a focused button.
+const isInList = (event: Event) => (event.target as HTMLElement).classList?.contains("file-grid");
 const hideBrowserMenu = (event: MouseEvent) => event.preventDefault();
 const blockBrowserZoom = (event: WheelEvent) => event.ctrlKey && event.preventDefault();
 const trackWindowFocus = (event: FocusEvent) =>
@@ -61,6 +69,9 @@ export function App() {
   const tabs = createTabs();
   const [menu, setMenu] = createSignal<{ x: number; y: number; items: MenuItem[] }>();
   const [settingsOpen, setSettingsOpen] = createSignal(false);
+  const [deleting, setDeleting] = createSignal<DeleteRequest>();
+  const jobs = createJobs(tabs.allViews);
+  const actions = createFileActions(jobs, setDeleting, () => tabs.active().other());
   // A run started on one folder is a detour, so it must not replace the saved tabs.
   const [keepSession, setKeepSession] = createSignal(false);
   let saveTimer: number | undefined;
@@ -89,6 +100,7 @@ export function App() {
   const closeListener = getCurrentWindow().onCloseRequested(flushSession);
 
   function openRow(view: FolderView, row: Row, toSide: boolean) {
+    if (view.isBin()) return;
     const path = join(view.folder()!.path, row.name);
     if (!row.isDir) openFile(path).catch(console.error);
     else if (toSide) tabs.openToSide(path);
@@ -102,6 +114,42 @@ export function App() {
       { label: "Open to side", action: () => tabs.openToSide(path) },
     ];
     setMenu({ x: event.clientX, y: event.clientY, items });
+  }
+
+  async function showRowMenu(event: MouseEvent, view: FolderView, row: Row) {
+    event.preventDefault();
+    const { clientX: x, clientY: y } = event;
+    if (view.isBin()) {
+      const items = [
+        { label: "Restore", action: () => actions.restore(view) },
+        { label: "Delete permanently", action: () => actions.remove(view, true) },
+      ];
+      return setMenu({ x, y, items });
+    }
+
+    const path = join(view.folder()!.path, row.name);
+    const single = view.list()?.selection().rows.length === 1;
+    const canPaste = await clipboardHasFiles();
+    const items: MenuItem[] = [
+      { label: "Open", action: () => openRow(view, row, false) },
+      ...(row.isDir ? [{ label: "Open to side", action: () => openRow(view, row, true) }] : []),
+      { label: "Cut", divider: true, action: () => actions.cut(view) },
+      { label: "Copy", action: () => actions.copy(view) },
+      {
+        label: "Paste",
+        disabled: !canPaste,
+        action: () => actions.paste(view, row.isDir ? path : undefined),
+      },
+      { label: "Rename", disabled: !single, action: () => actions.startRename(view) },
+      { label: "Delete", action: () => actions.remove(view, false) },
+    ];
+    if (tabs.active().other()) {
+      items.push(
+        { label: "Copy to other pane", divider: true, action: () => actions.toOtherPane(view, "copy") },
+        { label: "Move to other pane", action: () => actions.toOtherPane(view, "move") },
+      );
+    }
+    setMenu({ x, y, items });
   }
 
   function showHeaderMenu(event: MouseEvent) {
@@ -135,7 +183,7 @@ export function App() {
   const toggleHidden = () => changeOrder(() => setShowHidden(!showHidden()));
   const cycleGrouping = () => changeOrder(() => setGrouping(nextGrouping(grouping())));
 
-  function showViewMenu(view: FolderView, x: number, y: number) {
+  function viewItems(view: FolderView): MenuItem[] {
     const layoutItem = (label: string, layout: Layout) => ({
       label,
       checked: view.layout() === layout,
@@ -164,9 +212,19 @@ export function App() {
         action: () => setTileSize(clampTile(tileSize() - TILE_STEP)),
       },
     ];
-    const items: MenuItem[] = [
+    const sortItems = view.isBin()
+      ? BIN_COLUMNS.map((column) => sortItem(column.label, column.id))
+      : [
+          sortItem("Name", "name"),
+          sortItem("Date modified", "modified"),
+          sortItem("Date created", "created"),
+          sortItem("Type", "type"),
+          sortItem("Size", "size"),
+        ];
+    return [
       {
         label: "View",
+        divider: true,
         items: [
           layoutItem("List", "list"),
           layoutItem("Grid", "grid"),
@@ -176,11 +234,7 @@ export function App() {
       {
         label: "Sort by",
         items: [
-          sortItem("Name", "name"),
-          sortItem("Date modified", "modified"),
-          sortItem("Date created", "created"),
-          sortItem("Type", "type"),
-          sortItem("Size", "size"),
+          ...sortItems,
           {
             label: "Descending",
             divider: true,
@@ -189,14 +243,18 @@ export function App() {
           },
         ],
       },
-      {
-        label: "Grouping",
-        items: [
-          groupItem("Folders first", "foldersFirst"),
-          groupItem("Files first", "filesFirst"),
-          groupItem("Mixed", "mixed"),
-        ],
-      },
+      ...(view.isBin()
+        ? []
+        : [
+            {
+              label: "Grouping",
+              items: [
+                groupItem("Folders first", "foldersFirst"),
+                groupItem("Files first", "filesFirst"),
+                groupItem("Mixed", "mixed"),
+              ],
+            },
+          ]),
       {
         label: "Show hidden files",
         divider: true,
@@ -204,7 +262,27 @@ export function App() {
         action: toggleHidden,
       },
     ];
-    setMenu({ x, y, items });
+  }
+
+  async function showBackgroundMenu(event: MouseEvent, view: FolderView) {
+    const { clientX: x, clientY: y } = event;
+    const undo = { label: "Undo", disabled: jobs.undoSteps() === 0, action: () => actions.undo(view) };
+    const fileItems: MenuItem[] = view.isBin()
+      ? [
+          {
+            label: "Empty Recycle Bin",
+            disabled: view.folder()?.count === 0,
+            action: () => actions.empty(view),
+          },
+          undo,
+        ]
+      : [
+          { label: "Paste", disabled: !(await clipboardHasFiles()), action: () => actions.paste(view) },
+          { label: "New folder", action: () => actions.newItem(view, true) },
+          { label: "New file", action: () => actions.newItem(view, false) },
+          undo,
+        ];
+    setMenu({ x, y, items: [...fileItems, ...viewItems(view)] });
   }
 
   const newTab = async () => {
@@ -222,6 +300,26 @@ export function App() {
     if (view.layout() === "grid") setTileSize(clampTile(tileSize() + change));
   }
 
+  /** Holding a key down must not paste or delete again and again. */
+  function onFileKey(event: KeyboardEvent, view: FolderView, key: string) {
+    if (!isInList(event) || event.altKey) return false;
+    const { ctrlKey: ctrl, shiftKey: shift } = event;
+    const run = (action: () => void) => {
+      if (!event.repeat) action();
+      return true;
+    };
+    if (ctrl && key === "c") return run(() => actions.copy(view));
+    if (ctrl && key === "x") return run(() => actions.cut(view));
+    if (ctrl && key === "v") return run(() => actions.paste(view));
+    if (ctrl && key === "z") return run(() => actions.undo(view));
+    if (ctrl && key === "n") return run(() => actions.newItem(view, shift));
+    if (key === "delete") return run(() => actions.remove(view, shift));
+    if (key === "f2") return run(() => actions.startRename(view));
+    if (key === "f7") return run(() => actions.toOtherPane(view, "copy"));
+    if (key === "f8") return run(() => actions.toOtherPane(view, "move"));
+    return false;
+  }
+
   function onKeyDown(event: KeyboardEvent) {
     const view = tabs.activeView();
     const tab = tabs.active();
@@ -229,13 +327,15 @@ export function App() {
     // Shift changes what a digit key reports, so read which key it is.
     const digit = Number(event.code.match(/^Digit([1-9])$/)?.[1]);
 
-    if (settingsOpen()) {
+    if (settingsOpen() || deleting()) {
       // The dialog covers the tabs, so nothing behind it may change.
       if (isBrowserKey(event, key)) event.preventDefault();
       return;
     }
 
-    if (event.altKey && key === "arrowleft") view.back();
+    if (key === "escape" && !isTyping(event)) takeBackCut();
+    if (onFileKey(event, view, key)) event.preventDefault();
+    else if (event.altKey && key === "arrowleft") view.back();
     else if (event.altKey && key === "arrowright") view.forward();
     else if (event.altKey && key === "arrowup") view.up();
     else if (key === "backspace" && !isTyping(event)) view.up();
@@ -272,6 +372,7 @@ export function App() {
     window.addEventListener("wheel", blockBrowserZoom, { passive: false });
     window.addEventListener("focus", trackWindowFocus);
     window.addEventListener("blur", trackWindowFocus);
+    window.addEventListener("focus", checkCut);
     const start = await startState();
     const session = start.folder ? undefined : parseSession(start.session);
     if (session) {
@@ -291,6 +392,7 @@ export function App() {
     window.removeEventListener("wheel", blockBrowserZoom);
     window.removeEventListener("focus", trackWindowFocus);
     window.removeEventListener("blur", trackWindowFocus);
+    window.removeEventListener("focus", checkCut);
   });
 
   const Pane = (props: { tab: Tab; view: FolderView }) => {
@@ -314,25 +416,35 @@ export function App() {
               {view.error()}
             </p>
           </Show>
-          <Show when={view.folder()} keyed>
-            {(opened) => (
+          {/* A real arrival starts the list over. A reload only swaps its rows, so nothing blinks. */}
+          <Show when={view.folder() && view.arrival()} keyed>
+            {(_arrival) => (
               <FileList
                 view={view.id}
-                snapshot={opened.request}
-                rearranged={opened.rearranged}
-                count={opened.count}
-                selected={opened.selected}
+                snapshot={view.folder()!.request}
+                rearranged={view.folder()!.rearranged}
+                count={view.folder()!.count}
+                selected={view.folder()!.selected}
+                reveal={view.folder()!.reveal}
+                rename={view.folder()!.rename}
+                columns={view.isBin() ? BIN_COLUMNS : columns()}
+                fixedColumns={view.isBin()}
+                cut={cutNames(view.folder()!.path)}
+                emptyText={view.isBin() ? "The Recycle Bin is empty." : "This folder is empty."}
                 active={tab === tabs.active() && view === tab.active()}
                 layout={view.layout()}
                 sort={view.sort()}
                 onSort={(key) => view.setSort(nextSort(view.sort(), key))}
                 onOpen={(row, toSide) => openRow(view, row, toSide)}
-                onMenu={(event, row) => row.isDir && showFolderMenu(event, view, join(opened.path, row.name))}
-                onBackgroundMenu={(event) => showViewMenu(view, event.clientX, event.clientY)}
-                onHeaderMenu={showHeaderMenu}
+                onMenu={(event, row) => showRowMenu(event, view, row)}
+                onBackgroundMenu={(event) => showBackgroundMenu(event, view)}
+                onHeaderMenu={(event) => (view.isBin() ? event.preventDefault() : showHeaderMenu(event))}
                 onGroup={cycleGrouping}
+                onRename={(selection, name) => actions.rename(view, selection, name)}
+                onEditEnd={view.editEnded}
+                onInputMenu={showInputMenu}
                 onFirstPaint={markReady}
-                shareSelection={view.readSelectionFrom}
+                connect={view.connectList}
               />
             )}
           </Show>
@@ -368,6 +480,10 @@ export function App() {
       </main>
       <Show when={menu()} keyed>
         {(open) => <Menu x={open.x} y={open.y} items={open.items} onClose={() => setMenu(undefined)} />}
+      </Show>
+      <JobsPanel jobs={jobs} />
+      <Show when={deleting()} keyed>
+        {(request) => <ConfirmDelete request={request} onClose={() => setDeleting(undefined)} />}
       </Show>
       <Palette />
       <Settings open={settingsOpen()} onClose={() => setSettingsOpen(false)} />
