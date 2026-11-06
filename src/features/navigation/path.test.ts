@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { join, nextTrail, parentOf, samePath, toCrumbs } from "./path.ts";
+import { join, nextTrail, parentOf, samePath, toCrumbs, typedPath } from "./path.ts";
 
 test("samePath ignores case and handles no folder yet", () => {
   assert.equal(samePath("C:\\Users\\Me", "c:\\users\\me"), true);
@@ -38,4 +38,19 @@ test("nextTrail starts over when leaving the trail", () => {
   assert.equal(nextTrail("C:\\a\\b", "C:\\x"), "C:\\x");
   assert.equal(nextTrail("C:\\ab", "C:\\a"), "C:\\a");
   assert.equal(nextTrail("", "C:\\a"), "C:\\a");
+});
+
+test("typedPath keeps full paths and strips the quotes of Copy as path", () => {
+  assert.equal(typedPath("C:\\a", "D:\\b"), "D:\\b");
+  assert.equal(typedPath("C:\\a", '  "D:\\My Files\\b"  '), "D:\\My Files\\b");
+  assert.equal(typedPath("C:\\a", "d:/b"), "d:/b");
+});
+
+test("typedPath opens a bare drive at its root", () => {
+  assert.equal(typedPath("C:\\a", "D:"), "D:\\");
+});
+
+test("typedPath reads other text from the current folder", () => {
+  assert.equal(typedPath("C:\\a", "b\\c"), "C:\\a\\b\\c");
+  assert.equal(typedPath("C:\\a", ".."), "C:\\a\\..");
 });

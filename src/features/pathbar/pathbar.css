@@ -39,10 +39,38 @@
   align-items: center;
   gap: var(--space-1);
   min-width: 0;
+  flex: 1;
+  height: 32px;
   margin: 0 0 0 var(--space-2);
   padding: 0;
   overflow: hidden;
   list-style: none;
+  cursor: text;
+}
+
+.crumbs[hidden] {
+  display: none;
+}
+
+.path-input {
+  flex: 1;
+  min-width: 0;
+  height: 32px;
+  margin-left: var(--space-2);
+  padding: 0 var(--space-2);
+  border: 0;
+  border-radius: var(--radius);
+  background: var(--surface-hover);
+  color: var(--text);
+  font: inherit;
+  caret-color: var(--accent);
+  user-select: text;
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.path-input::selection {
+  background: var(--surface-selected);
 }
 
 .crumbs li {

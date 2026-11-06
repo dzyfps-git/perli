@@ -1,6 +1,18 @@
 import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
-import { openFile, startFolder, type Row } from "./api";
+import { clipboardText, openFile, startFolder, type Row, type SortKey } from "./api";
+import { nextSort } from "./features/filelist/columns";
 import { FileList } from "./features/filelist/FileList";
+import { clampTile, isLargestTile, isSmallestTile, TILE_STEP, type Layout } from "./features/filelist/layout";
+import {
+  columns,
+  filesFirst,
+  setFilesFirst,
+  setShowHidden,
+  setTileSize,
+  showHidden,
+  tileSize,
+  toggleColumn,
+} from "./features/filelist/prefs";
 import type { FolderView } from "./features/navigation/folderView";
 import { join } from "./features/navigation/path";
 import { Palette } from "./features/palette/Palette";
@@ -17,10 +29,13 @@ function markReady() {
 
 // WebView2's find bar, reload and save dialog would break the app's look, so these keys do nothing.
 function isBrowserKey(event: KeyboardEvent, key: string) {
-  return ["f3", "f5", "f7"].includes(key) || (event.ctrlKey && ["f", "g", "r", "s"].includes(key));
+  const ctrlKeys = ["f", "g", "r", "s", "+", "=", "-", "0"];
+  return ["f3", "f5", "f7"].includes(key) || (event.ctrlKey && ctrlKeys.includes(key));
 }
 
+const isTyping = (event: Event) => event.target instanceof HTMLInputElement;
 const hideBrowserMenu = (event: MouseEvent) => event.preventDefault();
+const blockBrowserZoom = (event: WheelEvent) => event.ctrlKey && event.preventDefault();
 const trackWindowFocus = (event: FocusEvent) =>
   document.documentElement.toggleAttribute("data-blurred", event.type === "blur");
 
@@ -45,6 +60,87 @@ export function App() {
     setMenu({ x: event.clientX, y: event.clientY, items });
   }
 
+  function showHeaderMenu(event: MouseEvent) {
+    event.preventDefault();
+    const items = columns().map((column) => ({
+      label: column.label,
+      checked: column.visible,
+      disabled: column.id === "name",
+      action: () => toggleColumn(column.id),
+    }));
+    setMenu({ x: event.clientX, y: event.clientY, items });
+  }
+
+  function showInputMenu(event: MouseEvent) {
+    const paste = async () => {
+      document.execCommand("insertText", false, await clipboardText());
+    };
+    const items = [
+      { label: "Cut", action: () => document.execCommand("cut") },
+      { label: "Copy", action: () => document.execCommand("copy") },
+      { label: "Paste", action: () => paste().catch(console.error) },
+    ];
+    setMenu({ x: event.clientX, y: event.clientY, items });
+  }
+
+  function changeOrder(apply: () => void) {
+    apply();
+    for (const view of tabs.allViews()) view.rearrange();
+  }
+
+  function showViewMenu(view: FolderView, x: number, y: number) {
+    const layoutItem = (label: string, layout: Layout) => ({
+      label,
+      checked: view.layout() === layout,
+      action: () => view.setLayout(layout),
+    });
+    const sortItem = (label: string, key: SortKey, divider = false) => ({
+      label,
+      divider,
+      checked: view.sort().key === key,
+      action: () => view.setSort(nextSort(view.sort(), key)),
+    });
+    const tileItems = [
+      {
+        label: "Larger tiles",
+        disabled: isLargestTile(tileSize()),
+        action: () => setTileSize(clampTile(tileSize() + TILE_STEP)),
+      },
+      {
+        label: "Smaller tiles",
+        disabled: isSmallestTile(tileSize()),
+        action: () => setTileSize(clampTile(tileSize() - TILE_STEP)),
+      },
+    ];
+    const items: MenuItem[] = [
+      layoutItem("List", "list"),
+      layoutItem("Grid", "grid"),
+      ...(view.layout() === "grid" ? tileItems : []),
+      sortItem("Sort by name", "name", true),
+      sortItem("Sort by date modified", "modified"),
+      sortItem("Sort by date created", "created"),
+      sortItem("Sort by type", "type"),
+      sortItem("Sort by size", "size"),
+      {
+        label: "Descending",
+        checked: view.sort().descending,
+        action: () => view.setSort({ ...view.sort(), descending: !view.sort().descending }),
+      },
+      {
+        label: "Files first",
+        divider: true,
+        checked: filesFirst(),
+        action: () => changeOrder(() => setFilesFirst(!filesFirst())),
+      },
+      {
+        label: "Show hidden files",
+        checked: showHidden(),
+        action: () => changeOrder(() => setShowHidden(!showHidden())),
+      },
+    ];
+    setMenu({ x, y, items });
+  }
+
   const newTab = async () => {
     const path = tabs.activeView().folder()?.path;
     if (path) await tabs.add([path]);
@@ -55,6 +151,11 @@ export function App() {
     if (path && !tabs.active().other()) tabs.openToSide(path);
   }
 
+  // List view has no tiles, so these keys do nothing there.
+  function resizeTiles(view: FolderView, change: number) {
+    if (view.layout() === "grid") setTileSize(clampTile(tileSize() + change));
+  }
+
   function onKeyDown(event: KeyboardEvent) {
     const view = tabs.activeView();
     const tab = tabs.active();
@@ -63,20 +164,24 @@ export function App() {
     if (event.altKey && key === "arrowleft") view.back();
     else if (event.altKey && key === "arrowright") view.forward();
     else if (event.altKey && key === "arrowup") view.up();
-    else if (key === "backspace") view.up();
+    else if (key === "backspace" && !isTyping(event)) view.up();
+    else if ((event.ctrlKey && key === "l") || (event.altKey && key === "d")) view.setEditingPath(true);
     else if (event.ctrlKey && event.shiftKey && key === "t") tabs.reopenClosed();
     else if (event.ctrlKey && key === "t") newTab();
     else if (event.ctrlKey && key === "w") tabs.closePane(tab, view);
     else if (event.ctrlKey && key === "\\") splitView();
     else if (key === "f6") tab.activate(tab.other() ?? view);
     else if (event.ctrlKey && key === "tab") tabs.cycle(event.shiftKey ? -1 : 1);
-    else if (!isBrowserKey(event, key)) return;
+    else if (event.ctrlKey && (key === "+" || key === "=")) resizeTiles(view, TILE_STEP);
+    else if (event.ctrlKey && key === "-") resizeTiles(view, -TILE_STEP);
+    else if (key === "backspace" || !isBrowserKey(event, key)) return;
     event.preventDefault();
   }
 
   onMount(async () => {
     window.addEventListener("keydown", onKeyDown);
     window.addEventListener("contextmenu", hideBrowserMenu);
+    window.addEventListener("wheel", blockBrowserZoom, { passive: false });
     window.addEventListener("focus", trackWindowFocus);
     window.addEventListener("blur", trackWindowFocus);
     const opened = await tabs.activeView().open(await startFolder());
@@ -85,6 +190,7 @@ export function App() {
   onCleanup(() => {
     window.removeEventListener("keydown", onKeyDown);
     window.removeEventListener("contextmenu", hideBrowserMenu);
+    window.removeEventListener("wheel", blockBrowserZoom);
     window.removeEventListener("focus", trackWindowFocus);
     window.removeEventListener("blur", trackWindowFocus);
   });
@@ -99,7 +205,11 @@ export function App() {
         onPointerDown={activate}
         onFocusIn={activate}
       >
-        <PathBar view={view} />
+        <PathBar
+          view={view}
+          onOptions={(x, y) => showViewMenu(view, x, y)}
+          onInputMenu={showInputMenu}
+        />
         <div class="file-area">
           <Show when={view.error()}>
             <p class="message" role="alert">
@@ -112,10 +222,17 @@ export function App() {
                 view={view.id}
                 snapshot={opened.request}
                 count={opened.count}
+                selected={opened.selected}
                 active={tab === tabs.active() && view === tab.active()}
+                layout={view.layout()}
+                sort={view.sort()}
+                onSort={(key) => view.setSort(nextSort(view.sort(), key))}
                 onOpen={(row, toSide) => openRow(view, row, toSide)}
                 onMenu={(event, row) => row.isDir && showFolderMenu(event, view, join(opened.path, row.name))}
+                onBackgroundMenu={(event) => showViewMenu(view, event.clientX, event.clientY)}
+                onHeaderMenu={showHeaderMenu}
                 onFirstPaint={markReady}
+                shareSelection={view.readSelectionFrom}
               />
             )}
           </Show>

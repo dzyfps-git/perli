@@ -13,6 +13,14 @@ export function createSelection() {
     has: (index: number) => selected.has(index),
     focused: () => focused,
     size: () => selected.size,
+    /** Every selected row, with the focused one first. */
+    rows: () => [...selected].sort((a, b) => Number(b === focused) - Number(a === focused)),
+
+    /** Selects `rows` and focuses the first one. */
+    restore(rows: number[]) {
+      selected = new Set(rows);
+      focused = anchor = rows[0] ?? -1;
+    },
 
     clear() {
       selected = new Set();

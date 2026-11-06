@@ -1,8 +1,77 @@
+.file-list {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.column-header {
+  flex: none;
+  display: grid;
+  grid-template-columns: var(--file-columns);
+  gap: var(--space-3);
+  height: var(--row-height);
+  /* Lines up with rows, which always leave room for the scrollbar. */
+  padding: 0 calc(var(--space-4) + var(--scrollbar-size)) 0 var(--space-4);
+  border-bottom: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.column-title {
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.column-size {
+  justify-content: flex-end;
+}
+
+.column-button {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  white-space: nowrap;
+  transition: color var(--motion);
+}
+
+.column-button:hover,
+.column-button:focus-visible {
+  color: var(--text);
+  outline: none;
+}
+
+.column-arrow {
+  color: var(--accent);
+  font-family: var(--font-icons);
+  font-size: 8px;
+}
+
+.column-resize {
+  position: absolute;
+  inset: 0 auto 0 calc(var(--space-3) / -2 - 4px);
+  width: 8px;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.column-resize:hover {
+  background: linear-gradient(var(--accent), var(--accent)) center / 1px 100% no-repeat;
+}
+
 .file-grid {
   position: relative;
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  scrollbar-gutter: stable;
   outline: none;
   contain: strict;
 }
@@ -13,11 +82,12 @@
 
 .file-row {
   position: absolute;
-  inset: 0 0 auto;
-  height: var(--row-height);
+  inset: 0 auto auto 0;
+  width: calc(100% / var(--per-row, 1));
+  height: var(--item-height, var(--row-height));
   padding: 0 var(--space-4);
   display: grid;
-  grid-template-columns: minmax(120px, 1fr) 160px 90px;
+  grid-template-columns: var(--file-columns);
   gap: var(--space-3);
   align-items: center;
   contain: strict;
@@ -26,8 +96,9 @@
 /* A lone selection is this one bar, so it can slide between rows. */
 .file-marker {
   position: absolute;
-  inset: 0 0 auto;
-  height: var(--row-height);
+  inset: 0 auto auto 0;
+  width: calc(100% / var(--per-row, 1));
+  height: var(--item-height, var(--row-height));
   background: var(--surface-selected);
   transition: transform var(--motion-slide);
 }
@@ -72,4 +143,49 @@
 
 .file-size {
   text-align: right;
+}
+
+.file-row[data-hidden] .file-name,
+.file-row[data-hidden]::before {
+  opacity: 55%;
+}
+
+/* A clear border leaves a small gap between tiles, so highlights stay separate. */
+.file-grid[data-layout="grid"] .file-row,
+.file-grid[data-layout="grid"] .file-marker {
+  border: 2px solid transparent;
+  border-radius: calc(var(--radius) + 2px);
+  background-clip: padding-box;
+}
+
+.file-grid[data-layout="grid"] .file-row {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-1);
+  padding: var(--space-2);
+}
+
+.file-grid[data-layout="grid"] .file-row:not([data-empty])::before {
+  content: "\E8A5";
+  color: var(--text-muted);
+  font-family: var(--font-icons);
+  font-size: calc(var(--tile-size) * 0.4);
+  line-height: 1;
+}
+
+.file-grid[data-layout="grid"] .file-row[data-folder]::before {
+  content: "\E8B7";
+  color: var(--accent);
+}
+
+.file-grid[data-layout="grid"] .file-name {
+  display: -webkit-box;
+  width: 100%;
+  text-align: center;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
