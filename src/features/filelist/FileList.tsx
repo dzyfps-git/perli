@@ -55,6 +55,7 @@ function createRow(): PooledRow {
 
 export function FileList(props: {
   view: number;
+  snapshot: number;
   count: number;
   active: boolean;
   onOpen: (row: Row) => void;
@@ -72,7 +73,7 @@ export function FileList(props: {
   function loadPage(page: number) {
     if (loading.has(page)) return;
     loading.add(page);
-    fetchRows(props.view, page * PAGE_SIZE, PAGE_SIZE)
+    fetchRows(props.view, props.snapshot, page * PAGE_SIZE, PAGE_SIZE)
       .then((rows) => {
         pages.set(page, rows);
         if (pages.size > MAX_PAGES) pages.delete(pages.keys().next().value!);

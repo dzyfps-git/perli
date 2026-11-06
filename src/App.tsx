@@ -71,6 +71,7 @@ export function App() {
                 {(opened) => (
                   <FileList
                     view={view.id}
+                    snapshot={opened.request}
                     count={opened.count}
                     active={view === tabs.active()}
                     onOpen={(row) => openRow(view, row)}

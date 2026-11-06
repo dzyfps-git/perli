@@ -16,7 +16,7 @@ export function createFolderView(id: number) {
   async function load(path: string) {
     const request = ++latestRequest;
     try {
-      const opened = await openFolder(id, request, path);
+      const opened = await openFolder(id, request, folder()?.request ?? 0, path);
       if (request !== latestRequest) return undefined;
       setError(undefined);
       setFolder(opened);
