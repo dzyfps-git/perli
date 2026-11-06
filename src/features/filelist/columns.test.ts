@@ -6,12 +6,19 @@ import {
   dragTarget,
   gridTemplate,
   movedColumn,
+  nextGrouping,
   nextSort,
   restoreColumns,
   typeLabel,
 } from "./columns.ts";
 
 const ids = (columns: { id: string }[]) => columns.map((column) => column.id).join();
+
+test("nextGrouping cycles through all three and wraps", () => {
+  assert.equal(nextGrouping("foldersFirst"), "filesFirst");
+  assert.equal(nextGrouping("filesFirst"), "mixed");
+  assert.equal(nextGrouping("mixed"), "foldersFirst");
+});
 
 test("movedColumn takes the target's place in either direction", () => {
   assert.equal(ids(movedColumn(DEFAULT_COLUMNS, "modified", "type")), "name,created,type,modified,size");

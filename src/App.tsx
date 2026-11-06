@@ -9,7 +9,7 @@ import {
   type Row,
   type SortKey,
 } from "./api";
-import { nextSort } from "./features/filelist/columns";
+import { nextGrouping, nextSort } from "./features/filelist/columns";
 import { FileList } from "./features/filelist/FileList";
 import { clampTile, isLargestTile, isSmallestTile, TILE_STEP, type Layout } from "./features/filelist/layout";
 import {
@@ -132,6 +132,7 @@ export function App() {
   }
 
   const toggleHidden = () => changeOrder(() => setShowHidden(!showHidden()));
+  const cycleGrouping = () => changeOrder(() => setGrouping(nextGrouping(grouping())));
 
   function showViewMenu(view: FolderView, x: number, y: number) {
     const layoutItem = (label: string, layout: Layout) => ({
@@ -288,7 +289,7 @@ export function App() {
       >
         <PathBar
           view={view}
-          onOptions={(x, y) => showViewMenu(view, x, y)}
+          onToggleHidden={toggleHidden}
           onInputMenu={showInputMenu}
         />
         <div class="file-area">
@@ -313,6 +314,7 @@ export function App() {
                 onMenu={(event, row) => row.isDir && showFolderMenu(event, view, join(opened.path, row.name))}
                 onBackgroundMenu={(event) => showViewMenu(view, event.clientX, event.clientY)}
                 onHeaderMenu={showHeaderMenu}
+                onGroup={cycleGrouping}
                 onFirstPaint={markReady}
                 shareSelection={view.readSelectionFrom}
               />

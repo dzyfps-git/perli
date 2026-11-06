@@ -5,6 +5,92 @@
   min-height: 0;
 }
 
+.column-strip {
+  position: relative;
+  flex: none;
+}
+
+/* Grid keeps the same titles, with room at the end for the tile size. */
+.sort-strip {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  height: var(--row-height);
+  padding: 0 calc(var(--space-4) + var(--scrollbar-size)) 0 var(--space-4);
+  border-bottom: 1px solid var(--border);
+  overflow: hidden;
+}
+
+/* Extras wait for the pointer, so a resting list shows titles and nothing else. */
+.strip-extra {
+  opacity: 0;
+  transition: opacity var(--motion);
+}
+
+.column-strip:hover .strip-extra,
+.column-strip:focus-within .strip-extra,
+.strip-extra[data-on] {
+  opacity: 100%;
+}
+
+.strip-icon {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--space-1);
+  background: transparent;
+  color: var(--text-muted);
+  font-family: var(--font-icons);
+  font-size: 11px;
+}
+
+.strip-icon:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.strip-icon:focus-visible,
+.column-ghost:focus-visible,
+.tile-size:focus-visible {
+  opacity: 100%;
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* Sits in the header's right padding, so it never covers a title. */
+.column-edit {
+  position: absolute;
+  inset: calc((var(--row-height) - 20px) / 2) var(--space-1) auto auto;
+}
+
+.column-ghost {
+  flex: none;
+  margin-left: var(--space-1);
+  padding: 0 var(--space-2);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.column-ghost:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.tile-size {
+  flex: 0 1 96px;
+  min-width: 48px;
+  height: 16px;
+  margin: 0 0 0 auto;
+  accent-color: var(--accent);
+}
+
 .column-header {
   flex: none;
   display: grid;
@@ -21,6 +107,7 @@
   position: relative;
   display: flex;
   align-items: center;
+  gap: var(--space-1);
   min-width: 0;
 }
 

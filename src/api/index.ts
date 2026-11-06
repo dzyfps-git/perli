@@ -7,6 +7,8 @@ export interface Opened {
   /** The resolved full path. */
   path: string;
   count: number;
+  /** Hidden entries in the folder, shown or not. */
+  hiddenCount: number;
   loadMs: number;
   /** Rows to select straight away, when this is a new order of the same folder. */
   selected?: number[];

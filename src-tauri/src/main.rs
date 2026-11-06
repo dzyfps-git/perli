@@ -80,6 +80,7 @@ struct Opened {
     request: u64,
     path: String,
     count: usize,
+    hidden_count: usize,
     load_ms: f64,
 }
 
@@ -182,6 +183,7 @@ async fn open_folder(
         request,
         path: resolved,
         count: listing.len(),
+        hidden_count: listing.hidden_count(),
         load_ms: started.elapsed().as_secs_f64() * 1000.0,
     };
     let mut views = views.0.write().unwrap_or_else(|error| error.into_inner());
