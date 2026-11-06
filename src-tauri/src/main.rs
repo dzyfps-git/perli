@@ -8,10 +8,13 @@ mod shell;
 use std::collections::HashMap;
 use std::sync::{Mutex, RwLock};
 use std::thread::{self, JoinHandle};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
-use tauri::{async_runtime, ipc::Response, State};
+use tauri::{async_runtime, ipc::Response, State, WindowEvent};
+
+/// How long the UI gets to finish closing before the window goes anyway.
+const CLOSE_LIMIT: Duration = Duration::from_secs(1);
 
 /// A folder's rows, named by the request that made them.
 struct Snapshot {
@@ -340,6 +343,16 @@ fn main() {
     });
 
     tauri::Builder::default()
+        // The UI saves the session and then closes the window, unless it is frozen.
+        .on_window_event(|window, event| {
+            if matches!(event, WindowEvent::CloseRequested { .. }) {
+                let window = window.clone();
+                thread::spawn(move || {
+                    thread::sleep(CLOSE_LIMIT);
+                    let _ = window.destroy();
+                });
+            }
+        })
         .manage(start)
         .manage(Views::default())
         .manage(Preload(Mutex::new(preload)))
