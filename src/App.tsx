@@ -21,6 +21,8 @@ function isBrowserKey(event: KeyboardEvent, key: string) {
 }
 
 const hideBrowserMenu = (event: MouseEvent) => event.preventDefault();
+const trackWindowFocus = (event: FocusEvent) =>
+  document.documentElement.toggleAttribute("data-blurred", event.type === "blur");
 
 // The main layout. Moving parts of the app around should only change this file.
 export function App() {
@@ -75,12 +77,16 @@ export function App() {
   onMount(async () => {
     window.addEventListener("keydown", onKeyDown);
     window.addEventListener("contextmenu", hideBrowserMenu);
+    window.addEventListener("focus", trackWindowFocus);
+    window.addEventListener("blur", trackWindowFocus);
     const opened = await tabs.activeView().open(await startFolder());
     if (opened) performance.mark("perli-folder-open", { detail: opened });
   });
   onCleanup(() => {
     window.removeEventListener("keydown", onKeyDown);
     window.removeEventListener("contextmenu", hideBrowserMenu);
+    window.removeEventListener("focus", trackWindowFocus);
+    window.removeEventListener("blur", trackWindowFocus);
   });
 
   const Pane = (props: { tab: Tab; view: FolderView }) => {

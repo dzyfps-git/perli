@@ -38,6 +38,22 @@ function Place(props: { view: FolderView; path: string; label: string; icon: str
 
 export function Sidebar(props: { view: FolderView; onMenu: PlaceMenu }) {
   const [places, setPlaces] = createSignal<Places>();
+  let nav!: HTMLElement;
+  let glide!: HTMLSpanElement;
+
+  function moveGlide(event: PointerEvent) {
+    const place = (event.target as HTMLElement).closest(".place");
+    if (!place) return;
+
+    const top = place.getBoundingClientRect().top - nav.getBoundingClientRect().top;
+    const hidden = !glide.classList.contains("place-glide-on");
+    // Appearing should fade in on the spot, not fly over from the last place.
+    if (hidden) glide.style.transition = "none";
+    glide.style.transform = `translateY(${top}px)`;
+    if (hidden) void glide.offsetHeight;
+    glide.style.transition = "";
+    glide.classList.add("place-glide-on");
+  }
 
   // ponytail: read once, so a newly plugged drive needs a restart. Watch for drive changes in Phase 3.
   onMount(() => {
@@ -45,7 +61,14 @@ export function Sidebar(props: { view: FolderView; onMenu: PlaceMenu }) {
   });
 
   return (
-    <nav class="places" aria-label="Places">
+    <nav
+      ref={nav}
+      class="places"
+      aria-label="Places"
+      onPointerOver={moveGlide}
+      onPointerLeave={() => glide.classList.remove("place-glide-on")}
+    >
+      <span ref={glide} class="place-glide" />
       <ul>
         <For each={places()?.folders}>
           {(folder) => <Place view={props.view} path={folder.path} onMenu={props.onMenu} {...FOLDERS[folder.kind]} />}

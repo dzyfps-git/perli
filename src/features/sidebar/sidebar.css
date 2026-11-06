@@ -1,3 +1,25 @@
+.places {
+  position: relative;
+}
+
+/* One hover highlight that glides between places. */
+.place-glide {
+  position: absolute;
+  inset: 0 0 auto;
+  height: var(--row-height);
+  border-radius: var(--radius);
+  background: var(--surface-hover);
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    opacity var(--motion),
+    transform var(--motion-slide);
+}
+
+.place-glide-on {
+  opacity: 1;
+}
+
 .places ul {
   margin: var(--space-3) 0 0;
   padding: 0;
@@ -5,6 +27,7 @@
 }
 
 .place {
+  position: relative;
   display: flex;
   align-items: center;
   gap: var(--space-2);
@@ -18,10 +41,6 @@
   font: inherit;
   text-align: left;
   transition: background var(--motion);
-}
-
-.place:hover {
-  background: var(--surface-hover);
 }
 
 .place[aria-current] {

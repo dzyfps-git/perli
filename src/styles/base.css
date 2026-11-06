@@ -58,7 +58,27 @@ body {
 .logo {
   font-size: 16px;
   font-weight: 600;
-  color: var(--accent);
+  background: var(--accent-drift) 0 0 / 300% 100%;
+  background-clip: text;
+  color: transparent;
+  animation: drift var(--drift-time) linear infinite;
+}
+
+/* Repaints every frame, so it only runs while Perli is in use. */
+html[data-blurred] .logo {
+  animation-play-state: paused;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .logo {
+    animation: none;
+  }
+}
+
+@keyframes drift {
+  to {
+    background-position: -300% 0;
+  }
 }
 
 .files {
@@ -92,7 +112,7 @@ body {
 }
 
 .pane-active .pathbar {
-  border-bottom-color: var(--accent);
+  border-image: var(--accent-line) 1;
 }
 
 .file-area {

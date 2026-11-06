@@ -11,6 +11,7 @@
   align-items: flex-end;
   gap: var(--space-1);
   min-width: 0;
+  position: relative;
   padding: var(--space-1) var(--space-2) 0;
   overflow: hidden;
 }
@@ -40,13 +41,18 @@
   color: var(--text);
 }
 
-.tab-active::after {
-  content: "";
+/* One line that glides between tabs. The padding insets it from the tab's edges. */
+.tab-ink {
   position: absolute;
-  inset: auto var(--space-2) 0;
+  bottom: 0;
+  left: 0;
   height: 2px;
-  border-radius: 1px;
-  background: var(--accent);
+  padding: 0 var(--space-2);
+  background: var(--accent-line) content-box;
+  pointer-events: none;
+  transition:
+    transform var(--motion-glide),
+    width var(--motion-glide);
 }
 
 .tab:focus-visible {
