@@ -52,7 +52,13 @@ export function App() {
           </Show>
           <Show when={view.folder()} keyed>
             {(opened) => (
-              <FileList view={view.id} count={opened.count} onOpen={openRow} onFirstPaint={markReady} />
+              <FileList
+                view={view.id}
+                snapshot={opened.request}
+                count={opened.count}
+                onOpen={openRow}
+                onFirstPaint={markReady}
+              />
             )}
           </Show>
         </div>

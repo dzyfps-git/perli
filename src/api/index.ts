@@ -2,6 +2,8 @@
 import { invoke } from "@tauri-apps/api/core";
 
 export interface Opened {
+  /** Names this folder's rows in later `fetchRows` calls. */
+  request: number;
   /** The resolved full path. */
   path: string;
   count: number;
@@ -25,13 +27,19 @@ const names = new TextDecoder("utf-16le");
 
 export const startFolder = () => invoke<string>("start_folder");
 
-export const openFolder = (view: number, request: number, path: string) =>
-  invoke<Opened>("open_folder", { view, request, path });
+/** `shown` is the request of the folder on screen, whose rows must outlive this open. */
+export const openFolder = (view: number, request: number, shown: number, path: string) =>
+  invoke<Opened>("open_folder", { view, request, shown, path });
 
 export const openFile = (path: string) => invoke<void>("open_file", { path });
 
-export async function fetchRows(view: number, start: number, count: number): Promise<Row[]> {
-  return decodeRows(await invoke<ArrayBuffer>("rows", { view, start, count }));
+export async function fetchRows(
+  view: number,
+  request: number,
+  start: number,
+  count: number,
+): Promise<Row[]> {
+  return decodeRows(await invoke<ArrayBuffer>("rows", { view, request, start, count }));
 }
 
 /** Decodes the format written by `encode_rows` in `src-tauri/src/folder.rs`. */
