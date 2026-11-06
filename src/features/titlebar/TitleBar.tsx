@@ -2,9 +2,8 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { placeSnapArea } from "../../api";
 import { Menu } from "../../ui/Menu";
-import type { FolderView } from "../navigation/folderView";
 import { toCrumbs } from "../navigation/path";
-import type { Tabs } from "../tabs/tabs";
+import type { Tab, Tabs } from "../tabs/tabs";
 import "./titlebar.css";
 
 const ICON_ADD = "";
@@ -13,15 +12,15 @@ const ICON_MINIMIZE = "";
 const ICON_MAXIMIZE = "";
 const ICON_RESTORE = "";
 
-function tabTitle(view: FolderView) {
-  const crumbs = toCrumbs(view.folder()?.path ?? "");
-  return crumbs.at(-1)?.label ?? "New tab";
+function tabTitle(tab: Tab) {
+  const titles = tab.panes().map((view) => toCrumbs(view.folder()?.path ?? "").at(-1)?.label ?? "New tab");
+  return titles.join(" | ");
 }
 
 export function TitleBar(props: { tabs: Tabs; onNewTab: () => void }) {
   const appWindow = getCurrentWindow();
   const [maximized, setMaximized] = createSignal(false);
-  const [menu, setMenu] = createSignal<{ x: number; y: number; view: FolderView }>();
+  const [menu, setMenu] = createSignal<{ x: number; y: number; tab: Tab }>();
   const [maximizeHovered, setMaximizeHovered] = createSignal(false);
   let maximizeButton!: HTMLButtonElement;
 
@@ -46,16 +45,21 @@ export function TitleBar(props: { tabs: Tabs; onNewTab: () => void }) {
     update();
   });
 
-  function menuItems(view: FolderView) {
+  function menuItems(tab: Tab) {
     const { tabs } = props;
     const list = tabs.tabs();
+    const split = tab.panes().length > 1;
+    const path = tab.active().folder()?.path;
     return [
       { label: "New tab", action: props.onNewTab },
-      { label: "Duplicate", action: () => tabs.duplicate(view) },
-      { label: "Move left", action: () => tabs.move(view, -1), disabled: list[0] === view },
-      { label: "Move right", action: () => tabs.move(view, 1), disabled: list.at(-1) === view },
-      { label: "Close", action: () => tabs.close(view), disabled: list.length === 1 },
-      { label: "Close others", action: () => tabs.closeOthers(view), disabled: list.length === 1 },
+      { label: "Duplicate", action: () => tabs.duplicate(tab) },
+      { label: "Split view", action: () => tabs.openToSide(path!, tab), disabled: split || !path },
+      { label: "Swap panes", action: tab.swap, disabled: !split },
+      { label: "Close pane", action: () => tabs.closePane(tab, tab.active()), disabled: !split },
+      { label: "Move left", action: () => tabs.move(tab, -1), disabled: list[0] === tab },
+      { label: "Move right", action: () => tabs.move(tab, 1), disabled: list.at(-1) === tab },
+      { label: "Close", action: () => tabs.close(tab), disabled: list.length === 1 },
+      { label: "Close others", action: () => tabs.closeOthers(tab), disabled: list.length === 1 },
     ];
   }
 
@@ -63,31 +67,31 @@ export function TitleBar(props: { tabs: Tabs; onNewTab: () => void }) {
     <header class="titlebar" data-tauri-drag-region>
       <div class="tabs" role="tablist" aria-label="Open folders">
         <For each={props.tabs.tabs()}>
-          {(view) => (
+          {(tab) => (
             <div
               class="tab"
-              classList={{ "tab-active": view === props.tabs.active() }}
+              classList={{ "tab-active": tab === props.tabs.active() }}
               role="tab"
-              aria-selected={view === props.tabs.active()}
+              aria-selected={tab === props.tabs.active()}
               tabindex="0"
-              onClick={() => props.tabs.activate(view)}
-              onKeyDown={(event) => event.key === "Enter" && props.tabs.activate(view)}
-              onAuxClick={(event) => event.button === 1 && props.tabs.close(view)}
+              onClick={() => props.tabs.activate(tab)}
+              onKeyDown={(event) => event.key === "Enter" && props.tabs.activate(tab)}
+              onAuxClick={(event) => event.button === 1 && props.tabs.close(tab)}
               onContextMenu={(event) => {
                 event.preventDefault();
                 // A native window sits over the maximize button and would take the menu's clicks.
                 const below = maximizeButton.getBoundingClientRect().bottom;
-                setMenu({ x: event.clientX, y: Math.max(event.clientY, below), view });
+                setMenu({ x: event.clientX, y: Math.max(event.clientY, below), tab });
               }}
             >
-              <span class="tab-title">{tabTitle(view)}</span>
+              <span class="tab-title">{tabTitle(tab)}</span>
               <Show when={props.tabs.tabs().length > 1}>
                 <button
                   class="tab-close"
-                  aria-label={`Close ${tabTitle(view)}`}
+                  aria-label={`Close ${tabTitle(tab)}`}
                   onClick={(event) => {
                     event.stopPropagation();
-                    props.tabs.close(view);
+                    props.tabs.close(tab);
                   }}
                 >
                   {ICON_CLOSE}
@@ -121,7 +125,7 @@ export function TitleBar(props: { tabs: Tabs; onNewTab: () => void }) {
 
       <Show when={menu()} keyed>
         {(open) => (
-          <Menu x={open.x} y={open.y} items={menuItems(open.view)} onClose={() => setMenu(undefined)} />
+          <Menu x={open.x} y={open.y} items={menuItems(open.tab)} onClose={() => setMenu(undefined)} />
         )}
       </Show>
     </header>

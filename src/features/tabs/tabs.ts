@@ -1,59 +1,101 @@
 import { createSignal } from "solid-js";
-import { closeView, type Opened } from "../../api";
+import { closeView } from "../../api";
 import { createFolderView, type FolderView } from "../navigation/folderView";
-import { cycled, moved, nextActive } from "./tabList";
+import { cycled, moved, nextActive, otherPane } from "./tabList";
 
 export type Tabs = ReturnType<typeof createTabs>;
+export type Tab = ReturnType<typeof createTab>;
+
+/** One title bar tab: 1 or 2 folder views side by side. */
+function createTab(views: FolderView[]) {
+  const [panes, setPanes] = createSignal(views);
+  const [active, setActive] = createSignal(views[0]);
+  const [swapped, setSwapped] = createSignal(false);
+  return {
+    panes,
+    setPanes,
+    active,
+    activate: setActive,
+    swapped,
+    swap: () => setSwapped(!swapped()),
+    other: () => otherPane(panes(), active()),
+    paths: () => panes().flatMap((view) => view.folder()?.path ?? []),
+  };
+}
 
 export function createTabs() {
-  const first = createFolderView(0);
-  let nextId = 1;
-  const [tabs, setTabs] = createSignal<FolderView[]>([first]);
+  let nextId = 0;
+  const newView = () => createFolderView(nextId++);
+
+  const first = createTab([newView()]);
+  const [tabs, setTabs] = createSignal([first]);
   const [active, setActive] = createSignal(first);
-  const closedPaths: string[] = [];
+  const closed: string[][] = [];
 
-  async function add(path: string, after = active()): Promise<Opened | undefined> {
-    const view = createFolderView(nextId++);
-    const opened = await view.open(path);
-    if (!opened) return undefined;
+  async function add(paths: string[], after = active()) {
+    const views = paths.map(newView);
+    const results = await Promise.all(views.map((view, index) => view.open(paths[index])));
+    const opened = views.filter((_, index) => results[index]);
+    if (opened.length === 0) return;
 
+    const tab = createTab(opened);
     const list = tabs();
     const result = [...list];
-    result.splice(list.indexOf(after) + 1, 0, view);
+    result.splice(list.indexOf(after) + 1, 0, tab);
     setTabs(result);
-    setActive(view);
-    return opened;
+    setActive(tab);
   }
 
-  function close(view: FolderView) {
+  function close(tab: Tab) {
     const list = tabs();
     if (list.length === 1) return;
 
+    closed.push(tab.paths());
+    setActive(nextActive(list, tab, active()));
+    setTabs(list.filter((other) => other !== tab));
+    for (const view of tab.panes()) closeView(view.id).catch(console.error);
+  }
+
+  function closePane(tab: Tab, view: FolderView) {
+    const panes = tab.panes();
+    if (panes.length === 1) return close(tab);
+
     const path = view.folder()?.path;
-    if (path) closedPaths.push(path);
-    setActive(nextActive(list, view, active()));
-    setTabs(list.filter((tab) => tab !== view));
+    if (path) closed.push([path]);
+    tab.activate(nextActive(panes, view, tab.active()));
+    tab.setPanes(panes.filter((pane) => pane !== view));
     closeView(view.id).catch(console.error);
+  }
+
+  /** Opens `path` in the other pane, adding that pane if the tab has only one. */
+  function openToSide(path: string, tab = active()) {
+    let view = tab.other();
+    if (!view) {
+      view = newView();
+      tab.setPanes([...tab.panes(), view]);
+    }
+    tab.activate(view);
+    return view.open(path);
   }
 
   return {
     tabs,
     active,
+    activeView: () => active().active(),
     add,
     close,
+    closePane,
+    openToSide,
     activate: setActive,
-    closeOthers(view: FolderView) {
-      for (const tab of tabs()) if (tab !== view) close(tab);
+    closeOthers(tab: Tab) {
+      for (const other of tabs()) if (other !== tab) close(other);
     },
-    duplicate(view: FolderView) {
-      const path = view.folder()?.path;
-      if (path) add(path, view);
-    },
-    move: (view: FolderView, offset: number) => setTabs(moved(tabs(), view, offset)),
+    duplicate: (tab: Tab) => add(tab.paths(), tab),
+    move: (tab: Tab, offset: number) => setTabs(moved(tabs(), tab, offset)),
     cycle: (offset: number) => setActive(cycled(tabs(), active(), offset)),
     reopenClosed() {
-      const path = closedPaths.pop();
-      if (path) add(path);
+      const paths = closed.pop();
+      if (paths?.length) add(paths);
     },
   };
 }

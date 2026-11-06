@@ -16,6 +16,11 @@ export function moved<T>(tabs: T[], tab: T, offset: number) {
   return result;
 }
 
+/** The pane beside `pane`, if the tab has two. */
+export function otherPane<T>(panes: T[], pane: T) {
+  return panes.find((other) => other !== pane);
+}
+
 /** The tab `offset` places away, wrapping around the ends. */
 export function cycled<T>(tabs: T[], active: T, offset: number) {
   const index = tabs.indexOf(active);

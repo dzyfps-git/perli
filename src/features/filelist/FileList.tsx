@@ -58,7 +58,8 @@ export function FileList(props: {
   snapshot: number;
   count: number;
   active: boolean;
-  onOpen: (row: Row) => void;
+  onOpen: (row: Row, toSide: boolean) => void;
+  onMenu: (event: MouseEvent, row: Row) => void;
   onFirstPaint: () => void;
 }) {
   const pages = new Map<number, Row[]>();
@@ -169,9 +170,21 @@ export function FileList(props: {
     selectionChanged();
   }
 
-  function openIndex(index: number) {
+  function openIndex(index: number, toSide: boolean) {
     const row = index >= 0 ? rowAt(index) : undefined;
-    if (row) props.onOpen(row);
+    if (row) props.onOpen(row, toSide);
+  }
+
+  function onContextMenu(event: MouseEvent) {
+    event.preventDefault();
+    const index = indexFromEvent(event);
+    const row = index >= 0 ? rowAt(index) : undefined;
+    if (!row) return;
+    if (!selection.has(index)) {
+      selection.select(index);
+      selectionChanged();
+    }
+    props.onMenu(event, row);
   }
 
   function onKeyDown(event: KeyboardEvent) {
@@ -192,7 +205,7 @@ export function FileList(props: {
       if (event.shiftKey) selection.extendTo(target, false);
       else selection.select(target);
     } else if (event.key === "Enter" && focused >= 0) {
-      openIndex(focused);
+      openIndex(focused, event.ctrlKey);
     } else if (event.ctrlKey && event.key.toLowerCase() === "a") {
       selection.selectAll(props.count);
     } else {
@@ -226,7 +239,8 @@ export function FileList(props: {
       tabindex="0"
       onScroll={paint}
       onClick={onClick}
-      onDblClick={(event) => openIndex(indexFromEvent(event))}
+      onDblClick={(event) => openIndex(indexFromEvent(event), event.ctrlKey)}
+      onContextMenu={onContextMenu}
       onKeyDown={onKeyDown}
     >
       <div ref={spacer} class="file-spacer" role="presentation" />
