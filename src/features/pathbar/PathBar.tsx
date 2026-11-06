@@ -1,4 +1,4 @@
-import { For } from "solid-js";
+import { createEffect, For, onCleanup, onMount } from "solid-js";
 import type { FolderView } from "../navigation/folderView";
 import { toCrumbs } from "../navigation/path";
 import "./pathbar.css";
@@ -10,6 +10,22 @@ const ICON_UP = "";
 export function PathBar(props: { view: FolderView }) {
   const crumbs = () => toCrumbs(props.view.trail());
   const depth = () => toCrumbs(props.view.folder()?.path ?? "").length;
+  let list!: HTMLOListElement;
+
+  // Narrow panes clip the crumbs, and the current folder must stay visible.
+  const revealCurrent = () => list.querySelector("[aria-current]")?.scrollIntoView({ block: "nearest", inline: "end" });
+
+  createEffect(() => {
+    crumbs();
+    depth();
+    revealCurrent();
+  });
+
+  onMount(() => {
+    const observer = new ResizeObserver(revealCurrent);
+    observer.observe(list);
+    onCleanup(() => observer.disconnect());
+  });
 
   return (
     <nav class="pathbar" aria-label="Folder navigation">
@@ -27,7 +43,7 @@ export function PathBar(props: { view: FolderView }) {
       <button class="nav-button" aria-label="Up" disabled={!props.view.canGoUp()} onClick={() => props.view.up()}>
         {ICON_UP}
       </button>
-      <ol class="crumbs">
+      <ol ref={list} class="crumbs">
         <For each={crumbs()}>
           {(crumb, index) => (
             <li>

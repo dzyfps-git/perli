@@ -43,21 +43,43 @@ body {
 }
 
 .files {
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
   min-width: 0;
   min-height: 0;
   background: var(--surface);
+}
+
+.panes {
+  display: flex;
+  gap: 1px;
+  height: 100%;
+  background: var(--border);
+}
+
+.panes[hidden] {
+  display: none;
+}
+
+/* Swapping by style keeps each list's DOM in place, which keeps its scroll position. */
+.panes-swapped {
+  flex-direction: row-reverse;
+}
+
+.pane {
+  display: grid;
+  flex: 1 1 0;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-width: 0;
+  background: var(--surface);
+}
+
+.pane-active .pathbar {
+  border-image: var(--accent-gradient) 1;
 }
 
 .file-area {
   display: flex;
   flex-direction: column;
   min-height: 0;
-}
-
-.file-area[hidden] {
-  display: none;
 }
 
 .message {

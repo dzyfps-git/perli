@@ -16,13 +16,16 @@ const FOLDERS: Record<string, { label: string; icon: string }> = {
   videos: { label: "Videos", icon: "" },
 };
 
-function Place(props: { view: FolderView; path: string; label: string; icon: string }) {
+type PlaceMenu = (event: MouseEvent, path: string) => void;
+
+function Place(props: { view: FolderView; path: string; label: string; icon: string; onMenu: PlaceMenu }) {
   return (
     <li>
       <button
         class="place"
         aria-current={samePath(props.view.folder()?.path, props.path) ? "location" : undefined}
         onClick={() => props.view.open(props.path)}
+        onContextMenu={(event) => props.onMenu(event, props.path)}
       >
         <span class="place-icon" aria-hidden="true">
           {props.icon}
@@ -33,7 +36,7 @@ function Place(props: { view: FolderView; path: string; label: string; icon: str
   );
 }
 
-export function Sidebar(props: { view: FolderView }) {
+export function Sidebar(props: { view: FolderView; onMenu: PlaceMenu }) {
   const [places, setPlaces] = createSignal<Places>();
 
   // ponytail: read once, so a newly plugged drive needs a restart. Watch for drive changes in Phase 3.
@@ -45,12 +48,14 @@ export function Sidebar(props: { view: FolderView }) {
     <nav class="places" aria-label="Places">
       <ul>
         <For each={places()?.folders}>
-          {(folder) => <Place view={props.view} path={folder.path} {...FOLDERS[folder.kind]} />}
+          {(folder) => <Place view={props.view} path={folder.path} onMenu={props.onMenu} {...FOLDERS[folder.kind]} />}
         </For>
       </ul>
       <ul>
         <For each={places()?.drives}>
-          {(drive) => <Place view={props.view} path={drive.path} label={drive.name} icon={ICON_DRIVE} />}
+          {(drive) => (
+            <Place view={props.view} path={drive.path} label={drive.name} icon={ICON_DRIVE} onMenu={props.onMenu} />
+          )}
         </For>
       </ul>
     </nav>

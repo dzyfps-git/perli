@@ -11,6 +11,7 @@ export interface MenuItem {
 /** A floating glass menu. It closes on outside click, Escape or after choosing an item. */
 export function Menu(props: { x: number; y: number; items: MenuItem[]; onClose: () => void }) {
   let menu!: HTMLDivElement;
+  const focusedBefore = document.activeElement as HTMLElement | null;
 
   function onKeyDown(event: KeyboardEvent) {
     const buttons = [...menu.querySelectorAll<HTMLButtonElement>("button:not(:disabled)")];
@@ -31,7 +32,10 @@ export function Menu(props: { x: number; y: number; items: MenuItem[]; onClose: 
     window.addEventListener("pointerdown", onPointerDown, true);
     menu.querySelector("button")?.focus();
   });
-  onCleanup(() => window.removeEventListener("pointerdown", onPointerDown, true));
+  onCleanup(() => {
+    window.removeEventListener("pointerdown", onPointerDown, true);
+    focusedBefore?.focus();
+  });
 
   return (
     <Portal>
