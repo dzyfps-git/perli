@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::mem::size_of;
 
-use windows::core::{w, Error, Result, HSTRING, PCWSTR};
+use windows::core::{w, Error, Result, HSTRING};
 use windows::Win32::Foundation::{E_FAIL, HGLOBAL};
 use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NORMAL;
 use windows::Win32::System::Com::{
@@ -11,7 +11,7 @@ use windows::Win32::System::Com::{
 };
 use windows::Win32::System::DataExchange::{CloseClipboard, GetClipboardData, OpenClipboard};
 use windows::Win32::System::Environment::ExpandEnvironmentStringsW;
-use windows::Win32::System::Memory::{GlobalLock, GlobalUnlock};
+use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VIRTUAL_KEY, VK_LWIN,
     VK_Z,
@@ -38,16 +38,23 @@ pub fn clipboard_text() -> Result<String> {
     }
 }
 
+/// Another program wrote the clipboard, so its text may have no terminating null.
+fn until_null(text: &[u16]) -> String {
+    let end = text.iter().position(|&unit| unit == 0).unwrap_or(text.len());
+    String::from_utf16_lossy(&text[..end])
+}
+
 unsafe fn open_clipboard_text() -> String {
     let Ok(handle) = GetClipboardData(CF_UNICODETEXT) else {
         return String::new();
     };
     let memory = HGLOBAL(handle.0);
+    let units = GlobalSize(memory) / size_of::<u16>();
     let text = GlobalLock(memory) as *const u16;
     if text.is_null() {
         return String::new();
     }
-    let result = PCWSTR(text).to_string().unwrap_or_default();
+    let result = until_null(std::slice::from_raw_parts(text, units));
     // Reports an error once the lock count reaches zero, which is the normal outcome.
     let _ = GlobalUnlock(memory);
     result
@@ -183,5 +190,13 @@ mod tests {
     fn names_a_file_type() {
         let names = type_names(vec!["txt".to_string()]).unwrap();
         assert!(!names["txt"].is_empty());
+    }
+
+    #[test]
+    fn clipboard_text_stops_at_null_or_the_end_of_its_memory() {
+        let text: Vec<u16> = "ab".encode_utf16().collect();
+        assert_eq!(until_null(&text), "ab");
+        assert_eq!(until_null(&[text[0], 0, text[1]]), "a");
+        assert_eq!(until_null(&[]), "");
     }
 }

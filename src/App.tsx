@@ -183,6 +183,11 @@ export function App() {
     if (path && !tabs.active().other()) tabs.openToSide(path);
   }
 
+  // List view has no tiles, so these keys do nothing there.
+  function resizeTiles(view: FolderView, change: number) {
+    if (view.layout() === "grid") setTileSize(clampTile(tileSize() + change));
+  }
+
   function onKeyDown(event: KeyboardEvent) {
     const view = tabs.activeView();
     const tab = tabs.active();
@@ -215,6 +220,8 @@ export function App() {
     else if (event.ctrlKey && !event.shiftKey && digit) tabs.activateAt(digit - 1);
     else if (event.ctrlKey && key === "h") toggleHidden();
     else if (event.ctrlKey && key === ",") setSettingsOpen(true);
+    else if (event.ctrlKey && (key === "+" || key === "=")) resizeTiles(view, TILE_STEP);
+    else if (event.ctrlKey && key === "-") resizeTiles(view, -TILE_STEP);
     else if (key === "backspace" || !isBrowserKey(event, key)) return;
     event.preventDefault();
   }
