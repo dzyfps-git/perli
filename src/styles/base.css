@@ -23,6 +23,7 @@ body {
 .shell {
   display: grid;
   grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
+  grid-template-rows: var(--title-bar-height) minmax(0, 1fr);
   height: 100%;
 }
 
@@ -52,6 +53,10 @@ body {
   display: flex;
   flex-direction: column;
   min-height: 0;
+}
+
+.file-area[hidden] {
+  display: none;
 }
 
 .message {

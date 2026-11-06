@@ -13,18 +13,18 @@ export function PathBar(props: { view: FolderView }) {
 
   return (
     <nav class="pathbar" aria-label="Folder navigation">
-      <button class="nav-button" aria-label="Back" disabled={!props.view.canGoBack()} onClick={props.view.back}>
+      <button class="nav-button" aria-label="Back" disabled={!props.view.canGoBack()} onClick={() => props.view.back()}>
         {ICON_BACK}
       </button>
       <button
         class="nav-button"
         aria-label="Forward"
         disabled={!props.view.canGoForward()}
-        onClick={props.view.forward}
+        onClick={() => props.view.forward()}
       >
         {ICON_FORWARD}
       </button>
-      <button class="nav-button" aria-label="Up" disabled={!props.view.canGoUp()} onClick={props.view.up}>
+      <button class="nav-button" aria-label="Up" disabled={!props.view.canGoUp()} onClick={() => props.view.up()}>
         {ICON_UP}
       </button>
       <ol class="crumbs">

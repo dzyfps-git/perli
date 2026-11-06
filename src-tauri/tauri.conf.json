@@ -16,6 +16,7 @@
         "width": 1100,
         "height": 700,
         "transparent": true,
+        "decorations": false,
         "windowEffects": { "effects": ["mica"] }
       }
     ],

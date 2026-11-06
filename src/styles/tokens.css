@@ -11,6 +11,7 @@
 
   --text: #f0eff2;
   --text-muted: #9a99a3;
+  --danger: #c42b1c;
 
   --accent-from: #e58bc0;
   --accent-to: #a9c7f5;
@@ -28,6 +29,7 @@
   --row-height: 28px;
 
   --sidebar-width: 220px;
+  --title-bar-height: 40px;
   --blur: blur(24px);
   --motion: 150ms ease-out;
 }

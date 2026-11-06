@@ -31,6 +31,10 @@ export const startFolder = () => invoke<string>("start_folder");
 export const openFolder = (view: number, request: number, shown: number, path: string) =>
   invoke<Opened>("open_folder", { view, request, shown, path });
 
+export const closeView = (view: number) => invoke<void>("close_view", { view });
+
+export const showSnapLayouts = () => invoke<void>("show_snap_layouts");
+
 export const openFile = (path: string) => invoke<void>("open_file", { path });
 
 export async function fetchRows(
