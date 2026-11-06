@@ -15,6 +15,15 @@ function markReady() {
   requestAnimationFrame(() => requestAnimationFrame(() => performance.mark("perli-ready")));
 }
 
+// WebView2's find bar, reload and save dialog would break the app's look, so these keys do nothing.
+function isBrowserKey(event: KeyboardEvent, key: string) {
+  return ["f3", "f5", "f7"].includes(key) || (event.ctrlKey && ["f", "g", "r", "s"].includes(key));
+}
+
+const hideBrowserMenu = (event: MouseEvent) => event.preventDefault();
+const trackWindowFocus = (event: FocusEvent) =>
+  document.documentElement.toggleAttribute("data-blurred", event.type === "blur");
+
 // The main layout. Moving parts of the app around should only change this file.
 export function App() {
   const tabs = createTabs();
@@ -61,16 +70,24 @@ export function App() {
     else if (event.ctrlKey && key === "\\") splitView();
     else if (key === "f6") tab.activate(tab.other() ?? view);
     else if (event.ctrlKey && key === "tab") tabs.cycle(event.shiftKey ? -1 : 1);
-    else return;
+    else if (!isBrowserKey(event, key)) return;
     event.preventDefault();
   }
 
   onMount(async () => {
     window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("contextmenu", hideBrowserMenu);
+    window.addEventListener("focus", trackWindowFocus);
+    window.addEventListener("blur", trackWindowFocus);
     const opened = await tabs.activeView().open(await startFolder());
     if (opened) performance.mark("perli-folder-open", { detail: opened });
   });
-  onCleanup(() => window.removeEventListener("keydown", onKeyDown));
+  onCleanup(() => {
+    window.removeEventListener("keydown", onKeyDown);
+    window.removeEventListener("contextmenu", hideBrowserMenu);
+    window.removeEventListener("focus", trackWindowFocus);
+    window.removeEventListener("blur", trackWindowFocus);
+  });
 
   const Pane = (props: { tab: Tab; view: FolderView }) => {
     const { tab, view } = props;

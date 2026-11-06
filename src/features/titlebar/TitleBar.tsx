@@ -1,5 +1,5 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import { createEffect, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { placeSnapArea } from "../../api";
 import { Menu } from "../../ui/Menu";
 import { toCrumbs } from "../navigation/path";
@@ -23,6 +23,8 @@ export function TitleBar(props: { tabs: Tabs; onNewTab: () => void }) {
   const [menu, setMenu] = createSignal<{ x: number; y: number; tab: Tab }>();
   const [maximizeHovered, setMaximizeHovered] = createSignal(false);
   let maximizeButton!: HTMLButtonElement;
+  let strip!: HTMLDivElement;
+  let ink!: HTMLSpanElement;
 
   // A native window covers the maximize button, so Windows sees a real one. See snap.rs.
   function moveSnapArea() {
@@ -45,6 +47,25 @@ export function TitleBar(props: { tabs: Tabs; onNewTab: () => void }) {
     update();
   });
 
+  function moveInk() {
+    const tab = strip.querySelector<HTMLElement>(".tab-active");
+    if (!tab) return;
+    ink.style.transform = `translateX(${tab.offsetLeft}px)`;
+    ink.style.width = `${tab.offsetWidth}px`;
+  }
+
+  createEffect(() => {
+    props.tabs.tabs();
+    props.tabs.active();
+    moveInk();
+  });
+
+  onMount(() => {
+    const observer = new ResizeObserver(moveInk);
+    observer.observe(strip);
+    onCleanup(() => observer.disconnect());
+  });
+
   function menuItems(tab: Tab) {
     const { tabs } = props;
     const list = tabs.tabs();
@@ -65,7 +86,7 @@ export function TitleBar(props: { tabs: Tabs; onNewTab: () => void }) {
 
   return (
     <header class="titlebar" data-tauri-drag-region>
-      <div class="tabs" role="tablist" aria-label="Open folders">
+      <div ref={strip} class="tabs" role="tablist" aria-label="Open folders">
         <For each={props.tabs.tabs()}>
           {(tab) => (
             <div
@@ -103,6 +124,7 @@ export function TitleBar(props: { tabs: Tabs; onNewTab: () => void }) {
         <button class="tab-add" aria-label="New tab" onClick={props.onNewTab}>
           {ICON_ADD}
         </button>
+        <span ref={ink} class="tab-ink" />
       </div>
 
       <div class="window-buttons">

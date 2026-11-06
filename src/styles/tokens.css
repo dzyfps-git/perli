@@ -13,9 +13,22 @@
   --text-muted: #9a99a3;
   --danger: #c42b1c;
 
-  --accent-from: #e58bc0;
-  --accent-to: #a9c7f5;
-  --accent-gradient: linear-gradient(90deg, var(--accent-from), var(--accent-to));
+  --accent-start: #9db4ff;
+  --accent: #c4b5fd;
+  --accent-end: #f0a6d4;
+  --accent-line: linear-gradient(90deg, var(--accent-start), var(--accent), var(--accent-end));
+  --accent-drift: linear-gradient(
+    90deg,
+    var(--accent-start),
+    var(--accent),
+    var(--accent-end),
+    var(--accent),
+    var(--accent-start)
+  );
+
+  --scrollbar-size: 10px;
+  --scrollbar-thumb: rgb(255 255 255 / 18%);
+  --scrollbar-thumb-hover: rgb(255 255 255 / 32%);
 
   --font: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
   --font-size: 13px;
@@ -32,6 +45,9 @@
   --title-bar-height: 40px;
   --blur: blur(24px);
   --motion: 150ms ease-out;
+  --motion-slide: 180ms cubic-bezier(0.3, 1.1, 0.5, 1);
+  --motion-glide: 300ms cubic-bezier(0.3, 1.25, 0.5, 1);
+  --drift-time: 7s;
 }
 
 @media (prefers-color-scheme: light) {
@@ -47,5 +63,19 @@
 
     --text: #1c1b20;
     --text-muted: #66646e;
+
+    --accent-start: #4f6bed;
+    --accent: #7a5fe0;
+    --accent-end: #d6479f;
+
+    --scrollbar-thumb: rgb(0 0 0 / 20%);
+    --scrollbar-thumb-hover: rgb(0 0 0 / 36%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --motion-slide: 0ms;
+    --motion-glide: 0ms;
   }
 }

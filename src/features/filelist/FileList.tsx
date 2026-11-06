@@ -7,6 +7,13 @@ const PAGE_SIZE = 256;
 // ponytail: fixed page cache, plenty for one list, revisit if many tabs stay open.
 const MAX_PAGES = 32;
 const OVERSCAN = 8;
+const ROWS_IN_MS = 220;
+const ROWS_IN_STAGGER_MS = 12;
+const ROWS_IN_STAGGERED = 12;
+// Moving through folders quickly should feel instant, so only a pause earns the animation.
+const ROWS_IN_PAUSE_MS = 1000;
+const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
+let lastFolderOpen = 0;
 
 interface PooledRow {
   element: HTMLDivElement;
@@ -70,6 +77,7 @@ export function FileList(props: {
   let firstPaintDone = false;
   let grid!: HTMLDivElement;
   let spacer!: HTMLDivElement;
+  let marker!: HTMLDivElement;
 
   function loadPage(page: number) {
     if (loading.has(page)) return;
@@ -128,6 +136,26 @@ export function FileList(props: {
     if (!firstPaintDone && pool.every((pooled) => pooled.filled)) {
       firstPaintDone = true;
       props.onFirstPaint();
+      playRowsIn();
+    }
+  }
+
+  function playRowsIn() {
+    const now = performance.now();
+    const paused = now - lastFolderOpen > ROWS_IN_PAUSE_MS;
+    lastFolderOpen = now;
+    if (!paused || reducedMotion.matches) return;
+
+    for (const { element, index } of pool) {
+      element.animate(
+        { translate: ["0 10px", "0 0"], opacity: [0, 1] },
+        {
+          duration: ROWS_IN_MS,
+          delay: Math.min(index, ROWS_IN_STAGGERED) * ROWS_IN_STAGGER_MS,
+          easing: "cubic-bezier(0.3, 1.25, 0.5, 1)",
+          fill: "backwards",
+        },
+      );
     }
   }
 
@@ -143,8 +171,18 @@ export function FileList(props: {
     paint();
   }
 
-  function selectionChanged() {
+  function moveMarker(instant: boolean) {
+    const focused = selection.focused();
+    const lone = selection.size() === 1 && selection.has(focused);
+    grid.toggleAttribute("data-slide", lone);
+    marker.hidden = !lone;
+    marker.style.transition = instant ? "none" : "";
+    if (lone) marker.style.transform = `translateY(${focused * rowHeight}px)`;
+  }
+
+  function selectionChanged(instant = false) {
     pool.forEach(decorate);
+    moveMarker(instant);
     const focused = selection.focused();
     if (focused < 0) return grid.removeAttribute("aria-activedescendant");
 
@@ -212,7 +250,8 @@ export function FileList(props: {
       return;
     }
     event.preventDefault();
-    selectionChanged();
+    // Held keys repeat faster than the slide, so the bar would trail behind.
+    selectionChanged(event.repeat);
   }
 
   onMount(() => {
@@ -243,6 +282,7 @@ export function FileList(props: {
       onContextMenu={onContextMenu}
       onKeyDown={onKeyDown}
     >
+      <div ref={marker} class="file-marker" role="presentation" hidden />
       <div ref={spacer} class="file-spacer" role="presentation" />
       {props.count === 0 && <p class="message">This folder is empty.</p>}
     </div>

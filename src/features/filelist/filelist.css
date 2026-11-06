@@ -23,6 +23,15 @@
   contain: strict;
 }
 
+/* A lone selection is this one bar, so it can slide between rows. */
+.file-marker {
+  position: absolute;
+  inset: 0 0 auto;
+  height: var(--row-height);
+  background: var(--surface-selected);
+  transition: transform var(--motion-slide);
+}
+
 .file-row:hover {
   background: var(--surface-hover);
 }
@@ -32,7 +41,17 @@
 }
 
 .file-grid:focus-visible .file-row[data-focused] {
-  outline: 1px solid var(--accent-from);
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.file-grid[data-slide] .file-row[aria-selected="true"] {
+  background: transparent;
+  outline: none;
+}
+
+.file-grid:focus-visible .file-marker {
+  outline: 1px solid var(--accent);
   outline-offset: -1px;
 }
 
