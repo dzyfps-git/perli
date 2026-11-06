@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { join, nextTrail, parentOf, samePath, toCrumbs, typedPath } from "./path.ts";
+import { baseName, BIN_PATH, join, nextTrail, parentOf, samePath, toCrumbs, typedPath } from "./path.ts";
 
 test("samePath ignores case and handles no folder yet", () => {
   assert.equal(samePath("C:\\Users\\Me", "c:\\users\\me"), true);
@@ -53,4 +53,14 @@ test("typedPath opens a bare drive at its root", () => {
 test("typedPath reads other text from the current folder", () => {
   assert.equal(typedPath("C:\\a", "b\\c"), "C:\\a\\b\\c");
   assert.equal(typedPath("C:\\a", ".."), "C:\\a\\..");
+});
+
+test("the Recycle Bin is one crumb with no parent, and typing its name opens it", () => {
+  assert.deepEqual(toCrumbs(BIN_PATH), [{ label: "Recycle Bin", path: BIN_PATH }]);
+  assert.equal(parentOf(BIN_PATH), undefined);
+  assert.equal(typedPath("C:\\Users", BIN_PATH), BIN_PATH);
+});
+
+test("baseName is the last part of a path", () => {
+  assert.equal(baseName("C:\\a\\b.txt"), "b.txt");
 });

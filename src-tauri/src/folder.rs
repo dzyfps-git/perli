@@ -241,17 +241,27 @@ impl Listing {
             .collect()
     }
 
-    /// Where the entries called `names` sit, in the same order. Names no longer shown are
-    /// left out.
-    pub fn rows_named(&self, names: &[String]) -> Vec<u32> {
-        let rows: HashMap<&[u16], u32> = self.rows().map(Entry::name).zip(0..).collect();
-        names
-            .iter()
-            .filter_map(|name| {
-                let name: Vec<u16> = name.encode_utf16().collect();
-                rows.get(name.as_slice()).copied()
-            })
-            .collect()
+    /// What tells an entry apart from one read to the next: its name, or in the Recycle Bin,
+    /// where names repeat, its `$R` item.
+    fn key(&self, entry: usize) -> Vec<u16> {
+        match &self.bin {
+            Some(bin) => bin.items[entry].item.as_os_str().encode_wide().collect(),
+            None => self.entries[entry].name().to_vec(),
+        }
+    }
+
+    pub fn keys(&self, rows: &[u32]) -> Vec<Vec<u16>> {
+        self.chosen(rows).map(|entry| self.key(entry)).collect()
+    }
+
+    /// Where the entries with `keys` sit, in the same order. Keys no longer shown are left out.
+    pub fn rows_keyed(&self, keys: &[Vec<u16>]) -> Vec<u32> {
+        if keys.is_empty() {
+            return Vec::new();
+        }
+        let visible = self.visible.iter().map(|&entry| self.key(entry as usize));
+        let rows: HashMap<Vec<u16>, u32> = visible.zip(0..).collect();
+        keys.iter().filter_map(|key| rows.get(key).copied()).collect()
     }
 
     /// Where `rows` of `before` sit in this listing, in the same order. Rows no longer
@@ -690,15 +700,36 @@ mod tests {
     }
 
     #[test]
-    fn rows_named_follows_names_and_drops_missing_ones() {
+    fn rows_keyed_follows_names_and_drops_missing_ones() {
         let folder = TempFolder::new("named");
         for file in ["a", "b", "c"] {
             fs::write(folder.0.join(file), "").unwrap();
         }
         let listing = Listing::read(folder.0.to_str().unwrap(), Order::default()).unwrap();
 
-        let wanted = ["c".to_string(), "nope".to_string(), "a".to_string()];
-        assert_eq!(listing.rows_named(&wanted), [2, 0]);
+        let wanted = ["c", "nope", "a"].map(|name| name.encode_utf16().collect());
+        assert_eq!(listing.rows_keyed(&wanted), [2, 0]);
+    }
+
+    #[test]
+    fn recycle_bin_rows_with_one_name_stay_apart() {
+        let item = |id: &str, folder: &str| BinItem {
+            item: PathBuf::from(format!(r"C:\$Recycle.Bin\$R{id}.txt")),
+            original: PathBuf::from(format!(r"C:\{folder}\same.txt")),
+            size: 1,
+            deleted: 1,
+            is_dir: false,
+        };
+        let before = Listing::from_bin(vec![item("A", "one"), item("B", "two")]).arrange(Order::default());
+        let after = Listing::from_bin(vec![item("C", "new"), item("A", "one"), item("B", "two")])
+            .arrange(Order::default());
+
+        assert_eq!(before.len(), 2);
+        let first = after.rows_keyed(&before.keys(&[0]));
+        assert_eq!(after.paths(&first), before.paths(&[0]));
+        let second = after.rows_keyed(&before.keys(&[1]));
+        assert_eq!(after.paths(&second), before.paths(&[1]));
+        assert_eq!(after.rows_keyed(&before.keys(&[0, 1])).len(), 2);
     }
 
     #[test]

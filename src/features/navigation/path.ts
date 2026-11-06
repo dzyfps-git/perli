@@ -3,8 +3,14 @@ export interface Crumb {
   path: string;
 }
 
+/** Stands for the Recycle Bin, which has no folder of its own to open. */
+export const BIN_PATH = "shell:RecycleBinFolder";
+
+export const isBin = (path: string | undefined) => path === BIN_PATH;
+
 /** Splits `C:\Users\me` into one crumb per folder, starting at the drive. */
 export function toCrumbs(path: string): Crumb[] {
+  if (isBin(path)) return [{ label: "Recycle Bin", path }];
   const parts = path.split("\\").filter(Boolean);
   return parts.map((label, index) => ({
     label,
@@ -20,11 +26,13 @@ export function join(folder: string, name: string) {
   return folder.endsWith("\\") ? `${folder}${name}` : `${folder}\\${name}`;
 }
 
+export const baseName = (path: string) => path.slice(path.lastIndexOf("\\") + 1);
+
 /** What to open for text typed into the path bar. Text with no drive is read from `folder`. */
 export function typedPath(folder: string, text: string) {
   const path = text.trim().replace(/^"|"$/g, "");
   if (/^[a-z]:$/i.test(path)) return `${path}\\`;
-  return /^([a-z]:[\\/]|\\\\)/i.test(path) ? path : join(folder, path);
+  return /^([a-z]:[\\/]|\\\\|shell:)/i.test(path) ? path : join(folder, path);
 }
 
 export function samePath(a: string | undefined, b: string) {

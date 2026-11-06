@@ -1,10 +1,11 @@
-import { createEffect, createMemo, on, onCleanup, onMount, Show } from "solid-js";
-import { fetchRows, findRow, type Row, type Sort, type SortKey } from "../../api";
+import { createEffect, createMemo, createSignal, on, onCleanup, onMount, Show } from "solid-js";
+import { fetchRows, findRow, type Row, type Selection, type Sort, type SortKey } from "../../api";
 import { ColumnHeader, SortStrip } from "./ColumnHeader";
 import { formatSize } from "../../ui/format";
-import { columnsWidth, gridTemplate } from "./columns";
+import type { ListHandle } from "../navigation/folderView";
+import { columnsWidth, gridTemplate, type Column } from "./columns";
 import { clampTile, moveTarget, TILE_STEP, type Layout } from "./layout";
-import { columns, setTileSize, tileSize } from "./prefs";
+import { setTileSize, tileSize } from "./prefs";
 import { createSelection } from "./selection";
 import { createTypeJump } from "./typeJump";
 import { typesLearned, typeText } from "./typeNames";
@@ -19,6 +20,7 @@ const ROWS_IN_STAGGER_MS = 12;
 const ROWS_IN_STAGGERED = 12;
 // Moving through folders quickly should feel instant, so only a pause earns the animation.
 const ROWS_IN_PAUSE_MS = 1000;
+const MIN_EDITOR_WIDTH = 120;
 const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
 let lastFolderOpen = 0;
 
@@ -43,6 +45,7 @@ const CELL_TEXT: Record<SortKey, (row: Row) => string> = {
 const CELL_CLASS: Partial<Record<SortKey, string>> = {
   name: "file-name",
   size: "file-meta file-size",
+  location: "file-meta file-clipped",
 };
 
 function createCell(parent: HTMLElement, id: SortKey) {
@@ -71,6 +74,15 @@ export function FileList(props: {
   count: number;
   /** Rows to select on arrival. */
   selected?: number[];
+  /** Scroll to the selected rows when a new snapshot arrives. */
+  reveal?: boolean;
+  /** Open the first selected row's name for editing when a new snapshot arrives. */
+  rename?: boolean;
+  columns: Column[];
+  fixedColumns: boolean;
+  /** Names waiting to move, which fade. */
+  cut?: Set<string>;
+  emptyText: string;
   active: boolean;
   layout: Layout;
   sort: Sort;
@@ -80,15 +92,33 @@ export function FileList(props: {
   onBackgroundMenu: (event: MouseEvent) => void;
   onHeaderMenu: (event: MouseEvent) => void;
   onGroup: () => void;
+  /** Rejects with the reason a name can't be used, which keeps the editor open. */
+  onRename: (selection: Selection, name: string) => Promise<void>;
+  onEditEnd: () => void;
+  onInputMenu: (event: MouseEvent) => void;
   /** The rows are a new order of the folder already shown. */
   rearranged?: boolean;
   onFirstPaint: () => void;
-  shareSelection: (read: () => number[]) => void;
+  onSwapped: (snapshot: number) => void;
+  connect: (list: ListHandle) => void;
 }) {
   const pages = new Map<number, Row[]>();
   const loading = new Set<number>();
   const selection = createSelection();
   const typed = createTypeJump();
+  const [editor, setEditor] = createSignal<{
+    index: number;
+    name: string;
+    isDir: boolean;
+    left: number;
+    top: number;
+    width: number;
+  }>();
+  const [editError, setEditError] = createSignal<string>();
+  let editInput!: HTMLInputElement;
+  let committing = false;
+  /** The snapshot whose rows are on screen, which a reload changes once its rows are in. */
+  let shown = props.snapshot;
   let pool: PooledRow[] = [];
   let rowHeight = 0;
   let itemHeight = 0;
@@ -106,7 +136,7 @@ export function FileList(props: {
     (): SortKey[] =>
       props.layout === "grid"
         ? ["name"]
-        : columns().filter((column) => column.visible).map((column) => column.id),
+        : props.columns.filter((column) => column.visible).map((column) => column.id),
     [],
     { equals: (a, b) => a.join() === b.join() },
   );
@@ -114,8 +144,10 @@ export function FileList(props: {
   function loadPage(page: number) {
     if (loading.has(page)) return;
     loading.add(page);
-    fetchRows(props.view, props.snapshot, page * PAGE_SIZE, PAGE_SIZE)
+    const snapshot = props.snapshot;
+    fetchRows(props.view, snapshot, page * PAGE_SIZE, PAGE_SIZE)
       .then((rows) => {
+        if (snapshot !== props.snapshot) return;
         pages.set(page, rows);
         if (pages.size > MAX_PAGES) pages.delete(pages.keys().next().value!);
         paint();
@@ -153,6 +185,7 @@ export function FileList(props: {
     pooled.element.toggleAttribute("data-empty", !row);
     pooled.element.toggleAttribute("data-folder", row?.isDir ?? false);
     pooled.element.toggleAttribute("data-hidden", row?.isHidden ?? false);
+    pooled.element.toggleAttribute("data-cut", !!row && !!props.cut?.has(row.name));
     for (const cell of pooled.cells) cell.element.textContent = row ? CELL_TEXT[cell.id](row) : "";
   }
 
@@ -227,13 +260,14 @@ export function FileList(props: {
     if (lone) marker.style.transform = placeOf(focused);
   }
 
-  function selectionChanged(instant = false) {
+  function selectionChanged(instant = false, reveal = true) {
     pool.forEach(decorate);
     moveMarker(instant);
     const focused = selection.focused();
     if (focused < 0) return grid.removeAttribute("aria-activedescendant");
 
     grid.setAttribute("aria-activedescendant", `file-row-${props.view}-${focused}`);
+    if (!reveal) return;
     const top = Math.floor(focused / perRow) * itemHeight;
     if (top < grid.scrollTop) grid.scrollTop = top;
     else if (top + itemHeight > grid.scrollTop + grid.clientHeight) {
@@ -298,8 +332,114 @@ export function FileList(props: {
       .catch(console.error);
   }
 
+  /** New rows take over in one step, so nothing blinks and the scroll position stays. */
+  async function swapRows(snapshot: number) {
+    const selected = props.selected ?? [];
+    const first = Math.max(0, Math.floor(grid.scrollTop / itemHeight) - OVERSCAN) * perRow;
+    const onScreen = (Math.ceil(grid.clientHeight / itemHeight) + OVERSCAN * 2) * perRow;
+    const wanted = new Set<number>();
+    for (let index = first; index < first + onScreen + PAGE_SIZE; index += PAGE_SIZE) {
+      wanted.add(Math.floor(index / PAGE_SIZE));
+    }
+    if (props.reveal && selected.length > 0) wanted.add(Math.floor(selected[0] / PAGE_SIZE));
+    const fresh = await Promise.all(
+      [...wanted].map(async (page) => {
+        const rows = await fetchRows(props.view, snapshot, page * PAGE_SIZE, PAGE_SIZE);
+        return [page, rows] as const;
+      }),
+    );
+    if (snapshot !== props.snapshot) return;
+
+    pages.clear();
+    for (const [page, rows] of fresh) pages.set(page, rows);
+    shown = snapshot;
+
+    // With its rows gone, the next one takes over, so Delete can be pressed again and again.
+    const focused = selection.focused();
+    if (selected.length === 0 && focused >= 0 && props.count > 0) {
+      selection.select(Math.min(focused, props.count - 1));
+    } else {
+      selection.restore(selected);
+    }
+    builtFor = "";
+    resize();
+    selectionChanged(true, props.reveal);
+    if (props.rename) startRename(selection.focused());
+  }
+
+  function startRename(index: number) {
+    const row = index >= 0 ? rowAt(index) : undefined;
+    const sample = pool[0];
+    if (!row || !sample || editor()) return;
+    const cell = sample.cells.find(({ id }) => id === "name")!.element;
+    const { element } = sample;
+    setEditor({
+      index,
+      name: row.name,
+      isDir: row.isDir,
+      left: (index % perRow) * element.offsetWidth + element.clientLeft + cell.offsetLeft,
+      top: Math.floor(index / perRow) * itemHeight + element.clientTop + cell.offsetTop + cell.offsetHeight / 2,
+      width: Math.max(cell.offsetWidth, MIN_EDITOR_WIDTH),
+    });
+  }
+
+  function focusEditor(input: HTMLInputElement) {
+    editInput = input;
+    queueMicrotask(() => {
+      const { name, isDir } = editor()!;
+      const dot = name.lastIndexOf(".");
+      input.focus();
+      input.setSelectionRange(0, !isDir && dot > 0 ? dot : name.length);
+    });
+  }
+
+  function endRename() {
+    setEditor(undefined);
+    setEditError(undefined);
+    if (props.active) grid.focus({ preventScroll: true });
+    props.onEditEnd();
+  }
+
+  async function commitRename() {
+    const current = editor();
+    if (!current || committing) return;
+    const name = editInput.value;
+    if (name === current.name) return endRename();
+    committing = true;
+    try {
+      await props.onRename({ view: props.view, request: shown, rows: [current.index] }, name);
+      endRename();
+    } catch (failure) {
+      setEditError(String(failure));
+      editInput.focus();
+    } finally {
+      committing = false;
+    }
+  }
+
+  function onEditorKey(event: KeyboardEvent) {
+    if (event.key === "Enter") commitRename();
+    else if (event.key === "Escape") endRename();
+    else return;
+    event.preventDefault();
+    event.stopPropagation();
+  }
+
+  // Switching to another app or opening the paste menu must not end the edit.
+  function onEditorBlur(event: FocusEvent) {
+    const movedToMenu = (event.relatedTarget as HTMLElement | null)?.closest(".menu");
+    if (document.hasFocus() && !movedToMenu) commitRename();
+  }
+
+  function onEditorMenu(event: MouseEvent) {
+    event.preventDefault();
+    event.stopPropagation();
+    props.onInputMenu(event);
+  }
+
   function onKeyDown(event: KeyboardEvent) {
-    if (event.altKey) return;
+    // The name editor sits inside the list, and its keys are its own.
+    if (event.altKey || event.target !== grid) return;
     const focused = selection.focused();
     const pageRows = Math.max(1, Math.floor(grid.clientHeight / itemHeight) - 1);
     const shape = { count: props.count, perRow, pageRows };
@@ -334,7 +474,11 @@ export function FileList(props: {
     rowHeight = parseFloat(getComputedStyle(grid).getPropertyValue("--row-height"));
     itemHeight = rowHeight;
     resize();
-    props.shareSelection(selection.rows);
+    props.connect({
+      selection: () => ({ view: props.view, request: shown, rows: selection.rows() }),
+      rename: () => startRename(selection.focused()),
+      isEditing: () => editor() !== undefined,
+    });
     if (props.selected?.length) {
       selection.restore(props.selected);
       selectionChanged(true);
@@ -358,10 +502,22 @@ export function FileList(props: {
 
   createEffect(
     on(
-      typesLearned,
+      [typesLearned, () => props.cut],
       () => {
         for (const pooled of pool) pooled.filled = false;
         paint();
+      },
+      { defer: true },
+    ),
+  );
+
+  createEffect(
+    on(
+      () => props.snapshot,
+      (snapshot) => {
+        swapRows(snapshot)
+          .catch(console.error)
+          .finally(() => props.onSwapped(snapshot));
       },
       { defer: true },
     ),
@@ -375,21 +531,31 @@ export function FileList(props: {
     <div
       class="file-list"
       style={{
-        "--file-columns": gridTemplate(columns()),
+        "--file-columns": gridTemplate(props.columns),
         "--tile-size": `${tileSize()}px`,
         // Columns wider than the pane scroll sideways instead of being cut off.
         "--columns-min":
           props.layout === "list"
-            ? `calc(${columnsWidth(columns())}px + ${cells().length - 1} * var(--space-3) + 2 * var(--space-4))`
+            ? `calc(${columnsWidth(props.columns)}px + ${cells().length - 1} * var(--space-3) + 2 * var(--space-4))`
             : undefined,
       }}
     >
       <Show
         when={props.layout === "list"}
-        fallback={<SortStrip sort={props.sort} onSort={props.onSort} onGroup={props.onGroup} />}
+        fallback={
+          <SortStrip
+            columns={props.columns}
+            fixed={props.fixedColumns}
+            sort={props.sort}
+            onSort={props.onSort}
+            onGroup={props.onGroup}
+          />
+        }
       >
         <ColumnHeader
           ref={(element) => (header = element)}
+          columns={props.columns}
+          fixed={props.fixedColumns}
           sort={props.sort}
           onSort={props.onSort}
           onMenu={props.onHeaderMenu}
@@ -413,7 +579,33 @@ export function FileList(props: {
       >
         <div ref={marker} class="file-marker" role="presentation" hidden />
         <div ref={spacer} class="file-spacer" role="presentation" />
-        {props.count === 0 && <p class="message">This folder is empty.</p>}
+        {props.count === 0 && <p class="message">{props.emptyText}</p>}
+        <Show when={editor()} keyed>
+          {(open) => (
+            <div
+              class="file-editor"
+              style={{ left: `${open.left}px`, top: `${open.top}px`, width: `${open.width}px` }}
+              onClick={(event) => event.stopPropagation()}
+              onDblClick={(event) => event.stopPropagation()}
+              onContextMenu={onEditorMenu}
+            >
+              <input
+                ref={focusEditor}
+                class="file-editor-input"
+                aria-label="Name"
+                spellcheck={false}
+                value={open.name}
+                onKeyDown={onEditorKey}
+                onBlur={onEditorBlur}
+              />
+              <Show when={editError()}>
+                <p class="file-editor-error" role="alert">
+                  {editError()}
+                </p>
+              </Show>
+            </div>
+          )}
+        </Show>
       </div>
     </div>
   );

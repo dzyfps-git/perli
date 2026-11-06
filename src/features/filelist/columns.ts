@@ -20,6 +20,14 @@ export const DEFAULT_COLUMNS: Column[] = [
   { id: "size", label: "Size", width: 90, visible: true },
 ];
 
+/** The Recycle Bin's own columns. "modified" holds when an item was deleted. */
+export const BIN_COLUMNS: Column[] = [
+  { id: "name", label: "Name", width: 0, visible: true },
+  { id: "location", label: "Original location", width: 220, visible: true },
+  { id: "modified", label: "Date deleted", width: 160, visible: true },
+  { id: "size", label: "Size", width: 90, visible: true },
+];
+
 export function nextSort(sort: Sort, key: SortKey): Sort {
   if (sort.key === key) return { key, descending: !sort.descending };
   return { key, descending: LARGEST_FIRST.includes(key) };
