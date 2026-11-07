@@ -1100,6 +1100,22 @@ fn a_locked_file_names_the_app_holding_it() {
 }
 
 #[test]
+fn a_file_that_fails_to_fill_goes_again_so_a_retry_finds_its_name_free() {
+    let sandbox = Sandbox::new();
+    let target = sandbox.path("new.txt");
+
+    let failed = sys::fill_new(&target, |file| {
+        std::io::Write::write_all(file, b"half")?;
+        Err(std::io::Error::other("disk full"))
+    });
+
+    assert!(failed.is_err());
+    assert!(!target.exists());
+    sys::write_new(&target, b"whole").unwrap();
+    assert_eq!(fs::read(&target).unwrap(), b"whole");
+}
+
+#[test]
 fn only_perlis_own_temp_names_count() {
     assert!(is_temp_name("~perli-12-3.part"));
     assert!(is_temp_name("~perli-12-3.moved"));

@@ -2,6 +2,7 @@
 //! and passes the test guard first, so a test cannot touch anything outside its temp folder.
 
 use std::ffi::{c_void, OsString};
+use std::fs::File;
 use std::io::Write;
 use std::mem::size_of;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
@@ -414,11 +415,21 @@ pub fn create_dirs(path: &Path) -> Result<()> {
 
 /// Writes a file that must not exist yet.
 pub fn write_new(path: &Path, bytes: &[u8]) -> Result<()> {
+    fill_new(path, |file| file.write_all(bytes))
+}
+
+/// Makes a file that must not exist yet. If `fill` fails the file goes again, because nothing
+/// records it and it would block a retry under the same name.
+pub(super) fn fill_new(path: &Path, fill: impl FnOnce(&mut File) -> std::io::Result<()>) -> Result<()> {
     guard(path);
     let target = PathBuf::from(extended(path).to_os_string());
-    let mut file = std::fs::File::options().write(true).create_new(true).open(target)?;
-    file.write_all(bytes)?;
-    Ok(())
+    let mut file = File::options().write(true).create_new(true).open(target)?;
+    let filled = fill(&mut file);
+    drop(file);
+    if filled.is_err() {
+        let _ = delete_file(path);
+    }
+    Ok(filled?)
 }
 
 pub fn create_file(path: &Path) -> Result<()> {
