@@ -98,6 +98,7 @@ export function PathBar(props: {
     const count = props.view.folder()?.count ?? 0;
     if (!props.view.query()) return "";
     if (props.view.searching()) return "Searching…";
+    if (props.view.moreToFind()) return `${count.toLocaleString()}+ matches`;
     return count === 1 ? "1 match" : `${count.toLocaleString()} matches`;
   };
 

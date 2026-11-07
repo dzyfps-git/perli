@@ -5,29 +5,36 @@
 use std::cmp::Reverse;
 use std::collections::{HashMap, VecDeque};
 use std::ffi::OsString;
+use std::mem;
 use std::os::windows::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use windows::core::Result;
 
-use crate::folder::{self, Entry, Found, Listing, Order};
+use crate::folder::{self, Entry, Found, Listing, Order, SortKey};
 use crate::network;
 use crate::ops::sys::{self, Stat};
 
-// ponytail: the walk stops here, because each report copies every row found so far. Rows that
-// share their memory would lift this.
-const MAX_ROWS: usize = 100_000;
+/// How many rows past the user the walk keeps ready. Scrolling never catches up, so the list
+/// feels endless, while a search nobody scrolls goes no further than this.
+const AHEAD: usize = 100_000;
 const REPORT_GAP: Duration = Duration::from_millis(200);
 
 const LETTER: i32 = 1;
 const IN_A_ROW: i32 = 8;
 const WORD_START: i32 = 6;
 const SKIPPED_COST: i32 = 1;
+
+// ponytail: each report copies every row found so far, so reports thin out as rows grow. Rows
+// that share their memory would lift this.
+fn report_gap(rows: usize) -> Duration {
+    REPORT_GAP * (1 + rows / AHEAD) as u32
+}
 
 fn lower(letter: char) -> char {
     letter.to_lowercase().next().unwrap_or(letter)
@@ -138,7 +145,7 @@ fn read_top(folder: &Path, query: &Query, show_hidden: bool) -> Result<(Found, V
     })?;
     fits.sort_by_key(|(fit, _)| Reverse(*fit));
 
-    let location = folder::null_terminated(folder);
+    let location: Arc<[u16]> = folder::null_terminated(folder).into();
     let mut found = Found::default();
     for (_, entry) in fits {
         found.push(entry, location.clone());
@@ -146,12 +153,37 @@ fn read_top(folder: &Path, query: &Query, show_hidden: bool) -> Result<(Found, V
     Ok((found, below))
 }
 
+/// Where a search's walk has got, as the UI hears it.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Walk {
+    /// More rows are on the way.
+    Going,
+    /// It has rows to spare, and goes on once the user scrolls closer to them.
+    Waiting,
+    /// It has seen everything.
+    Done,
+}
+
 struct Search {
     found: Mutex<Found>,
     stopped: AtomicBool,
+    /// How many rows in sight the walk may hold before it waits.
+    room: AtomicUsize,
+    /// Wakes a waiting walk.
+    changed: Condvar,
 }
 
 impl Search {
+    fn new(found: Found, room: usize) -> Self {
+        Self {
+            found: Mutex::new(found),
+            stopped: AtomicBool::new(false),
+            room: AtomicUsize::new(room),
+            changed: Condvar::new(),
+        }
+    }
+
     fn found(&self) -> MutexGuard<'_, Found> {
         self.found.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -160,47 +192,83 @@ impl Search {
         self.stopped.load(Ordering::SeqCst)
     }
 
+    fn stop(&self) {
+        self.stopped.store(true, Ordering::SeqCst);
+        self.wake();
+    }
+
+    fn room(&self) -> usize {
+        self.room.load(Ordering::SeqCst)
+    }
+
+    fn make_room(&self, room: usize) {
+        if self.room.fetch_max(room, Ordering::SeqCst) < room {
+            self.wake();
+        }
+    }
+
+    /// A walk about to wait holds the lock until it does, so it can't miss this.
+    fn wake(&self) {
+        drop(self.found());
+        self.changed.notify_all();
+    }
+
+    /// Holds the walk until there is room again or the search stops.
+    fn wait_for_room(&self, in_sight: usize) {
+        let full = |_: &mut Found| in_sight >= self.room() && !self.stopped();
+        drop(self.changed.wait_while(self.found(), full).unwrap_or_else(PoisonError::into_inner));
+    }
+
+    /// Puts what the walk holds on show. The first rows of a quiet walk replace the old ones.
+    fn show(&self, rows: &mut Found, quiet: &mut bool) {
+        if mem::take(quiet) {
+            *self.found() = mem::take(rows);
+        } else {
+            self.found().append(rows);
+        }
+    }
+
     /// Walks everything in `below`, nearest first. `rows` is what a quiet search starts from,
-    /// because it only shows its rows once it has them all.
+    /// because it only shows its rows once it has as many as it will wait with.
     fn walk(
         &self,
         query: &Query,
         mut rows: Found,
         mut below: VecDeque<PathBuf>,
         show_hidden: bool,
-        quiet: bool,
-        report: impl Fn(bool),
+        mut quiet: bool,
+        report: impl Fn(Walk),
     ) {
         let mut reported = Instant::now();
-        let mut total = if quiet { rows.len() } else { self.found().len() };
+        let mut in_sight = if quiet { rows.in_sight(show_hidden) } else { self.found().in_sight(show_hidden) };
         while let Some(folder) = below.pop_front() {
-            if self.stopped() || total >= MAX_ROWS {
-                break;
+            if in_sight >= self.room() && !self.stopped() {
+                self.show(&mut rows, &mut quiet);
+                report(Walk::Waiting);
+                self.wait_for_room(in_sight);
             }
-            let before = rows.len();
-            let location = folder::null_terminated(&folder);
+            if self.stopped() {
+                return;
+            }
+            let location: Arc<[u16]> = folder::null_terminated(&folder).into();
             // A folder that can't be read has nothing to show, which is no reason to stop.
             let _ = read_folder(&folder, show_hidden, &mut below, |entry| {
                 if query.is_in(entry.name()) {
+                    in_sight += usize::from(show_hidden || !entry.is_hidden());
                     rows.push(entry, location.clone());
                 }
             });
-            total += rows.len() - before;
-            if !quiet && !rows.is_empty() && reported.elapsed() >= REPORT_GAP {
-                self.found().append(&mut rows);
-                report(false);
+            if !quiet && !rows.is_empty() && reported.elapsed() >= report_gap(in_sight) {
+                self.show(&mut rows, &mut quiet);
+                report(Walk::Going);
                 reported = Instant::now();
             }
         }
         if self.stopped() {
             return;
         }
-        if quiet {
-            *self.found() = rows;
-        } else {
-            self.found().append(&mut rows);
-        }
-        report(true);
+        self.show(&mut rows, &mut quiet);
+        report(Walk::Done);
     }
 }
 
@@ -233,18 +301,35 @@ impl Searches {
 
     pub fn stop(&self, view: u32) {
         if let Some(search) = self.all().remove(&view) {
-            search.stopped.store(true, Ordering::SeqCst);
+            search.stop();
         }
     }
 
-    /// The rows to show now. `report` hears when more are waiting, and true for the last of them.
+    /// The user reached `row`. Room comes in big steps once they near the end of it, because
+    /// each step of the walk makes the list read its rows again.
+    pub fn reached(&self, view: u32, row: usize) {
+        if let Some(search) = self.all().get(&view) {
+            if row + AHEAD / 2 > search.room() {
+                search.make_room(row + AHEAD);
+            }
+        }
+    }
+
+    /// Any order but found is only right with every row there.
+    pub fn arranged(&self, view: u32, order: Order) {
+        if let Some(search) = self.all().get(&view).filter(|_| order.key != SortKey::Found) {
+            search.make_room(usize::MAX);
+        }
+    }
+
+    /// The rows to show now. `report` hears when more are waiting and how the walk is doing.
     pub fn rows(
         &self,
         view: u32,
         asked: Asked,
         path: &str,
         order: Order,
-        report: impl Fn(bool) + Send + 'static,
+        report: impl Fn(Walk) + Send + 'static,
     ) -> Result<Listing> {
         let running = self.all().get(&view).cloned();
         if asked.step == Step::Grown {
@@ -256,15 +341,15 @@ impl Searches {
         let query = Query::new(&asked.query);
         let (first, below) = read_top(&folder, &query, order.show_hidden)?;
         let quiet = asked.step == Step::Again;
-        let shown = match running {
-            Some(search) if quiet => search.found().clone(),
-            _ => first.clone(),
+        let kept = running.filter(|_| quiet);
+        let room = match &kept {
+            _ if order.key != SortKey::Found => usize::MAX,
+            Some(search) => search.room(),
+            None => AHEAD,
         };
+        let shown = kept.map_or_else(|| first.clone(), |search| search.found().clone());
         self.stop(view);
-        let search = Arc::new(Search {
-            found: Mutex::new(shown.clone()),
-            stopped: AtomicBool::new(false),
-        });
+        let search = Arc::new(Search::new(shown.clone(), room));
         self.all().insert(view, search.clone());
         let rows = if quiet { first } else { Found::default() };
         thread::spawn(move || search.walk(&query, rows, below, order.show_hidden, quiet, report));
@@ -279,7 +364,6 @@ mod tests {
     use std::sync::mpsc;
 
     use super::*;
-    use crate::folder::SortKey;
 
     const WAIT: Duration = Duration::from_secs(5);
 
@@ -333,7 +417,7 @@ mod tests {
         Query::new(query).fit(&name.encode_utf16().collect::<Vec<_>>())
     }
 
-    fn start(searches: &Searches, tree: &Tree, query: &str, order: Order) -> (Listing, mpsc::Receiver<bool>) {
+    fn start(searches: &Searches, tree: &Tree, query: &str, order: Order) -> (Listing, mpsc::Receiver<Walk>) {
         let (reports, heard) = mpsc::channel();
         let report = move |done| {
             let _ = reports.send(done);
@@ -347,8 +431,44 @@ mod tests {
         searches.rows(1, asked, tree.path(), order, |_| ()).unwrap()
     }
 
-    fn wait_until_done(heard: &mpsc::Receiver<bool>) {
-        while !heard.recv_timeout(WAIT).expect("the search ended") {}
+    fn wait_until_done(heard: &mpsc::Receiver<Walk>) {
+        while heard.recv_timeout(WAIT).expect("the search ended") != Walk::Done {}
+    }
+
+    /// How the walk stands the next time it is not going.
+    fn next_stop(heard: &mpsc::Receiver<Walk>) -> Walk {
+        loop {
+            let walk = heard.recv_timeout(WAIT).expect("the walk stopped");
+            if walk != Walk::Going {
+                return walk;
+            }
+        }
+    }
+
+    /// Finds `report` under `tree` on a thread of its own, and a folder at a time.
+    fn walk_tree(search: &Arc<Search>, tree: &Tree, quiet: bool) -> mpsc::Receiver<Walk> {
+        let (reports, heard) = mpsc::channel();
+        let (search, below) = (search.clone(), VecDeque::from([tree.0.clone()]));
+        thread::spawn(move || {
+            let report = move |walk| {
+                let _ = reports.send(walk);
+            };
+            search.walk(&Query::new("report"), Found::default(), below, false, quiet, report);
+        });
+        heard
+    }
+
+    fn found_names(search: &Search) -> Vec<String> {
+        names(&Listing::searched(search.found().clone(), found_order()))
+    }
+
+    /// One row in each of its folders, on top of the root's `report.txt` and two under `deep`.
+    fn tree_of_folders(name: &str) -> Tree {
+        let tree = Tree::new(name);
+        for folder in ["a", "b", "c"] {
+            tree.file(&format!(r"{folder}\report.txt"));
+        }
+        tree
     }
 
     fn names(listing: &Listing) -> Vec<String> {
@@ -470,16 +590,117 @@ mod tests {
         let tree = Tree::new("stop");
         let searches = Searches::default();
         let (reports, heard) = mpsc::channel();
-        let search = Search { found: Mutex::new(Found::default()), stopped: AtomicBool::new(true) };
+        let search = Search::new(Found::default(), AHEAD);
+        search.stop();
         let below = VecDeque::from([tree.0.clone()]);
 
-        search.walk(&Query::new("report"), Found::default(), below, false, false, move |done| {
-            let _ = reports.send(done);
+        search.walk(&Query::new("report"), Found::default(), below, false, false, move |walk| {
+            let _ = reports.send(walk);
         });
 
         assert!(heard.try_recv().is_err());
         assert_eq!(search.found().len(), 0);
         assert_eq!(grown(&searches, &tree, found_order()).len(), 0);
+    }
+
+    #[test]
+    fn a_walk_waits_with_rows_to_spare_until_there_is_room() {
+        let tree = tree_of_folders("room");
+        let search = Arc::new(Search::new(Found::default(), 2));
+
+        let heard = walk_tree(&search, &tree, false);
+        assert_eq!(next_stop(&heard), Walk::Waiting);
+        assert_eq!(search.found().len(), 2, "the root's row and one folder's");
+
+        search.make_room(3);
+        assert_eq!(next_stop(&heard), Walk::Waiting);
+        assert_eq!(search.found().len(), 3);
+
+        search.make_room(usize::MAX);
+        assert_eq!(next_stop(&heard), Walk::Done);
+        assert_eq!(search.found().len(), 6);
+    }
+
+    #[test]
+    fn stopping_ends_a_waiting_walk() {
+        let tree = tree_of_folders("wake");
+        let search = Arc::new(Search::new(Found::default(), 1));
+        let heard = walk_tree(&search, &tree, false);
+        assert_eq!(next_stop(&heard), Walk::Waiting);
+
+        search.stop();
+
+        assert_eq!(heard.recv_timeout(WAIT), Err(mpsc::RecvTimeoutError::Disconnected));
+    }
+
+    #[test]
+    fn a_quiet_walk_shows_its_rows_when_it_starts_to_wait() {
+        let tree = tree_of_folders("quiet");
+        let (old, _) = read_top(&tree.0, &Query::new("other"), false).unwrap();
+        let search = Arc::new(Search::new(old, 2));
+
+        let heard = walk_tree(&search, &tree, true);
+        assert_eq!(next_stop(&heard), Walk::Waiting);
+
+        assert_eq!(found_names(&search), ["report.txt", "report.txt"]);
+    }
+
+    #[test]
+    fn hidden_rows_take_no_room() {
+        let tree = tree_of_folders("sight");
+        let attributes = Command::new("attrib").arg("+h").arg(tree.0.join("report.txt")).status();
+        assert!(attributes.unwrap().success());
+        let search = Arc::new(Search::new(Found::default(), 1));
+
+        let heard = walk_tree(&search, &tree, false);
+        assert_eq!(next_stop(&heard), Walk::Waiting);
+
+        assert_eq!(search.found().len(), 2, "the hidden row and one in sight");
+    }
+
+    #[test]
+    fn room_comes_in_steps_as_the_user_nears_the_end_of_it() {
+        let searches = Searches::default();
+        let search = Arc::new(Search::new(Found::default(), AHEAD));
+        searches.all().insert(1, search.clone());
+
+        searches.reached(1, AHEAD / 2);
+        assert_eq!(search.room(), AHEAD, "still far from the end");
+
+        searches.reached(1, AHEAD / 2 + 1);
+        assert_eq!(search.room(), AHEAD / 2 + 1 + AHEAD);
+    }
+
+    #[test]
+    fn only_rows_in_found_order_can_wait() {
+        let searches = Searches::default();
+        let search = Arc::new(Search::new(Found::default(), AHEAD));
+        searches.all().insert(1, search.clone());
+
+        searches.arranged(1, found_order());
+        assert_eq!(search.room(), AHEAD);
+
+        searches.arranged(1, Order::default());
+        assert_eq!(search.room(), usize::MAX);
+
+        let tree = Tree::new("order");
+        let (_, heard) = start(&searches, &tree, "report", Order::default());
+        wait_until_done(&heard);
+        assert_eq!(searches.all()[&1].room(), usize::MAX);
+    }
+
+    #[test]
+    fn searching_again_keeps_the_room_it_had() {
+        let tree = Tree::new("kept");
+        let searches = Searches::default();
+        let (_, heard) = start(&searches, &tree, "report", found_order());
+        wait_until_done(&heard);
+        searches.reached(1, AHEAD);
+
+        let asked = Asked { step: Step::Again, query: "report".to_string() };
+        searches.rows(1, asked, tree.path(), found_order(), |_| ()).unwrap();
+
+        assert_eq!(searches.all()[&1].room(), AHEAD * 2);
     }
 
     #[test]

@@ -250,10 +250,13 @@ export const reloadView = (
     search,
   });
 
-/** More of a view's search is ready. `done` means that was the last of it. */
-export const onSearchGrew = (handler: (view: number, done: boolean) => void) =>
-  listen<{ view: number; done: boolean }>("search-grew", (event) =>
-    handler(event.payload.view, event.payload.done),
+/** `waiting` means it has rows to spare and goes on once the user scrolls closer to them. */
+export type SearchWalk = "going" | "waiting" | "done";
+
+/** More of a view's search is ready. */
+export const onSearchGrew = (handler: (view: number, walk: SearchWalk) => void) =>
+  listen<{ view: number; walk: SearchWalk }>("search-grew", (event) =>
+    handler(event.payload.view, event.payload.walk),
   );
 
 /** `origin` is the view that asked, which selects what the job makes. */

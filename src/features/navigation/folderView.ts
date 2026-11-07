@@ -6,6 +6,7 @@ import {
   type Opened,
   type Order,
   type SearchStep,
+  type SearchWalk,
   type Selection,
   type Sort,
 } from "../../api";
@@ -89,8 +90,7 @@ export function createFolderView(id: number, saved?: SavedPane) {
   const [editingPath, setEditingPath] = createSignal(false);
   /** What the rows are a search for. Empty for a plain folder. */
   const [query, setQuery] = createSignal("");
-  /** The search is still walking. */
-  const [searching, setSearching] = createSignal(false);
+  const [walk, setWalk] = createSignal<SearchWalk>("done");
   const [searchSort, setSearchSort] = createSignal(SEARCH_SORT);
   const [searchAsked, setSearchAsked] = createSignal(0);
   let latestRequest = 0;
@@ -151,7 +151,7 @@ export function createFolderView(id: number, saved?: SavedPane) {
 
   async function load(target: string) {
     setQuery("");
-    setSearching(false);
+    setWalk("done");
     const request = ++latestRequest;
     const folderSort = arrivalSort(target);
     if (folderSort) setSortValue(folderSort);
@@ -191,7 +191,7 @@ export function createFolderView(id: number, saved?: SavedPane) {
     const request = ++latestRequest;
     opening = true;
     if (search && step !== "grown") {
-      setSearching(true);
+      setWalk("going");
       walkedHidden = showHidden();
     }
     try {
@@ -214,7 +214,7 @@ export function createFolderView(id: number, saved?: SavedPane) {
     } catch (failure) {
       if (request === latestRequest) {
         setError(String(failure));
-        setSearching(false);
+        setWalk("done");
       }
     }
     settle(request);
@@ -233,13 +233,14 @@ export function createFolderView(id: number, saved?: SavedPane) {
     if (text === query() || isBin(path())) return;
     if (!query()) setSearchSort(SEARCH_SORT);
     setQuery(text);
-    if (!text) setSearching(false);
+    if (!text) setWalk("done");
     readAgain({ select: [], rename: false, step: "start", top: true });
   }
 
-  function searchGrew(done: boolean) {
-    if (done) setSearching(false);
-    if (query()) readAgain({ select: [], rename: false, step: "grown", top: false });
+  function searchGrew(walked: SearchWalk) {
+    if (!query()) return;
+    setWalk(walked);
+    readAgain({ select: [], rename: false, step: "grown", top: false });
   }
 
   /** Applies a changed order to the shown folder. An open in flight must not be cancelled. */
@@ -346,7 +347,9 @@ export function createFolderView(id: number, saved?: SavedPane) {
     rearrange,
     reload,
     query,
-    searching,
+    searching: () => walk() === "going",
+    /** The rows so far aren't all of them, and more come as the user scrolls. */
+    moreToFind: () => walk() === "waiting",
     search,
     searchGrew,
     searchAsked,

@@ -288,8 +288,7 @@ struct Clipped {
 #[derive(Clone, Serialize)]
 struct SearchGrew {
     view: u32,
-    /// The search has ended, so these are the last.
-    done: bool,
+    walk: search::Walk,
 }
 
 /// What the app starts with. A folder from the command line replaces the saved session.
@@ -438,7 +437,9 @@ async fn arrange_view(
     order: folder::Order,
     selected: Vec<u32>,
     views: State<'_, Views>,
+    searches: State<'_, Searches>,
 ) -> Result<Arranged, String> {
+    searches.arranged(view, order);
     let before = {
         let mut views = views.0.write().unwrap_or_else(|error| error.into_inner());
         let current = views.entry(view).or_default();
@@ -467,8 +468,8 @@ async fn arrange_view(
 
 fn find(app: &AppHandle, view: u32, asked: search::Asked, path: &str, order: folder::Order) -> ReadResult {
     let events = app.clone();
-    app.state::<Searches>().rows(view, asked, path, order, move |done| {
-        let _ = events.emit("search-grew", SearchGrew { view, done });
+    app.state::<Searches>().rows(view, asked, path, order, move |walk| {
+        let _ = events.emit("search-grew", SearchGrew { view, walk });
     })
 }
 
@@ -680,7 +681,9 @@ async fn rows(
     start: usize,
     count: usize,
     views: State<'_, Views>,
+    searches: State<'_, Searches>,
 ) -> Result<Response, String> {
+    searches.reached(view, start + count);
     let readable = views.0.read().unwrap_or_else(|error| error.into_inner());
     let current = readable.get(&view);
     let bytes = current

@@ -138,8 +138,8 @@ export function App() {
   const dragListener = followFileDrag(tabs.allViews, jobs.report);
   // Other apps and Windows' own commands change folders without Perli running a job.
   const folderListener = onFolderChanged((id) => tabs.allViews().find((view) => view.id === id)?.reload());
-  const searchListener = onSearchGrew((id, done) =>
-    tabs.allViews().find((view) => view.id === id)?.searchGrew(done),
+  const searchListener = onSearchGrew((id, walk) =>
+    tabs.allViews().find((view) => view.id === id)?.searchGrew(walk),
   );
 
   async function searchIn(view: FolderView, path: string) {

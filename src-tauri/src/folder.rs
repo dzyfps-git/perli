@@ -166,19 +166,19 @@ pub fn null_terminated(text: &Path) -> Box<[u16]> {
 /// It lives apart so normal rows stay small.
 struct Bin {
     items: Vec<BinItem>,
-    locations: Vec<Box<[u16]>>,
+    locations: Vec<Arc<[u16]>>,
 }
 
 /// Rows from many folders, with where each one is.
 #[derive(Clone, Default)]
 pub struct Found {
     entries: Vec<Entry>,
-    /// Null-terminated, in the same order as `entries`.
-    locations: Vec<Box<[u16]>>,
+    /// Null-terminated, in the same order as `entries`. Rows of one folder share theirs.
+    locations: Vec<Arc<[u16]>>,
 }
 
 impl Found {
-    pub fn push(&mut self, entry: Entry, location: Box<[u16]>) {
+    pub fn push(&mut self, entry: Entry, location: Arc<[u16]>) {
         self.entries.push(entry);
         self.locations.push(location);
     }
@@ -196,6 +196,11 @@ impl Found {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+
+    /// The rows the list would show.
+    pub fn in_sight(&self, show_hidden: bool) -> usize {
+        self.entries.iter().filter(|entry| show_hidden || !entry.hidden).count()
+    }
 }
 
 /// One read of a folder. Rows are positions in `entries`, so a new sort or the hidden
@@ -206,7 +211,7 @@ pub struct Listing {
     entries: Arc<Vec<Entry>>,
     bin: Option<Arc<Bin>>,
     /// Where a search found each of `entries`. Empty for a plain folder.
-    found_in: Arc<Vec<Box<[u16]>>>,
+    found_in: Arc<Vec<Arc<[u16]>>>,
     visible: Vec<u32>,
     order: Order,
 }
@@ -240,7 +245,9 @@ impl Listing {
     }
 
     fn from_bin(items: Vec<BinItem>) -> Self {
-        let location = |item: &BinItem| null_terminated(item.original.parent().unwrap_or(Path::new("")));
+        let location = |item: &BinItem| -> Arc<[u16]> {
+            null_terminated(item.original.parent().unwrap_or(Path::new(""))).into()
+        };
         let bin = Bin {
             locations: items.iter().map(location).collect(),
             items,
@@ -282,7 +289,7 @@ impl Listing {
         self
     }
 
-    fn locations(&self) -> &[Box<[u16]>] {
+    fn locations(&self) -> &[Arc<[u16]>] {
         self.bin.as_ref().map_or(&self.found_in, |bin| &bin.locations)
     }
 
@@ -471,13 +478,13 @@ pub fn resolve(path: &str) -> Result<String> {
 }
 
 /// Null-terminated, and empty outside the Recycle Bin.
-fn location_of(locations: &[Box<[u16]>], entry: u32) -> &[u16] {
+fn location_of(locations: &[Arc<[u16]>], entry: u32) -> &[u16] {
     locations.get(entry as usize).map_or(&[0], |location| location)
 }
 
 fn compare(
     entries: &[Entry],
-    locations: &[Box<[u16]>],
+    locations: &[Arc<[u16]>],
     types: &[u32],
     first: u32,
     second: u32,
