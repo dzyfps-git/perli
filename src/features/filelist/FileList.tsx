@@ -21,6 +21,8 @@ const ROWS_IN_STAGGERED = 12;
 // Moving through folders quickly should feel instant, so only a pause earns the animation.
 const ROWS_IN_PAUSE_MS = 1000;
 const MIN_EDITOR_WIDTH = 120;
+/** How far a press moves before it is a drag. Windows uses about this much. */
+const DRAG_DISTANCE = 6;
 const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
 let lastFolderOpen = 0;
 
@@ -87,6 +89,8 @@ export function FileList(props: {
   layout: Layout;
   sort: Sort;
   onSort: (key: SortKey) => void;
+  /** The pointer dragged the selected rows far enough to start a real file drag. */
+  onDragOut: () => void;
   onOpen: (row: Row, toSide: boolean) => void;
   onMenu: (event: MouseEvent, row: Row) => void;
   onBackgroundMenu: (event: MouseEvent) => void;
@@ -125,6 +129,7 @@ export function FileList(props: {
   let perRow = 1;
   let builtFor = "";
   let latestJump = 0;
+  let press: { x: number; y: number; index: number } | undefined;
   let firstPaintDone = false;
   let grid!: HTMLDivElement;
   let spacer!: HTMLDivElement;
@@ -287,6 +292,26 @@ export function FileList(props: {
     else if (event.ctrlKey) selection.toggle(index);
     else selection.select(index);
     selectionChanged();
+  }
+
+  function onPointerDown(event: PointerEvent) {
+    const index = indexFromEvent(event);
+    const onRow = event.button === 0 && index >= 0 && !(event.target as HTMLElement).closest("input");
+    press = onRow ? { x: event.clientX, y: event.clientY, index } : undefined;
+  }
+
+  function onPointerMove(event: PointerEvent) {
+    if (!press) return;
+    if ((event.buttons & 1) === 0) press = undefined;
+    else if (Math.hypot(event.clientX - press.x, event.clientY - press.y) >= DRAG_DISTANCE) {
+      const { index } = press;
+      press = undefined;
+      if (!selection.has(index)) {
+        selection.select(index);
+        selectionChanged();
+      }
+      props.onDragOut();
+    }
   }
 
   function openIndex(index: number, toSide: boolean) {
@@ -575,6 +600,8 @@ export function FileList(props: {
         onDblClick={(event) => openIndex(indexFromEvent(event), event.ctrlKey)}
         onContextMenu={onContextMenu}
         onKeyDown={onKeyDown}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
         onWheel={onWheel}
       >
         <div ref={marker} class="file-marker" role="presentation" hidden />

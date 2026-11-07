@@ -3,10 +3,14 @@
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
+use windows::Win32::Foundation::ERROR_FILE_EXISTS;
+
 use super::sys;
 
 const BAD_CHARACTERS: &str = "<>:\"/\\|?*";
 const LONGEST_NAME: usize = 255;
+/// A name that can't be read can look free forever, so asking again has to end.
+const CLAIM_TRIES: usize = 100;
 const RESERVED: [&str; 4] = ["CON", "PRN", "AUX", "NUL"];
 
 /// Explains why Windows would refuse `name`, or would make it unreachable by normal paths.
@@ -85,6 +89,20 @@ fn free_name(folder: &Path, stem: &OsStr, extension: &OsStr) -> PathBuf {
         }
         number += 1;
     }
+}
+
+/// Makes an empty file at the name `free` gives, asking again if another job got there first.
+/// Finding a name and writing to it are two steps, and this holds the name between them.
+pub fn claim(mut free: impl FnMut() -> PathBuf) -> windows::core::Result<PathBuf> {
+    for _ in 1..CLAIM_TRIES {
+        let target = free();
+        match sys::create_file(&target) {
+            Err(error) if error.code() == ERROR_FILE_EXISTS.to_hresult() => {}
+            created => return created.map(|()| target),
+        }
+    }
+    let target = free();
+    sys::create_file(&target).map(|()| target)
 }
 
 /// A free name for keeping both: "name (2).txt".

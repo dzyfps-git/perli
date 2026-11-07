@@ -3,6 +3,7 @@ import {
   measureSelection,
   redoJob,
   setClipboard,
+  startDrag,
   startJob,
   undoJob,
   type Selection,
@@ -65,6 +66,11 @@ export function createFileActions(
     copyTo(view: FolderView, folder: string) {
       const selection = movable(view);
       if (selection) start(view, { kind: "copy", selection, folder });
+    },
+
+    dragOut(view: FolderView) {
+      const selection = movable(view);
+      if (selection) startDrag(selection).catch(report);
     },
 
     /** Rejects with the reason a name can't be used. */

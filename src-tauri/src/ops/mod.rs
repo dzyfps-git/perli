@@ -23,6 +23,8 @@ use windows::core::{Error, Result};
 pub use bin::{read as read_bin, BinItem};
 pub use names::check_rename;
 pub use shell::shell_item;
+#[cfg(test)]
+pub use shell::Com;
 pub use transfer::{is_temp_name, put_back, remove_leftovers};
 pub use tree::measure;
 
@@ -33,6 +35,7 @@ pub enum Job {
     Rename { path: PathBuf, name: String },
     New { folder: PathBuf, directory: bool },
     Template { folder: PathBuf, template: Template },
+    Shortcut { sources: Vec<PathBuf>, folder: PathBuf },
     Recycle { paths: Vec<PathBuf> },
     Delete { paths: Vec<PathBuf> },
     Restore { items: Vec<BinItem> },
@@ -269,6 +272,7 @@ impl<'a> Run<'a> {
             Job::Rename { path, name } => self.rename(&path, &name),
             Job::New { folder, directory } => self.new_item(&folder, directory),
             Job::Template { folder, template } => self.new_from(&folder, &template),
+            Job::Shortcut { sources, folder } => self.shortcuts(&sources, &folder),
             Job::Recycle { paths } => {
                 self.add_total(paths.len() as u64, 0);
                 self.recycle(paths)
@@ -338,6 +342,27 @@ impl<'a> Run<'a> {
             self.done.push(Done::Created { path: target });
         }
         self.step(1, 0);
+        Ok(())
+    }
+
+    fn shortcuts(&mut self, sources: &[PathBuf], folder: &Path) -> Flow {
+        self.add_total(sources.len() as u64, 0);
+        for source in sources {
+            // A drive has no name of its own to go by.
+            let name = source.file_name().map_or("Drive".into(), |name| name.to_string_lossy());
+            let stem = format!("{name} - Shortcut");
+            let made = self.attempt(source, None, |_| {
+                let target = names::claim(|| names::free(folder, &stem, ".lnk"))?;
+                shell::write_shortcut(source, &target).inspect_err(|_| {
+                    let _ = sys::delete_file(&target);
+                })?;
+                Ok(target)
+            })?;
+            if let Some(path) = made {
+                self.done.push(Done::Created { path });
+            }
+            self.step(1, 0);
+        }
         Ok(())
     }
 

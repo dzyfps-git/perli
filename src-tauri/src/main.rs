@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod clipboard;
+mod drag;
 mod folder;
 mod jobs;
 mod menus;
@@ -14,9 +15,9 @@ mod templates;
 mod watch;
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, RwLock};
+use std::sync::{mpsc, Arc, Mutex, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -25,6 +26,7 @@ use tauri::{
     async_runtime, ipc::Response, AppHandle, Emitter, Manager, State, WebviewWindow, WindowEvent,
 };
 
+use drag::Drags;
 use jobs::{Jobs, Plan};
 use ops::{Job, Reply};
 use watch::{Watch, Watches};
@@ -157,6 +159,8 @@ enum Task {
     New { folder: String, directory: bool },
     Template { folder: String, extension: String },
     Paste { folder: String },
+    /// The last files dropped on the window landed on `folder`.
+    Drop { folder: String },
     Recycle { selection: Selection },
     Delete { selection: Selection },
     Restore { selection: Selection },
@@ -166,7 +170,7 @@ enum Task {
 
 impl Task {
     /// The job to run, if there is anything to do.
-    fn plan(self, views: &Views) -> Result<Option<Plan>, String> {
+    fn plan(self, views: &Views, drags: &Drags) -> Result<Option<Plan>, String> {
         let target = |folder: String| -> Result<PathBuf, String> {
             Ok(folder::resolve(&folder).map_err(|error| error.message())?.into())
         };
@@ -195,6 +199,7 @@ impl Task {
                 template: templates::template(&extension)?,
             },
             Self::Paste { folder } => return paste(target(folder)?),
+            Self::Drop { folder } => return Ok(drags.job(Path::new(&target(folder)?)).map(Plan::from)),
             Self::Recycle { selection } => Job::Recycle {
                 paths: paths(&selection)?,
             },
@@ -482,8 +487,9 @@ async fn start_job(
     origin: Option<u32>,
     app: AppHandle,
     views: State<'_, Views>,
+    drags: State<'_, Arc<Drags>>,
 ) -> Result<(), String> {
-    match task.plan(&views)? {
+    match task.plan(&views, &drags)? {
         Some(plan) => jobs::start(&app, Plan { origin, ..plan }),
         None => Ok(()),
     }
@@ -828,6 +834,25 @@ async fn file_users(selection: Selection, views: State<'_, Views>) -> Result<Vec
 }
 
 #[tauri::command]
+async fn set_drop_target(folder: Option<PathBuf>, drags: State<'_, Arc<Drags>>) -> Result<(), String> {
+    drags.aim(folder);
+    Ok(())
+}
+
+/// Windows' drag loop must run on the main thread, and not inside this call from the web view.
+#[tauri::command]
+async fn start_drag(selection: Selection, views: State<'_, Views>, app: AppHandle) -> Result<(), String> {
+    let paths = views.read(&selection, folder::Listing::paths)?;
+    let main = jobs::owner(&app);
+    let (finished, result) = mpsc::channel();
+    app.run_on_main_thread(move || {
+        let _ = finished.send(drag::start(&paths, main));
+    })
+    .map_err(|error| error.to_string())?;
+    off_main(move || result.recv().unwrap_or(Ok(()))).await
+}
+
+#[tauri::command]
 async fn clipboard_text() -> Result<String, String> {
     async_runtime::spawn_blocking(shell::clipboard_text)
         .await
@@ -868,9 +893,14 @@ fn main() {
         .manage(Jobs::loading_history())
         .manage(Closing::default())
         .manage(Watches::default())
+        .manage(Arc::new(Drags::default()))
         .manage(Preload(Mutex::new(preload)))
         .setup(|app| {
             watch::start(app.handle().clone());
+            let (events, drags) = (app.handle().clone(), app.state::<Arc<Drags>>().inner().clone());
+            drag::attach(jobs::owner(app.handle()), drags, move |event| {
+                let _ = events.emit("file-drag", event);
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -915,6 +945,8 @@ fn main() {
             open_terminal,
             new_types,
             file_users,
+            set_drop_target,
+            start_drag,
             clipboard_text
         ])
         .run(tauri::generate_context!())

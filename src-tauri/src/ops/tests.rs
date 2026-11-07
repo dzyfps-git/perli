@@ -12,7 +12,10 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+use windows::core::{Interface, HSTRING};
 use windows::Win32::Storage::FileSystem::GetLogicalDrives;
+use windows::Win32::System::Com::{CoCreateInstance, IPersistFile, CLSCTX_INPROC_SERVER, STGM_READ};
+use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
 
 use super::bin::{parse_info, read_root};
 use super::names::check as check_name;
@@ -1042,6 +1045,46 @@ fn a_template_fills_the_new_file_and_undo_recycles_it() {
     purge(&undone);
 }
 
+/// The file a shortcut opens, by name, because the shell spells out a temp folder in 8.3 form.
+fn linked_name(shortcut: &Path) -> String {
+    let _com = shell::Com::enter();
+    let mut path = [0; 260];
+    unsafe {
+        let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).unwrap();
+        let file = link.cast::<IPersistFile>().unwrap();
+        file.Load(&HSTRING::from(shortcut.as_os_str()), STGM_READ).unwrap();
+        link.GetPath(&mut path, std::ptr::null_mut(), 0).unwrap();
+    }
+    let end = path.iter().position(|&unit| unit == 0).unwrap();
+    let path = String::from_utf16_lossy(&path[..end]);
+    Path::new(&path).file_name().unwrap().to_str().unwrap().to_string()
+}
+
+#[test]
+fn a_shortcut_opens_its_source_and_undo_recycles_it() {
+    let sandbox = Sandbox::new();
+    let folder = sandbox.folder("here");
+    let source = sandbox.file("a.txt", "linked");
+    let link = || {
+        go(Job::Shortcut {
+            sources: vec![source.clone()],
+            folder: folder.clone(),
+        })
+    };
+
+    link();
+    let outcome = link();
+
+    let (first, second) = (folder.join("a.txt - Shortcut.lnk"), folder.join("a.txt - Shortcut (2).lnk"));
+    assert_eq!(linked_name(&first), "a.txt");
+    assert_eq!(linked_name(&second), "a.txt");
+    let undone = undo(outcome);
+    assert!(!second.exists());
+    assert!(first.exists());
+    assert_eq!(read(&source), "linked");
+    purge(&undone);
+}
+
 #[test]
 fn a_locked_file_names_the_app_holding_it() {
     let sandbox = Sandbox::new();
@@ -1070,6 +1113,29 @@ fn a_file_that_fails_to_fill_goes_again_so_a_retry_finds_its_name_free() {
     assert!(!target.exists());
     sys::write_new(&target, b"whole").unwrap();
     assert_eq!(fs::read(&target).unwrap(), b"whole");
+}
+
+#[test]
+fn a_name_another_job_took_is_passed_over_and_left_alone() {
+    let sandbox = Sandbox::new();
+    let taken = sandbox.file("a.lnk", "theirs");
+    let free = sandbox.path("a (2).lnk");
+    let mut names = vec![free.clone(), taken.clone()];
+
+    let claimed = names::claim(|| names.pop().unwrap()).unwrap();
+
+    assert_eq!(claimed, free);
+    assert!(free.exists());
+    assert_eq!(read(&taken), "theirs");
+}
+
+#[test]
+fn a_name_that_never_comes_free_is_an_error() {
+    let sandbox = Sandbox::new();
+    let taken = sandbox.file("a.lnk", "theirs");
+
+    assert!(names::claim(|| taken.clone()).is_err());
+    assert_eq!(read(&taken), "theirs");
 }
 
 #[test]

@@ -481,6 +481,7 @@ fn title(job: &Job) -> String {
         Job::Rename { name, .. } => format!("Renaming to {name}"),
         Job::New { directory: true, .. } => "Creating a folder".to_string(),
         Job::New { .. } | Job::Template { .. } => "Creating a file".to_string(),
+        Job::Shortcut { sources, .. } => listed("Linking to", sources),
         Job::Recycle { paths } => listed("Recycling", paths),
         Job::Delete { paths } => listed("Deleting", paths),
         Job::Restore { items } => deleted("Restoring", items),

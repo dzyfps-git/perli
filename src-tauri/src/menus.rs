@@ -238,7 +238,7 @@ fn shell_items(paths: &[PathBuf]) -> Result<IShellItemArray> {
     unsafe { SHCreateShellItemArrayFromIDLists(&raw) }
 }
 
-fn data_object(paths: &[PathBuf]) -> Result<IDataObject> {
+pub fn data_object(paths: &[PathBuf]) -> Result<IDataObject> {
     unsafe { shell_items(paths)?.BindToHandler(None, &BHID_DataObject) }
 }
 
