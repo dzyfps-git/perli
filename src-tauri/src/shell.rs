@@ -1,6 +1,8 @@
 //! Asks Windows to do things the way Explorer would.
 
 use std::collections::HashMap;
+use std::os::windows::process::CommandExt;
+use std::process::Command;
 
 use windows::core::{w, Error, Result, HSTRING};
 use windows::Win32::Foundation::{E_FAIL, HGLOBAL};
@@ -11,6 +13,7 @@ use windows::Win32::System::Com::{
 use windows::Win32::System::DataExchange::{CloseClipboard, GetClipboardData, OpenClipboard};
 use windows::Win32::System::Environment::ExpandEnvironmentStringsW;
 use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
+use windows::Win32::System::Threading::CREATE_NEW_CONSOLE;
 use windows::Win32::UI::Shell::{
     SHGetFileInfoW, ShellExecuteW, SHFILEINFOW, SHGFI_TYPENAME, SHGFI_USEFILEATTRIBUTES,
 };
@@ -105,6 +108,22 @@ fn type_name(extension: &str) -> Option<String> {
     let name = info.szTypeName;
     let length = name.iter().position(|&unit| unit == 0)?;
     (found != 0 && length > 0).then(|| String::from_utf16_lossy(&name[..length]))
+}
+
+/// Opens a terminal in `folder`: Windows Terminal if there is one, or else PowerShell.
+pub fn open_terminal(folder: &str) -> std::io::Result<()> {
+    let terminal = Command::new("wt.exe")
+        .args(["-d", "."])
+        .current_dir(folder)
+        .spawn();
+    terminal
+        .or_else(|_| {
+            Command::new("powershell.exe")
+                .current_dir(folder)
+                .creation_flags(CREATE_NEW_CONSOLE.0)
+                .spawn()
+        })
+        .map(drop)
 }
 
 /// Opens a file with its default app. Blocks, so call it off the main thread.

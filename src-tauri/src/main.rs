@@ -3,12 +3,15 @@
 mod clipboard;
 mod folder;
 mod jobs;
+mod menus;
 mod ops;
 mod parts;
 mod places;
 mod session;
 mod shell;
 mod snap;
+mod templates;
+mod watch;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -24,6 +27,7 @@ use tauri::{
 
 use jobs::{Jobs, Plan};
 use ops::{Job, Reply};
+use watch::{Watch, Watches};
 
 /// How long the UI gets to answer a close request before the window goes anyway, so a frozen
 /// UI can't keep it open.
@@ -75,10 +79,13 @@ impl View {
         self.snapshots.retain(|snapshot| snapshot.request == shown);
     }
 
-    fn finish(&mut self, request: u64, listing: folder::Listing) {
-        if request == self.latest {
+    /// Says whether `listing` is the newest read, which moves the view on to it.
+    fn finish(&mut self, request: u64, listing: folder::Listing) -> bool {
+        let newest = request == self.latest;
+        if newest {
             self.snapshots.push(Snapshot { request, listing });
         }
+        newest
     }
 
     fn listing(&self, request: u64) -> Option<&folder::Listing> {
@@ -122,6 +129,16 @@ impl Views {
     }
 }
 
+/// Runs blocking work off the main thread.
+async fn off_main<T: Send + 'static>(
+    work: impl FnOnce() -> windows::core::Result<T> + Send + 'static,
+) -> Result<T, String> {
+    async_runtime::spawn_blocking(work)
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.message())
+}
+
 /// Rows of one snapshot.
 #[derive(Deserialize)]
 struct Selection {
@@ -138,6 +155,7 @@ enum Task {
     Move { selection: Selection, folder: String },
     Rename { selection: Selection, name: String },
     New { folder: String, directory: bool },
+    Template { folder: String, extension: String },
     Paste { folder: String },
     Recycle { selection: Selection },
     Delete { selection: Selection },
@@ -171,6 +189,10 @@ impl Task {
             Self::New { folder, directory } => Job::New {
                 folder: target(folder)?,
                 directory,
+            },
+            Self::Template { folder, extension } => Job::Template {
+                folder: target(folder)?,
+                template: templates::template(&extension)?,
             },
             Self::Paste { folder } => return paste(target(folder)?),
             Self::Recycle { selection } => Job::Recycle {
@@ -315,8 +337,10 @@ async fn open_folder(
     order: folder::Order,
     views: State<'_, Views>,
     preload: State<'_, Preload>,
+    watches: State<'_, Watches>,
 ) -> Result<Opened, String> {
     let started = Instant::now();
+    let watch = watch_of(&path);
     views
         .0
         .write()
@@ -351,9 +375,20 @@ async fn open_folder(
     };
     let mut views = views.0.write().unwrap_or_else(|error| error.into_inner());
     if let Some(current) = views.get_mut(&view) {
-        current.finish(request, listing);
+        if current.finish(request, listing) {
+            watches.set(view, watch);
+        }
     }
     Ok(opened)
+}
+
+/// What a view watches once `path` has read fine. Make it before the read, and hand it over only
+/// after, because a failed open leaves the old folder on screen and that one must stay watched.
+// ponytail: a finished read the UI drops for a newer open that then fails leaves the watch on the
+// dropped folder until the next open. Handing over when the UI takes the rows would close that.
+fn watch_of(path: &str) -> Option<Watch> {
+    let resolved = folder::resolve(path).ok().filter(|_| path != folder::BIN_PATH)?;
+    Some(Watch::new(resolved.into()))
 }
 
 /// Puts the shown folder in a new order as a new snapshot, the same way an open would.
@@ -405,7 +440,9 @@ async fn reload_view(
     selected: Vec<u32>,
     select: Vec<String>,
     views: State<'_, Views>,
+    watches: State<'_, Watches>,
 ) -> Result<Reloaded, String> {
+    let watch = watch_of(&path);
     let keys = {
         let mut views = views.0.write().unwrap_or_else(|error| error.into_inner());
         let current = views.entry(view).or_default();
@@ -432,7 +469,9 @@ async fn reload_view(
 
     let mut views = views.0.write().unwrap_or_else(|error| error.into_inner());
     if let Some(current) = views.get_mut(&view) {
-        current.finish(request, listing);
+        if current.finish(request, listing) {
+            watches.set(view, watch);
+        }
     }
     Ok(reloaded)
 }
@@ -622,7 +661,12 @@ async fn find_row(
 }
 
 #[tauri::command]
-async fn close_view(view: u32, views: State<'_, Views>) -> Result<(), String> {
+async fn close_view(
+    view: u32,
+    views: State<'_, Views>,
+    watches: State<'_, Watches>,
+) -> Result<(), String> {
+    watches.stop(view);
     views
         .0
         .write()
@@ -683,6 +727,107 @@ async fn open_file(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+async fn apps_for(
+    selection: Selection,
+    views: State<'_, Views>,
+) -> Result<Vec<menus::App>, String> {
+    let paths = views.read(&selection, folder::Listing::paths)?;
+    off_main(move || menus::apps_for(paths)).await
+}
+
+#[tauri::command]
+async fn open_with(selection: Selection, app: String, views: State<'_, Views>) -> Result<(), String> {
+    let paths = views.read(&selection, folder::Listing::paths)?;
+    off_main(move || menus::open_with(paths, app)).await
+}
+
+#[tauri::command]
+async fn choose_app(selection: Selection, views: State<'_, Views>) -> Result<(), String> {
+    let path = views
+        .read(&selection, folder::Listing::paths)?
+        .pop()
+        .ok_or("Nothing is selected")?;
+    off_main(move || menus::choose_app(path)).await
+}
+
+#[tauri::command]
+async fn send_targets() -> Result<Vec<menus::SendTarget>, String> {
+    off_main(menus::send_targets).await
+}
+
+#[tauri::command]
+async fn send_to(selection: Selection, target: PathBuf, views: State<'_, Views>) -> Result<(), String> {
+    let paths = views.read(&selection, folder::Listing::paths)?;
+    off_main(move || menus::send_to(paths, target)).await
+}
+
+/// Rows, or with none the folder itself, for what Windows offers on either.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+enum ShellTarget {
+    Rows { selection: Selection },
+    Folder { path: String },
+}
+
+impl ShellTarget {
+    fn read(self, views: &Views) -> Result<menus::Target, String> {
+        Ok(match self {
+            Self::Rows { selection } => {
+                menus::Target::Items(views.read(&selection, folder::Listing::paths)?)
+            }
+            Self::Folder { path } => menus::Target::Folder(path.into()),
+        })
+    }
+}
+
+/// `x` and `y` are physical pixels inside the window, here and in `show_properties`.
+#[tauri::command]
+async fn show_shell_menu(
+    target: ShellTarget,
+    x: i32,
+    y: i32,
+    views: State<'_, Views>,
+    app: AppHandle,
+) -> Result<Option<String>, String> {
+    let target = target.read(&views)?;
+    let main = jobs::owner(&app);
+    off_main(move || menus::show_menu(target, main, x, y)).await
+}
+
+#[tauri::command]
+async fn show_properties(
+    target: ShellTarget,
+    x: i32,
+    y: i32,
+    views: State<'_, Views>,
+    app: AppHandle,
+) -> Result<(), String> {
+    let target = target.read(&views)?;
+    let main = jobs::owner(&app);
+    off_main(move || menus::show_properties(target, main, x, y)).await
+}
+
+#[tauri::command]
+async fn open_terminal(path: String) -> Result<(), String> {
+    async_runtime::spawn_blocking(move || shell::open_terminal(&path))
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn new_types() -> Result<Vec<templates::NewType>, String> {
+    off_main(|| Ok(templates::new_types())).await
+}
+
+/// The apps holding the selected files.
+#[tauri::command]
+async fn file_users(selection: Selection, views: State<'_, Views>) -> Result<Vec<String>, String> {
+    let paths = views.read(&selection, folder::Listing::paths)?;
+    off_main(move || Ok(ops::sys::users_of(&paths))).await
+}
+
+#[tauri::command]
 async fn clipboard_text() -> Result<String, String> {
     async_runtime::spawn_blocking(shell::clipboard_text)
         .await
@@ -722,7 +867,12 @@ fn main() {
         .manage(Views::default())
         .manage(Jobs::loading_history())
         .manage(Closing::default())
+        .manage(Watches::default())
         .manage(Preload(Mutex::new(preload)))
+        .setup(|app| {
+            watch::start(app.handle().clone());
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             start_state,
             save_session,
@@ -755,6 +905,16 @@ fn main() {
             close_view,
             place_snap_area,
             open_file,
+            apps_for,
+            open_with,
+            choose_app,
+            send_targets,
+            send_to,
+            show_shell_menu,
+            show_properties,
+            open_terminal,
+            new_types,
+            file_users,
             clipboard_text
         ])
         .run(tauri::generate_context!())
@@ -805,9 +965,9 @@ mod tests {
         let mut view = View::default();
         view.begin(1, 0);
         view.begin(2, 0);
-        view.finish(2, folder::Listing::default());
-        view.finish(1, folder::Listing::default());
 
+        assert!(view.finish(2, folder::Listing::default()));
+        assert!(!view.finish(1, folder::Listing::default()));
         assert_eq!(held(&view), [2]);
     }
 

@@ -54,6 +54,7 @@ export function createJobs(views: () => FolderView[]) {
   const [cards, setCards] = createStore<JobCard[]>([]);
   const [latestStep, setLatestStep] = createSignal<number | null>(null);
   const [canRedo, setCanRedo] = createSignal(false);
+  /** Cards with no job behind them count down, so their ids never meet a job's. */
   let failures = 0;
 
   const find = (id: number) => cards.find((card) => card.id === id);
@@ -117,6 +118,21 @@ export function createJobs(views: () => FolderView[]) {
     }
   }
 
+  /** A card with no job behind it, which only tells the user something. */
+  function notify(title: string, note: string) {
+    setCards(cards.length, {
+      id: --failures,
+      title,
+      origin: null,
+      newItem: false,
+      recycle: false,
+      shown: true,
+      paused: false,
+      rate: startRate(0),
+      ended: { note, kept: [], step: null },
+    });
+  }
+
   const listener = onJobEvent(onEvent);
   onCleanup(() => listener.then((stop) => stop()));
   // The undo log outlives the app, so Undo can work before any job runs.
@@ -133,19 +149,8 @@ export function createJobs(views: () => FolderView[]) {
       undoJob(card.origin ?? undefined, card.ended?.step ?? undefined).catch(this.report);
     },
     /** A job that never started sends no events, so its reason gets a card of its own. */
-    report(failure: unknown) {
-      setCards(cards.length, {
-        id: --failures,
-        title: String(failure),
-        origin: null,
-        newItem: false,
-        recycle: false,
-        shown: true,
-        paused: false,
-        rate: startRate(0),
-        ended: { note: "Nothing changed", kept: [], step: null },
-      });
-    },
+    report: (failure: unknown) => notify(String(failure), "Nothing changed"),
+    notify,
     pause(id: number) {
       patch(id, { paused: true });
       pauseJob(id).catch(console.error);

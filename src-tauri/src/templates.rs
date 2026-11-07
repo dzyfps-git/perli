@@ -1,0 +1,293 @@
+//! The file types Windows offers under New, read from the `ShellNew` registry keys.
+
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
+use serde::Serialize;
+use windows::core::{GUID, HSTRING, PCWSTR, PWSTR};
+use windows::Win32::Foundation::ERROR_SUCCESS;
+use windows::Win32::System::Registry::{
+    RegEnumKeyExW, RegGetValueW, RegOpenKeyExW, RegCloseKey, HKEY, HKEY_CLASSES_ROOT, KEY_READ,
+    RRF_RT_ANY, RRF_RT_REG_BINARY, RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ,
+};
+use windows::Win32::UI::Shell::{FOLDERID_CommonTemplates, FOLDERID_Templates, SHLoadIndirectString};
+
+use crate::ops::{Content, Template};
+use crate::{places, shell};
+
+/// Longest key name the registry allows, with room for the null.
+const LONGEST_KEY: usize = 256;
+/// Longest text a `ShellNew` item name resolves to.
+const LONGEST_TEXT: usize = 512;
+
+/// A type for the New menu.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct NewType {
+    /// Without the dot.
+    extension: String,
+    name: String,
+}
+
+fn exists(key: &str) -> bool {
+    let mut opened = HKEY::default();
+    let found = unsafe {
+        RegOpenKeyExW(HKEY_CLASSES_ROOT, &HSTRING::from(key), None, KEY_READ, &raw mut opened)
+    };
+    if found == ERROR_SUCCESS {
+        let _ = unsafe { RegCloseKey(opened) };
+    }
+    found == ERROR_SUCCESS
+}
+
+/// The raw bytes of a value. Text values come with Windows' environment names filled in.
+fn read_value(key: &str, name: Option<&str>, kinds: windows::Win32::System::Registry::REG_ROUTINE_FLAGS) -> Option<Vec<u8>> {
+    let key = HSTRING::from(key);
+    let name = name.map(HSTRING::from);
+    let name = name.as_ref().map_or(PCWSTR::null(), |name| PCWSTR(name.as_ptr()));
+    let mut size = 0;
+    unsafe {
+        let found = RegGetValueW(HKEY_CLASSES_ROOT, &key, name, kinds, None, None, Some(&raw mut size));
+        if found != ERROR_SUCCESS {
+            return None;
+        }
+        let mut bytes = vec![0; size as usize];
+        let read = RegGetValueW(
+            HKEY_CLASSES_ROOT,
+            &key,
+            name,
+            kinds,
+            None,
+            Some(bytes.as_mut_ptr().cast()),
+            Some(&raw mut size),
+        );
+        (read == ERROR_SUCCESS).then(|| {
+            bytes.truncate(size as usize);
+            bytes
+        })
+    }
+}
+
+fn read_text(key: &str, name: Option<&str>) -> Option<String> {
+    let bytes = read_value(key, name, RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ)?;
+    let units: Vec<u16> = bytes.chunks_exact(2).map(|pair| u16::from_le_bytes([pair[0], pair[1]])).collect();
+    let end = units.iter().position(|&unit| unit == 0).unwrap_or(units.len());
+    Some(String::from_utf16_lossy(&units[..end]))
+}
+
+fn has_value(key: &str, name: &str) -> bool {
+    read_value(key, Some(name), RRF_RT_ANY).is_some()
+}
+
+/// A type's `ShellNew` key sits under its extension, or under the extension's class.
+fn shell_new_key(extension: &str) -> Option<String> {
+    let direct = format!(r"{extension}\ShellNew");
+    if exists(&direct) {
+        return Some(direct);
+    }
+    let class = read_text(extension, None)?;
+    let nested = format!(r"{extension}\{class}\ShellNew");
+    exists(&nested).then_some(nested)
+}
+
+/// The file `FileName` means: a full path, or one kept in a templates folder.
+fn find_template(name: &str) -> Option<PathBuf> {
+    if Path::new(name).is_absolute() {
+        return Path::new(name).is_file().then(|| name.into());
+    }
+    let known = |id: &GUID| places::known_folder(id).map(PathBuf::from);
+    let windows_folder = std::env::var_os("WINDIR").map(|folder| PathBuf::from(folder).join("ShellNew"));
+    [known(&FOLDERID_Templates), known(&FOLDERID_CommonTemplates), windows_folder]
+        .into_iter()
+        .flatten()
+        .map(|folder| folder.join(name))
+        .find(|file| file.is_file())
+}
+
+/// `Command` and `Handler` types run a program or a wizard, which a plain new file can't stand
+/// in for, even if the key also says `NullFile`, as the shortcut type does.
+fn content_of(key: &str) -> Option<Content> {
+    if has_value(key, "Command") || has_value(key, "Handler") {
+        return None;
+    }
+    if has_value(key, "NullFile") {
+        return Some(Content::Empty);
+    }
+    if let Some(bytes) = read_value(key, Some("Data"), RRF_RT_REG_BINARY) {
+        return Some(Content::Bytes(bytes));
+    }
+    if let Some(text) = read_text(key, Some("Data")) {
+        return Some(Content::Bytes(text.into_bytes()));
+    }
+    find_template(&read_text(key, Some("FileName"))?).map(Content::Copy)
+}
+
+/// `ItemName` is often a reference into a program's resources.
+fn item_name(key: &str) -> Option<String> {
+    let name = read_text(key, Some("ItemName"))?;
+    if !name.starts_with('@') {
+        return Some(name);
+    }
+    let mut text = [0u16; LONGEST_TEXT];
+    unsafe { SHLoadIndirectString(&HSTRING::from(name), &mut text, None) }.ok()?;
+    let length = text.iter().position(|&unit| unit == 0)?;
+    (length > 0).then(|| String::from_utf16_lossy(&text[..length]))
+}
+
+/// Every extension key, each with its dot.
+fn extensions() -> Vec<String> {
+    let mut found = Vec::new();
+    let mut name = [0u16; LONGEST_KEY];
+    for index in 0.. {
+        let mut length = LONGEST_KEY as u32;
+        let result = unsafe {
+            RegEnumKeyExW(
+                HKEY_CLASSES_ROOT,
+                index,
+                Some(PWSTR(name.as_mut_ptr())),
+                &raw mut length,
+                None,
+                None,
+                None,
+                None,
+            )
+        };
+        if result != ERROR_SUCCESS {
+            break;
+        }
+        if name[0] == u16::from(b'.') {
+            found.push(String::from_utf16_lossy(&name[..length as usize]));
+        }
+    }
+    found
+}
+
+fn read_types() -> Vec<NewType> {
+    let with_key = extensions().into_iter().filter_map(|extension| {
+        let key = shell_new_key(&extension)?;
+        content_of(&key)?;
+        extension.strip_prefix('.').map(str::to_string)
+    });
+    let extensions: Vec<String> = with_key.collect();
+    let names = shell::type_names(extensions).unwrap_or_default();
+    let mut types: Vec<NewType> = names
+        .into_iter()
+        .map(|(extension, name)| NewType { extension, name })
+        .collect();
+    types.sort_by_key(|kind| kind.name.to_lowercase());
+    types
+}
+
+/// The types Windows offers. Blocks, so call it off the main thread. The first read walks the
+/// whole registry, and the list only changes when an app is installed.
+pub fn new_types() -> Vec<NewType> {
+    static TYPES: OnceLock<Vec<NewType>> = OnceLock::new();
+    TYPES.get_or_init(read_types).clone()
+}
+
+/// What a new file of `extension` should be named and hold.
+pub fn template(extension: &str) -> Result<Template, String> {
+    let dotted = format!(".{extension}");
+    let unknown = || format!("Windows has no template for {dotted} files");
+    let key = shell_new_key(&dotted).ok_or_else(unknown)?;
+    let content = content_of(&key).ok_or_else(unknown)?;
+    let stem = item_name(&key).unwrap_or_else(|| {
+        let names = shell::type_names(vec![extension.to_string()]).unwrap_or_default();
+        let name = names.get(extension).map_or(extension, String::as_str);
+        format!("New {name}")
+    });
+    Ok(Template { stem, extension: dotted, content })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows::Win32::System::Registry::{
+        RegDeleteTreeW, RegSetKeyValueW, HKEY_CURRENT_USER, REG_BINARY, REG_SZ,
+    };
+
+    /// A made-up type in the user's own classes, which Windows adds to `HKEY_CLASSES_ROOT`.
+    /// What a real PC offers varies: some have no text template at all.
+    struct ScratchType(String);
+
+    impl ScratchType {
+        fn new(name: &str) -> Self {
+            Self(format!("perli-test-{name}-{}", std::process::id()))
+        }
+
+        fn set(&self, below: &str, name: Option<&str>, kind: u32, bytes: &[u8]) {
+            let key = HSTRING::from(format!(r"Software\Classes\.{}{below}", self.0));
+            let name = HSTRING::from(name.unwrap_or_default());
+            let data = Some(bytes.as_ptr().cast());
+            let set = unsafe { RegSetKeyValueW(HKEY_CURRENT_USER, &key, &name, kind, data, bytes.len() as u32) };
+            assert_eq!(set, ERROR_SUCCESS);
+        }
+
+        fn set_text(&self, below: &str, name: Option<&str>, text: &str) {
+            let bytes: Vec<u8> = text.encode_utf16().chain([0]).flat_map(u16::to_le_bytes).collect();
+            self.set(below, name, REG_SZ.0, &bytes);
+        }
+    }
+
+    impl Drop for ScratchType {
+        fn drop(&mut self) {
+            let key = HSTRING::from(format!(r"Software\Classes\.{}", self.0));
+            let _ = unsafe { RegDeleteTreeW(HKEY_CURRENT_USER, &key) };
+        }
+    }
+
+    #[test]
+    fn a_type_starts_empty_under_its_own_name() {
+        let scratch = ScratchType::new("empty");
+        scratch.set_text(r"\ShellNew", Some("NullFile"), "");
+        scratch.set_text(r"\ShellNew", Some("ItemName"), "Blank Note");
+
+        let template = template(&scratch.0).unwrap();
+        assert_eq!(template.stem, "Blank Note");
+        assert_eq!(template.extension, format!(".{}", scratch.0));
+        assert_eq!(template.content, Content::Empty);
+    }
+
+    #[test]
+    fn a_type_under_its_class_starts_from_bytes() {
+        let scratch = ScratchType::new("bytes");
+        scratch.set_text("", None, "PerliClass");
+        scratch.set(r"\PerliClass\ShellNew", Some("Data"), REG_BINARY.0, &[1, 2, 3]);
+
+        let template = template(&scratch.0).unwrap();
+        assert!(template.stem.starts_with("New "), "{}", template.stem);
+        assert_eq!(template.content, Content::Bytes(vec![1, 2, 3]));
+    }
+
+    #[test]
+    fn a_type_copies_its_blank_file_and_goes_when_that_is_missing() {
+        let blank = std::env::temp_dir().join(format!("perli-blank-{}.bin", std::process::id()));
+        std::fs::write(&blank, "blank").unwrap();
+        let scratch = ScratchType::new("copy");
+        scratch.set_text(r"\ShellNew", Some("FileName"), blank.to_str().unwrap());
+
+        assert_eq!(template(&scratch.0).unwrap().content, Content::Copy(blank.clone()));
+
+        std::fs::remove_file(&blank).unwrap();
+        assert!(template(&scratch.0).is_err());
+    }
+
+    #[test]
+    fn a_type_that_runs_a_program_is_not_offered() {
+        let scratch = ScratchType::new("wizard");
+        scratch.set_text(r"\ShellNew", Some("NullFile"), "");
+        scratch.set_text(r"\ShellNew", Some("Command"), "wizard.exe");
+        let plain = ScratchType::new("plain");
+        plain.set_text(r"\ShellNew", Some("NullFile"), "");
+
+        assert!(template(&scratch.0).is_err());
+        let types = read_types();
+        assert!(types.iter().any(|kind| kind.extension == plain.0), "{types:?}");
+        assert!(!types.iter().any(|kind| kind.extension == scratch.0), "{types:?}");
+        assert!(!types.iter().any(|kind| kind.extension == "lnk"), "{types:?}");
+    }
+
+    #[test]
+    fn an_unknown_type_has_no_template() {
+        assert!(template("perli-not-a-type").is_err());
+    }
+}

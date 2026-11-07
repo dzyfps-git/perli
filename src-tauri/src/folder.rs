@@ -2,7 +2,7 @@
 //! The UI only ever holds the rows it is showing.
 
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
@@ -16,6 +16,7 @@ use windows::Win32::Storage::FileSystem::{
 use windows::Win32::UI::Shell::StrCmpLogicalW;
 
 use crate::ops::{self, BinItem};
+use crate::shell;
 
 /// Stands for the Recycle Bin, which has no folder of its own to open.
 pub const BIN_PATH: &str = "shell:RecycleBinFolder";
@@ -73,6 +74,10 @@ impl Entry {
         let length = data.cFileName.iter().position(|&c| c == 0)?;
         let name = &data.cFileName[..length];
         if name == [b'.' as u16] || name == [b'.' as u16, b'.' as u16] {
+            return None;
+        }
+        // A folder that reloads while a copy lands in it must not show the copy's working file.
+        if name.first() == Some(&(b'~' as u16)) && ops::is_temp_name(&String::from_utf16_lossy(name)) {
             return None;
         }
         Some(Self {
@@ -185,7 +190,8 @@ impl Listing {
             .filter(|&row| order.show_hidden || !entries[row as usize].hidden)
             .collect();
         let locations = self.locations();
-        visible.sort_unstable_by(|&a, &b| compare(entries, locations, a, b, order));
+        let types = if order.key == SortKey::Type { type_ranks(entries) } else { Vec::new() };
+        visible.sort_unstable_by(|&a, &b| compare(entries, locations, &types, a, b, order));
         self.visible = visible;
         self.order = order;
         self
@@ -204,6 +210,7 @@ impl Listing {
         self.entries.iter().filter(|entry| entry.hidden).count()
     }
 
+    #[cfg(test)]
     fn rows(&self) -> impl Iterator<Item = &Entry> {
         self.visible.iter().map(|&row| &self.entries[row as usize])
     }
@@ -315,6 +322,33 @@ impl Listing {
     }
 }
 
+/// Each entry's place among the names Windows gives file types, so JPG and JPEG sit together
+/// and a sort compares numbers rather than text. An extension with no name goes by itself.
+fn type_ranks(entries: &[Entry]) -> Vec<u32> {
+    let extension = |entry: &Entry| {
+        let dotted = &entry.extension()[..entry.extension().len() - 1];
+        String::from_utf16_lossy(dotted.get(1..).unwrap_or_default()).to_lowercase()
+    };
+    let extensions: HashSet<String> = entries.iter().map(extension).collect();
+    let names = shell::type_names(extensions.iter().filter(|text| !text.is_empty()).cloned().collect())
+        .unwrap_or_default();
+    let label = |extension: &String| -> Vec<u16> {
+        let name = names.get(extension).unwrap_or(extension);
+        name.encode_utf16().chain([0]).collect()
+    };
+    let mut labels: Vec<(Vec<u16>, String)> =
+        extensions.into_iter().map(|extension| (label(&extension), extension)).collect();
+    labels.sort_unstable_by(|a, b| natural(&a.0, &b.0));
+
+    let mut ranks = HashMap::new();
+    let mut rank = 0;
+    for (index, (label, extension)) in labels.iter().enumerate() {
+        rank += u32::from(index > 0 && *label != labels[index - 1].0);
+        ranks.insert(extension.as_str(), rank);
+    }
+    entries.iter().map(|entry| ranks[extension(entry).as_str()]).collect()
+}
+
 /// `full` comes from `resolve`.
 fn read_entries(full: &str) -> Result<Vec<Entry>> {
     let mut entries = Vec::new();
@@ -352,7 +386,14 @@ fn location_of(locations: &[Box<[u16]>], entry: u32) -> &[u16] {
     locations.get(entry as usize).map_or(&[0], |location| location)
 }
 
-fn compare(entries: &[Entry], locations: &[Box<[u16]>], first: u32, second: u32, order: Order) -> Ordering {
+fn compare(
+    entries: &[Entry],
+    locations: &[Box<[u16]>],
+    types: &[u32],
+    first: u32,
+    second: u32,
+    order: Order,
+) -> Ordering {
     let (a, b) = (&entries[first as usize], &entries[second as usize]);
     let groups = match order.group {
         Grouping::FoldersFirst => b.is_dir.cmp(&a.is_dir),
@@ -364,7 +405,7 @@ fn compare(entries: &[Entry], locations: &[Box<[u16]>], first: u32, second: u32,
             SortKey::Name => natural(&a.name, &b.name),
             SortKey::Modified => a.modified.cmp(&b.modified),
             SortKey::Created => a.created.cmp(&b.created),
-            SortKey::Type => natural(a.extension(), b.extension()),
+            SortKey::Type => types[first as usize].cmp(&types[second as usize]),
             SortKey::Size => a.size.cmp(&b.size),
             SortKey::Location => natural(location_of(locations, first), location_of(locations, second)),
         };
@@ -479,9 +520,9 @@ mod tests {
     }
 
     #[test]
-    fn sorts_by_extension_for_type() {
+    fn sorts_by_type_name_so_one_type_sits_together() {
         let folder = TempFolder::new("type");
-        for file in ["b.txt", "a.zip", "c.png", "noext"] {
+        for file in ["a.jpg", "b.txt", "c.jpeg", "noext"] {
             fs::write(folder.0.join(file), "").unwrap();
         }
 
@@ -490,7 +531,11 @@ mod tests {
             ..Order::default()
         };
 
-        assert_eq!(sorted(&folder, order), ["noext", "c.png", "b.txt", "a.zip"]);
+        let names = sorted(&folder, order);
+        assert_eq!(names[0], "noext");
+        let photo = |name: &String| name.ends_with(".jpg") || name.ends_with(".jpeg");
+        let first = names.iter().position(photo).unwrap();
+        assert!(photo(&names[first + 1]), "{names:?}");
     }
 
     #[test]

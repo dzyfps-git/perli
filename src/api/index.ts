@@ -72,6 +72,7 @@ export type Task =
   | { kind: "copy" | "move"; selection: Selection; folder: string }
   | { kind: "rename"; selection: Selection; name: string }
   | { kind: "new"; folder: string; directory: boolean }
+  | { kind: "template"; folder: string; extension: string }
   | { kind: "paste"; folder: string }
   | { kind: "recycle" | "delete" | "restore" | "purge"; selection: Selection }
   | { kind: "empty" };
@@ -127,6 +128,28 @@ export interface Measured {
   items: number;
   bytes: number;
 }
+
+/** An app Windows recommends for a file type. */
+export interface App {
+  id: string;
+  name: string;
+}
+
+export interface SendTarget {
+  name: string;
+  path: string;
+  /** A drive takes a plain copy. The rest are Windows' own targets, such as a zip. */
+  isDrive: boolean;
+}
+
+/** A file type Windows offers under New. */
+export interface NewType {
+  extension: string;
+  name: string;
+}
+
+/** What a Windows menu or Properties window is for. */
+export type ShellTarget = { kind: "rows"; selection: Selection } | { kind: "folder"; path: string };
 
 const HEADER_BYTES = 33;
 const FLAG_FOLDER = 1;
@@ -237,6 +260,37 @@ export const placeSnapArea = (x: number, y: number, width: number, height: numbe
 export const openFile = (path: string) => invoke<void>("open_file", { path });
 
 export const clipboardText = () => invoke<string>("clipboard_text");
+
+export const appsFor = (selection: Selection) => invoke<App[]>("apps_for", { selection });
+
+export const openWith = (selection: Selection, app: string) => invoke<void>("open_with", { selection, app });
+
+export const chooseApp = (selection: Selection) => invoke<void>("choose_app", { selection });
+
+export const sendTargets = () => invoke<SendTarget[]>("send_targets");
+
+export const sendTo = (selection: Selection, target: string) => invoke<void>("send_to", { selection, target });
+
+/** `x` and `y` are physical pixels inside the window. Gives the verb the UI should run itself. */
+export const showShellMenu = (target: ShellTarget, x: number, y: number) =>
+  invoke<string | null>("show_shell_menu", { target, x, y });
+
+/** `x` and `y` are physical pixels inside the window, and pick the monitor it opens on. */
+export const showProperties = (target: ShellTarget, x: number, y: number) =>
+  invoke<void>("show_properties", { target, x, y });
+
+export const openTerminal = (path: string) => invoke<void>("open_terminal", { path });
+
+export const newTypes = () => invoke<NewType[]>("new_types");
+
+/** The apps holding the selected files. */
+export const fileUsers = (selection: Selection) => invoke<string[]>("file_users", { selection });
+
+/** Something outside Perli changed the folder this view shows. */
+export const onFolderChanged = (handler: (view: number) => void) =>
+  listen<number>("folder-changed", (event) => handler(event.payload));
+
+export const onDrivesChanged = (handler: () => void) => listen("drives-changed", handler);
 
 export async function fetchRows(
   view: number,

@@ -6,6 +6,7 @@ import {
   clipboardText,
   holdClose,
   onCloseAsked,
+  onFolderChanged,
   openFile,
   saveSession,
   startState,
@@ -18,6 +19,7 @@ import { checkCut, cutNames, takeBackCut } from "./features/fileops/clipboard";
 import { ConfirmDelete, type DeleteRequest } from "./features/fileops/ConfirmDelete";
 import { createJobs } from "./features/fileops/jobs";
 import { JobsPanel } from "./features/fileops/JobsPanel";
+import { createShellItems } from "./features/fileops/shellItems";
 import { BIN_COLUMNS, nextGrouping, nextSort } from "./features/filelist/columns";
 import { FileList } from "./features/filelist/FileList";
 import { clampTile, isLargestTile, isSmallestTile, TILE_STEP, type Layout } from "./features/filelist/layout";
@@ -32,7 +34,7 @@ import {
   toggleColumn,
 } from "./features/filelist/prefs";
 import type { FolderView } from "./features/navigation/folderView";
-import { join } from "./features/navigation/path";
+import { isBin, join } from "./features/navigation/path";
 import { Palette } from "./features/palette/Palette";
 import { PathBar } from "./features/pathbar/PathBar";
 import { Settings } from "./features/settings/Settings";
@@ -75,6 +77,7 @@ export function App() {
   const [deleting, setDeleting] = createSignal<DeleteRequest>();
   const jobs = createJobs(tabs.allViews);
   const actions = createFileActions(jobs, setDeleting, () => tabs.active().other());
+  const shell = createShellItems(jobs, actions);
   // A run started on one folder is a detour, so it must not replace the saved tabs.
   const [keepSession, setKeepSession] = createSignal(false);
   let saveTimer: number | undefined;
@@ -115,6 +118,8 @@ export function App() {
 
   // Covers every way to close, including Alt+F4 and the taskbar.
   const closeListener = onCloseAsked(onClose);
+  // Other apps and Windows' own commands change folders without Perli running a job.
+  const folderListener = onFolderChanged((id) => tabs.allViews().find((view) => view.id === id)?.reload());
 
   function openRow(view: FolderView, row: Row, toSide: boolean) {
     if (view.isBin()) return;
@@ -129,6 +134,7 @@ export function App() {
     const items = [
       { label: "Open", action: () => view.open(path) },
       { label: "Open to side", action: () => tabs.openToSide(path) },
+      ...(isBin(path) ? [] : shell.placeItems(path, { x: event.clientX, y: event.clientY })),
     ];
     setMenu({ x: event.clientX, y: event.clientY, items });
   }
@@ -149,7 +155,9 @@ export function App() {
     const canPaste = await clipboardHasFiles();
     const items: MenuItem[] = [
       { label: "Open", action: () => openRow(view, row, false) },
-      ...(row.isDir ? [{ label: "Open to side", action: () => openRow(view, row, true) }] : []),
+      row.isDir
+        ? { label: "Open to side", action: () => openRow(view, row, true) }
+        : shell.openWithItem(view),
       { label: "Cut", divider: true, action: () => actions.cut(view) },
       { label: "Copy", action: () => actions.copy(view) },
       {
@@ -166,6 +174,7 @@ export function App() {
         { label: "Move to other pane", action: () => actions.toOtherPane(view, "move") },
       );
     }
+    items.push(...shell.rowItems(view, { x, y }, row.isDir ? path : undefined, () => openRow(view, row, false)));
     setMenu({ x, y, items });
   }
 
@@ -298,11 +307,11 @@ export function App() {
         ]
       : [
           { label: "Paste", disabled: !(await clipboardHasFiles()), action: () => actions.paste(view) },
-          { label: "New folder", action: () => actions.newItem(view, true) },
-          { label: "New file", action: () => actions.newItem(view, false) },
+          shell.newItem(view),
           ...undo,
         ];
-    setMenu({ x, y, items: [...fileItems, ...viewItems(view)] });
+    const shellItems = view.isBin() ? [] : shell.backgroundItems(view, { x, y });
+    setMenu({ x, y, items: [...fileItems, ...viewItems(view), ...shellItems] });
   }
 
   const newTab = async () => {
@@ -322,12 +331,13 @@ export function App() {
 
   /** Holding a key down must not paste or delete again and again. */
   function onFileKey(event: KeyboardEvent, view: FolderView, key: string) {
-    if (!isInList(event) || event.altKey) return false;
+    if (!isInList(event)) return false;
     const { ctrlKey: ctrl, shiftKey: shift } = event;
     const run = (action: () => void) => {
       if (!event.repeat) action();
       return true;
     };
+    if (event.altKey) return key === "enter" && run(() => shell.properties(view));
     if (ctrl && key === "c") return run(() => actions.copy(view));
     if (ctrl && key === "x") return run(() => actions.cut(view));
     if (ctrl && key === "v") return run(() => actions.paste(view));
@@ -407,6 +417,7 @@ export function App() {
   onCleanup(() => {
     window.clearTimeout(saveTimer);
     closeListener.then((stop) => stop());
+    folderListener.then((stop) => stop());
     window.removeEventListener("keydown", onKeyDown);
     window.removeEventListener("mouseup", onMouseButton);
     window.removeEventListener("contextmenu", hideBrowserMenu);
