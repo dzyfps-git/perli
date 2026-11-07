@@ -937,6 +937,322 @@ fn junction_moved_across_drives_leaves_its_target_alone() {
     assert_eq!(read(&outside), "secret");
 }
 
+// ZIP.
+
+fn zip_of(path: &Path, entries: &[(&str, &[u8])]) {
+    let mut zip = zip::ZipWriter::new(fs::File::create(path).unwrap());
+    for (name, bytes) in entries {
+        let stored = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        zip.start_file(*name, stored).unwrap();
+        std::io::Write::write_all(&mut zip, bytes).unwrap();
+    }
+    zip.finish().unwrap();
+}
+
+fn unzip(archive: &Path, own_folder: bool) -> Job {
+    Job::Unzip {
+        archives: vec![archive.to_path_buf()],
+        own_folder,
+    }
+}
+
+fn entries_of(archive: &Path) -> Vec<String> {
+    let zip = zip::ZipArchive::new(fs::File::open(archive).unwrap()).unwrap();
+    let mut names: Vec<String> = zip.file_names().map(|name| name.unwrap().into_owned()).collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn a_zip_holds_a_tree_and_extracts_to_the_same_tree() {
+    let sandbox = Sandbox::new();
+    let folder = sandbox.path(r"here\tree");
+    sandbox.file(r"here\tree\top.txt", "top");
+    sandbox.file(r"here\tree\deep\ünï.txt", "deep");
+    fs::create_dir_all(folder.join("empty")).unwrap();
+    let long_ago = sys::stat(&sandbox.path(r"here\tree\top.txt")).unwrap().unwrap().modified;
+
+    let outcome = go(Job::Zip { sources: vec![folder] });
+
+    let archive = sandbox.path(r"here\tree.zip");
+    assert_eq!(outcome.done, [Done::Created { path: archive.clone() }]);
+    assert_eq!(sandbox.names("here"), ["tree", "tree.zip"], "no working file stays");
+    assert_eq!(entries_of(&archive), ["tree/", "tree/deep/", "tree/deep/ünï.txt", "tree/empty/", "tree/top.txt"]);
+
+    fs::create_dir(sandbox.path("out")).unwrap();
+    fs::rename(&archive, sandbox.path(r"out\tree.zip")).unwrap();
+    let extracted = go(unzip(&sandbox.path(r"out\tree.zip"), false));
+
+    assert_eq!(read(&sandbox.path(r"out\tree\top.txt")), "top");
+    assert_eq!(read(&sandbox.path(r"out\tree\deep\ünï.txt")), "deep");
+    assert!(sandbox.path(r"out\tree\empty").is_dir());
+    assert_eq!(extracted.done, [Done::Created { path: sandbox.path(r"out\tree") }], "the top folder stands for the rest");
+    let landed = sys::stat(&sandbox.path(r"out\tree\top.txt")).unwrap().unwrap().modified;
+    let seconds = landed.abs_diff(long_ago) / 10_000_000;
+    assert!(seconds <= 2, "ZIP keeps times to two seconds, this is {seconds} off");
+}
+
+#[test]
+fn a_new_zip_gets_its_name_from_what_went_in() {
+    let sandbox = Sandbox::new();
+    let (a, b) = (sandbox.file(r"here\a.tar.txt", "a"), sandbox.file(r"here\b.txt", "b"));
+
+    go(Job::Zip { sources: vec![a.clone()] });
+    go(Job::Zip { sources: vec![a.clone(), b.clone()] });
+    go(Job::Zip { sources: vec![a, b] });
+
+    assert_eq!(
+        sandbox.names("here"),
+        ["a.tar.txt", "a.tar.zip", "b.txt", "here (2).zip", "here.zip"]
+    );
+}
+
+#[test]
+fn a_file_given_up_on_leaves_a_good_archive() {
+    let sandbox = Sandbox::new();
+    let good = sandbox.file(r"here\good.txt", "good");
+    let held = sandbox.file(r"here\held.bin", &"x".repeat(1 << 20));
+    let _lock = lock(&held);
+
+    let outcome = go(Job::Zip { sources: vec![good, held.clone()] });
+
+    let archive = sandbox.path(r"here\here.zip");
+    assert_eq!(outcome.done.len(), 1);
+    assert_eq!(entries_of(&archive), ["good.txt"]);
+    go(unzip(&archive, true));
+    assert_eq!(read(&sandbox.path(r"here\here\good.txt")), "good");
+}
+
+#[test]
+fn a_cancelled_zip_leaves_nothing() {
+    let sandbox = Sandbox::new();
+    let a = sandbox.file(r"here\a.txt", "a");
+    let b = sandbox.file(r"here\b.txt", "b");
+    let control = Arc::new(Control::default());
+    let cancel = control.clone();
+    let script = Script {
+        during: Some(Box::new(move |_: &Progress| cancel.cancel())),
+        ..Script::default()
+    };
+
+    let outcome = run(Job::Zip { sources: vec![a, b] }, &script, &control);
+
+    assert!(outcome.cancelled);
+    assert!(outcome.done.is_empty());
+    assert_eq!(sandbox.names("here"), ["a.txt", "b.txt"]);
+}
+
+#[test]
+fn a_link_in_a_zip_stays_out_and_is_not_followed() {
+    let sandbox = Sandbox::new();
+    let outside = sandbox.folder("outside");
+    sandbox.file(r"outside\secret.txt", "secret");
+    sandbox.file(r"here\tree\a.txt", "a");
+    sandbox.junction(r"here\tree\link", &outside);
+
+    go(Job::Zip { sources: vec![sandbox.path(r"here\tree")] });
+
+    assert_eq!(entries_of(&sandbox.path(r"here\tree.zip")), ["tree/", "tree/a.txt"]);
+}
+
+#[test]
+fn names_from_an_archive_cannot_land_outside_or_break_windows() {
+    let sandbox = Sandbox::new();
+    let archive = sandbox.path(r"here\in\bad.zip");
+    fs::create_dir_all(archive.parent().unwrap()).unwrap();
+    zip_of(
+        &archive,
+        &[
+            ("../evil1.txt", b"x"),
+            (r"..\evil2.txt", b"x"),
+            ("a/../../evil3.txt", b"x"),
+            (r"C:\evil4.txt", b"x"),
+            ("/evil5.txt", b"x"),
+            ("CON.txt", b"x"),
+            ("name:stream.txt", b"x"),
+            ("trailing./fine.txt", b"x"),
+            ("ok.txt", b"fine"),
+        ],
+    );
+    let script = Script::always(Answer::Skip);
+
+    let outcome = run_with(unzip(&archive, false), &script);
+
+    // A rooted name loses its root, so it lands inside like any other.
+    assert_eq!(sandbox.names(r"here\in"), ["bad.zip", "evil4.txt", "evil5.txt", "ok.txt"]);
+    assert_eq!(sandbox.names("here"), ["in"]);
+    assert!(!Path::new(r"C:\evil4.txt").exists());
+    assert_eq!(outcome.done.len(), 3);
+    assert_eq!(read(&sandbox.path(r"here\in\ok.txt")), "fine");
+    assert_eq!(script.asked(), 1, "all answered by one Skip for all");
+}
+
+#[test]
+fn a_link_entry_lands_as_a_plain_file() {
+    let sandbox = Sandbox::new();
+    let archive = sandbox.path(r"here\links.zip");
+    fs::create_dir_all(archive.parent().unwrap()).unwrap();
+    let mut zip = zip::ZipWriter::new(fs::File::create(&archive).unwrap());
+    zip.add_symlink("link", r"C:\Windows", zip::write::SimpleFileOptions::default()).unwrap();
+    zip.finish().unwrap();
+
+    go(unzip(&archive, false));
+
+    let stat = sys::stat(&sandbox.path(r"here\link")).unwrap().unwrap();
+    assert!(stat.is_file());
+    assert_eq!(read(&sandbox.path(r"here\link")), r"C:\Windows");
+}
+
+#[test]
+fn extracting_onto_a_file_gives_the_usual_choices() {
+    let sandbox = Sandbox::new();
+    let archive = sandbox.path(r"here\a.zip");
+    let old = sandbox.file(r"here\a.txt", "old");
+    zip_of(&archive, &[("a.txt", b"new")]);
+
+    let skipped = run_with(unzip(&archive, false), &Script::answering(&[Answer::Skip]));
+    assert_eq!(read(&old), "old");
+    assert!(skipped.done.is_empty());
+
+    let kept = run_with(unzip(&archive, false), &Script::answering(&[Answer::KeepBoth]));
+    assert_eq!(read(&old), "old");
+    assert_eq!(read(&sandbox.path(r"here\a (2).txt")), "new");
+    assert_eq!(kept.done.len(), 1);
+
+    let replaced = run_with(unzip(&archive, false), &Script::answering(&[Answer::Replace]));
+    assert_eq!(read(&old), "new");
+    allow_bin_copy(&replaced);
+    purge(&replaced);
+    assert_eq!(sandbox.names("here"), ["a (2).txt", "a.txt", "a.zip"]);
+}
+
+#[test]
+fn an_archive_never_overwrites_itself() {
+    let sandbox = Sandbox::new();
+    let archive = sandbox.path(r"here\a.zip");
+    fs::create_dir_all(archive.parent().unwrap()).unwrap();
+    zip_of(&archive, &[("a.zip", b"not an archive")]);
+    let before = fs::read(&archive).unwrap();
+
+    let outcome = run_with(unzip(&archive, false), &Script::always(Answer::Replace));
+
+    assert!(outcome.done.is_empty());
+    assert_eq!(fs::read(&archive).unwrap(), before);
+}
+
+#[test]
+fn extract_to_a_folder_picks_a_free_name_and_undoes_in_one_step() {
+    let sandbox = Sandbox::new();
+    let archive = sandbox.path(r"here\a.zip");
+    sandbox.file(r"here\a\old.txt", "old");
+    zip_of(&archive, &[("in.txt", b"in"), ("top.txt", b"top")]);
+
+    let outcome = go(unzip(&archive, true));
+
+    assert_eq!(read(&sandbox.path(r"here\a (2)\in.txt")), "in");
+    assert_eq!(outcome.done, [Done::Created { path: sandbox.path(r"here\a (2)") }]);
+    let undone = undo(outcome);
+    assert_eq!(sandbox.names("here"), ["a", "a.zip"]);
+    purge(&undone);
+}
+
+#[test]
+fn files_landing_in_an_existing_folder_undo_one_by_one() {
+    let sandbox = Sandbox::new();
+    let archive = sandbox.path(r"here\a.zip");
+    sandbox.file(r"here\sub\old.txt", "old");
+    zip_of(&archive, &[("sub/new.txt", b"new"), ("sub/more/deep.txt", b"deep")]);
+
+    let outcome = go(unzip(&archive, false));
+
+    assert_eq!(
+        outcome.done,
+        [
+            Done::Created { path: sandbox.path(r"here\sub\new.txt") },
+            Done::Created { path: sandbox.path(r"here\sub\more") },
+        ]
+    );
+    let undone = undo(outcome);
+    assert_eq!(sandbox.names(r"here\sub"), ["old.txt"]);
+    purge(&undone);
+}
+
+#[test]
+fn a_cancelled_extract_keeps_what_landed() {
+    let sandbox = Sandbox::new();
+    let archive = sandbox.path(r"here\a.zip");
+    fs::create_dir_all(archive.parent().unwrap()).unwrap();
+    zip_of(&archive, &[("one.txt", b"1"), ("two.txt", b"2")]);
+    let control = Arc::new(Control::default());
+    let cancel = control.clone();
+    let script = Script {
+        during: Some(Box::new(move |progress: &Progress| {
+            if progress.items > 0 {
+                cancel.cancel();
+            }
+        })),
+        ..Script::default()
+    };
+
+    let outcome = run(unzip(&archive, false), &script, &control);
+
+    assert!(outcome.cancelled);
+    assert_eq!(sandbox.names("here"), ["a.zip", "one.txt"]);
+    assert_eq!(outcome.done.len(), 1);
+}
+
+#[test]
+fn the_mark_of_the_web_travels_to_what_is_extracted() {
+    let sandbox = Sandbox::new();
+    let archive = sandbox.path(r"here\a.zip");
+    fs::create_dir_all(archive.parent().unwrap()).unwrap();
+    zip_of(&archive, &[("deep/a.txt", b"a")]);
+    let zone = b"[ZoneTransfer]\r\nZoneId=3\r\n";
+    sys::write_zone(&archive, zone).unwrap();
+
+    go(unzip(&archive, false));
+
+    assert_eq!(sys::read_zone(&sandbox.path(r"here\deep\a.txt")).as_deref(), Some(zone.as_slice()));
+}
+
+#[test]
+fn a_damaged_entry_leaves_nothing_and_a_password_is_refused() {
+    let sandbox = Sandbox::new();
+    let archive = sandbox.path(r"here\a.zip");
+    fs::create_dir_all(archive.parent().unwrap()).unwrap();
+    zip_of(&archive, &[("damaged.txt", b"plain text kept as it is"), ("locked.txt", b"secret"), ("ok.txt", b"ok")]);
+    let mut bytes = fs::read(&archive).unwrap();
+    let at = |bytes: &[u8], word: &[u8]| bytes.windows(word.len()).position(|part| part == word).unwrap();
+    let damaged = at(&bytes, b"plain text");
+    bytes[damaged] ^= 0xff;
+    // The second central record, with its "encrypted" flag on.
+    let first = at(&bytes, b"PK\x01\x02");
+    let second = first + 1 + at(&bytes[first + 1..], b"PK\x01\x02");
+    bytes[second + 8] |= 1;
+    fs::write(&archive, bytes).unwrap();
+    let script = Script::default();
+
+    run_with(unzip(&archive, false), &script);
+
+    assert_eq!(sandbox.names("here"), ["a.zip", "ok.txt"]);
+    let questions = script.questions.borrow();
+    assert_eq!(questions.len(), 2, "{questions:?}");
+    assert!(matches!(&questions[1], Question::Problem { message, .. } if message.contains("password")), "{questions:?}");
+}
+
+#[test]
+fn something_that_is_no_archive_is_a_plain_problem() {
+    let sandbox = Sandbox::new();
+    let file = sandbox.file(r"here\not.zip", "nothing like an archive");
+    let script = Script::default();
+
+    let outcome = run_with(unzip(&file, true), &script);
+
+    assert_eq!(script.asked(), 1);
+    assert!(outcome.done.is_empty());
+    assert_eq!(sandbox.names("here"), ["not.zip"]);
+}
+
 // Rename and new items.
 
 #[test]

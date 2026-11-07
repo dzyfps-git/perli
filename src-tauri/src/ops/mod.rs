@@ -1,6 +1,7 @@
 //! The file engine: copy, move, delete, recycle, restore and undo. It knows nothing about the
 //! UI. A job talks to the outside through `Host`, and `Control` pauses or cancels it.
 
+mod archive;
 mod bin;
 mod names;
 mod rename;
@@ -37,6 +38,10 @@ pub enum Job {
     New { folder: PathBuf, directory: bool },
     Template { folder: PathBuf, template: Template },
     Shortcut { sources: Vec<PathBuf>, folder: PathBuf },
+    /// A new archive beside the first source.
+    Zip { sources: Vec<PathBuf> },
+    /// Each archive beside itself, loose or in a new folder of its own.
+    Unzip { archives: Vec<PathBuf>, own_folder: bool },
     Recycle { paths: Vec<PathBuf> },
     Delete { paths: Vec<PathBuf> },
     Restore { items: Vec<BinItem> },
@@ -275,6 +280,8 @@ impl<'a> Run<'a> {
             Job::New { folder, directory } => self.new_item(&folder, directory),
             Job::Template { folder, template } => self.new_from(&folder, &template),
             Job::Shortcut { sources, folder } => self.shortcuts(&sources, &folder),
+            Job::Zip { sources } => self.zip(sources),
+            Job::Unzip { archives, own_folder } => self.unzip(archives, own_folder),
             Job::Recycle { paths } => {
                 self.add_total(paths.len() as u64, 0);
                 self.recycle(paths)
@@ -475,13 +482,18 @@ impl<'a> Run<'a> {
 
     /// Tells the user about something that can't be retried, and moves on past it.
     fn refuse(&mut self, path: &Path, message: &str) -> Flow {
+        self.tell(path, message)?;
+        self.step(1, 0);
+        Ok(())
+    }
+
+    fn tell(&mut self, path: &Path, message: &str) -> Flow {
         let question = Question::Problem {
             path: path.to_string_lossy().into_owned(),
             message: message.to_string(),
             choices: vec![Answer::Skip, Answer::Cancel],
         };
         self.ask(Key::Refused, question)?;
-        self.step(1, 0);
         Ok(())
     }
 

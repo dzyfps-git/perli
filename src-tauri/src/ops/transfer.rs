@@ -67,7 +67,7 @@ pub fn remove_leftovers(folder: &Path, process: u32) -> io::Result<()> {
     Ok(())
 }
 
-fn file_name(path: &Path) -> &OsStr {
+pub(super) fn file_name(path: &Path) -> &OsStr {
     path.file_name().unwrap_or(path.as_os_str())
 }
 
@@ -125,7 +125,7 @@ impl Run<'_> {
             let plan = if same_folder {
                 Plan::Write(names::copy_of(folder, name, node.stat.is_dir()))
             } else {
-                self.resolve(&node.path, node.stat, &folder.join(name))?
+                self.resolve(Some(&node.path), node.stat, &folder.join(name))?
             };
             self.place(node, plan, false)?;
         }
@@ -199,7 +199,7 @@ impl Run<'_> {
         target: &Path,
         crossing: &mut Vec<Crossing>,
     ) -> Flow {
-        let plan = self.resolve(source, stat, target)?;
+        let plan = self.resolve(Some(source), stat, target)?;
         let cross_drive = |plan: Plan, crossing: &mut Vec<Crossing>| {
             crossing.push(Crossing {
                 source: source.to_path_buf(),
@@ -331,7 +331,8 @@ impl Run<'_> {
     }
 
     /// Looks at `target` and settles what to do there, asking if something is in the way.
-    fn resolve(&mut self, source: &Path, stat: Stat, target: &Path) -> Flow<Plan> {
+    /// With no `source`, what lands has no file of its own to compare.
+    pub(super) fn resolve(&mut self, source: Option<&Path>, stat: Stat, target: &Path) -> Flow<Plan> {
         let found = self.attempt(target, None, |_| sys::stat(target))?;
         let Some(found) = found else {
             return Ok(Plan::Skip);
@@ -340,12 +341,14 @@ impl Run<'_> {
             return Ok(Plan::Write(target.to_path_buf()));
         };
         // A replace through a junction alias would destroy the source.
-        match self.attempt(target, None, |_| sys::same_file(source, target))? {
-            Some(false) => {}
-            Some(true) if same_but_for_case(source, target) => {
-                return Ok(Plan::Write(target.to_path_buf()));
+        if let Some(source) = source {
+            match self.attempt(target, None, |_| sys::same_file(source, target))? {
+                Some(false) => {}
+                Some(true) if same_but_for_case(source, target) => {
+                    return Ok(Plan::Write(target.to_path_buf()));
+                }
+                _ => return Ok(Plan::Skip),
             }
-            _ => return Ok(Plan::Skip),
         }
 
         let (key, choices): (Key, &[Answer]) = if stat.is_folder() && existing.is_folder() {
@@ -433,7 +436,7 @@ impl Run<'_> {
             let plan = if fresh {
                 Plan::Write(child_target)
             } else {
-                self.resolve(&child.path.clone(), child.stat, &child_target)?
+                self.resolve(Some(&child.path.clone()), child.stat, &child_target)?
             };
             self.place(child, plan, moving)?;
         }
@@ -452,7 +455,7 @@ impl Run<'_> {
     }
 
     /// A temp name in the folder of `target`.
-    fn temp_beside(&mut self, target: &Path) -> PathBuf {
+    pub(super) fn temp_beside(&mut self, target: &Path) -> PathBuf {
         let folder = sys::parent(target);
         if self.temp_folders.insert(folder.clone()) {
             self.host.temp_folder(&folder);
@@ -491,7 +494,7 @@ impl Run<'_> {
 
     /// Gives a finished temp file its real name. An old file goes to the Recycle Bin first and
     /// stays if the user skips. False if the file did not land.
-    fn swap_in(&mut self, temp: &Path, target: &Path, replace: bool) -> Flow<bool> {
+    pub(super) fn swap_in(&mut self, temp: &Path, target: &Path, replace: bool) -> Flow<bool> {
         if replace {
             self.add_total(1, 0);
             self.recycle(vec![target.to_path_buf()])?;
