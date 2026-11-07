@@ -14,6 +14,7 @@ const ICON_LIST = "\uE8FD";
 const ICON_GRID = "\uF0E2";
 const ICON_SHOWN = "\uE7B3";
 const ICON_HIDDEN = "\uED1A";
+const ICON_FILTER = "\uE71C";
 
 /** Long enough that typing a word starts one search, not one per letter. */
 const SEARCH_WAIT_MS = 120;
@@ -21,6 +22,7 @@ const SEARCH_WAIT_MS = 120;
 export function PathBar(props: {
   view: FolderView;
   onToggleHidden: () => void;
+  onFilter: () => void;
   onInputMenu: (event: MouseEvent) => void;
 }) {
   const crumbs = () => toCrumbs(props.view.trail());
@@ -190,6 +192,15 @@ export function PathBar(props: {
           </button>
         )}
       </Show>
+      <button
+        class="nav-button filter-button"
+        aria-label="Filter"
+        aria-keyshortcuts="Control+Shift+F"
+        aria-pressed={props.view.filtered()}
+        onClick={props.onFilter}
+      >
+        {ICON_FILTER}
+      </button>
       <span class="search-status" aria-live="polite">
         {searchStatus()}
       </span>

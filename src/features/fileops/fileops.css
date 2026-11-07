@@ -268,3 +268,15 @@
 .rename-bad {
   color: var(--danger);
 }
+
+.filter-one {
+  grid-template-columns: 1fr;
+}
+
+.filter-buttons {
+  margin-top: var(--space-4);
+}
+
+.filter-buttons button:first-child {
+  margin-right: auto;
+}

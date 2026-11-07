@@ -3,6 +3,7 @@ import {
   arrangeView,
   openFolder,
   reloadView,
+  scanSizes,
   type Opened,
   type Order,
   type SearchStep,
@@ -10,8 +11,10 @@ import {
   type Selection,
   type Sort,
 } from "../../api";
+import { filterActive, NO_FILTER, toFilter } from "../filelist/filter";
 import type { Layout } from "../filelist/layout";
 import {
+  folderSizes,
   grouping,
   lastLayout,
   lastSort,
@@ -30,6 +33,8 @@ export type FolderView = ReturnType<typeof createFolderView>;
 const BIN_SORT: Sort = { key: "modified", descending: true };
 /** Keeps rows where they are as more arrive. */
 const SEARCH_SORT: Sort = { key: "found", descending: false };
+/** Asks a search for every file, which makes a flat view of the folder. */
+export const FLAT_QUERY = "*";
 /** Weakest first. Each covers the ones before it, so one read can stand for all that waited. */
 const SEARCH_STEPS: SearchStep[] = ["grown", "again", "start"];
 
@@ -61,6 +66,8 @@ export interface ListHandle {
   rename: () => void;
   isEditing: () => boolean;
   focus: () => void;
+  /** Selects `rows` in place of what was selected. */
+  select: (rows: number[]) => void;
 }
 
 export interface ShownFolder extends Opened {
@@ -93,6 +100,8 @@ export function createFolderView(id: number, saved?: SavedPane) {
   const [walk, setWalk] = createSignal<SearchWalk>("done");
   const [searchSort, setSearchSort] = createSignal(SEARCH_SORT);
   const [searchAsked, setSearchAsked] = createSignal(0);
+  /** Stays with the folder until the view goes to another one. */
+  const [filterForm, setFilterFormValue] = createSignal(NO_FILTER);
   let latestRequest = 0;
   let opening = false;
   let rearrangeAfterOpen = false;
@@ -111,12 +120,14 @@ export function createFolderView(id: number, saved?: SavedPane) {
     ...shownSort(),
     group: query() || isBin(target) ? "mixed" : grouping(),
     showHidden: showHidden(),
+    filter: toFilter(filterForm()),
   });
   /** A folder opens in its own order, even from a search. */
-  const openingOrder = (target: string, wanted: Sort): Order => ({
+  const openingOrder = (target: string, wanted: Sort, form: typeof NO_FILTER): Order => ({
     ...wanted,
     group: isBin(target) ? "mixed" : grouping(),
     showHidden: showHidden(),
+    filter: toFilter(form),
   });
   /** Row numbers mean nothing outside the snapshot they came from. */
   const selectedRows = (snapshot: number) => {
@@ -155,14 +166,21 @@ export function createFolderView(id: number, saved?: SavedPane) {
     else if (rearrangeAfterOpen) rearrange();
   }
 
+  /** Adds up the folders shown, if the user wants that. */
+  function scanFolder() {
+    const shown = folder()?.path;
+    if (shown && folderSizes() && !isBin(shown)) scanSizes(id, shown).catch(console.error);
+  }
+
   /** Nothing about the shown rows changes until the folder has read fine. */
   async function load(target: string) {
     const searched = query();
     const request = ++latestRequest;
     const folderSort = arrivalSort(target);
+    const form = samePath(path(), target) ? filterForm() : NO_FILTER;
     opening = true;
     try {
-      const wanted = openingOrder(target, folderSort ?? sort());
+      const wanted = openingOrder(target, folderSort ?? sort(), form);
       const opened = await openFolder(id, request, folder()?.request ?? 0, target, wanted);
       if (request !== latestRequest) return undefined;
       setError(undefined);
@@ -173,9 +191,11 @@ export function createFolderView(id: number, saved?: SavedPane) {
           setWalk("done");
         }
         if (folderSort) setSortValue(folderSort);
+        setFilterFormValue(form);
         show(opened);
       });
       setTrail(nextTrail(trail(), opened.path));
+      scanFolder();
       return opened;
     } catch (failure) {
       if (request === latestRequest) setError(String(failure));
@@ -366,7 +386,18 @@ export function createFolderView(id: number, saved?: SavedPane) {
     moreToFind: () => walk() === "waiting",
     search,
     searchGrew,
+    /** Totals came in. A search would start over, so its rows wait for the next read. */
+    sizesGrew() {
+      if (!query()) reload();
+    },
+    scanFolder,
     searchAsked,
+    filterForm,
+    filtered: () => filterActive(filterForm()),
+    setFilterForm(form: typeof NO_FILTER) {
+      setFilterFormValue(form);
+      rearrange();
+    },
     /** Sends the user to the search box. */
     askSearch() {
       if (!isBin(folder()?.path)) setSearchAsked(searchAsked() + 1);

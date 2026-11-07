@@ -42,10 +42,26 @@ export interface Sort {
 
 export type Grouping = "foldersFirst" | "filesFirst" | "mixed";
 
+/** Conditions a view's rows must all meet. */
+export interface Filter {
+  /** Part of the name, in any case. */
+  name: string;
+  /** In lowercase with no dots. Any one of them will do. */
+  extensions: string[];
+  kinds: "all" | "files" | "folders";
+  minSize: number | null;
+  maxSize: number | null;
+  /** Milliseconds since 1970. */
+  modifiedFrom: number | null;
+  /** Milliseconds since 1970. */
+  modifiedTo: number | null;
+}
+
 /** Which rows a view shows and in what order. */
 export interface Order extends Sort {
   group: Grouping;
   showHidden: boolean;
+  filter: Filter;
 }
 
 export interface Start {
@@ -318,6 +334,19 @@ export const clipboardCanPaste = () => invoke<boolean>("clipboard_can_paste");
 /** The first row at or after `start` whose name starts with `prefix`, wrapping around. */
 export const findRow = (view: number, request: number, prefix: string, start: number) =>
   invoke<number | null>("find_row", { view, request, prefix, start });
+
+/** The rows whose names fit `pattern`, such as `*.jpg;*.png`. */
+export const rowsMatching = (view: number, request: number, pattern: string) =>
+  invoke<number[]>("rows_matching", { view, request, pattern });
+
+/** Starts adding up the folders in `path`. `onSizesGrew` says when totals come in. */
+export const scanSizes = (view: number, path: string) => invoke<void>("scan_sizes", { view, path });
+
+/** Stops every scan and forgets the totals. */
+export const stopSizes = () => invoke<void>("stop_sizes");
+
+export const onSizesGrew = (handler: (view: number) => void) =>
+  listen<number>("sizes-grew", (event) => handler(event.payload));
 
 export const closeView = (view: number) => invoke<void>("close_view", { view });
 

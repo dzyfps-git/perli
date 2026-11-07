@@ -54,7 +54,7 @@ const CELL_TEXT: Record<SortKey, (row: Row, folder: string) => string> = {
   modified: (row) => dateText(row.modified),
   created: (row) => dateText(row.created),
   type: (row) => typeText(row.name, row.isDir),
-  size: (row) => (row.isDir ? "" : formatSize(row.size)),
+  size: (row) => (row.isDir && !row.size ? "" : formatSize(row.size)),
   // A deep path would be clipped just where it starts to differ.
   location: (row, folder) => relativeTo(folder, row.location),
 };
@@ -545,7 +545,7 @@ export function FileList(props: {
       else selection.select(target);
     } else if (event.key === "Enter" && focused >= 0) {
       openIndex(focused, event.ctrlKey);
-    } else if (event.ctrlKey && event.key.toLowerCase() === "a") {
+    } else if (event.ctrlKey && !event.shiftKey && event.key.toLowerCase() === "a") {
       selection.selectAll(props.count);
     } else if (event.key === "Escape") {
       selection.clear();
@@ -575,6 +575,10 @@ export function FileList(props: {
       rename: () => startRename(selection.focused()),
       isEditing: () => editor() !== undefined,
       focus: () => grid.focus({ preventScroll: true }),
+      select(rows) {
+        selection.restore(rows);
+        selectionChanged(true);
+      },
     });
     if (props.selected?.length) {
       selection.restore(props.selected);

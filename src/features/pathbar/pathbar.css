@@ -161,6 +161,10 @@
   color: var(--accent);
 }
 
+.filter-button[aria-pressed="true"] {
+  color: var(--accent);
+}
+
 .hidden-icon {
   font-family: var(--font-icons);
   font-size: 12px;

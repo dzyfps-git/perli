@@ -1,12 +1,13 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { createEffect, createSignal, For, on, Show } from "solid-js";
 import { isDefaultApp, setDefaultApp } from "../../api";
+import { folderSizes } from "../filelist/prefs";
 import { accent, ACCENTS, setAccent, setTheme, theme, THEMES } from "./appearance";
 import "./settings.css";
 
 const ICON_CLOSE = "";
 
-export function Settings(props: { open: boolean; onClose: () => void }) {
+export function Settings(props: { open: boolean; onClose: () => void; onToggleSizes: () => void }) {
   const [isDefault, setIsDefault] = createSignal(false);
   const [defaultFailure, setDefaultFailure] = createSignal<string>();
   let dialog!: HTMLDialogElement;
@@ -88,6 +89,20 @@ export function Settings(props: { open: boolean; onClose: () => void }) {
           )}
         </For>
       </div>
+
+      <h3>Folder sizes</h3>
+      <button
+        class="settings-theme settings-default"
+        role="switch"
+        aria-checked={folderSizes()}
+        onClick={props.onToggleSizes}
+      >
+        Add up folders in the background
+      </button>
+      <p class="settings-note">
+        The Size column fills in as Perli walks each folder you open. Links are not followed, and cloud
+        files stay in the cloud.
+      </p>
 
       <h3>Default file manager</h3>
       <button class="settings-theme settings-default" role="switch" aria-checked={isDefault()} onClick={toggleDefault}>

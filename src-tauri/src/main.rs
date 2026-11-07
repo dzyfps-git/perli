@@ -14,6 +14,7 @@ mod registry;
 mod search;
 mod session;
 mod shell;
+mod sizes;
 mod snap;
 mod templates;
 mod thumbs;
@@ -35,6 +36,7 @@ use drag::{DropAction, Drags};
 use jobs::{Jobs, Plan};
 use ops::{Job, Reply};
 use search::Searches;
+use sizes::Scans;
 use watch::{Watch, Watches};
 
 /// How long the UI gets to answer a close request before the window goes anyway, so a frozen
@@ -419,12 +421,12 @@ async fn open_folder(
     let resolved = folder::resolve(&path).map_err(|error| error.message())?;
     let full = resolved.clone();
     let listing = async_runtime::spawn_blocking(move || {
-        let read = || folder::Listing::read(&path, order);
+        let read = || folder::Listing::read(&path, order.clone());
         let first = match waiting {
             Some((_, reader)) => reader
                 .join()
                 .unwrap_or_else(|_| read())
-                .map(|listing| listing.arranged(order)),
+                .map(|listing| listing.arranged(order.clone())),
             None => read(),
         };
         first.or_else(|failure| {
@@ -477,7 +479,7 @@ async fn arrange_view(
     views: State<'_, Views>,
     searches: State<'_, Searches>,
 ) -> Result<Arranged, String> {
-    searches.arranged(view, order);
+    searches.arranged(view, &order);
     let before = {
         let mut views = views.0.write().unwrap_or_else(|error| error.into_inner());
         let current = views.entry(view).or_default();
@@ -783,9 +785,11 @@ async fn close_view(
     views: State<'_, Views>,
     watches: State<'_, Watches>,
     searches: State<'_, Searches>,
+    scans: State<'_, Scans>,
 ) -> Result<(), String> {
     watches.stop(view);
     searches.stop(view);
+    scans.stop(view);
     views
         .0
         .write()
@@ -955,6 +959,27 @@ async fn thumbnail(view: u32, request: u64, row: u32, views: State<'_, Views>) -
     Ok(Response::new(thumbs::read(path).await))
 }
 
+/// The rows whose names fit `pattern`.
+#[tauri::command]
+fn rows_matching(view: u32, request: u64, pattern: String, views: State<'_, Views>) -> Result<Vec<u32>, String> {
+    let selection = Selection { view, request, rows: Vec::new() };
+    views.read(&selection, |listing, _| listing.matching(&pattern))
+}
+
+/// Adds up the folders in `path`, and says so as totals come in.
+#[tauri::command]
+fn scan_sizes(view: u32, path: PathBuf, scans: State<'_, Scans>, app: AppHandle) {
+    scans.start(view, path, move || {
+        let _ = app.emit("sizes-grew", view);
+    });
+}
+
+#[tauri::command]
+fn stop_sizes(scans: State<'_, Scans>) {
+    scans.stop_all();
+    sizes::forget();
+}
+
 #[tauri::command]
 fn drop_choices(folder: PathBuf, drags: State<'_, Arc<Drags>>) -> Vec<DropAction> {
     drags.choices(&folder)
@@ -1066,6 +1091,7 @@ fn main() {
         .manage(Watches::default())
         .manage(Arc::new(Drags::default()))
         .manage(Searches::default())
+        .manage(Scans::default())
         .manage(Preload(Mutex::new(preload)))
         .setup(|app| {
             watch::start(app.handle().clone());
@@ -1121,6 +1147,9 @@ fn main() {
             file_users,
             thumbnail,
             set_drop_target,
+            rows_matching,
+            scan_sizes,
+            stop_sizes,
             drop_choices,
             own_templates,
             templates_folder,
