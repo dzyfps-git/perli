@@ -81,20 +81,22 @@ fn same_drive(a: &Path, b: &Path) -> bool {
 
 /// What dropping `paths` on `folder` does: Windows' rules, or nothing if it would make no sense.
 /// Ctrl copies, Shift moves, Alt or both make shortcuts, and with no key files move on their own
-/// drive and copy to another.
+/// drive and copy to another. One file from another drive makes the whole drop a copy, because
+/// no original should go without the user asking.
 fn choose(
     keys: MODIFIERKEYS_FLAGS,
     allowed: DROPEFFECT,
     paths: &[PathBuf],
     folder: &Path,
 ) -> Option<DROPEFFECT> {
+    paths.first()?;
     let held = |key: u32| keys.0 & key != 0;
     let (control, shift) = (held(MK_CONTROL.0), held(MK_SHIFT.0));
     let wanted = if held(MK_ALT) || (control && shift) {
         DROPEFFECT_LINK
     } else if control {
         DROPEFFECT_COPY
-    } else if shift || same_drive(paths.first()?, folder) {
+    } else if shift || paths.iter().all(|path| same_drive(path, folder)) {
         DROPEFFECT_MOVE
     } else {
         DROPEFFECT_COPY
@@ -316,6 +318,17 @@ mod tests {
     fn with_no_key_files_move_on_their_drive_and_copy_to_another() {
         assert_eq!(choose(NO_KEYS, ANY, &on_c(), Path::new(r"c:\to")), Some(DROPEFFECT_MOVE));
         assert_eq!(choose(NO_KEYS, ANY, &on_c(), Path::new(r"D:\to")), Some(DROPEFFECT_COPY));
+    }
+
+    #[test]
+    fn files_from_two_drives_copy_whichever_comes_first() {
+        let (c, d) = (PathBuf::from(r"C:\from\a.txt"), PathBuf::from(r"D:\from\b.txt"));
+        let to_c = Path::new(r"C:\to");
+
+        for files in [[c.clone(), d.clone()], [d.clone(), c.clone()]] {
+            assert_eq!(choose(NO_KEYS, ANY, &files, to_c), Some(DROPEFFECT_COPY));
+            assert_eq!(choose(MK_SHIFT, ANY, &files, to_c), Some(DROPEFFECT_MOVE));
+        }
     }
 
     #[test]
