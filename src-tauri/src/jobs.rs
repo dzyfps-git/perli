@@ -479,6 +479,7 @@ fn title(job: &Job) -> String {
         Job::Copy { sources, .. } => listed("Copying", sources),
         Job::Move { sources, .. } => listed("Moving", sources),
         Job::Rename { name, .. } => format!("Renaming to {name}"),
+        Job::RenameAll { renames } => format!("Renaming {} items", renames.len()),
         Job::New { directory: true, .. } => "Creating a folder".to_string(),
         Job::New { .. } | Job::Template { .. } => "Creating a file".to_string(),
         Job::Shortcut { sources, .. } => listed("Linking to", sources),

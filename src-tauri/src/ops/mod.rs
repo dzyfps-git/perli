@@ -3,6 +3,7 @@
 
 mod bin;
 mod names;
+mod rename;
 mod shell;
 pub mod sys;
 mod transfer;
@@ -21,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use windows::core::{Error, Result};
 
 pub use bin::{read as read_bin, BinItem};
-pub use names::check_rename;
+pub use names::{check_rename, check_renames};
 pub use shell::{shell_item, Com};
 pub use transfer::{is_temp_name, put_back, remove_leftovers};
 pub use tree::measure;
@@ -31,6 +32,8 @@ pub enum Job {
     Copy { sources: Vec<PathBuf>, folder: PathBuf },
     Move { sources: Vec<PathBuf>, folder: PathBuf },
     Rename { path: PathBuf, name: String },
+    /// Each path with its new name. One's new name may be another's old name.
+    RenameAll { renames: Vec<(PathBuf, String)> },
     New { folder: PathBuf, directory: bool },
     Template { folder: PathBuf, template: Template },
     Shortcut { sources: Vec<PathBuf>, folder: PathBuf },
@@ -268,6 +271,7 @@ impl<'a> Run<'a> {
             Job::Copy { sources, folder } => self.copy(sources, &folder),
             Job::Move { sources, folder } => self.move_sources(sources, &folder),
             Job::Rename { path, name } => self.rename(&path, &name),
+            Job::RenameAll { renames } => self.rename_all(renames),
             Job::New { folder, directory } => self.new_item(&folder, directory),
             Job::Template { folder, template } => self.new_from(&folder, &template),
             Job::Shortcut { sources, folder } => self.shortcuts(&sources, &folder),
@@ -290,20 +294,26 @@ impl<'a> Run<'a> {
 
     fn rename(&mut self, path: &Path, name: &str) -> Flow {
         self.add_total(1, 0);
-        let target = path.with_file_name(name);
-        // The shell's rename takes the same route as a move within one folder.
-        let elevated = Elevated::Move {
-            source: path.to_path_buf(),
-            target: target.clone(),
-        };
-        if self.attempt(path, Some(elevated), |_| sys::rename(path, &target))?.is_some() {
-            self.done.push(Done::Moved {
-                from: path.to_path_buf(),
-                to: target,
-            });
-        }
+        self.rename_to(path, &path.with_file_name(name), true)?;
         self.step(1, 0);
         Ok(())
+    }
+
+    /// False if it was skipped.
+    fn rename_to(&mut self, path: &Path, target: &Path, can_elevate: bool) -> Flow<bool> {
+        // The shell's rename takes the same route as a move within one folder.
+        let elevated = can_elevate.then(|| Elevated::Move {
+            source: path.to_path_buf(),
+            target: target.to_path_buf(),
+        });
+        let renamed = self.attempt(path, elevated, |_| sys::rename(path, target))?.is_some();
+        if renamed {
+            self.done.push(Done::Moved {
+                from: path.to_path_buf(),
+                to: target.to_path_buf(),
+            });
+        }
+        Ok(renamed)
     }
 
     fn new_item(&mut self, folder: &Path, directory: bool) -> Flow {

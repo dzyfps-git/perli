@@ -23,7 +23,7 @@ fn temp_path(folder: &Path) -> PathBuf {
 
 /// Holds the source of a move while the file it replaces leaves. This is the only copy of
 /// that file, so unlike a `temp_path` file it never counts as a leftover.
-fn staged_path(folder: &Path) -> PathBuf {
+pub(super) fn staged_path(folder: &Path) -> PathBuf {
     temp_path(folder).with_extension("moved")
 }
 
@@ -181,6 +181,10 @@ impl Run<'_> {
             if same_place {
                 self.step(1, 0);
                 continue;
+            }
+            // Undoing a ring of renames steps through a spare name, which only the list leads back from.
+            if is_temp_name(&file_name(&target).to_string_lossy()) {
+                self.host.staged(&target, &source);
             }
             self.move_item(&source, stat, &target, crossing)?;
         }

@@ -1,5 +1,6 @@
 //! File names: which are legal and how to pick a free one.
 
+use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
@@ -43,6 +44,43 @@ pub fn check_rename(path: &Path, name: &str) -> Result<(), &'static str> {
         }
         _ => Ok(()),
     }
+}
+
+/// True when `name` is what `path` is called already. Names reach the UI lossy, so that is how
+/// they compare, and an odd name the user did not touch stays as it is.
+pub fn unchanged(path: &Path, name: &str) -> bool {
+    path.file_name().is_some_and(|own| own.to_string_lossy() == name)
+}
+
+/// Explains why each item can't take its new name, if it can't. A name counts as free if another
+/// item in the list is leaving it.
+pub fn check_renames(renames: &[(PathBuf, String)]) -> Vec<Option<&'static str>> {
+    let key = |path: &Path| path.to_string_lossy().to_lowercase();
+    let mut wanted: HashMap<String, usize> = HashMap::new();
+    let mut leaving = HashSet::new();
+    for (path, name) in renames {
+        *wanted.entry(key(&path.with_file_name(name))).or_default() += 1;
+        if !unchanged(path, name) {
+            leaving.insert(key(path));
+        }
+    }
+    let problem = |(path, name): &(PathBuf, String)| {
+        if unchanged(path, name) {
+            return None;
+        }
+        if let Err(problem) = check(name) {
+            return Some(problem);
+        }
+        let target = path.with_file_name(name);
+        if wanted[&key(&target)] > 1 {
+            return Some("Another item would get the same name.");
+        }
+        let taken = matches!(sys::stat(&target), Ok(Some(_)))
+            && !leaving.contains(&key(&target))
+            && !sys::same_file(path, &target).unwrap_or(false);
+        taken.then_some("That name is already taken.")
+    };
+    renames.iter().map(problem).collect()
 }
 
 /// Windows keeps device names even when they have an extension.

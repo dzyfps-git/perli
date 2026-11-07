@@ -341,6 +341,15 @@ impl Listing {
         self.chosen(rows).map(|entry| bin.items[entry].clone()).collect()
     }
 
+    /// Each row's name, lossy, and whether it is a folder.
+    pub fn facts(&self, rows: &[u32]) -> Vec<(String, bool)> {
+        let fact = |entry| {
+            let entry: &Entry = &self.entries[entry];
+            (String::from_utf16_lossy(entry.name()), entry.is_dir)
+        };
+        self.chosen(rows).map(fact).collect()
+    }
+
     /// Lossy, which is fine because these are only ever shown or compared.
     pub fn names(&self, rows: &[u32]) -> Vec<String> {
         self.chosen(rows)

@@ -162,6 +162,8 @@ enum Task {
     Copy { selection: Selection, folder: String },
     Move { selection: Selection, folder: String },
     Rename { selection: Selection, name: String },
+    /// `names` line up with the selected rows.
+    RenameAll { selection: Selection, names: Vec<String> },
     New { folder: String, directory: bool },
     Template { folder: String, extension: String },
     Paste { folder: String },
@@ -195,6 +197,13 @@ impl Task {
                 let path = paths(&selection)?.pop().ok_or("Nothing to rename")?;
                 ops::check_rename(&path, &name)?;
                 Job::Rename { path, name }
+            }
+            Self::RenameAll { selection, names } => {
+                let renames: Vec<_> = paths(&selection)?.into_iter().zip(names).collect();
+                if let Some(problem) = ops::check_renames(&renames).into_iter().flatten().next() {
+                    return Err(problem.to_string());
+                }
+                Job::RenameAll { renames }
             }
             Self::New { folder, directory } => Job::New {
                 folder: target(folder)?,
@@ -635,6 +644,25 @@ async fn measure_selection(
     Ok(Measured { items, bytes })
 }
 
+/// Why each selected row can't take the name lined up with it, if it can't.
+#[tauri::command]
+async fn check_renames(
+    selection: Selection,
+    names: Vec<String>,
+    views: State<'_, Views>,
+) -> Result<Vec<Option<&'static str>>, String> {
+    let renames: Vec<_> = views.read(&selection, folder::Listing::paths)?.into_iter().zip(names).collect();
+    async_runtime::spawn_blocking(move || ops::check_renames(&renames))
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// The selected rows' names, and whether each is a folder.
+#[tauri::command]
+fn row_facts(selection: Selection, views: State<'_, Views>) -> Result<Vec<(String, bool)>, String> {
+    views.read(&selection, folder::Listing::facts)
+}
+
 #[tauri::command]
 async fn bin_summary() -> Result<Measured, String> {
     let items = async_runtime::spawn_blocking(ops::read_bin)
@@ -1031,6 +1059,8 @@ fn main() {
             cancel_job,
             answer_job,
             measure_selection,
+            check_renames,
+            row_facts,
             bin_summary,
             set_clipboard,
             cancel_cut,

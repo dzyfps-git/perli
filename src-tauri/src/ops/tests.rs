@@ -969,6 +969,135 @@ fn rename_that_only_changes_case_and_its_undo() {
     assert_eq!(sandbox.names("here"), ["a.txt"]);
 }
 
+fn rename_all(sandbox: &Sandbox, renames: &[(&str, &str)]) -> Job {
+    let path = |(from, to): &(&str, &str)| (sandbox.path(&format!(r"here\{from}")), to.to_string());
+    Job::RenameAll {
+        renames: renames.iter().map(path).collect(),
+    }
+}
+
+/// Files that each hold their own name.
+fn lettered(sandbox: &Sandbox, names: &[&str]) {
+    for name in names {
+        sandbox.file(&format!(r"here\{name}"), name);
+    }
+}
+
+fn holds(sandbox: &Sandbox, names: &[&str]) -> Vec<String> {
+    names.iter().map(|name| read(&sandbox.path(&format!(r"here\{name}")))).collect()
+}
+
+const RING: [(&str, &str); 3] = [("a", "b"), ("b", "c"), ("c", "a")];
+
+#[test]
+fn many_renames_land_and_undo_together() {
+    let sandbox = Sandbox::new();
+    lettered(&sandbox, &["a", "b", "same"]);
+
+    let outcome = go(rename_all(&sandbox, &[("a", "1"), ("b", "2"), ("same", "same")]));
+
+    assert_eq!(sandbox.names("here"), ["1", "2", "same"]);
+    assert_eq!(outcome.done.len(), 2);
+    undo(outcome);
+    assert_eq!(sandbox.names("here"), ["a", "b", "same"]);
+}
+
+#[test]
+fn a_chain_of_renames_waits_for_each_name_to_come_free() {
+    let sandbox = Sandbox::new();
+    lettered(&sandbox, &["a", "b", "c"]);
+
+    let outcome = go(rename_all(&sandbox, &[("a", "b"), ("b", "c"), ("c", "d")]));
+
+    assert_eq!(holds(&sandbox, &["b", "c", "d"]), ["a", "b", "c"]);
+    assert_eq!(sandbox.names("here"), ["b", "c", "d"]);
+    undo(outcome);
+    assert_eq!(holds(&sandbox, &["a", "b", "c"]), ["a", "b", "c"]);
+}
+
+#[test]
+fn a_ring_of_renames_swaps_and_undoes() {
+    let sandbox = Sandbox::new();
+    lettered(&sandbox, &["a", "b", "c"]);
+
+    let outcome = go(rename_all(&sandbox, &RING));
+    assert_eq!(holds(&sandbox, &["a", "b", "c"]), ["c", "a", "b"]);
+    assert_eq!(sandbox.names("here"), ["a", "b", "c"]);
+
+    undo(outcome);
+    assert_eq!(holds(&sandbox, &["a", "b", "c"]), ["a", "b", "c"]);
+    assert_eq!(sandbox.names("here"), ["a", "b", "c"]);
+}
+
+#[test]
+fn a_ring_and_a_new_case_work_on_folders_too() {
+    let sandbox = Sandbox::new();
+    sandbox.file(r"here\a\inside-a", "a");
+    sandbox.file(r"here\b\inside-b", "b");
+    sandbox.file(r"here\low", "low");
+
+    let outcome = go(rename_all(&sandbox, &[("a", "b"), ("b", "a"), ("low", "LOW")]));
+
+    assert_eq!(sandbox.names(r"here\a"), ["inside-b"]);
+    assert_eq!(sandbox.names(r"here\b"), ["inside-a"]);
+    assert_eq!(sandbox.names("here"), ["LOW", "a", "b"]);
+    undo(outcome);
+    assert_eq!(sandbox.names(r"here\a"), ["inside-a"]);
+    assert_eq!(sandbox.names("here"), ["a", "b", "low"]);
+}
+
+#[test]
+fn a_ring_stays_whole_when_one_item_is_skipped() {
+    for locked in ["a", "b", "c"] {
+        let sandbox = Sandbox::new();
+        lettered(&sandbox, &["a", "b", "c"]);
+        let held = lock(&sandbox.path(&format!(r"here\{locked}")));
+
+        let outcome = go(rename_all(&sandbox, &RING));
+
+        drop(held);
+        assert_eq!(sandbox.names("here"), ["a", "b", "c"], "{locked}");
+        assert_eq!(holds(&sandbox, &["a", "b", "c"]), ["a", "b", "c"], "{locked}");
+        assert!(outcome.done.is_empty(), "{locked}: {:?}", outcome.done);
+    }
+}
+
+#[test]
+fn a_ring_cancelled_half_way_goes_back() {
+    let sandbox = Sandbox::new();
+    lettered(&sandbox, &["a", "b", "c"]);
+    let control = Arc::new(Control::default());
+    let cancel = control.clone();
+    let script = Script {
+        during: Some(Box::new(move |_: &Progress| cancel.cancel())),
+        ..Script::default()
+    };
+
+    let outcome = run(rename_all(&sandbox, &RING), &script, &control);
+
+    assert!(outcome.cancelled);
+    assert!(outcome.done.is_empty(), "{:?}", outcome.done);
+    assert_eq!(sandbox.names("here"), ["a", "b", "c"]);
+    assert_eq!(holds(&sandbox, &["a", "b", "c"]), ["a", "b", "c"]);
+}
+
+#[test]
+fn batch_checks_know_which_names_come_free() {
+    let sandbox = Sandbox::new();
+    lettered(&sandbox, &["a", "b", "stays"]);
+    let check = |renames: &[(&str, &str)]| {
+        let Job::RenameAll { renames } = rename_all(&sandbox, renames) else { unreachable!() };
+        check_renames(&renames)
+    };
+
+    assert_eq!(check(&[("a", "b"), ("b", "a"), ("stays", "stays")]), [None, None, None]);
+    assert_eq!(check(&[("a", "A")]), [None]);
+    assert!(check(&[("a", "stays")])[0].is_some_and(|problem| problem.contains("taken")));
+    assert!(check(&[("a", "x"), ("b", "X")]).iter().all(|problem| problem.is_some_and(|text| text.contains("same"))));
+    assert!(check(&[("a", "bad?")])[0].is_some());
+    assert!(check(&[("a", "b"), ("b", "b")])[0].is_some());
+}
+
 #[test]
 fn rename_onto_a_taken_name_asks_and_replaces_nothing() {
     let sandbox = Sandbox::new();
