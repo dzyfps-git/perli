@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::ptr;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use windows::core::{implement, Ref, Result, BOOL};
 use windows::Win32::Foundation::{HWND, LPARAM, POINT, POINTL};
 use windows::Win32::Graphics::Gdi::ScreenToClient;
@@ -17,11 +17,12 @@ use windows::Win32::System::Ole::{
     IDropSource, IDropTarget, IDropTarget_Impl, RegisterDragDrop, ReleaseStgMedium, RevokeDragDrop,
     CF_HDROP, DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_LINK, DROPEFFECT_MOVE, DROPEFFECT_NONE, MK_ALT,
 };
-use windows::Win32::System::SystemServices::{MK_CONTROL, MK_SHIFT, MODIFIERKEYS_FLAGS};
+use windows::Win32::System::SystemServices::{MK_CONTROL, MK_RBUTTON, MK_SHIFT, MODIFIERKEYS_FLAGS};
 use windows::Win32::UI::Shell::{CLSID_DragDropHelper, IDropTargetHelper, SHDoDragDrop};
 use windows::Win32::UI::WindowsAndMessaging::EnumChildWindows;
 
-use crate::ops::Job;
+use crate::folder::BIN_PATH;
+use crate::ops::{self, Incoming, Job};
 use crate::{clipboard, menus};
 
 /// What the UI hears about a drag over the window, in physical pixels inside it.
@@ -30,13 +31,37 @@ use crate::{clipboard, menus};
 pub enum Event {
     Over { x: i32, y: i32 },
     Leave,
-    Drop { x: i32, y: i32 },
+    /// `right` means the right button dragged, so the user gets to pick what happens.
+    Drop { x: i32, y: i32, right: bool },
+}
+
+/// What a drop can do, when the user picks it from a menu.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DropAction {
+    Move,
+    Copy,
+    Link,
+}
+
+impl DropAction {
+    const ALL: [Self; 3] = [Self::Move, Self::Copy, Self::Link];
+
+    fn effect(self) -> DROPEFFECT {
+        match self {
+            Self::Move => DROPEFFECT_MOVE,
+            Self::Copy => DROPEFFECT_COPY,
+            Self::Link => DROPEFFECT_LINK,
+        }
+    }
 }
 
 struct Dropped {
     paths: Vec<PathBuf>,
     keys: MODIFIERKEYS_FLAGS,
     allowed: DROPEFFECT,
+    /// In place of `paths`, for files that have none.
+    incoming: Option<Incoming>,
 }
 
 /// What the UI and the drag share. The UI knows what is under the pointer, and Windows knows
@@ -54,13 +79,22 @@ impl Drags {
         *self.target.lock().unwrap_or_else(PoisonError::into_inner) = folder;
     }
 
-    /// The job for the last drop, which landed on `folder`.
-    pub fn job(&self, folder: &Path) -> Option<Job> {
+    /// The job for the last drop, which landed on `folder`. `action` is what the user picked.
+    pub fn job(&self, folder: &Path, action: Option<DropAction>) -> Option<Job> {
         let dropped = self.dropped.lock().unwrap_or_else(PoisonError::into_inner).take()?;
-        let Dropped { paths: sources, keys, allowed } = dropped;
-        let effect = choose(keys, allowed, &sources, folder)?;
+        let Dropped { paths: sources, keys, allowed, incoming } = dropped;
+        if let Some(incoming) = incoming {
+            let folder = folder.to_path_buf();
+            return (!is_bin(&folder)).then_some(Job::Receive { incoming, folder });
+        }
+        let effect = match action {
+            Some(action) => Some(action.effect()).filter(|&effect| fits(effect, allowed, &sources, folder))?,
+            None => choose(keys, allowed, &sources, folder)?,
+        };
         let folder = folder.to_path_buf();
-        Some(if effect == DROPEFFECT_COPY {
+        Some(if is_bin(&folder) {
+            Job::Recycle { paths: sources }
+        } else if effect == DROPEFFECT_COPY {
             Job::Copy { sources, folder }
         } else if effect == DROPEFFECT_MOVE {
             Job::Move { sources, folder }
@@ -68,6 +102,25 @@ impl Drags {
             Job::Shortcut { sources, folder }
         })
     }
+
+    /// What the last drop can do on `folder`, for the user to pick from.
+    // ponytail: a dismissed menu leaves the drop waiting until the next one replaces it, which
+    // only ever holds a list of paths or a source that gave up its data.
+    pub fn choices(&self, folder: &Path) -> Vec<DropAction> {
+        let dropped = self.dropped.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(dropped) = dropped.as_ref() else {
+            return Vec::new();
+        };
+        if dropped.incoming.is_some() {
+            return if is_bin(folder) { Vec::new() } else { vec![DropAction::Copy] };
+        }
+        let fitting = |action: &DropAction| fits(action.effect(), dropped.allowed, &dropped.paths, folder);
+        DropAction::ALL.into_iter().filter(fitting).collect()
+    }
+}
+
+fn is_bin(folder: &Path) -> bool {
+    folder == Path::new(BIN_PATH)
 }
 
 fn lowered(path: &Path) -> PathBuf {
@@ -90,6 +143,9 @@ fn choose(
     folder: &Path,
 ) -> Option<DROPEFFECT> {
     paths.first()?;
+    if is_bin(folder) {
+        return fits(DROPEFFECT_MOVE, allowed, paths, folder).then_some(DROPEFFECT_MOVE);
+    }
     let held = |key: u32| keys.0 & key != 0;
     let (control, shift) = (held(MK_CONTROL.0), held(MK_SHIFT.0));
     let wanted = if held(MK_ALT) || (control && shift) {
@@ -105,12 +161,22 @@ fn choose(
     let effect = [wanted, DROPEFFECT_COPY, DROPEFFECT_MOVE, DROPEFFECT_LINK]
         .into_iter()
         .find(|effect| allowed.0 & effect.0 != 0)?;
+    fits(effect, allowed, paths, folder).then_some(effect)
+}
 
+/// True if the source offers `effect` and it makes sense for `paths` on `folder`.
+fn fits(effect: DROPEFFECT, allowed: DROPEFFECT, paths: &[PathBuf], folder: &Path) -> bool {
+    if paths.is_empty() || allowed.0 & effect.0 == 0 {
+        return false;
+    }
+    if is_bin(folder) {
+        return effect == DROPEFFECT_MOVE;
+    }
     let folder = lowered(folder);
     let into_itself = paths.iter().any(|path| folder.starts_with(lowered(path)));
     let stays_put = paths.iter().all(|path| path.parent().is_some_and(|parent| lowered(parent) == folder));
     let pointless = (effect != DROPEFFECT_LINK && into_itself) || (effect == DROPEFFECT_MOVE && stays_put);
-    (!pointless).then_some(effect)
+    !pointless
 }
 
 /// The files in a drag. Something like dragged text has none.
@@ -132,9 +198,30 @@ fn files_in(data: &IDataObject) -> Vec<PathBuf> {
 
 struct Hover {
     paths: Vec<PathBuf>,
+    /// A source of files with no paths, when `paths` is empty.
+    source: Option<IDataObject>,
     allowed: DROPEFFECT,
+    /// Windows only says which button dragged while it is held, and it is gone by the drop.
+    right: bool,
     /// Where the UI last heard about.
     at: Option<POINT>,
+}
+
+impl Hover {
+    fn over(data: Option<&IDataObject>, keys: MODIFIERKEYS_FLAGS, allowed: DROPEFFECT) -> Option<Self> {
+        let paths = data.map(files_in).unwrap_or_default();
+        let source = data.filter(|data| paths.is_empty() && ops::offers_files(data)).cloned();
+        let right = keys.0 & MK_RBUTTON.0 != 0;
+        (!paths.is_empty() || source.is_some()).then_some(Self { paths, source, allowed, right, at: None })
+    }
+
+    /// Files with no paths can only be copied out of where they are, and never to the bin.
+    fn effect(&self, keys: MODIFIERKEYS_FLAGS, folder: &Path) -> Option<DROPEFFECT> {
+        if self.source.is_some() {
+            return (self.allowed.0 & DROPEFFECT_COPY.0 != 0 && !is_bin(folder)).then_some(DROPEFFECT_COPY);
+        }
+        choose(keys, self.allowed, &self.paths, folder)
+    }
 }
 
 #[implement(IDropTarget)]
@@ -170,7 +257,7 @@ impl Target {
         hover
             .as_ref()
             .zip(folder)
-            .and_then(|(hover, folder)| choose(keys, hover.allowed, &hover.paths, &folder))
+            .and_then(|(hover, folder)| hover.effect(keys, &folder))
             .unwrap_or(DROPEFFECT_NONE)
     }
 
@@ -199,9 +286,7 @@ impl IDropTarget_Impl for Target_Impl {
         point: &POINTL,
         effect: *mut DROPEFFECT,
     ) -> Result<()> {
-        let paths = data.as_ref().map(files_in).unwrap_or_default();
-        let allowed = unsafe { *effect };
-        *self.hover.borrow_mut() = (!paths.is_empty()).then_some(Hover { paths, allowed, at: None });
+        *self.hover.borrow_mut() = Hover::over(data.as_ref(), keys, unsafe { *effect });
         let shown = self.effect(keys);
         unsafe { *effect = shown };
         if let (Some(helper), Some(data)) = (&self.helper, data.as_ref()) {
@@ -247,11 +332,13 @@ impl IDropTarget_Impl for Target_Impl {
         }
         // Perli's own job does the work, so the source must not delete anything itself.
         unsafe { *effect = DROPEFFECT_NONE };
-        if let Some(Hover { paths, allowed, .. }) = self.end() {
+        if let Some(Hover { paths, source, allowed, right, .. }) = self.end() {
+            let source = source.filter(|_| shown != DROPEFFECT_NONE);
+            let incoming = source.and_then(|data| Incoming::take_over(&data).ok());
             *self.drags.dropped.lock().unwrap_or_else(PoisonError::into_inner) =
-                Some(Dropped { paths, keys, allowed });
+                Some(Dropped { paths, keys, allowed, incoming });
             let at = self.inside(point);
-            (self.listener)(Event::Drop { x: at.x, y: at.y });
+            (self.listener)(Event::Drop { x: at.x, y: at.y, right });
         }
         Ok(())
     }
@@ -429,17 +516,77 @@ mod tests {
         assert_eq!(effect, DROPEFFECT_NONE, "a source must never delete after a Perli drop");
         assert_eq!(
             *heard.borrow(),
-            [Event::Over { x: 5, y: 6 }, Event::Over { x: 7, y: 8 }, Event::Drop { x: 7, y: 8 }]
+            [Event::Over { x: 5, y: 6 }, Event::Over { x: 7, y: 8 }, Event::Drop { x: 7, y: 8, right: false }]
         );
 
-        match drags.job(&into) {
+        match drags.job(&into, None) {
             Some(Job::Copy { sources, folder }) => {
                 assert_eq!(sources.len(), 1);
                 assert_eq!(folder, into);
             }
             _ => panic!("expected a copy"),
         }
-        assert!(drags.job(&into).is_none(), "a drop runs once");
+        assert!(drags.job(&into, None).is_none(), "a drop runs once");
+    }
+
+    #[test]
+    fn the_bin_takes_files_whatever_keys_are_held() {
+        let bin = Path::new(BIN_PATH);
+        for keys in [NO_KEYS, MK_CONTROL, MK_SHIFT, ALT] {
+            assert_eq!(choose(keys, ANY, &on_c(), bin), Some(DROPEFFECT_MOVE));
+        }
+        assert_eq!(choose(NO_KEYS, DROPEFFECT_COPY, &on_c(), bin), None, "the source must allow losing them");
+    }
+
+    /// Drops `paths` by hand, as Windows would have.
+    fn dropped(paths: Vec<PathBuf>) -> Drags {
+        let drags = Drags::default();
+        let held = Dropped { paths, keys: NO_KEYS, allowed: ANY, incoming: None };
+        *drags.dropped.lock().unwrap() = Some(held);
+        drags
+    }
+
+    #[test]
+    fn a_drop_on_the_bin_recycles() {
+        match dropped(on_c()).job(Path::new(BIN_PATH), None) {
+            Some(Job::Recycle { paths }) => assert_eq!(paths, on_c()),
+            _ => panic!("expected a recycle"),
+        }
+    }
+
+    #[test]
+    fn a_right_drag_offers_what_makes_sense_and_does_what_was_picked() {
+        let into = Path::new(r"C:\to");
+        assert_eq!(dropped(on_c()).choices(into), DropAction::ALL);
+        assert_eq!(dropped(on_c()).choices(Path::new(r"C:\from")), [DropAction::Copy, DropAction::Link]);
+        assert_eq!(dropped(on_c()).choices(Path::new(BIN_PATH)), [DropAction::Move]);
+
+        assert!(matches!(dropped(on_c()).job(into, Some(DropAction::Link)), Some(Job::Shortcut { .. })));
+        assert!(matches!(dropped(on_c()).job(into, Some(DropAction::Copy)), Some(Job::Copy { .. })));
+        assert!(matches!(dropped(on_c()).job(Path::new(r"D:\to"), Some(DropAction::Move)), Some(Job::Move { .. })));
+        assert!(dropped(on_c()).job(Path::new(r"C:\from"), Some(DropAction::Move)).is_none());
+    }
+
+    #[test]
+    fn the_right_button_is_remembered_from_the_start_of_the_drag() {
+        let scene = Scene::new("right");
+        let into = scene.folder.join("into");
+        let data = menus::data_object(&[scene.file.clone()]).unwrap();
+        let drags = Arc::new(Drags::default());
+        let heard = Rc::new(RefCell::new(Vec::new()));
+        let log = heard.clone();
+        let target: IDropTarget =
+            Target::new(HWND::default(), drags.clone(), Box::new(move |event| log.borrow_mut().push(event))).into();
+        let at = POINTL { x: 1, y: 2 };
+
+        let mut effect = ANY;
+        unsafe { target.DragEnter(&data, MODIFIERKEYS_FLAGS(MK_RBUTTON.0), at, &raw mut effect) }.unwrap();
+        drags.aim(Some(into.clone()));
+        effect = ANY;
+        unsafe { target.Drop(&data, NO_KEYS, at, &raw mut effect) }.unwrap();
+
+        assert_eq!(heard.borrow().last(), Some(&Event::Drop { x: 1, y: 2, right: true }));
+        assert_eq!(drags.choices(&into), DropAction::ALL);
     }
 
     /// Plain windows stand in for the web view's, with wry's target on one of them.
@@ -479,6 +626,6 @@ mod tests {
         unsafe { target.DragLeave() }.unwrap();
 
         assert!(drags.target.lock().unwrap().is_none());
-        assert!(drags.job(&scene.folder).is_none());
+        assert!(drags.job(&scene.folder, None).is_none());
     }
 }

@@ -8,8 +8,16 @@ use std::ptr;
 use std::thread;
 use std::time::Duration;
 
-use windows::core::{Error, Result};
-use windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL, HWND};
+use windows::core::{w, Error, Result};
+use windows::Win32::Foundation::{GlobalFree, E_OUTOFMEMORY, HANDLE, HGLOBAL, HWND};
+use windows::Win32::Graphics::Gdi::{HBITMAP, HPALETTE};
+use windows::Win32::Graphics::Imaging::{
+    CLSID_WICImagingFactory, GUID_ContainerFormatPng, IWICImagingFactory, WICBitmapEncoderNoCache,
+    WICBitmapIgnoreAlpha,
+};
+use windows::Win32::System::Com::{
+    CoCreateInstance, IStream, CLSCTX_INPROC_SERVER, STATFLAG_NONAME, STATSTG, STREAM_SEEK_SET,
+};
 use windows::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, GetClipboardData, GetClipboardSequenceNumber,
     IsClipboardFormatAvailable, OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
@@ -18,10 +26,16 @@ use windows::Win32::System::Memory::{
     GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE,
 };
 use windows::Win32::System::Ole::{DROPEFFECT_COPY, DROPEFFECT_LINK, DROPEFFECT_MOVE};
-use windows::Win32::UI::Shell::{CFSTR_PREFERREDDROPEFFECT, DROPFILES};
+use windows::Win32::UI::Shell::{SHCreateMemStream, CFSTR_PREFERREDDROPEFFECT, DROPFILES};
 
-/// Windows' standard clipboard format number for a list of files.
+use crate::ops::{Com, Content, Template};
+
+/// Windows' standard clipboard format numbers.
+const CF_BITMAP: u32 = 2;
+const CF_UNICODETEXT: u32 = 13;
 const CF_HDROP: u32 = 15;
+
+const PNG_START: &[u8] = b"\x89PNG\r\n\x1a\n";
 
 const OPEN_TRIES: u32 = 5;
 const OPEN_WAIT: Duration = Duration::from_millis(20);
@@ -60,6 +74,11 @@ impl Drop for Open {
 
 fn effect_format() -> u32 {
     unsafe { RegisterClipboardFormatW(CFSTR_PREFERREDDROPEFFECT) }
+}
+
+/// What browsers and image editors put beside a plain bitmap, with its transparency intact.
+fn png_format() -> u32 {
+    unsafe { RegisterClipboardFormatW(w!("PNG")) }
 }
 
 fn encode(paths: &[PathBuf]) -> Vec<u8> {
@@ -157,6 +176,72 @@ pub fn has_files() -> bool {
     unsafe { IsClipboardFormatAvailable(CF_HDROP) }.is_ok()
 }
 
+/// True if a paste would make something. This reads nothing, so it never wakes a program that
+/// renders its copied data late.
+pub fn can_paste() -> bool {
+    [CF_HDROP, CF_UNICODETEXT, CF_BITMAP, png_format()]
+        .into_iter()
+        .any(|format| unsafe { IsClipboardFormatAvailable(format) }.is_ok())
+}
+
+fn image_file(png: Vec<u8>) -> Template {
+    let stem = "Pasted image".to_string();
+    Template { stem, extension: ".png".to_string(), content: Content::Bytes(png) }
+}
+
+fn text_file(units: &[u8]) -> Option<Template> {
+    let units: Vec<u16> = units.chunks_exact(2).map(|pair| u16::from_le_bytes([pair[0], pair[1]])).collect();
+    let length = units.iter().position(|&unit| unit == 0).unwrap_or(units.len());
+    let text = String::from_utf16_lossy(&units[..length]);
+    let stem = "Pasted text".to_string();
+    (!text.is_empty()).then(|| Template { stem, extension: ".txt".to_string(), content: Content::Bytes(text.into_bytes()) })
+}
+
+/// Writes a bitmap as a PNG through Windows' own imaging. Screenshots have no real transparency,
+/// so what their alpha bytes say goes unused.
+fn png_of(bitmap: HBITMAP) -> Result<Vec<u8>> {
+    let _com = Com::enter();
+    unsafe {
+        let factory: IWICImagingFactory = CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER)?;
+        let source = factory.CreateBitmapFromHBITMAP(bitmap, HPALETTE::default(), WICBitmapIgnoreAlpha)?;
+        let stream = SHCreateMemStream(None).ok_or(Error::from(E_OUTOFMEMORY))?;
+        let encoder = factory.CreateEncoder(&GUID_ContainerFormatPng, ptr::null())?;
+        encoder.Initialize(&stream, WICBitmapEncoderNoCache)?;
+        let mut frame = None;
+        encoder.CreateNewFrame(&raw mut frame, ptr::null_mut())?;
+        let frame = frame.ok_or(Error::from(E_OUTOFMEMORY))?;
+        frame.Initialize(None)?;
+        frame.WriteSource(&source, ptr::null())?;
+        frame.Commit()?;
+        encoder.Commit()?;
+        read_all(&stream)
+    }
+}
+
+unsafe fn read_all(stream: &IStream) -> Result<Vec<u8>> {
+    let mut facts = STATSTG::default();
+    stream.Stat(&raw mut facts, STATFLAG_NONAME)?;
+    stream.Seek(0, STREAM_SEEK_SET, None)?;
+    let mut bytes = vec![0; facts.cbSize as usize];
+    let mut read = 0;
+    stream.Read(bytes.as_mut_ptr().cast(), bytes.len() as u32, Some(&raw mut read)).ok()?;
+    bytes.truncate(read as usize);
+    Ok(bytes)
+}
+
+/// A new file that holds what the clipboard does. An image wins over text, because anything
+/// copied as a picture also carries text only if that text describes it.
+pub fn content() -> Result<Option<Template>> {
+    let _open = Open::new(HWND::default())?;
+    if let Some(png) = unsafe { take(png_format()) }.filter(|bytes| bytes.starts_with(PNG_START)) {
+        return Ok(Some(image_file(png)));
+    }
+    if let Ok(bitmap) = unsafe { GetClipboardData(CF_BITMAP) } {
+        return Ok(Some(image_file(png_of(HBITMAP(bitmap.0))?)));
+    }
+    Ok(unsafe { take(CF_UNICODETEXT) }.as_deref().and_then(text_file))
+}
+
 /// Changes every time any program writes the clipboard.
 pub fn sequence() -> u32 {
     unsafe { GetClipboardSequenceNumber() }
@@ -175,8 +260,9 @@ pub fn clear_if_unchanged(seen: u32) -> Result<()> {
 mod tests {
     use std::process::Command;
 
-    use windows::core::{w, PCWSTR};
+    use windows::core::PCWSTR;
     use windows::Win32::Foundation::GENERIC_ALL;
+    use windows::Win32::Graphics::Gdi::CreateBitmap;
     use windows::Win32::System::StationsAndDesktops::{
         CreateDesktopW, CreateWindowStationW, SetProcessWindowStation, SetThreadDesktop,
         DESKTOP_CONTROL_FLAGS,
@@ -203,11 +289,9 @@ mod tests {
 
     /// A window station has a clipboard of its own, so the user's is never touched. Joining one
     /// changes the whole process, so the real test gets a process to itself.
-    #[test]
-    fn files_survive_a_real_clipboard() {
+    fn in_own_process(test: &str) {
         let output = Command::new(std::env::current_exe().unwrap())
-            .args(["clipboard::tests::private_round_trip", "--exact", "--ignored", "--nocapture"])
-            .args(["--test-threads=1"])
+            .args([test, "--exact", "--ignored", "--nocapture", "--test-threads=1"])
             .output()
             .unwrap();
         assert!(output.status.success(), "{output:?}");
@@ -215,9 +299,17 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "files_survive_a_real_clipboard runs this in its own process"]
-    fn private_round_trip() {
-        let window = unsafe {
+    fn files_survive_a_real_clipboard() {
+        in_own_process("clipboard::tests::private_round_trip");
+    }
+
+    #[test]
+    fn pastes_make_files_from_a_real_clipboard() {
+        in_own_process("clipboard::tests::private_content");
+    }
+
+    fn private_window() -> HWND {
+        unsafe {
             let station = CreateWindowStationW(PCWSTR::null(), 0, GENERIC_ALL.0, None).unwrap();
             SetProcessWindowStation(station).unwrap();
             let desktop = CreateDesktopW(
@@ -245,7 +337,58 @@ mod tests {
                 None,
             )
             .unwrap()
+        }
+    }
+
+    #[test]
+    #[ignore = "pastes_make_files_from_a_real_clipboard runs this in its own process"]
+    fn private_content() {
+        let window = private_window();
+        let fresh = |fill: &dyn Fn()| {
+            let _open = Open::new(window).unwrap();
+            unsafe { EmptyClipboard() }.unwrap();
+            fill();
         };
+        let bytes_of = |template: Template| match template.content {
+            Content::Bytes(bytes) => bytes,
+            other => panic!("{other:?}"),
+        };
+        assert!(!can_paste());
+
+        let text: Vec<u8> = "héllo\0".encode_utf16().flat_map(u16::to_le_bytes).collect();
+        fresh(&|| unsafe { put(CF_UNICODETEXT, &text) }.unwrap());
+        assert!(can_paste());
+        let template = content().unwrap().unwrap();
+        assert_eq!((template.stem.as_str(), template.extension.as_str()), ("Pasted text", ".txt"));
+        assert_eq!(bytes_of(template), "héllo".as_bytes());
+
+        let png = [PNG_START, b"rest of a picture"].concat();
+        fresh(&|| unsafe {
+            put(CF_UNICODETEXT, &text).unwrap();
+            put(png_format(), &png).unwrap();
+        });
+        let template = content().unwrap().unwrap();
+        assert_eq!(template.extension, ".png");
+        assert!(bytes_of(template).starts_with(&png));
+
+        fresh(&|| unsafe {
+            let pixels = [0x11u8; 16];
+            let bitmap = CreateBitmap(2, 2, 1, 32, Some(pixels.as_ptr().cast()));
+            SetClipboardData(CF_BITMAP, Some(HANDLE(bitmap.0))).unwrap();
+        });
+        let template = content().unwrap().unwrap();
+        assert_eq!(template.stem, "Pasted image");
+        let written = bytes_of(template);
+        assert!(written.starts_with(PNG_START) && written.len() > 40, "{written:?}");
+
+        fresh(&|| ());
+        assert!(content().unwrap().is_none());
+    }
+
+    #[test]
+    #[ignore = "files_survive_a_real_clipboard runs this in its own process"]
+    fn private_round_trip() {
+        let window = private_window();
         let paths = vec![PathBuf::from(r"C:\a.txt"), PathBuf::from(r"C:\b.txt")];
 
         write(&paths, true, window.0 as isize).unwrap();

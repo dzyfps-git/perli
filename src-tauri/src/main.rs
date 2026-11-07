@@ -31,7 +31,7 @@ use tauri::{
     async_runtime, ipc::Response, AppHandle, Emitter, Manager, State, WebviewWindow, WindowEvent,
 };
 
-use drag::Drags;
+use drag::{DropAction, Drags};
 use jobs::{Jobs, Plan};
 use ops::{Job, Reply};
 use search::Searches;
@@ -166,9 +166,13 @@ enum Task {
     RenameAll { selection: Selection, names: Vec<String> },
     New { folder: String, directory: bool },
     Template { folder: String, extension: String },
+    OwnTemplate { folder: String, name: String },
+    SaveTemplate { selection: Selection },
+    Zip { selection: Selection },
+    Unzip { selection: Selection, own_folder: bool },
     Paste { folder: String },
     /// The last files dropped on the window landed on `folder`.
-    Drop { folder: String },
+    Drop { folder: String, action: Option<DropAction> },
     Recycle { selection: Selection },
     Delete { selection: Selection },
     Restore { selection: Selection },
@@ -213,8 +217,25 @@ impl Task {
                 folder: target(folder)?,
                 template: templates::template(&extension)?,
             },
+            Self::OwnTemplate { folder, name } => Job::Template {
+                folder: target(folder)?,
+                template: templates::own_template(&name)?,
+            },
+            Self::SaveTemplate { selection } => Job::Copy {
+                sources: paths(&selection)?,
+                folder: templates::own_folder()?,
+            },
+            Self::Zip { selection } => Job::Zip {
+                sources: paths(&selection)?,
+            },
+            Self::Unzip { selection, own_folder } => Job::Unzip {
+                archives: paths(&selection)?,
+                own_folder,
+            },
             Self::Paste { folder } => return paste(target(folder)?),
-            Self::Drop { folder } => return Ok(drags.job(Path::new(&target(folder)?)).map(Plan::from)),
+            Self::Drop { folder, action } => {
+                return Ok(drags.job(Path::new(&target(folder)?), action).map(Plan::from));
+            }
             Self::Recycle { selection } => Job::Recycle {
                 paths: paths(&selection)?,
             },
@@ -233,11 +254,13 @@ impl Task {
     }
 }
 
-/// Pastes the files on the clipboard. A cut moves them, a copy copies them.
+/// Pastes the files on the clipboard. A cut moves them, a copy copies them. An image or text
+/// becomes a new file, which opens for naming like any other.
 fn paste(folder: PathBuf) -> Result<Option<Plan>, String> {
     let sequence = clipboard::sequence();
     let Some(files) = clipboard::read().map_err(|error| error.message())? else {
-        return Ok(None);
+        let content = clipboard::content().map_err(|error| error.message())?;
+        return Ok(content.map(|template| Job::Template { folder, template }.into()));
     };
     let sources = files.paths;
     let job = if files.cut {
@@ -704,8 +727,8 @@ fn clipboard_sequence() -> u32 {
 }
 
 #[tauri::command]
-fn clipboard_has_files() -> bool {
-    clipboard::has_files()
+fn clipboard_can_paste() -> bool {
+    clipboard::can_paste()
 }
 
 #[tauri::command]
@@ -933,6 +956,21 @@ async fn thumbnail(view: u32, request: u64, row: u32, views: State<'_, Views>) -
 }
 
 #[tauri::command]
+fn drop_choices(folder: PathBuf, drags: State<'_, Arc<Drags>>) -> Vec<DropAction> {
+    drags.choices(&folder)
+}
+
+#[tauri::command]
+async fn own_templates() -> Vec<String> {
+    templates::own_names()
+}
+
+#[tauri::command]
+fn templates_folder() -> Result<PathBuf, String> {
+    templates::own_folder()
+}
+
+#[tauri::command]
 async fn set_drop_target(folder: Option<PathBuf>, drags: State<'_, Arc<Drags>>) -> Result<(), String> {
     drags.aim(folder);
     Ok(())
@@ -1065,7 +1103,7 @@ fn main() {
             set_clipboard,
             cancel_cut,
             clipboard_sequence,
-            clipboard_has_files,
+            clipboard_can_paste,
             rows,
             find_row,
             close_view,
@@ -1083,6 +1121,9 @@ fn main() {
             file_users,
             thumbnail,
             set_drop_target,
+            drop_choices,
+            own_templates,
+            templates_folder,
             start_drag,
             clipboard_text,
             map_drive,

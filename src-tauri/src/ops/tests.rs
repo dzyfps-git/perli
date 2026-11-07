@@ -12,10 +12,19 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use windows::core::{Interface, HSTRING};
-use windows::Win32::Storage::FileSystem::GetLogicalDrives;
-use windows::Win32::System::Com::{CoCreateInstance, IPersistFile, CLSCTX_INPROC_SERVER, STGM_READ};
-use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
+use windows::core::{implement, Interface, Ref, BOOL, HRESULT, HSTRING};
+use windows::Win32::Foundation::{DV_E_FORMATETC, E_NOTIMPL, HGLOBAL, S_OK, SIZE};
+use windows::Win32::Storage::FileSystem::{GetLogicalDrives, FILE_ATTRIBUTE_DIRECTORY};
+use windows::Win32::System::Com::{
+    CoCreateInstance, IAdviseSink, IDataObject, IDataObject_Impl, IEnumFORMATETC, IEnumSTATDATA, IPersistFile,
+    CLSCTX_INPROC_SERVER, FORMATETC, STGMEDIUM, STGMEDIUM_0, STGM_READ, TYMED_HGLOBAL, TYMED_ISTREAM,
+};
+use windows::Win32::System::DataExchange::RegisterClipboardFormatW;
+use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+use windows::Win32::UI::Shell::{
+    IShellLinkW, SHCreateMemStream, ShellLink, CFSTR_FILECONTENTS, CFSTR_FILEDESCRIPTORW, FD_ATTRIBUTES,
+    FD_FILESIZE, FILEDESCRIPTORW,
+};
 
 use super::bin::{parse_info, read_root};
 use super::names::check as check_name;
@@ -1251,6 +1260,163 @@ fn something_that_is_no_archive_is_a_plain_problem() {
     assert_eq!(script.asked(), 1);
     assert!(outcome.done.is_empty());
     assert_eq!(sandbox.names("here"), ["not.zip"]);
+}
+
+// Dragged files with no paths.
+
+struct Virtual {
+    name: &'static str,
+    /// `None` for a folder.
+    bytes: Option<&'static [u8]>,
+    as_stream: bool,
+}
+
+#[implement(IDataObject)]
+struct Source(Vec<Virtual>);
+
+fn global(bytes: &[u8]) -> HGLOBAL {
+    unsafe {
+        let memory = GlobalAlloc(GMEM_MOVEABLE, bytes.len()).unwrap();
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), GlobalLock(memory).cast(), bytes.len());
+        let _ = GlobalUnlock(memory);
+        memory
+    }
+}
+
+impl Source {
+    fn descriptors(&self) -> Vec<u8> {
+        let mut bytes = (self.0.len() as u32).to_le_bytes().to_vec();
+        for item in &self.0 {
+            let mut name = [0u16; 260];
+            for (slot, unit) in name.iter_mut().zip(item.name.encode_utf16()) {
+                *slot = unit;
+            }
+            let entry = FILEDESCRIPTORW {
+                dwFlags: (FD_ATTRIBUTES.0 | FD_FILESIZE.0) as u32,
+                sizel: SIZE::default(),
+                dwFileAttributes: if item.bytes.is_none() { FILE_ATTRIBUTE_DIRECTORY.0 } else { 0 },
+                nFileSizeLow: item.bytes.map_or(0, |bytes| bytes.len() as u32),
+                cFileName: name,
+                ..Default::default()
+            };
+            let raw = (&raw const entry).cast::<u8>();
+            bytes.extend_from_slice(unsafe { std::slice::from_raw_parts(raw, size_of::<FILEDESCRIPTORW>()) });
+        }
+        bytes
+    }
+}
+
+fn medium(tymed: i32, u: STGMEDIUM_0) -> STGMEDIUM {
+    STGMEDIUM {
+        tymed: tymed as u32,
+        u,
+        pUnkForRelease: std::mem::ManuallyDrop::new(None),
+    }
+}
+
+#[allow(non_snake_case)]
+impl IDataObject_Impl for Source_Impl {
+    fn GetData(&self, format: *const FORMATETC) -> windows::core::Result<STGMEDIUM> {
+        let format = unsafe { &*format };
+        let descriptors = unsafe { RegisterClipboardFormatW(CFSTR_FILEDESCRIPTORW) };
+        if u32::from(format.cfFormat) == descriptors {
+            return Ok(medium(TYMED_HGLOBAL.0, STGMEDIUM_0 { hGlobal: global(&self.descriptors()) }));
+        }
+        let contents = unsafe { RegisterClipboardFormatW(CFSTR_FILECONTENTS) };
+        let item = usize::try_from(format.lindex).ok().and_then(|index| self.0.get(index));
+        let (Some(item), true) = (item, u32::from(format.cfFormat) == contents) else {
+            return Err(DV_E_FORMATETC.into());
+        };
+        let bytes = item.bytes.ok_or(DV_E_FORMATETC)?;
+        Ok(if item.as_stream {
+            let stream = std::mem::ManuallyDrop::new(unsafe { SHCreateMemStream(Some(bytes)) });
+            medium(TYMED_ISTREAM.0, STGMEDIUM_0 { pstm: stream })
+        } else {
+            medium(TYMED_HGLOBAL.0, STGMEDIUM_0 { hGlobal: global(bytes) })
+        })
+    }
+
+    fn GetDataHere(&self, _: *const FORMATETC, _: *mut STGMEDIUM) -> windows::core::Result<()> {
+        Err(E_NOTIMPL.into())
+    }
+
+    fn QueryGetData(&self, format: *const FORMATETC) -> HRESULT {
+        let descriptors = unsafe { RegisterClipboardFormatW(CFSTR_FILEDESCRIPTORW) };
+        if u32::from(unsafe { &*format }.cfFormat) == descriptors { S_OK } else { DV_E_FORMATETC }
+    }
+
+    fn GetCanonicalFormatEtc(&self, _: *const FORMATETC, _: *mut FORMATETC) -> HRESULT {
+        E_NOTIMPL
+    }
+
+    fn SetData(&self, _: *const FORMATETC, _: *const STGMEDIUM, _: BOOL) -> windows::core::Result<()> {
+        Err(E_NOTIMPL.into())
+    }
+
+    fn EnumFormatEtc(&self, _: u32) -> windows::core::Result<IEnumFORMATETC> {
+        Err(E_NOTIMPL.into())
+    }
+
+    fn DAdvise(&self, _: *const FORMATETC, _: u32, _: Ref<IAdviseSink>) -> windows::core::Result<u32> {
+        Err(E_NOTIMPL.into())
+    }
+
+    fn DUnadvise(&self, _: u32) -> windows::core::Result<()> {
+        Err(E_NOTIMPL.into())
+    }
+
+    fn EnumDAdvise(&self) -> windows::core::Result<IEnumSTATDATA> {
+        Err(E_NOTIMPL.into())
+    }
+}
+
+fn receive(sandbox: &Sandbox, items: Vec<Virtual>, script: &Script) -> Outcome {
+    let _com = Com::enter();
+    let data: IDataObject = Source(items).into();
+    assert!(offers_files(&data));
+    let folder = sandbox.path("into");
+    fs::create_dir_all(&folder).unwrap();
+    let incoming = Incoming::take_over(&data).unwrap();
+    run_with(Job::Receive { incoming, folder }, script)
+}
+
+#[test]
+fn dragged_files_land_with_their_folders_and_a_warning() {
+    let sandbox = Sandbox::new();
+    let items = vec![
+        Virtual { name: "sub", bytes: None, as_stream: false },
+        Virtual { name: r"sub\in stream.txt", bytes: Some(b"from a stream"), as_stream: true },
+        Virtual { name: "from memory.txt", bytes: Some(b"from memory"), as_stream: false },
+    ];
+
+    let outcome = receive(&sandbox, items, &Script::default());
+
+    assert_eq!(read(&sandbox.path(r"into\sub\in stream.txt")), "from a stream");
+    let file = sandbox.path(r"into\from memory.txt");
+    assert_eq!(read(&file), "from memory");
+    assert_eq!(sys::read_zone(&file).as_deref(), Some(b"[ZoneTransfer]\r\nZoneId=3\r\n".as_slice()));
+    assert_eq!(
+        outcome.done,
+        [Done::Created { path: sandbox.path(r"into\sub") }, Done::Created { path: file }]
+    );
+}
+
+#[test]
+fn dragged_names_cannot_land_outside_and_conflicts_ask() {
+    let sandbox = Sandbox::new();
+    sandbox.file(r"into\taken.txt", "old");
+    let items = vec![
+        Virtual { name: r"..\evil.txt", bytes: Some(b"x"), as_stream: false },
+        Virtual { name: "taken.txt", bytes: Some(b"new"), as_stream: false },
+    ];
+    let script = Script::answering(&[Answer::Skip, Answer::KeepBoth]);
+
+    receive(&sandbox, items, &script);
+
+    assert_eq!(sandbox.names("into"), ["taken (2).txt", "taken.txt"]);
+    assert_eq!(read(&sandbox.path(r"into\taken (2).txt")), "new");
+    assert_eq!(sandbox.names(""), ["into"]);
+    assert!(matches!(&script.questions.borrow()[1], Question::Conflict { .. }));
 }
 
 // Rename and new items.

@@ -1,5 +1,7 @@
 //! The file types Windows offers under New, read from the `ShellNew` registry keys.
 
+use std::ffi::OsStr;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -11,13 +13,14 @@ use windows::Win32::System::Registry::{
 use windows::Win32::UI::Shell::{FOLDERID_CommonTemplates, FOLDERID_Templates, SHLoadIndirectString};
 
 use crate::ops::{Content, Template};
-use crate::{places, registry, shell};
+use crate::{places, registry, session, shell};
 
 /// Longest text a `ShellNew` item name resolves to.
 const LONGEST_TEXT: usize = 512;
 /// Offered even on a PC whose Windows lists no such type. Its own template wins if it has one.
 const TEXT_EXTENSION: &str = "txt";
 const TEXT_NAME: &str = "Text Document";
+const OWN_FOLDER: &str = "templates";
 
 /// A type for the New menu.
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -150,6 +153,40 @@ pub fn template(extension: &str) -> Result<Template, String> {
     Ok(Template { stem, extension: dotted, content })
 }
 
+/// Where the user keeps files to start new ones from. Made here, so it can always be opened.
+pub fn own_folder() -> Result<PathBuf, String> {
+    let folder = session::data_file(OWN_FOLDER).ok_or("Windows gave no folder for app data")?;
+    fs::create_dir_all(&folder).map_err(|error| error.to_string())?;
+    Ok(folder)
+}
+
+/// The names of the user's own templates, A to Z.
+pub fn own_names() -> Vec<String> {
+    let Some(entries) = session::data_file(OWN_FOLDER).and_then(|folder| fs::read_dir(folder).ok()) else {
+        return Vec::new();
+    };
+    let files = entries.flatten().filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()));
+    let mut names: Vec<String> = files.filter_map(|entry| entry.file_name().into_string().ok()).collect();
+    names.sort_by_key(|name| name.to_lowercase());
+    names
+}
+
+fn own_from(folder: &Path, name: &str) -> Result<Template, String> {
+    let only_a_name = Path::new(name).file_name() == Some(OsStr::new(name));
+    let file = folder.join(name);
+    if !only_a_name || !file.is_file() {
+        return Err(format!("There is no template called {name}"));
+    }
+    let stem = file.file_stem().unwrap_or_default().to_string_lossy().into_owned();
+    let extension = file.extension().map_or(String::new(), |extension| format!(".{}", extension.to_string_lossy()));
+    Ok(Template { stem, extension, content: Content::Copy(file) })
+}
+
+/// A new file that starts as a copy of the user's template `name`.
+pub fn own_template(name: &str) -> Result<Template, String> {
+    own_from(&own_folder()?, name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -243,6 +280,24 @@ mod tests {
     fn a_text_document_is_always_offered() {
         assert!(read_types().iter().any(|kind| kind.extension == TEXT_EXTENSION));
         assert_eq!(template(TEXT_EXTENSION).unwrap().extension, ".txt");
+    }
+
+    #[test]
+    fn an_own_template_starts_from_its_file_and_stays_in_its_folder() {
+        let folder = std::env::temp_dir().join(format!("perli-own-templates-{}", std::process::id()));
+        fs::create_dir_all(folder.join("inner")).unwrap();
+        fs::write(folder.join("Letter.final.docx"), "letter").unwrap();
+        fs::write(folder.join("Notes"), "notes").unwrap();
+
+        let letter = own_from(&folder, "Letter.final.docx").unwrap();
+        assert_eq!((letter.stem.as_str(), letter.extension.as_str()), ("Letter.final", ".docx"));
+        assert_eq!(letter.content, Content::Copy(folder.join("Letter.final.docx")));
+        assert_eq!(own_from(&folder, "Notes").unwrap().extension, "");
+        assert!(own_from(&folder, r"inner\..\Notes").is_err());
+        assert!(own_from(&folder, "inner").is_err());
+        assert!(own_from(&folder, "gone.txt").is_err());
+
+        fs::remove_dir_all(folder).unwrap();
     }
 
     #[test]

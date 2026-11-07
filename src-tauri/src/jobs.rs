@@ -485,6 +485,7 @@ fn title(job: &Job) -> String {
         Job::Shortcut { sources, .. } => listed("Linking to", sources),
         Job::Zip { sources } => listed("Compressing", sources),
         Job::Unzip { archives, .. } => listed("Extracting", archives),
+        Job::Receive { .. } => "Copying dragged files".to_string(),
         Job::Recycle { paths } => listed("Recycling", paths),
         Job::Delete { paths } => listed("Deleting", paths),
         Job::Restore { items } => deleted("Restoring", items),

@@ -3,6 +3,7 @@
 
 mod archive;
 mod bin;
+mod incoming;
 mod names;
 mod rename;
 mod shell;
@@ -23,6 +24,7 @@ use serde::{Deserialize, Serialize};
 use windows::core::{Error, Result};
 
 pub use bin::{read as read_bin, BinItem};
+pub use incoming::{offers_files, Incoming};
 pub use names::{check_rename, check_renames};
 pub use shell::{shell_item, Com};
 pub use transfer::{is_temp_name, put_back, remove_leftovers};
@@ -42,6 +44,8 @@ pub enum Job {
     Zip { sources: Vec<PathBuf> },
     /// Each archive beside itself, loose or in a new folder of its own.
     Unzip { archives: Vec<PathBuf>, own_folder: bool },
+    /// Files dragged in with no paths of their own.
+    Receive { incoming: Incoming, folder: PathBuf },
     Recycle { paths: Vec<PathBuf> },
     Delete { paths: Vec<PathBuf> },
     Restore { items: Vec<BinItem> },
@@ -282,6 +286,7 @@ impl<'a> Run<'a> {
             Job::Shortcut { sources, folder } => self.shortcuts(&sources, &folder),
             Job::Zip { sources } => self.zip(sources),
             Job::Unzip { archives, own_folder } => self.unzip(archives, own_folder),
+            Job::Receive { incoming, folder } => self.receive(incoming, &folder),
             Job::Recycle { paths } => {
                 self.add_total(paths.len() as u64, 0);
                 self.recycle(paths)

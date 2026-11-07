@@ -96,7 +96,7 @@ fn ticks_of(time: DateTime) -> u64 {
 }
 
 /// `relative` if every part of it is a plain name Windows would accept.
-fn safe(relative: PathBuf) -> Option<PathBuf> {
+pub(super) fn safe(relative: PathBuf) -> Option<PathBuf> {
     let plain = |part: Component<'_>| match part {
         Component::Normal(name) => name.to_str().is_some_and(|name| names::check(name).is_ok()),
         _ => false,
