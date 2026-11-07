@@ -4,6 +4,7 @@ import {
   cancelJobsAndClose,
   clipboardCanPaste,
   clipboardText,
+  deleteTag,
   disconnectDrive,
   holdClose,
   listPlaces,
@@ -21,6 +22,7 @@ import {
   type Places,
   type Row,
   type Sort,
+  type Tag,
 } from "./api";
 import { createFileActions } from "./features/fileops/actions";
 import { BatchRename, type RenameRequest } from "./features/fileops/BatchRename";
@@ -56,6 +58,8 @@ import { Settings } from "./features/settings/Settings";
 import { FOLDERS, Sidebar } from "./features/sidebar/Sidebar";
 import { parseSession } from "./features/tabs/session";
 import { createTabs, type Tab } from "./features/tabs/tabs";
+import { NewTag } from "./features/tags/NewTag";
+import { refreshTags } from "./features/tags/tags";
 import { TitleBar } from "./features/titlebar/TitleBar";
 import { Menu, type MenuItem } from "./ui/Menu";
 import { Tooltip } from "./ui/Tooltip";
@@ -105,8 +109,10 @@ export function App() {
   const [renaming, setRenaming] = createSignal<RenameRequest>();
   const [filtering, setFiltering] = createSignal<FolderView>();
   const [selectingPattern, setSelectingPattern] = createSignal<FolderView>();
+  const [namingTag, setNamingTag] = createSignal<FolderView>();
   /** The dialog covers the tabs, so nothing behind it may change. */
-  const dialogOpen = () => settingsOpen() || !!deleting() || !!renaming() || !!filtering() || !!selectingPattern();
+  const dialogOpen = () =>
+    settingsOpen() || !!deleting() || !!renaming() || !!filtering() || !!selectingPattern() || !!namingTag();
   const jobs = createJobs(tabs.allViews);
   const actions = createFileActions(jobs, setDeleting, () => tabs.active().other(), setRenaming);
   const shell = createShellItems(jobs, actions);
@@ -220,6 +226,7 @@ export function App() {
       { label: "Rename", action: () => actions.startRename(view) },
       { label: "Delete", action: () => actions.remove(view, false) },
       ...toolItems,
+      shell.tagsItem(view, showTagChange, () => setNamingTag(view)),
     ];
     if (tabs.active().other()) {
       items.push(
@@ -229,6 +236,25 @@ export function App() {
     }
     items.push(...shell.rowItems(view, { x, y }, row.isDir ? path : undefined, () => openRow(view, row, false)));
     setMenu({ x, y, items });
+  }
+
+  /** A search would start over, and its rows don't show tags. */
+  function showTagChange() {
+    for (const view of tabs.allViews()) if (!view.query()) view.reload();
+  }
+
+  function askDeleteTag(tag: Tag) {
+    setDeleting({
+      title: `Delete the tag ${tag.name}?`,
+      note: "It comes off every file that has it. The files stay as they are.",
+      confirmLabel: "Delete tag",
+      async confirm() {
+        await deleteTag(tag.id).catch(jobs.report);
+        for (const view of tabs.allViews()) view.forgetTag(tag.id);
+        await refreshTags();
+        showTagChange();
+      },
+    });
   }
 
   function showHeaderMenu(event: MouseEvent) {
@@ -312,6 +338,7 @@ export function App() {
           sortItem("Date created", "created"),
           sortItem("Type", "type"),
           sortItem("Size", "size"),
+          sortItem("Tags", "tags"),
         ];
     return [
       {
@@ -553,6 +580,7 @@ export function App() {
     window.addEventListener("focus", trackWindowFocus);
     window.addEventListener("blur", trackWindowFocus);
     window.addEventListener("focus", checkCut);
+    refreshTags();
     const start = await startState();
     const session = start.folder ? undefined : parseSession(start.session);
     if (session) {
@@ -691,13 +719,28 @@ export function App() {
       <Show when={selectingPattern()} keyed>
         {(view) => <SelectPattern view={view} onClose={() => setSelectingPattern(undefined)} />}
       </Show>
+      <Show when={namingTag()} keyed>
+        {(view) => (
+          <NewTag
+            selection={() => actions.selected(view)}
+            onDone={showTagChange}
+            onClose={() => setNamingTag(undefined)}
+          />
+        )}
+      </Show>
       <Palette
         open={paletteOpen()}
         commands={commands}
         onClose={() => setPaletteOpen(false)}
         focusList={() => tabs.activeView().list()?.focus()}
       />
-      <Settings open={settingsOpen()} onClose={() => setSettingsOpen(false)} onToggleSizes={toggleSizes} />
+      <Settings
+        open={settingsOpen()}
+        onClose={() => setSettingsOpen(false)}
+        onToggleSizes={toggleSizes}
+        onTagsChanged={showTagChange}
+        onDeleteTag={askDeleteTag}
+      />
       <Tooltip />
     </div>
   );

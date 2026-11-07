@@ -200,8 +200,13 @@ fn open(path: &Path, access: u32, flags: FILE_FLAGS_AND_ATTRIBUTES) -> Result<Ow
 }
 
 /// Opens the object itself, never a link's target.
-fn open_object(path: &Path, access: u32) -> Result<Owned<HANDLE>> {
+pub fn open_object(path: &Path, access: u32) -> Result<Owned<HANDLE>> {
     open(path, access, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+}
+
+/// Opens a folder, going through a link to it.
+pub fn open_folder(path: &Path, access: u32) -> Result<Owned<HANDLE>> {
+    open(path, access, FILE_FLAG_BACKUP_SEMANTICS)
 }
 
 fn identity(path: &Path) -> Result<(u32, u64)> {

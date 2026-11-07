@@ -17,7 +17,7 @@ use windows::Win32::Storage::FileSystem::{
 use windows::Win32::UI::Shell::{PathMatchSpecW, StrCmpLogicalW};
 
 use crate::ops::{self, BinItem};
-use crate::{network, shell, sizes};
+use crate::{network, shell, sizes, tags};
 
 /// Stands for the Recycle Bin, which has no folder of its own to open.
 pub const BIN_PATH: &str = "shell:RecycleBinFolder";
@@ -26,6 +26,8 @@ const FLAG_FOLDER: u8 = 1;
 const FLAG_HIDDEN: u8 = 2;
 const FLAG_CLOUD: u8 = 4;
 const FLAG_PINNED: u8 = 8;
+/// What the row format's one byte can count.
+const MAX_ROW_TAGS: usize = u8::MAX as usize;
 /// Between FILETIME's start in 1601 and the 1970 start of the UI's times.
 const FILETIME_TO_UNIX_MS: i64 = 11_644_473_600_000;
 const FILETIME_TICKS_PER_MS: u64 = 10_000;
@@ -47,6 +49,8 @@ pub enum SortKey {
     Location,
     /// As a search found the rows, so that new ones never move the old ones.
     Found,
+    /// Rows of one tag sit together, and rows with none go last.
+    Tags,
 }
 
 /// Where folders go among files.
@@ -85,6 +89,8 @@ pub struct Filter {
     pub modified_from: Option<i64>,
     /// Milliseconds since 1970.
     pub modified_to: Option<i64>,
+    /// A row must carry all of these.
+    pub tags: Vec<u32>,
 }
 
 fn ticks(milliseconds: i64) -> u64 {
@@ -96,7 +102,7 @@ impl Filter {
         *self != Self::default()
     }
 
-    fn keeps(&self, entry: &Entry, name: &str) -> bool {
+    fn keeps(&self, entry: &Entry, name: &str, tags: &[u32]) -> bool {
         let lowered = || String::from_utf16_lossy(entry.name()).to_lowercase();
         let sized = |within: bool| !entry.is_dir && within;
         (name.is_empty() || lowered().contains(name))
@@ -110,6 +116,7 @@ impl Filter {
             && self.max_size.is_none_or(|most| sized(entry.size <= most))
             && self.modified_from.is_none_or(|from| entry.modified >= ticks(from))
             && self.modified_to.is_none_or(|to| entry.modified <= ticks(to))
+            && self.tags.iter().all(|tag| tags.contains(tag))
     }
 }
 
@@ -290,6 +297,8 @@ pub struct Listing {
     bin: Option<Arc<Bin>>,
     /// Where a search found each of `entries`. Empty for a plain folder.
     found_in: Arc<Vec<Arc<[u16]>>>,
+    /// Only entries that have tags are here, so normal rows stay small.
+    tags: Arc<tags::Tagged>,
     visible: Vec<u32>,
     order: Order,
 }
@@ -305,14 +314,17 @@ impl Listing {
             return Self::read_bin(order);
         }
         let full = resolve(path)?;
-        let entries = if network::is_server(&full) {
-            read_shares(&full)?
+        let (entries, tagged) = if network::is_server(&full) {
+            (read_shares(&full)?, tags::Tagged::new())
         } else {
-            read_entries(&full)?
+            let entries = read_entries(&full)?;
+            let tagged = tags::in_folder(Path::new(&full), &entries);
+            (entries, tagged)
         };
         let listing = Self {
             folder: full.into(),
             entries: Arc::new(entries),
+            tags: Arc::new(tagged),
             ..Self::default()
         };
         Ok(listing.arrange(order))
@@ -358,13 +370,16 @@ impl Listing {
         let entries = &self.entries;
         let name = order.filter.name.to_lowercase();
         let shown = |entry: &Entry| order.show_hidden || !entry.hidden;
-        let mut visible: Vec<u32> = (0..entries.len() as u32)
-            .filter(|&row| shown(&entries[row as usize]) && order.filter.keeps(&entries[row as usize], &name))
-            .collect();
+        let fits = |row: u32| {
+            let entry = &entries[row as usize];
+            shown(entry) && order.filter.keeps(entry, &name, self.tags_of(row))
+        };
+        let mut visible: Vec<u32> = (0..entries.len() as u32).filter(|&row| fits(row)).collect();
         let locations = self.locations();
         let ranks = match order.key {
             SortKey::Type => type_ranks(entries),
             SortKey::Size if sizes::any() => self.sizes(),
+            SortKey::Tags => self.tag_ranks(&tags::places()),
             _ => Vec::new(),
         };
         visible.sort_unstable_by(|&a, &b| compare(entries, locations, &ranks, a, b, &order));
@@ -384,6 +399,19 @@ impl Listing {
 
     fn sizes(&self) -> Vec<u64> {
         (0..self.entries.len()).map(|entry| self.size_of(entry)).collect()
+    }
+
+    fn tags_of(&self, entry: u32) -> &[u32] {
+        self.tags.get(&entry).map_or(&[], |tags| tags)
+    }
+
+    /// Where each entry goes in a sort by tag: by whichever of its tags comes first in `places`.
+    fn tag_ranks(&self, places: &HashMap<u32, u64>) -> Vec<u64> {
+        let rank = |entry| {
+            let ranks = self.tags_of(entry).iter().filter_map(|tag| places.get(tag));
+            ranks.min().copied().unwrap_or(u64::MAX)
+        };
+        (0..self.entries.len() as u32).map(rank).collect()
     }
 
     fn locations(&self) -> &[Arc<[u16]>] {
@@ -517,8 +545,8 @@ impl Listing {
 
     /// Encodes rows as: row count (u32), then for each row the name length in bytes (u32),
     /// size (u64), modified (u64), created (u64), flags (u8), the location length in bytes
-    /// (u32), the UTF-16 name and the UTF-16 location. All numbers are little-endian.
-    /// `src/api/index.ts` decodes this.
+    /// (u32), the tag count (u8), the UTF-16 name, the UTF-16 location and the tags (u32 each).
+    /// All numbers are little-endian. `src/api/index.ts` decodes this.
     pub fn encode_rows(&self, start: usize, count: usize) -> Vec<u8> {
         let start = start.min(self.len());
         let rows = (start + count).min(self.len()) - start;
@@ -539,8 +567,11 @@ impl Listing {
             bytes.extend(row.created.to_le_bytes());
             bytes.push(folder | hidden | cloud | pinned);
             bytes.extend((location.len() as u32 * 2).to_le_bytes());
+            let tags = &self.tags_of(entry)[..self.tags_of(entry).len().min(MAX_ROW_TAGS)];
+            bytes.push(tags.len() as u8);
             bytes.extend(row.name().iter().flat_map(|unit| unit.to_le_bytes()));
             bytes.extend(location.iter().flat_map(|unit| unit.to_le_bytes()));
+            bytes.extend(tags.iter().flat_map(|tag| tag.to_le_bytes()));
         }
         bytes
     }
@@ -619,7 +650,7 @@ fn compare(
             SortKey::Modified => a.modified.cmp(&b.modified),
             SortKey::Created => a.created.cmp(&b.created),
             SortKey::Size if ranks.is_empty() => a.size.cmp(&b.size),
-            SortKey::Type | SortKey::Size => ranks[first as usize].cmp(&ranks[second as usize]),
+            SortKey::Type | SortKey::Size | SortKey::Tags => ranks[first as usize].cmp(&ranks[second as usize]),
             SortKey::Location => natural(location_of(locations, first), location_of(locations, second)),
             SortKey::Found => first.cmp(&second),
         };
@@ -911,6 +942,55 @@ mod tests {
         assert_eq!(filtered(&folder, to), ["Holiday.JPG"]);
     }
 
+    /// Files `a` to `c`, with `a` tagged 7 and `c` tagged 7 and 9.
+    fn tagged_listing(folder: &TempFolder, order: Order) -> Listing {
+        for file in ["a", "b", "c"] {
+            fs::write(folder.0.join(file), "").unwrap();
+        }
+        let tagged = [(0, vec![7].into()), (2, vec![7, 9].into())];
+        Listing {
+            folder: folder.0.clone(),
+            entries: Arc::new(read_entries(folder.0.to_str().unwrap()).unwrap()),
+            tags: Arc::new(tagged.into_iter().collect()),
+            ..Listing::default()
+        }
+        .arrange(order)
+    }
+
+    #[test]
+    fn a_filter_wants_every_tag_it_names() {
+        let folder = TempFolder::new("filter-tags");
+        let with = |tags| Order { filter: Filter { tags, ..Filter::default() }, ..Order::default() };
+
+        assert_eq!(names(&tagged_listing(&folder, with(vec![7]))), ["a", "c"]);
+        assert_eq!(names(&tagged_listing(&folder, with(vec![7, 9]))), ["c"]);
+    }
+
+    #[test]
+    fn a_rows_tags_come_after_its_text() {
+        let folder = TempFolder::new("row-tags");
+        let listing = tagged_listing(&folder, Order::default());
+
+        let bytes = listing.encode_rows(2, 1);
+
+        assert_eq!(bytes[37], 2);
+        assert_eq!(bytes[38..40], [b'c', 0]);
+        assert_eq!(bytes[40..44], 7u32.to_le_bytes());
+        assert_eq!(bytes[44..48], 9u32.to_le_bytes());
+        assert_eq!(bytes.len(), 48);
+        assert_eq!(listing.encode_rows(1, 1)[37], 0);
+    }
+
+    #[test]
+    fn sorting_by_tag_puts_rows_with_no_tag_last() {
+        let folder = TempFolder::new("sort-tags");
+        let listing = tagged_listing(&folder, Order::default());
+
+        let ranks = listing.tag_ranks(&HashMap::from([(7, 5), (9, 2)]));
+
+        assert_eq!(ranks, [5, u64::MAX, 2]);
+    }
+
     #[test]
     fn an_empty_filter_is_no_filter() {
         assert!(!Filter::default().is_active());
@@ -985,7 +1065,7 @@ mod tests {
 
         let bytes = listing.encode_rows(0, 1);
         let location_bytes = u32::from_le_bytes(bytes[33..37].try_into().unwrap()) as usize;
-        let location: Vec<u16> = bytes[47..47 + location_bytes]
+        let location: Vec<u16> = bytes[48..48 + location_bytes]
             .chunks_exact(2)
             .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
             .collect();
@@ -1129,7 +1209,7 @@ mod tests {
         assert_eq!(bytes[..4], 2u32.to_le_bytes());
         assert_eq!(bytes[4..8], 2u32.to_le_bytes());
         assert_eq!(bytes[32], FLAG_HIDDEN);
-        assert_eq!(bytes[37..39], [b'b', 0]);
+        assert_eq!(bytes[38..40], [b'b', 0]);
         assert_eq!(listing.encode_rows(99, 10)[..4], 0u32.to_le_bytes());
     }
 }

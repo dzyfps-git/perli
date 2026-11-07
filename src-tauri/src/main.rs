@@ -16,6 +16,7 @@ mod session;
 mod shell;
 mod sizes;
 mod snap;
+mod tags;
 mod templates;
 mod thumbs;
 mod watch;
@@ -959,6 +960,44 @@ async fn thumbnail(view: u32, request: u64, row: u32, views: State<'_, Views>) -
     Ok(Response::new(thumbs::read(path).await))
 }
 
+/// Tags go through a database, which must not hold up the window.
+async fn with_tags<T: Send + 'static>(work: impl FnOnce() -> Result<T, String> + Send + 'static) -> Result<T, String> {
+    async_runtime::spawn_blocking(work).await.map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn list_tags() -> Result<Vec<tags::Tag>, String> {
+    with_tags(tags::all).await
+}
+
+#[tauri::command]
+async fn create_tag(name: String, color: u8) -> Result<tags::Tag, String> {
+    with_tags(move || tags::create(&name, color)).await
+}
+
+#[tauri::command]
+async fn edit_tag(id: u32, name: String, color: u8) -> Result<(), String> {
+    with_tags(move || tags::edit(id, &name, color)).await
+}
+
+#[tauri::command]
+async fn delete_tag(id: u32) -> Result<(), String> {
+    with_tags(move || tags::delete(id)).await
+}
+
+#[tauri::command]
+async fn set_tag(selection: Selection, tag: u32, on: bool, views: State<'_, Views>) -> Result<(), String> {
+    let paths = views.read(&selection, folder::Listing::paths)?;
+    with_tags(move || tags::set(&paths, tag, on)).await
+}
+
+/// The tags all the selected rows have.
+#[tauri::command]
+async fn common_tags(selection: Selection, views: State<'_, Views>) -> Result<Vec<u32>, String> {
+    let paths = views.read(&selection, folder::Listing::paths)?;
+    with_tags(move || tags::common(&paths)).await
+}
+
 /// The rows whose names fit `pattern`.
 #[tauri::command]
 fn rows_matching(view: u32, request: u64, pattern: String, views: State<'_, Views>) -> Result<Vec<u32>, String> {
@@ -1147,6 +1186,12 @@ fn main() {
             file_users,
             thumbnail,
             set_drop_target,
+            list_tags,
+            create_tag,
+            edit_tag,
+            delete_tag,
+            set_tag,
+            common_tags,
             rows_matching,
             scan_sizes,
             stop_sizes,

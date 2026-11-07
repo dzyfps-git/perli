@@ -120,7 +120,8 @@ export function createFolderView(id: number, saved?: SavedPane) {
     ...shownSort(),
     group: query() || isBin(target) ? "mixed" : grouping(),
     showHidden: showHidden(),
-    filter: toFilter(filterForm()),
+    // Rows of a search carry no tags, so a tag would leave none of them.
+    filter: { ...toFilter(filterForm()), tags: query() ? [] : filterForm().tags },
   });
   /** A folder opens in its own order, even from a search. */
   const openingOrder = (target: string, wanted: Sort, form: typeof NO_FILTER): Order => ({
@@ -397,6 +398,11 @@ export function createFolderView(id: number, saved?: SavedPane) {
     setFilterForm(form: typeof NO_FILTER) {
       setFilterFormValue(form);
       rearrange();
+    },
+    /** A filter must not go on asking for a tag that is gone. */
+    forgetTag(id: number) {
+      const form = filterForm();
+      setFilterFormValue({ ...form, tags: form.tags.filter((tag) => tag !== id) });
     },
     /** Sends the user to the search box. */
     askSearch() {

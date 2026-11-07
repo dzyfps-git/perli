@@ -38,4 +38,5 @@ test("only a form that asks for something is active", () => {
   assert.equal(filterActive({ ...NO_FILTER, name: "  " }), false);
   assert.equal(filterActive({ ...NO_FILTER, kinds: "files" }), true);
   assert.equal(filterActive({ ...NO_FILTER, maxSize: "0" }), true);
+  assert.equal(filterActive({ ...NO_FILTER, tags: [3] }), true);
 });

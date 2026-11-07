@@ -2,6 +2,7 @@ import { createEffect, createMemo, createSignal, on, onCleanup, onMount, Show } 
 import { fetchRows, fetchThumb, findRow, type Row, type Selection, type Sort, type SortKey } from "../../api";
 import { ColumnHeader, SortStrip } from "./ColumnHeader";
 import { formatSize } from "../../ui/format";
+import { tagColor, tagNames, tags } from "../tags/tags";
 import type { ListHandle } from "../navigation/folderView";
 import { relativeTo } from "../navigation/path";
 import { columnsWidth, gridTemplate, type Column } from "./columns";
@@ -64,6 +65,15 @@ const CELL_CLASS: Partial<Record<SortKey, string>> = {
   size: "file-meta file-size",
   location: "file-meta file-clipped",
 };
+
+function tagDot(id: number) {
+  const tag = tags().find((known) => known.id === id);
+  if (!tag) return [];
+  const dot = document.createElement("span");
+  dot.className = "tag-dot";
+  dot.style.background = tagColor(tag.color);
+  return [dot];
+}
 
 function createCell(parent: HTMLElement, id: SortKey) {
   const element = document.createElement("span");
@@ -252,10 +262,13 @@ export function FileList(props: {
     pooled.element.toggleAttribute("data-cut", !!row && !!props.cut?.has(row.name));
     pooled.element.toggleAttribute("data-cloud", row?.isCloud ?? false);
     pooled.element.toggleAttribute("data-pinned", row?.isPinned ?? false);
-    const sync = syncText(row);
-    if (sync) pooled.element.setAttribute("aria-description", sync);
+    const about = [syncText(row), tagNames(row?.tags ?? [])].filter(Boolean).join(". ");
+    if (about) pooled.element.setAttribute("aria-description", about);
     else pooled.element.removeAttribute("aria-description");
-    for (const cell of pooled.cells) cell.element.textContent = row ? CELL_TEXT[cell.id](row, props.folder) : "";
+    for (const cell of pooled.cells) {
+      cell.element.textContent = row ? CELL_TEXT[cell.id](row, props.folder) : "";
+      if (cell.id === "name" && row) cell.element.prepend(...row.tags.flatMap(tagDot));
+    }
     showThumb(pooled, row && thumbKey(row));
   }
 
@@ -603,7 +616,7 @@ export function FileList(props: {
 
   createEffect(
     on(
-      [typesLearned, () => props.cut],
+      [typesLearned, () => props.cut, tags],
       () => {
         for (const pooled of pool) pooled.filled = false;
         paint();

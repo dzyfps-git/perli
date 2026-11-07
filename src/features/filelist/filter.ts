@@ -12,9 +12,20 @@ export interface FilterForm {
   /** `YYYY-MM-DD`, as a date input gives it. */
   from: string;
   to: string;
+  /** Tag ids. */
+  tags: number[];
 }
 
-export const NO_FILTER: FilterForm = { name: "", types: "", kinds: "all", minSize: "", maxSize: "", from: "", to: "" };
+export const NO_FILTER: FilterForm = {
+  name: "",
+  types: "",
+  kinds: "all",
+  minSize: "",
+  maxSize: "",
+  from: "",
+  to: "",
+  tags: [],
+};
 
 const SIZE_TEXT = /^(\d+(?:\.\d+)?)\s*([kmgt]?)b?$/i;
 const SIZE_UNITS = "kmgt";
@@ -43,6 +54,7 @@ export const toFilter = (form: FilterForm): Filter => ({
   maxSize: parseSize(form.maxSize) ?? null,
   modifiedFrom: dayTime(form.from, "00:00:00.000"),
   modifiedTo: dayTime(form.to, "23:59:59.999"),
+  tags: form.tags,
 });
 
 export const sizesAreGood = (form: FilterForm) =>

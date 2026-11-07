@@ -1,6 +1,7 @@
 import { createSignal, For, onMount, Show } from "solid-js";
 import type { Filter } from "../../api";
 import type { FolderView } from "../navigation/folderView";
+import { tagColor, tags } from "../tags/tags";
 import { NO_FILTER, sizesAreGood, type FilterForm } from "./filter";
 import "../settings/settings.css";
 import "../fileops/fileops.css";
@@ -25,6 +26,11 @@ export function FilterDialog(props: { view: FolderView; onClose: () => void }) {
 
   const apply = () => sizesAreGood(form()) && finish(form());
 
+  function toggleTag(id: number) {
+    const chosen = form().tags;
+    setForm({ ...form(), tags: chosen.includes(id) ? chosen.filter((tag) => tag !== id) : [...chosen, id] });
+  }
+
   onMount(() => {
     dialog.showModal();
     name.focus();
@@ -32,7 +38,7 @@ export function FilterDialog(props: { view: FolderView; onClose: () => void }) {
 
   const Field = (field: {
     label: string;
-    part: Exclude<keyof FilterForm, "kinds">;
+    part: Exclude<keyof FilterForm, "kinds" | "tags">;
     type?: string;
     ref?: HTMLInputElement;
   }) => (
@@ -80,6 +86,26 @@ export function FilterDialog(props: { view: FolderView; onClose: () => void }) {
           )}
         </For>
       </div>
+      <Show when={tags().length > 0}>
+        <div class="rename-options">
+          <For each={tags()}>
+            {(tag) => (
+              <button
+                class="job-choice rename-case"
+                aria-pressed={form().tags.includes(tag.id)}
+                disabled={!!props.view.query()}
+                onClick={() => toggleTag(tag.id)}
+              >
+                <span class="tag-dot" style={{ background: tagColor(tag.color) }} />
+                {tag.name}
+              </button>
+            )}
+          </For>
+        </div>
+        <Show when={props.view.query()}>
+          <p class="settings-note">Rows of a search don't carry their tags yet.</p>
+        </Show>
+      </Show>
       <Show when={!sizesAreGood(form())}>
         <p class="confirm-summary">A size looks like 500 KB or 2 GB.</p>
       </Show>

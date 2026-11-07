@@ -16,6 +16,7 @@ windows-core = "0.62"
 zip = { version = "9.4.1", default-features = false, features = ["deflate-flate2", "deflate64"] }
 # `zip` leaves the backend open. This is the one already in the tree.
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+rusqlite = { version = "0.41.1", features = ["bundled"] }
 
 [profile.release]
 lto = true

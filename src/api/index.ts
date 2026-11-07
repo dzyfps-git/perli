@@ -30,13 +30,22 @@ export interface Row {
   isPinned: boolean;
   /** Where a deleted item came from, or where a search found the row. Otherwise empty. */
   location: string;
+  /** Ids of its tags. */
+  tags: number[];
+}
+
+export interface Tag {
+  id: number;
+  name: string;
+  /** Which of the `--tag-` colors. */
+  color: number;
 }
 
 export type SortKey = "name" | "modified" | "created" | "type" | "size" | "location";
 
 export interface Sort {
   /** `found` is the order a search found its rows in, which no column stands for. */
-  key: SortKey | "found";
+  key: SortKey | "found" | "tags";
   descending: boolean;
 }
 
@@ -55,6 +64,8 @@ export interface Filter {
   modifiedFrom: number | null;
   /** Milliseconds since 1970. */
   modifiedTo: number | null;
+  /** A row must carry all of these. */
+  tags: number[];
 }
 
 /** Which rows a view shows and in what order. */
@@ -199,7 +210,8 @@ export interface Thumb {
 /** What a Windows menu or Properties window is for. */
 export type ShellTarget = { kind: "rows"; selection: Selection } | { kind: "folder"; path: string };
 
-const HEADER_BYTES = 33;
+const HEADER_BYTES = 34;
+const TAG_BYTES = 4;
 const THUMB_HEADER_BYTES = 8;
 const FLAG_FOLDER = 1;
 const FLAG_HIDDEN = 2;
@@ -210,6 +222,8 @@ const FILETIME_TICKS_PER_MS = 10_000;
 const FILETIME_TO_UNIX_MS = 11_644_473_600_000;
 
 const names = new TextDecoder("utf-16le");
+/** Most rows have no tags, and they can all share this. */
+const NO_TAGS: number[] = [];
 
 export const startState = () => invoke<Start>("start_state");
 
@@ -335,6 +349,21 @@ export const clipboardCanPaste = () => invoke<boolean>("clipboard_can_paste");
 export const findRow = (view: number, request: number, prefix: string, start: number) =>
   invoke<number | null>("find_row", { view, request, prefix, start });
 
+export const listTags = () => invoke<Tag[]>("list_tags");
+
+export const createTag = (name: string, color: number) => invoke<Tag>("create_tag", { name, color });
+
+export const editTag = (id: number, name: string, color: number) => invoke<void>("edit_tag", { id, name, color });
+
+export const deleteTag = (id: number) => invoke<void>("delete_tag", { id });
+
+/** Puts `tag` on the selected rows, or takes it off. */
+export const setTag = (selection: Selection, tag: number, on: boolean) =>
+  invoke<void>("set_tag", { selection, tag, on });
+
+/** The tags all the selected rows have. */
+export const commonTags = (selection: Selection) => invoke<number[]>("common_tags", { selection });
+
 /** The rows whose names fit `pattern`, such as `*.jpg;*.png`. */
 export const rowsMatching = (view: number, request: number, pattern: string) =>
   invoke<number[]>("rows_matching", { view, request, pattern });
@@ -440,9 +469,14 @@ function decodeRows(buffer: ArrayBuffer): Row[] {
     const nameStart = offset + HEADER_BYTES;
     const locationStart = nameStart + nameBytes;
     const flags = view.getUint8(offset + 28);
+    const tagCount = view.getUint8(offset + 33);
+    const tagStart = locationStart + locationBytes;
     rows[i] = {
       name: names.decode(bytes.subarray(nameStart, locationStart)),
-      location: names.decode(bytes.subarray(locationStart, locationStart + locationBytes)),
+      location: names.decode(bytes.subarray(locationStart, tagStart)),
+      tags: tagCount
+        ? Array.from({ length: tagCount }, (_, tag) => view.getUint32(tagStart + tag * TAG_BYTES, true))
+        : NO_TAGS,
       size: readUint64(view, offset + 4),
       modified: readFiletime(view, offset + 12),
       created: readFiletime(view, offset + 20),
@@ -451,7 +485,7 @@ function decodeRows(buffer: ArrayBuffer): Row[] {
       isCloud: (flags & FLAG_CLOUD) !== 0,
       isPinned: (flags & FLAG_PINNED) !== 0,
     };
-    offset = locationStart + locationBytes;
+    offset = tagStart + tagCount * TAG_BYTES;
   }
   return rows;
 }

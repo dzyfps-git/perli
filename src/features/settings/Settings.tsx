@@ -1,13 +1,21 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { createEffect, createSignal, For, on, Show } from "solid-js";
 import { isDefaultApp, setDefaultApp } from "../../api";
+import type { Tag } from "../../api";
 import { folderSizes } from "../filelist/prefs";
+import { TagSettings } from "../tags/TagSettings";
 import { accent, ACCENTS, setAccent, setTheme, theme, THEMES } from "./appearance";
 import "./settings.css";
 
 const ICON_CLOSE = "";
 
-export function Settings(props: { open: boolean; onClose: () => void; onToggleSizes: () => void }) {
+export function Settings(props: {
+  open: boolean;
+  onClose: () => void;
+  onToggleSizes: () => void;
+  onTagsChanged: () => void;
+  onDeleteTag: (tag: Tag) => void;
+}) {
   const [isDefault, setIsDefault] = createSignal(false);
   const [defaultFailure, setDefaultFailure] = createSignal<string>();
   let dialog!: HTMLDialogElement;
@@ -89,6 +97,9 @@ export function Settings(props: { open: boolean; onClose: () => void; onToggleSi
           )}
         </For>
       </div>
+
+      <h3>Tags</h3>
+      <TagSettings onChanged={props.onTagsChanged} onDelete={props.onDeleteTag} />
 
       <h3>Folder sizes</h3>
       <button
