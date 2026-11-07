@@ -27,7 +27,7 @@ use tauri::{
 
 use jobs::{Jobs, Plan};
 use ops::{Job, Reply};
-use watch::Watches;
+use watch::{Watch, Watches};
 
 /// How long the UI gets to answer a close request before the window goes anyway, so a frozen
 /// UI can't keep it open.
@@ -79,10 +79,13 @@ impl View {
         self.snapshots.retain(|snapshot| snapshot.request == shown);
     }
 
-    fn finish(&mut self, request: u64, listing: folder::Listing) {
-        if request == self.latest {
+    /// Says whether `listing` is the newest read, which moves the view on to it.
+    fn finish(&mut self, request: u64, listing: folder::Listing) -> bool {
+        let newest = request == self.latest;
+        if newest {
             self.snapshots.push(Snapshot { request, listing });
         }
+        newest
     }
 
     fn listing(&self, request: u64) -> Option<&folder::Listing> {
@@ -337,7 +340,7 @@ async fn open_folder(
     watches: State<'_, Watches>,
 ) -> Result<Opened, String> {
     let started = Instant::now();
-    follow(&watches, view, &path);
+    let watch = watch_of(&path);
     views
         .0
         .write()
@@ -372,19 +375,20 @@ async fn open_folder(
     };
     let mut views = views.0.write().unwrap_or_else(|error| error.into_inner());
     if let Some(current) = views.get_mut(&view) {
-        current.finish(request, listing);
+        if current.finish(request, listing) {
+            watches.set(view, watch);
+        }
     }
     Ok(opened)
 }
 
-/// Watches what a view is about to read. A failed open leaves the view's old folder on screen,
-/// and the next look finds nothing new about the wrong one, so that does no harm.
-fn follow(watches: &Watches, view: u32, path: &str) {
-    if path == folder::BIN_PATH {
-        watches.stop(view);
-    } else if let Ok(resolved) = folder::resolve(path) {
-        watches.follow(view, &resolved);
-    }
+/// What a view watches once `path` has read fine. Make it before the read, and hand it over only
+/// after, because a failed open leaves the old folder on screen and that one must stay watched.
+// ponytail: a finished read the UI drops for a newer open that then fails leaves the watch on the
+// dropped folder until the next open. Handing over when the UI takes the rows would close that.
+fn watch_of(path: &str) -> Option<Watch> {
+    let resolved = folder::resolve(path).ok().filter(|_| path != folder::BIN_PATH)?;
+    Some(Watch::new(resolved.into()))
 }
 
 /// Puts the shown folder in a new order as a new snapshot, the same way an open would.
@@ -438,7 +442,7 @@ async fn reload_view(
     views: State<'_, Views>,
     watches: State<'_, Watches>,
 ) -> Result<Reloaded, String> {
-    follow(&watches, view, &path);
+    let watch = watch_of(&path);
     let keys = {
         let mut views = views.0.write().unwrap_or_else(|error| error.into_inner());
         let current = views.entry(view).or_default();
@@ -465,7 +469,9 @@ async fn reload_view(
 
     let mut views = views.0.write().unwrap_or_else(|error| error.into_inner());
     if let Some(current) = views.get_mut(&view) {
-        current.finish(request, listing);
+        if current.finish(request, listing) {
+            watches.set(view, watch);
+        }
     }
     Ok(reloaded)
 }
@@ -959,9 +965,9 @@ mod tests {
         let mut view = View::default();
         view.begin(1, 0);
         view.begin(2, 0);
-        view.finish(2, folder::Listing::default());
-        view.finish(1, folder::Listing::default());
 
+        assert!(view.finish(2, folder::Listing::default()));
+        assert!(!view.finish(1, folder::Listing::default()));
         assert_eq!(held(&view), [2]);
     }
 
