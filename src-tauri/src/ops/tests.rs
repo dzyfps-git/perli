@@ -1116,6 +1116,29 @@ fn a_file_that_fails_to_fill_goes_again_so_a_retry_finds_its_name_free() {
 }
 
 #[test]
+fn a_name_another_job_took_is_passed_over_and_left_alone() {
+    let sandbox = Sandbox::new();
+    let taken = sandbox.file("a.lnk", "theirs");
+    let free = sandbox.path("a (2).lnk");
+    let mut names = vec![free.clone(), taken.clone()];
+
+    let claimed = names::claim(|| names.pop().unwrap()).unwrap();
+
+    assert_eq!(claimed, free);
+    assert!(free.exists());
+    assert_eq!(read(&taken), "theirs");
+}
+
+#[test]
+fn a_name_that_never_comes_free_is_an_error() {
+    let sandbox = Sandbox::new();
+    let taken = sandbox.file("a.lnk", "theirs");
+
+    assert!(names::claim(|| taken.clone()).is_err());
+    assert_eq!(read(&taken), "theirs");
+}
+
+#[test]
 fn only_perlis_own_temp_names_count() {
     assert!(is_temp_name("~perli-12-3.part"));
     assert!(is_temp_name("~perli-12-3.moved"));

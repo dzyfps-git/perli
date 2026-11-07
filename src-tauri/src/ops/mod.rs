@@ -350,10 +350,16 @@ impl<'a> Run<'a> {
         for source in sources {
             // A drive has no name of its own to go by.
             let name = source.file_name().map_or("Drive".into(), |name| name.to_string_lossy());
-            let target = names::free(folder, &format!("{name} - Shortcut"), ".lnk");
-            let made = self.attempt(source, None, |_| shell::write_shortcut(source, &target))?;
-            if made.is_some() {
-                self.done.push(Done::Created { path: target });
+            let stem = format!("{name} - Shortcut");
+            let made = self.attempt(source, None, |_| {
+                let target = names::claim(|| names::free(folder, &stem, ".lnk"))?;
+                shell::write_shortcut(source, &target).inspect_err(|_| {
+                    let _ = sys::delete_file(&target);
+                })?;
+                Ok(target)
+            })?;
+            if let Some(path) = made {
+                self.done.push(Done::Created { path });
             }
             self.step(1, 0);
         }
