@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { moveTarget } from "./layout.ts";
+import { besidePoint, moveTarget } from "./layout.ts";
 
 const list = { count: 100, perRow: 1, pageRows: 10 };
 const grid = { count: 10, perRow: 4, pageRows: 2 };
@@ -50,4 +50,11 @@ test("the first arrow press with no focus lands on the first row", () => {
 
 test("other keys are not moves", () => {
   assert.equal(moveTarget("a", 1, list), undefined);
+});
+
+test("a box beside a point flips at the window edge and stays inside", () => {
+  const window = { width: 1000, height: 800 };
+  assert.deepEqual(besidePoint(100, 100, 200, 100, window), { left: 116, top: 116 });
+  assert.deepEqual(besidePoint(900, 750, 200, 100, window), { left: 684, top: 634 });
+  assert.deepEqual(besidePoint(10, 10, 2000, 100, window), { left: 4, top: 26 });
 });

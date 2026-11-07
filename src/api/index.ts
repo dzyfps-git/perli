@@ -95,6 +95,13 @@ export interface Places {
 }
 
 /** Rows of one snapshot. */
+/** A file or folder from Windows' list of recently opened ones. */
+export interface Recent {
+  name: string;
+  path: string;
+  isDir: boolean;
+}
+
 export interface Selection {
   view: number;
   request: number;
@@ -230,6 +237,12 @@ export const startState = () => invoke<Start>("start_state");
 export const saveSession = (text: string) => invoke<void>("save_session", { text });
 
 export const listPlaces = () => invoke<Places>("list_places");
+
+export const recentFiles = (limit: number) => invoke<Recent[]>("recent_files", { limit });
+
+/** The first lines of a row that reads as text, or null. */
+export const peekText = (view: number, request: number, row: number) =>
+  invoke<string | null>("peek_text", { view, request, row });
 
 export const driveSpace = (path: string) => invoke<DriveSpace>("drive_space", { path });
 

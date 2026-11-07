@@ -1,12 +1,27 @@
-import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
-import { driveSpace, listPlaces, onDrivesChanged, type DriveSpace, type Places } from "../../api";
+import { createSignal, For, onCleanup, onMount, Show, type JSX } from "solid-js";
+import {
+  driveSpace,
+  listPlaces,
+  onDrivesChanged,
+  openFile,
+  recentFiles,
+  type DriveSpace,
+  type Places,
+  type Recent,
+} from "../../api";
 import { formatSize } from "../../ui/format";
+import { tagColor } from "../tags/tags";
 import type { FolderView } from "../navigation/folderView";
 import { BIN_PATH, samePath } from "../navigation/path";
+import { placeLabel } from "./placeLists";
+import { foldedSections, hiddenSections, lookOf, pinned, toggleFolded, type SectionId } from "./saved";
 import "./sidebar.css";
 
 const ICON_DRIVE = "";
 const ICON_BIN = "";
+export const ICON_FOLDER = "";
+const ICON_FILE = "";
+const ICON_CHEVRON = "";
 
 export const FOLDERS: Record<string, { label: string; icon: string }> = {
   home: { label: "Home", icon: "" },
@@ -18,19 +33,30 @@ export const FOLDERS: Record<string, { label: string; icon: string }> = {
   videos: { label: "Videos", icon: "" },
 };
 
-const ICON_NETWORK = "\uE8CE";
-const ICON_CLOUD = "\uE753";
+const ICON_NETWORK = "";
+const ICON_CLOUD = "";
 
 const FULL_SHARE = 0.9;
+/** How many recent files the sidebar lists. */
+const RECENT_COUNT = 10;
 
 type PlaceMenu = (event: MouseEvent, path: string) => void;
+
+/** The glyph and color a folder shows, with its own look over the usual one. */
+export function folderGlyph(path: string, icon = ICON_FOLDER) {
+  const look = lookOf(path);
+  return { icon: look?.icon ?? icon, color: look?.color === undefined ? undefined : tagColor(look.color) };
+}
 
 function Place(props: {
   view: FolderView;
   path: string;
   label: string;
   icon: string;
+  color?: string;
   onMenu: PlaceMenu;
+  /** Set for what is not a folder to browse, such as a recent file. */
+  onOpen?: () => void;
   space?: DriveSpace;
 }) {
   const used = () => (props.space ? 1 - props.space.free / props.space.total : 0);
@@ -38,12 +64,12 @@ function Place(props: {
     <li>
       <button
         class="place"
-        data-drop={props.path}
+        data-drop={props.onOpen ? undefined : props.path}
         aria-current={samePath(props.view.folder()?.path, props.path) ? "location" : undefined}
-        onClick={() => props.view.open(props.path)}
+        onClick={() => (props.onOpen ? props.onOpen() : props.view.open(props.path))}
         onContextMenu={(event) => props.onMenu(event, props.path)}
       >
-        <span class="place-icon" aria-hidden="true">
+        <span class="place-icon" aria-hidden="true" style={{ color: props.color }}>
           {props.icon}
         </span>
         <span class="place-label">{props.label}</span>
@@ -66,9 +92,43 @@ function Place(props: {
   );
 }
 
-export function Sidebar(props: { view: FolderView; onMenu: PlaceMenu }) {
+/** A part of the sidebar under a heading, which folds away on a click. */
+function Section(props: { id: SectionId; label: string; onMenu: (event: MouseEvent) => void; children: JSX.Element }) {
+  const folded = () => foldedSections().includes(props.id);
+  return (
+    <Show when={!hiddenSections().includes(props.id)}>
+      <section class="place-section" aria-label={props.label}>
+        <button
+          class="place-heading"
+          aria-expanded={!folded()}
+          onClick={() => toggleFolded(props.id)}
+          onContextMenu={(event) => {
+            event.preventDefault();
+            props.onMenu(event);
+          }}
+        >
+          {props.label}
+          <span class="place-chevron" aria-hidden="true">
+            {ICON_CHEVRON}
+          </span>
+        </button>
+        <Show when={!folded()}>
+          <ul>{props.children}</ul>
+        </Show>
+      </section>
+    </Show>
+  );
+}
+
+export function Sidebar(props: {
+  view: FolderView;
+  onMenu: PlaceMenu;
+  onRecentMenu: (event: MouseEvent, recent: Recent) => void;
+  onSectionMenu: (event: MouseEvent) => void;
+}) {
   const [places, setPlaces] = createSignal<Places>();
   const [spaces, setSpaces] = createSignal<Record<string, DriveSpace>>({});
+  const [recent, setRecent] = createSignal<Recent[]>([]);
   const asking = new Set<string>();
   let nav!: HTMLElement;
   let glide!: HTMLSpanElement;
@@ -100,17 +160,29 @@ export function Sidebar(props: { view: FolderView; onMenu: PlaceMenu }) {
     }
   }
 
+  /** Files open in other apps, so coming back to Perli is when the list may have changed. */
+  const readRecent = () => recentFiles(RECENT_COUNT).then(setRecent).catch(console.error);
+  const onFocus = () => {
+    readSpaces();
+    readRecent();
+  };
   const readPlaces = () => listPlaces().then(setPlaces).then(readSpaces).catch(console.error);
   const drivesListener = onDrivesChanged(readPlaces);
 
   onMount(() => {
     readPlaces();
-    window.addEventListener("focus", readSpaces);
+    readRecent();
+    window.addEventListener("focus", onFocus);
   });
   onCleanup(() => {
     drivesListener.then((stop) => stop());
-    window.removeEventListener("focus", readSpaces);
+    window.removeEventListener("focus", onFocus);
   });
+
+  const openRecent = (item: Recent) => {
+    if (item.isDir) props.view.open(item.path);
+    else openFile(item.path).catch(console.error);
+  };
 
   return (
     <nav
@@ -121,24 +193,72 @@ export function Sidebar(props: { view: FolderView; onMenu: PlaceMenu }) {
       onPointerLeave={() => glide.classList.remove("place-glide-on")}
     >
       <span ref={glide} class="place-glide" />
-      <ul>
+      <Show when={pinned().length}>
+        <Section id="pinned" label="Pinned" onMenu={props.onSectionMenu}>
+          <For each={pinned()}>
+            {(path) => (
+              <Place
+                view={props.view}
+                path={path}
+                label={placeLabel(path)}
+                onMenu={props.onMenu}
+                icon={folderGlyph(path).icon}
+                color={folderGlyph(path).color}
+              />
+            )}
+          </For>
+        </Section>
+      </Show>
+      <Section id="places" label="Places" onMenu={props.onSectionMenu}>
         <For each={places()?.folders}>
-          {(folder) => <Place view={props.view} path={folder.path} onMenu={props.onMenu} {...FOLDERS[folder.kind]} />}
+          {(folder) => (
+            <Place
+              view={props.view}
+              path={folder.path}
+              onMenu={props.onMenu}
+              label={FOLDERS[folder.kind].label}
+              icon={folderGlyph(folder.path, FOLDERS[folder.kind].icon).icon}
+              color={folderGlyph(folder.path, FOLDERS[folder.kind].icon).color}
+            />
+          )}
         </For>
         <Show when={places()}>
           <Place view={props.view} path={BIN_PATH} label="Recycle Bin" icon={ICON_BIN} onMenu={props.onMenu} />
         </Show>
-      </ul>
-      <Show when={places()?.clouds.length}>
-        <ul>
-          <For each={places()?.clouds}>
-            {(cloud) => (
-              <Place view={props.view} path={cloud.path} label={cloud.name} icon={ICON_CLOUD} onMenu={props.onMenu} />
+      </Section>
+      <Show when={recent().length}>
+        <Section id="recent" label="Recent" onMenu={props.onSectionMenu}>
+          <For each={recent()}>
+            {(item) => (
+              <Place
+                view={props.view}
+                path={item.path}
+                label={item.name}
+                icon={item.isDir ? ICON_FOLDER : ICON_FILE}
+                onOpen={() => openRecent(item)}
+                onMenu={(event) => props.onRecentMenu(event, item)}
+              />
             )}
           </For>
-        </ul>
+        </Section>
       </Show>
-      <ul>
+      <Show when={places()?.clouds.length}>
+        <Section id="cloud" label="Cloud" onMenu={props.onSectionMenu}>
+          <For each={places()?.clouds}>
+            {(cloud) => (
+              <Place
+                view={props.view}
+                path={cloud.path}
+                label={cloud.name}
+                onMenu={props.onMenu}
+                icon={folderGlyph(cloud.path, ICON_CLOUD).icon}
+                color={folderGlyph(cloud.path, ICON_CLOUD).color}
+              />
+            )}
+          </For>
+        </Section>
+      </Show>
+      <Section id="drives" label="Drives" onMenu={props.onSectionMenu}>
         <For each={places()?.drives}>
           {(drive) => (
             <Place
@@ -151,7 +271,7 @@ export function Sidebar(props: { view: FolderView; onMenu: PlaceMenu }) {
             />
           )}
         </For>
-      </ul>
+      </Section>
     </nav>
   );
 }

@@ -10,6 +10,7 @@ mod network;
 mod ops;
 mod parts;
 mod places;
+mod recent;
 mod registry;
 mod search;
 mod session;
@@ -960,6 +961,24 @@ async fn thumbnail(view: u32, request: u64, row: u32, views: State<'_, Views>) -
     Ok(Response::new(thumbs::read(path).await))
 }
 
+/// The first lines of a text file, for its hover card.
+#[tauri::command]
+async fn peek_text(view: u32, request: u64, row: u32, views: State<'_, Views>) -> Result<Option<String>, String> {
+    let selection = Selection { view, request, rows: vec![row] };
+    let path = views.read(&selection, folder::Listing::paths)?.pop();
+    let path = path.ok_or("That row is gone")?;
+    async_runtime::spawn_blocking(move || thumbs::text_start(&path))
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn recent_files(limit: usize) -> Result<Vec<recent::Recent>, String> {
+    async_runtime::spawn_blocking(move || recent::read(limit))
+        .await
+        .map_err(|error| error.to_string())
+}
+
 /// Tags go through a database, which must not hold up the window.
 async fn with_tags<T: Send + 'static>(work: impl FnOnce() -> Result<T, String> + Send + 'static) -> Result<T, String> {
     async_runtime::spawn_blocking(work).await.map_err(|error| error.to_string())?
@@ -1185,6 +1204,8 @@ fn main() {
             new_types,
             file_users,
             thumbnail,
+            peek_text,
+            recent_files,
             set_drop_target,
             list_tags,
             create_tag,

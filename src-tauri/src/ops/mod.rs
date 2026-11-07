@@ -27,6 +27,8 @@ pub use bin::{read as read_bin, BinItem};
 pub use incoming::{offers_files, Incoming};
 pub use names::{check_rename, check_renames};
 pub use shell::{shell_item, Com};
+#[cfg(test)]
+pub use shell::write_shortcut;
 pub use transfer::{is_temp_name, put_back, remove_leftovers};
 pub use tree::measure;
 

@@ -132,3 +132,48 @@
   border-radius: 50%;
   background: var(--accent-line);
 }
+
+/* Edits the palette shown, which is always one of the user's own. */
+.settings-palette {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+
+.settings-palette-name {
+  flex: 1;
+  min-width: 0;
+  height: 32px;
+  padding: 0 var(--space-2);
+  color: var(--text);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font: inherit;
+}
+
+.settings-palette-name:focus-visible {
+  border-color: var(--accent);
+  outline: none;
+}
+
+.settings-palette-color {
+  flex: none;
+  width: 32px;
+  height: 32px;
+  padding: 2px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+
+.settings-palette-color::-webkit-color-swatch-wrapper {
+  padding: 0;
+}
+
+.settings-palette-color::-webkit-color-swatch {
+  border: 0;
+  border-radius: calc(var(--radius) - 3px);
+}

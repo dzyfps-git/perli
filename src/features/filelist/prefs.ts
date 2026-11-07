@@ -39,6 +39,8 @@ export const [lastLayout, setLastLayout] = stored<Layout>(
   "layout",
   (saved("layout") as Layout | null) ?? "list",
 );
+/** A card with a file's details and a preview, when the pointer rests on its row. */
+export const [hoverCards, setHoverCards] = stored("hover-cards", saved("hover-cards") !== false);
 
 const [sortMemory, setSortMemory] = stored<SortMemory>(
   "folder-sorts",
@@ -48,6 +50,9 @@ const [sortMemory, setSortMemory] = stored<SortMemory>(
 export const rememberedSort = (path: string): Sort | undefined => sortMemory()[folderKey(path)];
 
 export const rememberSort = (path: string, sort: Sort) => setSortMemory(remembered(sortMemory(), path, sort));
+
+/** Every folder goes back to the sort new panes start with. */
+export const forgetSorts = () => setSortMemory({});
 
 export const moveColumn = (id: SortKey, target: SortKey) => setColumns(movedColumn(columns(), id, target));
 

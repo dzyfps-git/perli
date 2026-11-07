@@ -4,10 +4,12 @@ import { ColumnHeader, SortStrip } from "./ColumnHeader";
 import { formatSize } from "../../ui/format";
 import { tagColor, tagNames, tags } from "../tags/tags";
 import type { ListHandle } from "../navigation/folderView";
-import { relativeTo } from "../navigation/path";
+import { join, relativeTo } from "../navigation/path";
+import { allLooks, lookOf } from "../sidebar/saved";
+import { HoverCard, type CardAsk } from "./HoverCard";
 import { columnsWidth, gridTemplate, type Column } from "./columns";
 import { clampTile, moveTarget, TILE_STEP, type Layout } from "./layout";
-import { setTileSize, tileSize } from "./prefs";
+import { hoverCards, setTileSize, tileSize } from "./prefs";
 import { createSelection } from "./selection";
 import { cachedThumb, createThumbLoader } from "./thumbs";
 import { createTypeJump } from "./typeJump";
@@ -26,6 +28,11 @@ const ROWS_IN_PAUSE_MS = 1000;
 const MIN_EDITOR_WIDTH = 120;
 /** How far a press moves before it is a drag. Windows uses about this much. */
 const DRAG_DISTANCE = 6;
+/** How long the pointer rests on a row before its card shows. */
+const CARD_DELAY_MS = 700;
+/** With a card already up, the next row's comes quicker. */
+const CARD_SWITCH_MS = 150;
+const ICON_FOLDER = "\uE8B7";
 const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
 let lastFolderOpen = 0;
 
@@ -73,6 +80,17 @@ function tagDot(id: number) {
   dot.className = "tag-dot";
   dot.style.background = tagColor(tag.color);
   return [dot];
+}
+
+/** The glyph a folder wears in the list, which only folders with a look of their own have. */
+function lookMark(icon: string | undefined, color: number | undefined) {
+  const mark = document.createElement("span");
+  mark.className = "file-look";
+  // Drawn by CSS, so the name's text stays only the name.
+  mark.dataset.glyph = icon ?? ICON_FOLDER;
+  mark.setAttribute("aria-hidden", "true");
+  if (color !== undefined) mark.style.color = tagColor(color);
+  return mark;
 }
 
 function createCell(parent: HTMLElement, id: SortKey) {
@@ -157,6 +175,11 @@ export function FileList(props: {
     width: number;
   }>();
   const [editError, setEditError] = createSignal<string>();
+  const [card, setCard] = createSignal<CardAsk>();
+  let cardTimer: ReturnType<typeof setTimeout> | undefined;
+  /** The row under the pointer, so resting on one row asks for its card only once. */
+  let hovered = -1;
+  let pointer = { x: 0, y: 0 };
   let editInput!: HTMLInputElement;
   let committing = false;
   /** The snapshot whose rows are on screen, which a reload changes once its rows are in. */
@@ -265,11 +288,44 @@ export function FileList(props: {
     const about = [syncText(row), tagNames(row?.tags ?? [])].filter(Boolean).join(". ");
     if (about) pooled.element.setAttribute("aria-description", about);
     else pooled.element.removeAttribute("aria-description");
+    const look = row?.isDir ? lookOf(join(row.location || props.folder, row.name)) : undefined;
+    if (look?.icon) pooled.element.dataset.glyph = look.icon;
+    else delete pooled.element.dataset.glyph;
+    if (look?.color !== undefined) pooled.element.style.setProperty("--look-color", tagColor(look.color));
+    else pooled.element.style.removeProperty("--look-color");
+    pooled.element.toggleAttribute("data-look", look !== undefined);
     for (const cell of pooled.cells) {
       cell.element.textContent = row ? CELL_TEXT[cell.id](row, props.folder) : "";
       if (cell.id === "name" && row) cell.element.prepend(...row.tags.flatMap(tagDot));
+      if (cell.id === "name" && look && props.layout === "list") cell.element.prepend(lookMark(look.icon, look.color));
     }
-    showThumb(pooled, row && thumbKey(row));
+    // Windows' picture of a folder would hide the look it was given.
+    showThumb(pooled, row && !look ? thumbKey(row) : undefined);
+  }
+
+  function hideCard(forget = false) {
+    clearTimeout(cardTimer);
+    if (forget) hovered = -1;
+    setCard(undefined);
+  }
+
+  /** A card waits for the pointer to rest on a row, and never shows while a button is held. */
+  function onHover(event: PointerEvent) {
+    pointer = { x: event.clientX, y: event.clientY };
+    if (!hoverCards() || event.buttons !== 0 || editor()) return;
+    const index = indexFromEvent(event);
+    if (index === hovered) return;
+    hovered = index;
+    const switching = card() !== undefined;
+    hideCard();
+    if (index < 0) return;
+    cardTimer = setTimeout(
+      () => {
+        const row = rowAt(index);
+        if (row && hovered === index) setCard({ row, index, snapshot: shown, thumbKey: thumbKey(row), ...pointer });
+      },
+      switching ? CARD_SWITCH_MS : CARD_DELAY_MS,
+    );
   }
 
   function paint() {
@@ -374,6 +430,7 @@ export function FileList(props: {
   }
 
   function onPointerDown(event: PointerEvent) {
+    hideCard();
     const index = indexFromEvent(event);
     const onRow = event.button === 0 && index >= 0 && !(event.target as HTMLElement).closest("input");
     press = onRow ? { x: event.clientX, y: event.clientY, index } : undefined;
@@ -400,6 +457,7 @@ export function FileList(props: {
 
   function onContextMenu(event: MouseEvent) {
     event.preventDefault();
+    hideCard();
     // The Menu key and Shift+F10 report the list itself, not a row, and no right button.
     const fromKeyboard = event.button !== 2;
     const index = fromKeyboard ? selection.focused() : indexFromEvent(event);
@@ -418,6 +476,7 @@ export function FileList(props: {
   }
 
   function onScroll() {
+    hideCard(true);
     paint();
     if (header) header.scrollLeft = grid.scrollLeft;
   }
@@ -457,6 +516,7 @@ export function FileList(props: {
     pages.clear();
     for (const [page, rows] of fresh) pages.set(page, rows);
     shown = snapshot;
+    hideCard(true);
     if (props.top) {
       grid.scrollTop = 0;
       selection.clear();
@@ -546,6 +606,7 @@ export function FileList(props: {
   }
 
   function onKeyDown(event: KeyboardEvent) {
+    hideCard();
     // The name editor sits inside the list, and its keys are its own.
     if (event.altKey || event.target !== grid) return;
     const focused = selection.focused();
@@ -616,7 +677,7 @@ export function FileList(props: {
 
   createEffect(
     on(
-      [typesLearned, () => props.cut, tags],
+      [typesLearned, () => props.cut, tags, allLooks],
       () => {
         for (const pooled of pool) pooled.filled = false;
         paint();
@@ -690,7 +751,11 @@ export function FileList(props: {
         onContextMenu={onContextMenu}
         onKeyDown={onKeyDown}
         onPointerDown={onPointerDown}
-        onPointerMove={onPointerMove}
+        onPointerMove={(event) => {
+          onPointerMove(event);
+          onHover(event);
+        }}
+        onPointerLeave={() => hideCard(true)}
         onWheel={onWheel}
       >
         <div ref={marker} class="file-marker" role="presentation" hidden />
@@ -723,6 +788,9 @@ export function FileList(props: {
           )}
         </Show>
       </div>
+      <Show when={card()} keyed>
+        {(ask) => <HoverCard ask={ask} view={props.view} folder={props.folder} sync={syncText(ask.row)} />}
+      </Show>
     </div>
   );
 }

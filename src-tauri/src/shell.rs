@@ -15,7 +15,8 @@ use windows::Win32::System::Environment::ExpandEnvironmentStringsW;
 use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
 use windows::Win32::System::Threading::CREATE_NEW_CONSOLE;
 use windows::Win32::UI::Shell::{
-    SHGetFileInfoW, ShellExecuteW, SHFILEINFOW, SHGFI_TYPENAME, SHGFI_USEFILEATTRIBUTES,
+    SHAddToRecentDocs, SHGetFileInfoW, ShellExecuteW, SHARD_PATHW, SHFILEINFOW, SHGFI_TYPENAME,
+    SHGFI_USEFILEATTRIBUTES,
 };
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
@@ -142,6 +143,9 @@ pub fn open(path: &str) -> Result<()> {
         CoUninitialize();
 
         if result.0 as isize > SHELL_EXECUTE_ERROR_MAX {
+            // Lists it in Windows' recent files, as opening it from Explorer would.
+            let wide = HSTRING::from(path);
+            SHAddToRecentDocs(SHARD_PATHW.0 as u32, Some(wide.as_ptr().cast()));
             Ok(())
         } else {
             Err(Error::new(E_FAIL, format!("Windows could not open {path}")))

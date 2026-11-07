@@ -128,6 +128,8 @@ html[data-blurred] .logo {
 
 /* Each pane is a panel floating on the window material. */
 .files {
+  display: flex;
+  flex-direction: column;
   min-width: 0;
   min-height: 0;
   padding: 0 var(--space-1) var(--space-1) 0;
@@ -135,8 +137,9 @@ html[data-blurred] .logo {
 
 .panes {
   display: flex;
+  flex: 1;
   gap: var(--space-1);
-  height: 100%;
+  min-height: 0;
 }
 
 .panes[hidden] {
