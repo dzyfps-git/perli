@@ -4,14 +4,19 @@ import {
   cancelJobsAndClose,
   clipboardHasFiles,
   clipboardText,
+  disconnectDrive,
   holdClose,
+  listPlaces,
+  mapDrive,
   onCloseAsked,
   onFolderChanged,
   onSearchGrew,
   openFile,
+  openTerminal,
   saveSession,
   startState,
   type Grouping,
+  type Places,
   type Row,
   type Sort,
 } from "./api";
@@ -36,11 +41,11 @@ import {
   toggleColumn,
 } from "./features/filelist/prefs";
 import type { FolderView } from "./features/navigation/folderView";
-import { isBin, join } from "./features/navigation/path";
-import { Palette } from "./features/palette/Palette";
+import { BIN_PATH, isBin, isDriveRoot, join } from "./features/navigation/path";
+import { Palette, type Command } from "./features/palette/Palette";
 import { PathBar } from "./features/pathbar/PathBar";
 import { Settings } from "./features/settings/Settings";
-import { Sidebar } from "./features/sidebar/Sidebar";
+import { FOLDERS, Sidebar } from "./features/sidebar/Sidebar";
 import { parseSession } from "./features/tabs/session";
 import { createTabs, type Tab } from "./features/tabs/tabs";
 import { TitleBar } from "./features/titlebar/TitleBar";
@@ -84,6 +89,8 @@ export function App() {
   const tabs = createTabs();
   const [menu, setMenu] = createSignal<{ x: number; y: number; items: MenuItem[] }>();
   const [settingsOpen, setSettingsOpen] = createSignal(false);
+  const [paletteOpen, setPaletteOpen] = createSignal(false);
+  const [places, setPlaces] = createSignal<Places>();
   const [deleting, setDeleting] = createSignal<DeleteRequest>();
   const jobs = createJobs(tabs.allViews);
   const actions = createFileActions(jobs, setDeleting, () => tabs.active().other());
@@ -147,6 +154,11 @@ export function App() {
     else view.open(path);
   }
 
+  const networkItems = (): MenuItem[] => [
+    { label: "Map network drive", divider: true, action: () => mapDrive().catch(jobs.report) },
+    { label: "Disconnect network drive", action: () => disconnectDrive().catch(jobs.report) },
+  ];
+
   function showFolderMenu(event: MouseEvent, view: FolderView, path: string) {
     event.preventDefault();
     const items = [
@@ -157,6 +169,7 @@ export function App() {
         : [
             { label: "Search here", action: () => searchIn(view, path) },
             ...shell.placeItems(path, { x: event.clientX, y: event.clientY }),
+            ...(isDriveRoot(path) ? networkItems() : []),
           ]),
     ];
     setMenu({ x: event.clientX, y: event.clientY, items });
@@ -358,6 +371,65 @@ export function App() {
     if (view.layout() === "grid") setTileSize(clampTile(tileSize() + change));
   }
 
+  function togglePalette() {
+    if (!paletteOpen()) listPlaces().then(setPlaces).catch(console.error);
+    setPaletteOpen(!paletteOpen());
+  }
+
+  /** What only makes sense on a real folder. The Recycle Bin has its own rules. */
+  function folderCommands(view: FolderView): Command[] {
+    const terminal = () => {
+      const path = view.folder()?.path;
+      if (path) openTerminal(path).catch(jobs.report);
+    };
+    return [
+      { label: "New folder", keys: "Ctrl+Shift+N", run: () => actions.newItem(view, true) },
+      { label: "New file", keys: "Ctrl+N", run: () => actions.newItem(view, false) },
+      { label: "Paste", keys: "Ctrl+V", run: () => actions.paste(view) },
+      { label: "Copy", keys: "Ctrl+C", run: () => actions.copy(view) },
+      { label: "Cut", keys: "Ctrl+X", run: () => actions.cut(view) },
+      { label: "Rename", keys: "F2", run: () => actions.startRename(view) },
+      { label: "Properties", keys: "Alt+Enter", run: () => shell.properties(view) },
+      { label: "Open in terminal", run: terminal },
+    ];
+  }
+
+  function commands(): Command[] {
+    const view = tabs.activeView();
+    const tab = tabs.active();
+    const goTo = (label: string, path: string): Command => ({
+      label: `Go to ${label}`,
+      run: () => view.open(path),
+    });
+    const known = places();
+    return [
+      { label: "Search", keys: "Ctrl+F", run: () => view.askSearch() },
+      { label: "Go to path", keys: "Ctrl+L", run: () => view.setEditingPath(true) },
+      { label: "New tab", keys: "Ctrl+T", run: newTab },
+      { label: "Close", keys: "Ctrl+W", run: () => tabs.closePane(tab, view) },
+      { label: "Reopen closed tab", keys: "Ctrl+Shift+T", run: () => tabs.reopenClosed() },
+      { label: "Split view", keys: "Ctrl+\\", run: splitView },
+      { label: "Refresh", keys: "F5", run: () => view.refresh() },
+      { label: "Back", keys: "Alt+Left", run: () => view.back() },
+      { label: "Forward", keys: "Alt+Right", run: () => view.forward() },
+      { label: "Up", keys: "Alt+Up", run: () => view.up() },
+      { label: "Show hidden files", keys: "Ctrl+H", run: toggleHidden },
+      { label: "List view", keys: "Ctrl+Shift+1", run: () => view.setLayout("list") },
+      { label: "Grid view", keys: "Ctrl+Shift+2", run: () => view.setLayout("grid") },
+      ...(view.isBin() ? [] : folderCommands(view)),
+      { label: "Undo", keys: "Ctrl+Z", run: () => actions.undo(view) },
+      { label: "Redo", keys: "Ctrl+Y", run: () => actions.redo(view) },
+      { label: "Delete", keys: "Delete", run: () => actions.remove(view, false) },
+      { label: "Settings", keys: "Ctrl+,", run: () => setSettingsOpen(true) },
+      { label: "Map network drive", run: () => mapDrive().catch(jobs.report) },
+      { label: "Disconnect network drive", run: () => disconnectDrive().catch(jobs.report) },
+      goTo("Recycle Bin", BIN_PATH),
+      ...(known?.folders ?? []).map(({ kind, path }) => goTo(FOLDERS[kind].label, path)),
+      ...(known?.clouds ?? []).map(({ name, path }) => goTo(name, path)),
+      ...(known?.drives ?? []).map(({ name, path }) => goTo(name, path)),
+    ];
+  }
+
   /** Holding a key down must not paste or delete again and again. */
   function onFileKey(event: KeyboardEvent, view: FolderView, key: string) {
     if (!isInList(event)) return false;
@@ -387,7 +459,14 @@ export function App() {
     // Shift changes what a digit key reports, so read which key it is.
     const digit = Number(event.code.match(/^Digit([1-9])$/)?.[1]);
 
-    if (settingsOpen() || deleting()) {
+    // Left alone, this key prints the page.
+    if (event.ctrlKey && key === "p") {
+      event.preventDefault();
+      if (!settingsOpen() && !deleting()) togglePalette();
+      return;
+    }
+
+    if (settingsOpen() || deleting() || paletteOpen()) {
       // The dialog covers the tabs, so nothing behind it may change.
       if (isBrowserKey(event, key)) event.preventDefault();
       return;
@@ -560,7 +639,12 @@ export function App() {
       <Show when={deleting()} keyed>
         {(request) => <ConfirmDelete request={request} onClose={() => setDeleting(undefined)} />}
       </Show>
-      <Palette />
+      <Palette
+        open={paletteOpen()}
+        commands={commands}
+        onClose={() => setPaletteOpen(false)}
+        focusList={() => tabs.activeView().list()?.focus()}
+      />
       <Settings open={settingsOpen()} onClose={() => setSettingsOpen(false)} />
       <Tooltip />
     </div>

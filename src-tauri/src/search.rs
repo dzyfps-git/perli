@@ -16,6 +16,7 @@ use serde::Deserialize;
 use windows::core::Result;
 
 use crate::folder::{self, Entry, Found, Listing, Order};
+use crate::network;
 use crate::ops::sys::{self, Stat};
 
 // ponytail: the walk stops here, because each report copies every row found so far. Rows that
@@ -86,6 +87,19 @@ impl Query {
     }
 }
 
+/// The positions of the `names` that fit `query`, best first, ties in their given order.
+pub fn rank(query: &str, names: &[String]) -> Vec<u32> {
+    let query = Query::new(query);
+    let mut fits: Vec<(i32, u32)> = (0..names.len() as u32)
+        .filter_map(|index| {
+            let name: Vec<u16> = names[index as usize].encode_utf16().collect();
+            Some((query.fit(&name)?, index))
+        })
+        .collect();
+    fits.sort_by_key(|&(fit, _)| Reverse(fit));
+    fits.into_iter().map(|(_, index)| index).collect()
+}
+
 /// Calls `visit` for each entry of `folder`, and adds the folders to walk next to `below`. A link
 /// could lead back around, and hidden folders hold what the user chose not to see.
 fn read_folder(
@@ -94,14 +108,22 @@ fn read_folder(
     below: &mut VecDeque<PathBuf>,
     mut visit: impl FnMut(Entry),
 ) -> Result<()> {
-    sys::each_entry(&sys::extended(&folder.join("*")), |data| {
-        let Some(entry) = Entry::from_find_data(data) else {
-            return;
-        };
-        if Stat::from_find_data(data).is_folder() && (show_hidden || !entry.is_hidden()) {
+    let mut take = |entry: Entry, is_folder: bool| {
+        if is_folder && (show_hidden || !entry.is_hidden()) {
             below.push_back(folder.join(OsString::from_wide(entry.name())));
         }
         visit(entry);
+    };
+    if let Some(server) = folder.to_str().filter(|path| network::is_server(path)) {
+        for share in folder::read_shares(server)? {
+            take(share, true);
+        }
+        return Ok(());
+    }
+    sys::each_entry(&sys::extended(&folder.join("*")), |data| {
+        if let Some(entry) = Entry::from_find_data(data) {
+            take(entry, Stat::from_find_data(data).is_folder());
+        }
     })
 }
 
@@ -296,6 +318,17 @@ mod tests {
         Order { key: SortKey::Found, ..Order::default() }
     }
 
+    #[test]
+    fn rank_puts_the_best_fit_first_and_leaves_out_the_rest() {
+        let names = ["Show hidden files", "Split view", "Settings", "New tab"].map(String::from);
+
+        let ranked = rank("se", &names);
+
+        assert_eq!(ranked[0], 2);
+        assert_eq!(ranked.len(), 3);
+        assert_eq!(rank("sv", &names), [1]);
+    }
+
     fn fit(query: &str, name: &str) -> Option<i32> {
         Query::new(query).fit(&name.encode_utf16().collect::<Vec<_>>())
     }
@@ -447,6 +480,35 @@ mod tests {
         assert!(heard.try_recv().is_err());
         assert_eq!(search.found().len(), 0);
         assert_eq!(grown(&searches, &tree, found_order()).len(), 0);
+    }
+
+    #[test]
+    fn a_share_is_searched_like_any_folder() {
+        let tree = Tree::new("share");
+        let (drive, rest) = tree.path().split_once(':').unwrap();
+        let shared = Tree(PathBuf::from(format!(r"\\localhost\{drive}${rest}")));
+        let searches = Searches::default();
+
+        let (_, heard) = start(&searches, &shared, "report", found_order());
+        wait_until_done(&heard);
+
+        assert_eq!(grown(&searches, &shared, found_order()).len(), 3);
+    }
+
+    #[test]
+    fn a_server_offers_its_shares_and_walks_those_in_sight() {
+        let system = std::env::var("SystemDrive").unwrap().replace(':', "$");
+        let read = |show_hidden| {
+            let (mut below, mut seen) = (VecDeque::new(), Vec::new());
+            read_folder(Path::new(r"\\localhost"), show_hidden, &mut below, |entry| {
+                seen.push(String::from_utf16_lossy(entry.name()));
+            })
+            .unwrap();
+            (seen.contains(&system), below.contains(&PathBuf::from(format!(r"\\localhost\{system}"))))
+        };
+
+        assert_eq!(read(false), (true, false));
+        assert_eq!(read(true), (true, true));
     }
 
     #[test]

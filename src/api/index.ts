@@ -24,6 +24,10 @@ export interface Row {
   created: number;
   isDir: boolean;
   isHidden: boolean;
+  /** Its content is in the cloud, so opening it fetches it. */
+  isCloud: boolean;
+  /** The user asked to always keep it on this device. */
+  isPinned: boolean;
   /** Where a deleted item came from, or where a search found the row. Otherwise empty. */
   location: string;
 }
@@ -58,7 +62,9 @@ export interface DriveSpace {
 
 export interface Places {
   folders: { kind: string; path: string }[];
-  drives: { name: string; path: string }[];
+  drives: { name: string; path: string; network: boolean }[];
+  /** Folders a sync app keeps, such as OneDrive. */
+  clouds: { name: string; path: string }[];
 }
 
 /** Rows of one snapshot. */
@@ -170,6 +176,8 @@ const HEADER_BYTES = 33;
 const THUMB_HEADER_BYTES = 8;
 const FLAG_FOLDER = 1;
 const FLAG_HIDDEN = 2;
+const FLAG_CLOUD = 4;
+const FLAG_PINNED = 8;
 const UINT32_RANGE = 2 ** 32;
 const FILETIME_TICKS_PER_MS = 10_000;
 const FILETIME_TO_UNIX_MS = 11_644_473_600_000;
@@ -183,6 +191,17 @@ export const saveSession = (text: string) => invoke<void>("save_session", { text
 export const listPlaces = () => invoke<Places>("list_places");
 
 export const driveSpace = (path: string) => invoke<DriveSpace>("drive_space", { path });
+
+export const mapDrive = () => invoke<void>("map_drive");
+
+export const disconnectDrive = () => invoke<void>("disconnect_drive");
+
+/** Positions in `names` of the ones that fit `query`, best first. */
+export const rankNames = (query: string, names: string[]) => invoke<number[]>("rank_names", { query, names });
+
+export const isDefaultApp = () => invoke<boolean>("is_default_app");
+
+export const setDefaultApp = (on: boolean) => invoke<void>("set_default_app", { on });
 
 export const typeNames = (extensions: string[]) =>
   invoke<Record<string, string>>("type_names", { extensions });
@@ -370,6 +389,8 @@ function decodeRows(buffer: ArrayBuffer): Row[] {
       created: readFiletime(view, offset + 20),
       isDir: (flags & FLAG_FOLDER) !== 0,
       isHidden: (flags & FLAG_HIDDEN) !== 0,
+      isCloud: (flags & FLAG_CLOUD) !== 0,
+      isPinned: (flags & FLAG_PINNED) !== 0,
     };
     offset = locationStart + locationBytes;
   }

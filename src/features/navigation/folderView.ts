@@ -59,6 +59,7 @@ export interface ListHandle {
   selection: () => Selection;
   rename: () => void;
   isEditing: () => boolean;
+  focus: () => void;
 }
 
 export interface ShownFolder extends Opened {

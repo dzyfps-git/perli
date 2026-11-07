@@ -16,13 +16,11 @@ use windows::Win32::Graphics::Gdi::{
     CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits, GetObjectW, BITMAP, BITMAPINFO,
     BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HBITMAP,
 };
-use windows::Win32::Storage::FileSystem::{
-    FILE_ATTRIBUTE_OFFLINE, FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS, FILE_ATTRIBUTE_RECALL_ON_OPEN,
-};
 use windows::Win32::UI::Shell::{
     IShellItemImageFactory, SIIGBF_ICONONLY, SIIGBF_INCACHEONLY, SIIGBF_RESIZETOFIT,
 };
 
+use crate::folder::ONLINE_ONLY;
 use crate::ops::{shell_item, Com};
 
 /// The longest edge. Windows caches pictures at this size, so most cost no decoding.
@@ -69,8 +67,7 @@ pub async fn read(path: PathBuf) -> Vec<u8> {
 
 /// True if opening the file would fetch it from the cloud.
 fn is_online_only(path: &Path) -> bool {
-    let remote = FILE_ATTRIBUTE_OFFLINE.0 | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS.0 | FILE_ATTRIBUTE_RECALL_ON_OPEN.0;
-    fs::symlink_metadata(path).is_ok_and(|data| data.file_attributes() & remote != 0)
+    fs::symlink_metadata(path).is_ok_and(|data| data.file_attributes() & ONLINE_ONLY != 0)
 }
 
 /// Its own picture if it has one, or the icon of its type. A file in the cloud stays there, so
@@ -208,7 +205,7 @@ mod tests {
     #[test]
     fn a_missing_file_has_no_picture() {
         let _com = Com::enter();
-        assert!(picture(&folder("missing").join("nope")).is_err());
+        assert!(picture(&std::env::temp_dir().join("perli-no-such-file")).is_err());
     }
 
     #[test]

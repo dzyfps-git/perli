@@ -332,6 +332,36 @@
   color: var(--accent);
 }
 
+/* Sits in the row's padding, so it never covers a name. */
+.file-row[data-pinned]::after,
+.file-row[data-cloud]::after {
+  position: absolute;
+  top: 50%;
+  left: 2px;
+  color: var(--text-muted);
+  font-family: var(--font-icons);
+  font-size: 10px;
+  line-height: 1;
+  transform: translateY(-50%);
+}
+
+.file-row[data-pinned]::after {
+  content: "\E718";
+}
+
+.file-row[data-cloud]::after {
+  content: "\E753";
+}
+
+.file-grid[data-layout="grid"] .file-row[data-pinned]::after,
+.file-grid[data-layout="grid"] .file-row[data-cloud]::after {
+  top: var(--space-2);
+  right: var(--space-2);
+  left: auto;
+  font-size: 12px;
+  transform: none;
+}
+
 /* Its size comes from CSS alone, so changing the tile size asks for no new picture. */
 .file-thumb {
   display: none;

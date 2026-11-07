@@ -116,6 +116,15 @@
   outline-offset: -2px;
 }
 
+.settings-default {
+  width: 100%;
+}
+
+.settings-note {
+  margin: var(--space-2) 0 0;
+  color: var(--text-muted);
+}
+
 .settings-swatch {
   flex: none;
   width: 14px;

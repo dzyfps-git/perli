@@ -9,20 +9,27 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde::Deserialize;
-use windows::core::{Result, HSTRING, PCWSTR};
+use windows::core::{Result, PCWSTR};
 use windows::Win32::Storage::FileSystem::{
-    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_HIDDEN, WIN32_FIND_DATAW,
+    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_OFFLINE, FILE_ATTRIBUTE_PINNED,
+    FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS, FILE_ATTRIBUTE_RECALL_ON_OPEN, WIN32_FIND_DATAW,
 };
 use windows::Win32::UI::Shell::StrCmpLogicalW;
 
 use crate::ops::{self, BinItem};
-use crate::shell;
+use crate::{network, shell};
 
 /// Stands for the Recycle Bin, which has no folder of its own to open.
 pub const BIN_PATH: &str = "shell:RecycleBinFolder";
 
 const FLAG_FOLDER: u8 = 1;
 const FLAG_HIDDEN: u8 = 2;
+const FLAG_CLOUD: u8 = 4;
+const FLAG_PINNED: u8 = 8;
+
+/// Attributes of a file whose content is in the cloud, so that reading it would fetch it.
+pub const ONLINE_ONLY: u32 =
+    FILE_ATTRIBUTE_OFFLINE.0 | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS.0 | FILE_ATTRIBUTE_RECALL_ON_OPEN.0;
 
 #[derive(Clone, Copy, Default, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -70,6 +77,10 @@ pub struct Entry {
     created: u64,
     is_dir: bool,
     hidden: bool,
+    /// Its content is in the cloud.
+    cloud: bool,
+    /// The user asked to always keep it on this device.
+    pinned: bool,
 }
 
 impl Entry {
@@ -92,6 +103,8 @@ impl Entry {
                 | u64::from(data.ftCreationTime.dwLowDateTime),
             is_dir: data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0,
             hidden: data.dwFileAttributes & FILE_ATTRIBUTE_HIDDEN.0 != 0,
+            cloud: data.dwFileAttributes & ONLINE_ONLY != 0,
+            pinned: data.dwFileAttributes & FILE_ATTRIBUTE_PINNED.0 != 0,
         })
     }
 
@@ -103,6 +116,22 @@ impl Entry {
             created: item.deleted,
             is_dir: item.is_dir,
             hidden: false,
+            cloud: false,
+            pinned: false,
+        }
+    }
+
+    /// A server's shares have no dates or size to show.
+    fn from_share((name, out_of_sight): (String, bool)) -> Self {
+        Self {
+            name: null_terminated(name.as_ref()),
+            size: 0,
+            modified: 0,
+            created: 0,
+            is_dir: true,
+            hidden: out_of_sight,
+            cloud: false,
+            pinned: false,
         }
     }
 
@@ -182,13 +211,22 @@ pub struct Listing {
     order: Order,
 }
 
+/// A server's shares as rows.
+pub fn read_shares(server: &str) -> Result<Vec<Entry>> {
+    Ok(network::shares(server)?.into_iter().map(Entry::from_share).collect())
+}
+
 impl Listing {
     pub fn read(path: &str, order: Order) -> Result<Self> {
         if path == BIN_PATH {
             return Self::read_bin(order);
         }
         let full = resolve(path)?;
-        let entries = read_entries(&full)?;
+        let entries = if network::is_server(&full) {
+            read_shares(&full)?
+        } else {
+            read_entries(&full)?
+        };
         let listing = Self {
             folder: full.into(),
             entries: Arc::new(entries),
@@ -363,13 +401,15 @@ impl Listing {
             let row = &self.entries[entry as usize];
             let folder = if row.is_dir { FLAG_FOLDER } else { 0 };
             let hidden = if row.hidden { FLAG_HIDDEN } else { 0 };
+            let cloud = if row.cloud { FLAG_CLOUD } else { 0 };
+            let pinned = if row.pinned { FLAG_PINNED } else { 0 };
             let location = location_of(self.locations(), entry);
             let location = &location[..location.len() - 1];
             bytes.extend((row.name().len() as u32 * 2).to_le_bytes());
             bytes.extend(row.size.to_le_bytes());
             bytes.extend(row.modified.to_le_bytes());
             bytes.extend(row.created.to_le_bytes());
-            bytes.push(folder | hidden);
+            bytes.push(folder | hidden | cloud | pinned);
             bytes.extend((location.len() as u32 * 2).to_le_bytes());
             bytes.extend(row.name().iter().flat_map(|unit| unit.to_le_bytes()));
             bytes.extend(location.iter().flat_map(|unit| unit.to_le_bytes()));
@@ -408,7 +448,7 @@ fn type_ranks(entries: &[Entry]) -> Vec<u32> {
 /// `full` comes from `resolve`.
 fn read_entries(full: &str) -> Result<Vec<Entry>> {
     let mut entries = Vec::new();
-    ops::sys::each_entry(&search_pattern(full), |data| {
+    ops::sys::each_entry(&ops::sys::extended(&Path::new(full).join("*")), |data| {
         entries.extend(Entry::from_find_data(data));
     })?;
     Ok(entries)
@@ -428,13 +468,6 @@ pub fn resolve(path: &str) -> Result<String> {
     } else {
         trimmed.to_string()
     })
-}
-
-/// Builds the extended-length search pattern. The `\\?\` prefix turns off Windows path
-/// parsing, so the path must be resolved before adding it.
-// ponytail: local drive paths only, UNC paths arrive with network drives in Phase 3.
-fn search_pattern(full: &str) -> HSTRING {
-    HSTRING::from(format!(r"\\?\{}\*", full.trim_end_matches('\\')))
 }
 
 /// Null-terminated, and empty outside the Recycle Bin.
@@ -525,6 +558,8 @@ mod tests {
     }
 
     fn hide(file: &Path) {
+        use windows::core::HSTRING;
+
         unsafe { SetFileAttributesW(&HSTRING::from(file.as_os_str()), FILE_ATTRIBUTE_HIDDEN) }
             .unwrap();
     }
@@ -832,6 +867,59 @@ mod tests {
         let second = after.rows_keyed(&before.keys(&[1]));
         assert_eq!(after.paths(&second), before.paths(&[1]));
         assert_eq!(after.rows_keyed(&before.keys(&[0, 1])).len(), 2);
+    }
+
+    #[test]
+    fn reads_a_folder_through_a_share() {
+        let folder = TempFolder::new("share");
+        fs::write(folder.0.join("inside.txt"), "").unwrap();
+        let (drive, rest) = folder.0.to_str().unwrap().split_once(':').unwrap();
+        let shared = format!(r"\\localhost\{drive}${rest}");
+
+        let listing = Listing::read(&shared, Order::default()).unwrap();
+
+        assert_eq!(names(&listing), ["inside.txt"]);
+        assert_eq!(listing.paths(&[0]), [Path::new(&shared).join("inside.txt")]);
+    }
+
+    #[test]
+    fn a_server_lists_its_shares_as_folders_with_admin_ones_hidden() {
+        let order = Order {
+            show_hidden: true,
+            ..Order::default()
+        };
+        let all = Listing::read(r"\\localhost", order).unwrap();
+        let shown = Listing::read(r"\\localhost", Order::default()).unwrap();
+
+        let system = std::env::var("SystemDrive").unwrap().replace(':', "$");
+        let row = names(&all).iter().position(|name| name.eq_ignore_ascii_case(&system)).unwrap() as u32;
+        assert_eq!(all.paths(&[row]), [PathBuf::from(format!(r"\\localhost\{}", all.names(&[row])[0]))]);
+        assert!(all.rows().all(|entry| entry.is_dir));
+        assert!(shown.len() < all.len());
+    }
+
+    #[test]
+    fn a_rows_sync_state_reaches_its_flags() {
+        let cases = [
+            (FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS.0, FLAG_CLOUD),
+            (FILE_ATTRIBUTE_RECALL_ON_OPEN.0, FLAG_CLOUD),
+            (FILE_ATTRIBUTE_OFFLINE.0, FLAG_CLOUD),
+            (FILE_ATTRIBUTE_PINNED.0, FLAG_PINNED),
+            (0, 0),
+        ];
+        for (attributes, flag) in cases {
+            let mut data = WIN32_FIND_DATAW {
+                dwFileAttributes: attributes,
+                ..Default::default()
+            };
+            data.cFileName[0] = u16::from(b'a');
+            let listing = Listing {
+                entries: Arc::new(vec![Entry::from_find_data(&data).unwrap()]),
+                ..Listing::default()
+            };
+
+            assert_eq!(listing.arrange(Order::default()).encode_rows(0, 1)[32], flag);
+        }
     }
 
     #[test]

@@ -1,13 +1,16 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod clipboard;
+mod default_app;
 mod drag;
 mod folder;
 mod jobs;
 mod menus;
+mod network;
 mod ops;
 mod parts;
 mod places;
+mod registry;
 mod search;
 mod session;
 mod shell;
@@ -297,9 +300,19 @@ struct Start {
     home: Option<String>,
 }
 
+/// Windows quotes a drive as `"C:\"`, and the backslash then escapes the closing quote.
+fn folder_argument(text: String) -> String {
+    let text = text.strip_suffix('"').unwrap_or(&text);
+    if text.ends_with(':') {
+        format!(r"{text}\")
+    } else {
+        text.to_string()
+    }
+}
+
 impl Start {
     fn read() -> Self {
-        let folder = std::env::args().nth(1);
+        let folder = std::env::args().nth(1).map(folder_argument);
         let session = folder.is_none().then(session::read).flatten();
         let home = std::env::var("USERPROFILE").ok();
         Self {
@@ -352,6 +365,7 @@ async fn open_folder(
     preload: State<'_, Preload>,
     watches: State<'_, Watches>,
     searches: State<'_, Searches>,
+    app: AppHandle,
 ) -> Result<Opened, String> {
     let started = Instant::now();
     searches.stop(view);
@@ -370,12 +384,22 @@ async fn open_folder(
         .unwrap_or_else(|error| error.into_inner())
         .take_if(|(preloaded, _)| *preloaded == path);
     let resolved = folder::resolve(&path).map_err(|error| error.message())?;
-    let listing = async_runtime::spawn_blocking(move || match waiting {
-        Some((_, reader)) => reader
-            .join()
-            .unwrap_or_else(|_| folder::Listing::read(&path, order))
-            .map(|listing| listing.arranged(order)),
-        None => folder::Listing::read(&path, order),
+    let listing = async_runtime::spawn_blocking(move || {
+        let read = || folder::Listing::read(&path, order);
+        let first = match waiting {
+            Some((_, reader)) => reader
+                .join()
+                .unwrap_or_else(|_| read())
+                .map(|listing| listing.arranged(order)),
+            None => read(),
+        };
+        first.or_else(|failure| {
+            if network::reconnect(&path, &failure, jobs::owner(&app)) {
+                read()
+            } else {
+                Err(failure)
+            }
+        })
     })
     .await
     .map_err(|error| error.to_string())?
@@ -898,7 +922,41 @@ async fn clipboard_text() -> Result<String, String> {
         .map_err(|error| error.message())
 }
 
+/// Windows' dialog, which runs until the user closes it.
+#[tauri::command]
+async fn map_drive(app: AppHandle) -> Result<(), String> {
+    let owner = jobs::owner(&app);
+    off_main(move || network::map_drive(owner)).await
+}
+
+/// Windows' dialog, which runs until the user closes it.
+#[tauri::command]
+async fn disconnect_drive(app: AppHandle) -> Result<(), String> {
+    let owner = jobs::owner(&app);
+    off_main(move || network::disconnect_drive(owner)).await
+}
+
+/// The `names` that fit `query`, best first, by the matcher a folder search uses.
+#[tauri::command]
+fn rank_names(query: String, names: Vec<String>) -> Vec<u32> {
+    search::rank(&query, &names)
+}
+
+#[tauri::command]
+fn is_default_app() -> bool {
+    default_app::is_on()
+}
+
+#[tauri::command]
+async fn set_default_app(on: bool) -> Result<(), String> {
+    off_main(move || default_app::set(on)).await
+}
+
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some(default_app::RESTORE_ARGUMENT) {
+        let _ = default_app::set(false);
+        return;
+    }
     thread::spawn(parts::sweep);
     let start = Start::read();
     let preload = start.first_folder().map(|(path, order)| {
@@ -987,7 +1045,12 @@ fn main() {
             thumbnail,
             set_drop_target,
             start_drag,
-            clipboard_text
+            clipboard_text,
+            map_drive,
+            disconnect_drive,
+            rank_names,
+            is_default_app,
+            set_default_app
         ])
         .run(tauri::generate_context!())
         .expect("failed to start Perli");
@@ -996,6 +1059,13 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_folder_argument_survives_the_way_windows_quotes_a_drive() {
+        assert_eq!(folder_argument("C:\"".into()), r"C:\");
+        assert_eq!(folder_argument(r"C:\".into()), r"C:\");
+        assert_eq!(folder_argument(r"D:\Some Folder".into()), r"D:\Some Folder");
+    }
 
     #[test]
     fn an_answer_holds_only_its_own_request_and_older_ones() {
