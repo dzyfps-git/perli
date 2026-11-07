@@ -19,14 +19,14 @@ use windows::Win32::Storage::FileSystem::GetLogicalDrives;
 
 const CHECK_GAP: Duration = Duration::from_secs(1);
 
-struct Watch {
+pub struct Watch {
     folder: PathBuf,
     seen: Option<SystemTime>,
 }
 
 impl Watch {
     /// Must run before the folder is read, so a change during the read still shows up.
-    fn new(folder: PathBuf) -> Self {
+    pub fn new(folder: PathBuf) -> Self {
         let seen = modified(&folder);
         Self { folder, seen }
     }
@@ -41,14 +41,17 @@ fn modified(folder: &PathBuf) -> Option<SystemTime> {
 pub struct Watches(Mutex<HashMap<u32, Watch>>);
 
 impl Watches {
-    pub fn follow(&self, view: u32, folder: &str) {
-        let watch = Watch::new(folder.into());
-        self.0.lock().unwrap_or_else(PoisonError::into_inner).insert(view, watch);
+    /// Moves a view to `watch`. With none it stops, as the Recycle Bin has no folder to ask about.
+    pub fn set(&self, view: u32, watch: Option<Watch>) {
+        let mut watches = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        match watch {
+            Some(watch) => watches.insert(view, watch),
+            None => watches.remove(&view),
+        };
     }
 
-    /// The Recycle Bin has no folder to ask about, so a view on it stops here.
     pub fn stop(&self, view: u32) {
-        self.0.lock().unwrap_or_else(PoisonError::into_inner).remove(&view);
+        self.set(view, None);
     }
 
     /// The views whose folder changed since the last look.
@@ -103,7 +106,7 @@ mod tests {
         let folder = std::env::temp_dir().join(format!("perli-watch-{}", std::process::id()));
         fs::create_dir_all(&folder).unwrap();
         let watches = Watches::default();
-        watches.follow(1, folder.to_str().unwrap());
+        watches.set(1, Some(Watch::new(folder.clone())));
         assert!(watches.changed().is_empty());
 
         // Modified times only move with the clock's tick.

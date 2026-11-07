@@ -593,6 +593,7 @@ export function App() {
                 onInputMenu={showInputMenu}
                 onFirstPaint={markReady}
                 onSwapped={view.swapped}
+                onEscape={() => view.search("")}
                 connect={view.connectList}
               />
             )}

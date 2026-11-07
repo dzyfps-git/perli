@@ -131,6 +131,7 @@ export function FileList(props: {
   rearranged?: boolean;
   onFirstPaint: () => void;
   onSwapped: (snapshot: number) => void;
+  onEscape: () => void;
   connect: (list: ListHandle) => void;
 }) {
   const pages = new Map<number, Row[]>();
@@ -548,6 +549,7 @@ export function FileList(props: {
       selection.selectAll(props.count);
     } else if (event.key === "Escape") {
       selection.clear();
+      props.onEscape();
     } else if (event.key.length === 1 && !event.ctrlKey && !event.metaKey) {
       event.preventDefault();
       return jumpTo(event.key);

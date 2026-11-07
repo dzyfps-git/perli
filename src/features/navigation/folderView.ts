@@ -112,6 +112,12 @@ export function createFolderView(id: number, saved?: SavedPane) {
     group: query() || isBin(target) ? "mixed" : grouping(),
     showHidden: showHidden(),
   });
+  /** A folder opens in its own order, even from a search. */
+  const openingOrder = (target: string, wanted: Sort): Order => ({
+    ...wanted,
+    group: isBin(target) ? "mixed" : grouping(),
+    showHidden: showHidden(),
+  });
   /** Row numbers mean nothing outside the snapshot they came from. */
   const selectedRows = (snapshot: number) => {
     const selection = list?.selection();
@@ -149,18 +155,26 @@ export function createFolderView(id: number, saved?: SavedPane) {
     else if (rearrangeAfterOpen) rearrange();
   }
 
+  /** Nothing about the shown rows changes until the folder has read fine. */
   async function load(target: string) {
-    setQuery("");
-    setWalk("done");
+    const searched = query();
     const request = ++latestRequest;
     const folderSort = arrivalSort(target);
-    if (folderSort) setSortValue(folderSort);
     opening = true;
     try {
-      const opened = await openFolder(id, request, folder()?.request ?? 0, target, order(target));
+      const wanted = openingOrder(target, folderSort ?? sort());
+      const opened = await openFolder(id, request, folder()?.request ?? 0, target, wanted);
       if (request !== latestRequest) return undefined;
       setError(undefined);
-      show(opened);
+      batch(() => {
+        // Text typed while this opened is a search of the new folder, which is waiting to start.
+        if (query() === searched) {
+          setQuery("");
+          setWalk("done");
+        }
+        if (folderSort) setSortValue(folderSort);
+        show(opened);
+      });
       setTrail(nextTrail(trail(), opened.path));
       return opened;
     } catch (failure) {
