@@ -25,7 +25,7 @@ mod watch;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{mpsc, Arc, Mutex, RwLock};
+use std::sync::{mpsc, Arc, Mutex, PoisonError, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -47,6 +47,17 @@ const CLOSE_LIMIT: Duration = Duration::from_secs(1);
 /// How long cancelled jobs get to clean up their partial files before Perli closes anyway.
 const CANCEL_LIMIT: Duration = Duration::from_secs(5);
 const CANCEL_CHECK: Duration = Duration::from_millis(50);
+
+/// The update found by the last check, waiting for the user to install it.
+#[derive(Default)]
+struct PendingUpdate(Mutex<Option<tauri_plugin_updater::Update>>);
+
+/// What a newer release offers.
+#[derive(Serialize)]
+struct UpdateOffer {
+    version: String,
+    notes: Option<String>,
+}
 
 /// Close requests so far, and the newest one the UI held back.
 #[derive(Default)]
@@ -979,6 +990,41 @@ async fn recent_files(limit: usize) -> Result<Vec<recent::Recent>, String> {
         .map_err(|error| error.to_string())
 }
 
+/// Asks the releases repo for a newer version. `PERLI_UPDATE_URL` points the check somewhere
+/// else, which is safe because every download must still carry this build's signature.
+#[tauri::command]
+async fn check_update(app: AppHandle, pending: State<'_, PendingUpdate>) -> Result<Option<UpdateOffer>, String> {
+    use tauri_plugin_updater::UpdaterExt;
+    let text = |error: tauri_plugin_updater::Error| error.to_string();
+    let mut builder = app.updater_builder();
+    if let Ok(url) = std::env::var("PERLI_UPDATE_URL") {
+        builder = builder.endpoints(vec![url.parse().map_err(|_| "PERLI_UPDATE_URL is not a URL")?]).map_err(text)?;
+    }
+    let update = builder.build().map_err(text)?.check().await.map_err(text)?;
+    let offer = update.as_ref().map(|update| UpdateOffer {
+        version: update.version.clone(),
+        notes: update.body.clone(),
+    });
+    *pending.0.lock().unwrap_or_else(PoisonError::into_inner) = update;
+    Ok(offer)
+}
+
+/// Downloads the update, checks its signature, and starts its installer, which ends Perli and
+/// opens the new version. Running jobs would be cut off, so they must finish first.
+#[tauri::command]
+async fn install_update(pending: State<'_, PendingUpdate>, jobs: State<'_, Jobs>) -> Result<(), String> {
+    if jobs.running() {
+        return Err("Jobs are still running. Let them finish, then install the update.".into());
+    }
+    // A copy stays, so a failed download can be tried again.
+    let update = pending.0.lock().unwrap_or_else(PoisonError::into_inner).clone();
+    let update = update.ok_or("No update is waiting. Check for updates first.")?;
+    update
+        .download_and_install(|_, _| {}, || {})
+        .await
+        .map_err(|error| error.to_string())
+}
+
 /// Tags go through a database, which must not hold up the window.
 async fn with_tags<T: Send + 'static>(work: impl FnOnce() -> Result<T, String> + Send + 'static) -> Result<T, String> {
     async_runtime::spawn_blocking(work).await.map_err(|error| error.to_string())?
@@ -1146,6 +1192,8 @@ fn main() {
         .manage(Views::default())
         .manage(Jobs::loading_history())
         .manage(Closing::default())
+        .manage(PendingUpdate::default())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(Watches::default())
         .manage(Arc::new(Drags::default()))
         .manage(Searches::default())
@@ -1206,6 +1254,8 @@ fn main() {
             thumbnail,
             peek_text,
             recent_files,
+            check_update,
+            install_update,
             set_drop_target,
             list_tags,
             create_tag,

@@ -59,6 +59,7 @@ import { BIN_PATH, isBin, isDriveRoot, join, parentOf, baseName } from "./featur
 import { Palette, type Command } from "./features/palette/Palette";
 import { PathBar } from "./features/pathbar/PathBar";
 import { Settings } from "./features/settings/Settings";
+import { startUpdates, updateState } from "./features/settings/updates";
 import { BookmarksBar } from "./features/sidebar/BookmarksBar";
 import { holds } from "./features/sidebar/placeLists";
 import {
@@ -724,6 +725,7 @@ export function App() {
     window.addEventListener("blur", trackWindowFocus);
     window.addEventListener("focus", checkCut);
     refreshTags();
+    startUpdates();
     const start = await startState();
     const session = start.folder ? undefined : parseSession(start.session);
     if (session) {
@@ -829,7 +831,7 @@ export function App() {
         />
         <button
           class="settings-button"
-          aria-label="Settings"
+          aria-label={updateState() === "ready" ? "Settings, update ready" : "Settings"}
           aria-keyshortcuts="Control+,"
           onClick={() => setSettingsOpen(true)}
         >
@@ -837,6 +839,9 @@ export function App() {
             {ICON_SETTINGS}
           </span>
           Settings
+          <Show when={updateState() === "ready"}>
+            <span class="update-dot" aria-hidden="true" />
+          </Show>
         </button>
       </aside>
       <main class="files">
@@ -890,6 +895,7 @@ export function App() {
         onToggleSizes={toggleSizes}
         onTagsChanged={showTagChange}
         onDeleteTag={askDeleteTag}
+        onBeforeUpdate={flushSession}
       />
       <Tooltip />
     </div>

@@ -95,6 +95,15 @@ body {
   outline-offset: -2px;
 }
 
+/* An update is ready. Settings has the button for it. */
+.update-dot {
+  width: 6px;
+  height: 6px;
+  margin-left: auto;
+  border-radius: 50%;
+  background: var(--accent-line);
+}
+
 .settings-icon {
   font-family: var(--font-icons);
   font-size: 14px;

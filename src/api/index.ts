@@ -2,6 +2,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
+export { getVersion as appVersion } from "@tauri-apps/api/app";
+
 export interface Opened {
   /** Names this folder's rows in later `fetchRows` calls. */
   request: number;
@@ -100,6 +102,12 @@ export interface Recent {
   name: string;
   path: string;
   isDir: boolean;
+}
+
+/** A newer release, found by `checkUpdate`. */
+export interface UpdateOffer {
+  version: string;
+  notes: string | null;
 }
 
 export interface Selection {
@@ -237,6 +245,11 @@ export const startState = () => invoke<Start>("start_state");
 export const saveSession = (text: string) => invoke<void>("save_session", { text });
 
 export const listPlaces = () => invoke<Places>("list_places");
+
+export const checkUpdate = () => invoke<UpdateOffer | null>("check_update");
+
+/** Ends Perli once the installer starts. */
+export const installUpdate = () => invoke<void>("install_update");
 
 export const recentFiles = (limit: number) => invoke<Recent[]>("recent_files", { limit });
 
