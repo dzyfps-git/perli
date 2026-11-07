@@ -1,6 +1,7 @@
 //! The folders and drives the sidebar offers.
 
 use std::mem::size_of;
+use std::path::Path;
 
 use serde::Serialize;
 use windows::core::{Result, GUID, HSTRING};
@@ -10,12 +11,19 @@ use windows::Win32::Storage::FileSystem::{
 use windows::Win32::System::Com::{
     CoInitializeEx, CoTaskMemFree, CoUninitialize, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE,
 };
+use windows::Win32::System::Registry::HKEY_CURRENT_USER;
 use windows::Win32::System::WindowsProgramming::{DRIVE_REMOTE, DRIVE_REMOVABLE};
 use windows::Win32::UI::Shell::{
     FOLDERID_Desktop, FOLDERID_Documents, FOLDERID_Downloads, FOLDERID_Music, FOLDERID_Pictures,
     FOLDERID_Profile, FOLDERID_Videos, SHGetFileInfoW, SHGetKnownFolderPath, KF_FLAG_DEFAULT,
     SHFILEINFOW, SHGFI_DISPLAYNAME,
 };
+
+use crate::registry;
+
+/// Where sync apps list their folders for Explorer's side pane.
+const NAMESPACE: &str = r"Software\Microsoft\Windows\CurrentVersion\Explorer\Desktop\NameSpace";
+const CLASSES: &str = r"Software\Classes";
 
 const FOLDERS: [(&str, GUID); 7] = [
     ("home", FOLDERID_Profile),
@@ -37,12 +45,21 @@ pub struct Folder {
 pub struct Drive {
     name: String,
     path: String,
+    network: bool,
+}
+
+/// A folder a sync app keeps, such as OneDrive.
+#[derive(Debug, PartialEq, Serialize)]
+pub struct Cloud {
+    name: String,
+    path: String,
 }
 
 #[derive(Serialize)]
 pub struct Places {
     folders: Vec<Folder>,
     drives: Vec<Drive>,
+    clouds: Vec<Cloud>,
 }
 
 #[derive(Serialize)]
@@ -77,7 +94,8 @@ pub fn read() -> Result<Places> {
         CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE).ok()?;
         let drives = read_drives();
         CoUninitialize();
-        Ok(Places { folders, drives })
+        let clouds = read_clouds(NAMESPACE, CLASSES);
+        Ok(Places { folders, drives, clouds })
     }
 }
 
@@ -102,7 +120,32 @@ fn read_drives() -> Vec<Drive> {
     drive_paths()
         .map(|path| {
             let name = display_name(&path).unwrap_or_else(|| path.clone());
-            Drive { name, path }
+            let network = unsafe { GetDriveTypeW(&HSTRING::from(&path)) } == DRIVE_REMOTE;
+            Drive { name, path, network }
+        })
+        .collect()
+}
+
+/// A class names its folder outright, or as a known folder's id, which is how OneDrive does it.
+fn cloud_path(class: &str) -> Option<String> {
+    let bag = format!(r"{class}\Instance\InitPropertyBag");
+    let path = registry::read_text(HKEY_CURRENT_USER, &bag, Some("TargetFolderPath"));
+    path.or_else(|| {
+        let id = registry::read_text(HKEY_CURRENT_USER, &bag, Some("TargetKnownFolder"))?;
+        known_folder(&GUID::try_from(id.trim_matches(['{', '}'])).ok()?)
+    })
+}
+
+/// The folders Explorer's side pane shows from sync apps. Asking the keys under the user's own
+/// classes costs no extra dependency, unlike the sync root manager, and matches that pane.
+fn read_clouds(namespace: &str, classes: &str) -> Vec<Cloud> {
+    let ids = registry::subkeys(HKEY_CURRENT_USER, namespace);
+    ids.iter()
+        .filter_map(|id| {
+            let class = format!(r"{classes}\CLSID\{id}");
+            let name = registry::read_text(HKEY_CURRENT_USER, &class, Some(""))?;
+            let path = cloud_path(&class).filter(|path| Path::new(path).is_dir())?;
+            Some(Cloud { name, path })
         })
         .collect()
 }
@@ -159,5 +202,40 @@ mod tests {
 
         let space = drive_space(&drive.path).unwrap();
         assert!(space.total > 0 && space.free <= space.total);
+        assert!(!drive.network);
+    }
+
+    #[test]
+    fn cloud_folders_come_by_path_or_known_folder_and_must_exist() {
+        let top = format!(r"Software\Classes\perli-test-clouds-{}", std::process::id());
+        let (namespace, classes) = (format!(r"{top}\namespace"), format!(r"{top}\classes"));
+        let add = |id: &str, name: Option<&str>, value: &str, target: &str| {
+            let (space, class) = (format!(r"{namespace}\{id}"), format!(r"{classes}\CLSID\{id}"));
+            registry::write_text(HKEY_CURRENT_USER, &space, "", "listed").unwrap();
+            if let Some(name) = name {
+                registry::write_text(HKEY_CURRENT_USER, &class, "", name).unwrap();
+            }
+            let bag = format!(r"{class}\Instance\InitPropertyBag");
+            registry::write_text(HKEY_CURRENT_USER, &bag, value, target).unwrap();
+        };
+        let temp = std::env::temp_dir();
+        let temp = temp.to_str().unwrap();
+        let known = format!("{{{FOLDERID_Documents:?}}}");
+        add("{1}", Some("By path"), "TargetFolderPath", temp);
+        add("{2}", Some("By id"), "TargetKnownFolder", &known);
+        add("{3}", Some("Gone"), "TargetFolderPath", r"C:\perli-no-such-folder");
+        add("{4}", None, "TargetFolderPath", temp);
+
+        let clouds = read_clouds(&namespace, &classes);
+        registry::delete_tree(HKEY_CURRENT_USER, &top);
+
+        let documents = known_folder(&FOLDERID_Documents).unwrap();
+        assert_eq!(
+            clouds,
+            [
+                Cloud { name: "By path".into(), path: temp.into() },
+                Cloud { name: "By id".into(), path: documents },
+            ]
+        );
     }
 }

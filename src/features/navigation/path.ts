@@ -8,13 +8,17 @@ export const BIN_PATH = "shell:RecycleBinFolder";
 
 export const isBin = (path: string | undefined) => path === BIN_PATH;
 
-/** Splits `C:\Users\me` into one crumb per folder, starting at the drive. */
+export const isDriveRoot = (path: string) => /^[a-z]:\\$/i.test(path);
+
+/** Splits `C:\Users\me` into one crumb per folder, starting at the drive or the `\\server`. */
 export function toCrumbs(path: string): Crumb[] {
   if (isBin(path)) return [{ label: "Recycle Bin", path }];
   const parts = path.split("\\").filter(Boolean);
+  const network = path.startsWith("\\\\");
+  if (network) parts[0] = `\\\\${parts[0]}`;
   return parts.map((label, index) => ({
     label,
-    path: index === 0 ? `${label}\\` : parts.slice(0, index + 1).join("\\"),
+    path: index === 0 && !network ? `${label}\\` : parts.slice(0, index + 1).join("\\"),
   }));
 }
 
@@ -32,7 +36,7 @@ export const baseName = (path: string) => path.slice(path.lastIndexOf("\\") + 1)
 export function typedPath(folder: string, text: string) {
   const path = text.trim().replace(/^"|"$/g, "");
   if (/^[a-z]:$/i.test(path)) return `${path}\\`;
-  return /^([a-z]:[\\/]|\\\\|shell:)/i.test(path) ? path : join(folder, path);
+  return /^([a-z]:[\\/]|[\\/]{2}|shell:)/i.test(path) ? path : join(folder, path);
 }
 
 export function samePath(a: string | undefined, b: string) {

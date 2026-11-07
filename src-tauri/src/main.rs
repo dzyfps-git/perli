@@ -1,13 +1,16 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod clipboard;
+mod default_app;
 mod drag;
 mod folder;
 mod jobs;
 mod menus;
+mod network;
 mod ops;
 mod parts;
 mod places;
+mod registry;
 mod search;
 mod session;
 mod shell;
@@ -288,8 +291,7 @@ struct Clipped {
 #[derive(Clone, Serialize)]
 struct SearchGrew {
     view: u32,
-    /// The search has ended, so these are the last.
-    done: bool,
+    walk: search::Walk,
 }
 
 /// What the app starts with. A folder from the command line replaces the saved session.
@@ -300,9 +302,19 @@ struct Start {
     home: Option<String>,
 }
 
+/// Windows quotes a drive as `"C:\"`, and the backslash then escapes the closing quote.
+fn folder_argument(text: String) -> String {
+    let text = text.strip_suffix('"').unwrap_or(&text);
+    if text.ends_with(':') {
+        format!(r"{text}\")
+    } else {
+        text.to_string()
+    }
+}
+
 impl Start {
     fn read() -> Self {
-        let folder = std::env::args().nth(1);
+        let folder = std::env::args().nth(1).map(folder_argument);
         let session = folder.is_none().then(session::read).flatten();
         let home = std::env::var("USERPROFILE").ok();
         Self {
@@ -355,6 +367,7 @@ async fn open_folder(
     preload: State<'_, Preload>,
     watches: State<'_, Watches>,
     searches: State<'_, Searches>,
+    app: AppHandle,
 ) -> Result<Opened, String> {
     let started = Instant::now();
     let watch = watch_of(&path);
@@ -372,12 +385,23 @@ async fn open_folder(
         .unwrap_or_else(|error| error.into_inner())
         .take_if(|(preloaded, _)| *preloaded == path);
     let resolved = folder::resolve(&path).map_err(|error| error.message())?;
-    let listing = async_runtime::spawn_blocking(move || match waiting {
-        Some((_, reader)) => reader
-            .join()
-            .unwrap_or_else(|_| folder::Listing::read(&path, order))
-            .map(|listing| listing.arranged(order)),
-        None => folder::Listing::read(&path, order),
+    let full = resolved.clone();
+    let listing = async_runtime::spawn_blocking(move || {
+        let read = || folder::Listing::read(&path, order);
+        let first = match waiting {
+            Some((_, reader)) => reader
+                .join()
+                .unwrap_or_else(|_| read())
+                .map(|listing| listing.arranged(order)),
+            None => read(),
+        };
+        first.or_else(|failure| {
+            if network::reconnect(&full, &failure, jobs::owner(&app)) {
+                read()
+            } else {
+                Err(failure)
+            }
+        })
     })
     .await
     .map_err(|error| error.to_string())?
@@ -419,7 +443,9 @@ async fn arrange_view(
     order: folder::Order,
     selected: Vec<u32>,
     views: State<'_, Views>,
+    searches: State<'_, Searches>,
 ) -> Result<Arranged, String> {
+    searches.arranged(view, order);
     let before = {
         let mut views = views.0.write().unwrap_or_else(|error| error.into_inner());
         let current = views.entry(view).or_default();
@@ -448,8 +474,8 @@ async fn arrange_view(
 
 fn find(app: &AppHandle, view: u32, asked: search::Asked, path: &str, order: folder::Order) -> ReadResult {
     let events = app.clone();
-    app.state::<Searches>().rows(view, asked, path, order, move |done| {
-        let _ = events.emit("search-grew", SearchGrew { view, done });
+    app.state::<Searches>().rows(view, asked, path, order, move |walk| {
+        let _ = events.emit("search-grew", SearchGrew { view, walk });
     })
 }
 
@@ -661,7 +687,9 @@ async fn rows(
     start: usize,
     count: usize,
     views: State<'_, Views>,
+    searches: State<'_, Searches>,
 ) -> Result<Response, String> {
+    searches.reached(view, start + count);
     let readable = views.0.read().unwrap_or_else(|error| error.into_inner());
     let current = readable.get(&view);
     let bytes = current
@@ -903,7 +931,41 @@ async fn clipboard_text() -> Result<String, String> {
         .map_err(|error| error.message())
 }
 
+/// Windows' dialog, which runs until the user closes it.
+#[tauri::command]
+async fn map_drive(app: AppHandle) -> Result<(), String> {
+    let owner = jobs::owner(&app);
+    off_main(move || network::map_drive(owner)).await
+}
+
+/// Windows' dialog, which runs until the user closes it.
+#[tauri::command]
+async fn disconnect_drive(app: AppHandle) -> Result<(), String> {
+    let owner = jobs::owner(&app);
+    off_main(move || network::disconnect_drive(owner)).await
+}
+
+/// The `names` that fit `query`, best first, by the matcher a folder search uses.
+#[tauri::command]
+fn rank_names(query: String, names: Vec<String>) -> Vec<u32> {
+    search::rank(&query, &names)
+}
+
+#[tauri::command]
+fn is_default_app() -> bool {
+    default_app::is_on()
+}
+
+#[tauri::command]
+async fn set_default_app(on: bool) -> Result<(), String> {
+    off_main(move || default_app::set(on)).await
+}
+
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some(default_app::RESTORE_ARGUMENT) {
+        let _ = default_app::set(false);
+        return;
+    }
     thread::spawn(parts::sweep);
     let start = Start::read();
     let preload = start.first_folder().map(|(path, order)| {
@@ -992,7 +1054,12 @@ fn main() {
             thumbnail,
             set_drop_target,
             start_drag,
-            clipboard_text
+            clipboard_text,
+            map_drive,
+            disconnect_drive,
+            rank_names,
+            is_default_app,
+            set_default_app
         ])
         .run(tauri::generate_context!())
         .expect("failed to start Perli");
@@ -1001,6 +1068,13 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_folder_argument_survives_the_way_windows_quotes_a_drive() {
+        assert_eq!(folder_argument("C:\"".into()), r"C:\");
+        assert_eq!(folder_argument(r"C:\".into()), r"C:\");
+        assert_eq!(folder_argument(r"D:\Some Folder".into()), r"D:\Some Folder");
+    }
 
     #[test]
     fn an_answer_holds_only_its_own_request_and_older_ones() {

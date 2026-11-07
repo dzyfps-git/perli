@@ -4,21 +4,20 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use serde::Serialize;
-use windows::core::{GUID, HSTRING, PCWSTR, PWSTR};
-use windows::Win32::Foundation::ERROR_SUCCESS;
+use windows::core::{GUID, HSTRING};
 use windows::Win32::System::Registry::{
-    RegEnumKeyExW, RegGetValueW, RegOpenKeyExW, RegCloseKey, HKEY, HKEY_CLASSES_ROOT, KEY_READ,
-    RRF_RT_ANY, RRF_RT_REG_BINARY, RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ,
+    HKEY_CLASSES_ROOT, REG_ROUTINE_FLAGS, RRF_RT_ANY, RRF_RT_REG_BINARY,
 };
 use windows::Win32::UI::Shell::{FOLDERID_CommonTemplates, FOLDERID_Templates, SHLoadIndirectString};
 
 use crate::ops::{Content, Template};
-use crate::{places, shell};
+use crate::{places, registry, shell};
 
-/// Longest key name the registry allows, with room for the null.
-const LONGEST_KEY: usize = 256;
 /// Longest text a `ShellNew` item name resolves to.
 const LONGEST_TEXT: usize = 512;
+/// Offered even on a PC whose Windows lists no such type. Its own template wins if it has one.
+const TEXT_EXTENSION: &str = "txt";
+const TEXT_NAME: &str = "Text Document";
 
 /// A type for the New menu.
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -29,49 +28,15 @@ pub struct NewType {
 }
 
 fn exists(key: &str) -> bool {
-    let mut opened = HKEY::default();
-    let found = unsafe {
-        RegOpenKeyExW(HKEY_CLASSES_ROOT, &HSTRING::from(key), None, KEY_READ, &raw mut opened)
-    };
-    if found == ERROR_SUCCESS {
-        let _ = unsafe { RegCloseKey(opened) };
-    }
-    found == ERROR_SUCCESS
+    registry::exists(HKEY_CLASSES_ROOT, key)
 }
 
-/// The raw bytes of a value. Text values come with Windows' environment names filled in.
-fn read_value(key: &str, name: Option<&str>, kinds: windows::Win32::System::Registry::REG_ROUTINE_FLAGS) -> Option<Vec<u8>> {
-    let key = HSTRING::from(key);
-    let name = name.map(HSTRING::from);
-    let name = name.as_ref().map_or(PCWSTR::null(), |name| PCWSTR(name.as_ptr()));
-    let mut size = 0;
-    unsafe {
-        let found = RegGetValueW(HKEY_CLASSES_ROOT, &key, name, kinds, None, None, Some(&raw mut size));
-        if found != ERROR_SUCCESS {
-            return None;
-        }
-        let mut bytes = vec![0; size as usize];
-        let read = RegGetValueW(
-            HKEY_CLASSES_ROOT,
-            &key,
-            name,
-            kinds,
-            None,
-            Some(bytes.as_mut_ptr().cast()),
-            Some(&raw mut size),
-        );
-        (read == ERROR_SUCCESS).then(|| {
-            bytes.truncate(size as usize);
-            bytes
-        })
-    }
+fn read_value(key: &str, name: Option<&str>, kinds: REG_ROUTINE_FLAGS) -> Option<Vec<u8>> {
+    registry::read_value(HKEY_CLASSES_ROOT, key, name, kinds)
 }
 
 fn read_text(key: &str, name: Option<&str>) -> Option<String> {
-    let bytes = read_value(key, name, RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ)?;
-    let units: Vec<u16> = bytes.chunks_exact(2).map(|pair| u16::from_le_bytes([pair[0], pair[1]])).collect();
-    let end = units.iter().position(|&unit| unit == 0).unwrap_or(units.len());
-    Some(String::from_utf16_lossy(&units[..end]))
+    registry::read_text(HKEY_CLASSES_ROOT, key, name)
 }
 
 fn has_value(key: &str, name: &str) -> bool {
@@ -135,29 +100,8 @@ fn item_name(key: &str) -> Option<String> {
 
 /// Every extension key, each with its dot.
 fn extensions() -> Vec<String> {
-    let mut found = Vec::new();
-    let mut name = [0u16; LONGEST_KEY];
-    for index in 0.. {
-        let mut length = LONGEST_KEY as u32;
-        let result = unsafe {
-            RegEnumKeyExW(
-                HKEY_CLASSES_ROOT,
-                index,
-                Some(PWSTR(name.as_mut_ptr())),
-                &raw mut length,
-                None,
-                None,
-                None,
-                None,
-            )
-        };
-        if result != ERROR_SUCCESS {
-            break;
-        }
-        if name[0] == u16::from(b'.') {
-            found.push(String::from_utf16_lossy(&name[..length as usize]));
-        }
-    }
+    let mut found = registry::subkeys(HKEY_CLASSES_ROOT, "");
+    found.retain(|name| name.starts_with('.'));
     found
 }
 
@@ -173,6 +117,9 @@ fn read_types() -> Vec<NewType> {
         .into_iter()
         .map(|(extension, name)| NewType { extension, name })
         .collect();
+    if !types.iter().any(|kind| kind.extension == TEXT_EXTENSION) {
+        types.push(NewType { extension: TEXT_EXTENSION.into(), name: TEXT_NAME.into() });
+    }
     types.sort_by_key(|kind| kind.name.to_lowercase());
     types
 }
@@ -187,9 +134,14 @@ pub fn new_types() -> Vec<NewType> {
 /// What a new file of `extension` should be named and hold.
 pub fn template(extension: &str) -> Result<Template, String> {
     let dotted = format!(".{extension}");
-    let unknown = || format!("Windows has no template for {dotted} files");
-    let key = shell_new_key(&dotted).ok_or_else(unknown)?;
-    let content = content_of(&key).ok_or_else(unknown)?;
+    let found = shell_new_key(&dotted).and_then(|key| content_of(&key).map(|content| (key, content)));
+    let Some((key, content)) = found else {
+        if extension != TEXT_EXTENSION {
+            return Err(format!("Windows has no template for {dotted} files"));
+        }
+        let stem = format!("New {TEXT_NAME}");
+        return Ok(Template { stem, extension: dotted, content: Content::Empty });
+    };
     let stem = item_name(&key).unwrap_or_else(|| {
         let names = shell::type_names(vec![extension.to_string()]).unwrap_or_default();
         let name = names.get(extension).map_or(extension, String::as_str);
@@ -201,6 +153,7 @@ pub fn template(extension: &str) -> Result<Template, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use windows::Win32::Foundation::ERROR_SUCCESS;
     use windows::Win32::System::Registry::{
         RegDeleteTreeW, RegSetKeyValueW, HKEY_CURRENT_USER, REG_BINARY, REG_SZ,
     };
@@ -284,6 +237,12 @@ mod tests {
         assert!(types.iter().any(|kind| kind.extension == plain.0), "{types:?}");
         assert!(!types.iter().any(|kind| kind.extension == scratch.0), "{types:?}");
         assert!(!types.iter().any(|kind| kind.extension == "lnk"), "{types:?}");
+    }
+
+    #[test]
+    fn a_text_document_is_always_offered() {
+        assert!(read_types().iter().any(|kind| kind.extension == TEXT_EXTENSION));
+        assert_eq!(template(TEXT_EXTENSION).unwrap().extension, ".txt");
     }
 
     #[test]

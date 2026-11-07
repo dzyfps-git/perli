@@ -1,11 +1,14 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { createEffect, For, on } from "solid-js";
+import { createEffect, createSignal, For, on, Show } from "solid-js";
+import { isDefaultApp, setDefaultApp } from "../../api";
 import { accent, ACCENTS, setAccent, setTheme, theme, THEMES } from "./appearance";
 import "./settings.css";
 
 const ICON_CLOSE = "";
 
 export function Settings(props: { open: boolean; onClose: () => void }) {
+  const [isDefault, setIsDefault] = createSignal(false);
+  const [defaultFailure, setDefaultFailure] = createSignal<string>();
   let dialog!: HTMLDialogElement;
 
   createEffect(() => {
@@ -28,6 +31,21 @@ export function Settings(props: { open: boolean; onClose: () => void }) {
     if (props.open) dialog.showModal();
     else if (dialog.open) dialog.close();
   });
+
+  createEffect(() => {
+    if (props.open) isDefaultApp().then(setIsDefault).catch(console.error);
+  });
+
+  async function toggleDefault() {
+    const on = !isDefault();
+    try {
+      await setDefaultApp(on);
+      setIsDefault(on);
+      setDefaultFailure(undefined);
+    } catch (failure) {
+      setDefaultFailure(String(failure));
+    }
+  }
 
   return (
     <dialog ref={dialog} class="settings" aria-label="Settings" onClose={props.onClose}>
@@ -70,6 +88,17 @@ export function Settings(props: { open: boolean; onClose: () => void }) {
           )}
         </For>
       </div>
+
+      <h3>Default file manager</h3>
+      <button class="settings-theme settings-default" role="switch" aria-checked={isDefault()} onClick={toggleDefault}>
+        Open folders in Perli
+      </button>
+      <p class="settings-note">The taskbar, Start and Open dialogs in other apps stay with Windows.</p>
+      <Show when={defaultFailure()}>
+        <p class="settings-note" role="alert">
+          {defaultFailure()}
+        </p>
+      </Show>
     </dialog>
   );
 }

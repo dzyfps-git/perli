@@ -1,6 +1,39 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { baseName, BIN_PATH, join, nextTrail, parentOf, relativeTo, samePath, toCrumbs, typedPath } from "./path.ts";
+import {
+  baseName,
+  BIN_PATH,
+  isDriveRoot,
+  join,
+  nextTrail,
+  parentOf,
+  relativeTo,
+  samePath,
+  toCrumbs,
+  typedPath,
+} from "./path.ts";
+
+test("a network path starts at its server", () => {
+  assert.deepEqual(toCrumbs("\\\\server\\share\\a"), [
+    { label: "\\\\server", path: "\\\\server" },
+    { label: "share", path: "\\\\server\\share" },
+    { label: "a", path: "\\\\server\\share\\a" },
+  ]);
+  assert.equal(parentOf("\\\\server\\share\\a"), "\\\\server\\share");
+  assert.equal(parentOf("\\\\server\\share"), "\\\\server");
+  assert.equal(parentOf("\\\\server"), undefined);
+});
+
+test("typedPath takes network paths with either slash", () => {
+  assert.equal(typedPath("C:\\Work", "\\\\server\\share"), "\\\\server\\share");
+  assert.equal(typedPath("C:\\Work", "//server/share"), "//server/share");
+});
+
+test("isDriveRoot only takes a drive's root", () => {
+  assert.equal(isDriveRoot("Z:\\"), true);
+  assert.equal(isDriveRoot("Z:\\Work"), false);
+  assert.equal(isDriveRoot("\\\\server\\share"), false);
+});
 
 test("relativeTo shortens paths inside the folder and leaves the rest whole", () => {
   assert.equal(relativeTo("C:\\Work", "C:\\Work\\deep\\inner"), "deep\\inner");

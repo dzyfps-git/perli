@@ -295,6 +295,7 @@ pub fn start(paths: &[PathBuf], main: isize) -> Result<()> {
 mod tests {
     use std::fs;
     use std::rc::Rc;
+    use std::sync::MutexGuard;
 
     use windows::core::w;
     use windows::Win32::Foundation::DRAGDROP_E_ALREADYREGISTERED;
@@ -360,20 +361,26 @@ mod tests {
         assert_eq!(choose(NO_KEYS, ANY, &folder, Path::new(r"C:\Top2")), Some(DROPEFFECT_MOVE));
     }
 
+    /// Windows' drag picture helper crashes when two threads run drags at once. The app only has
+    /// one target, on the main thread.
+    static ONE_DRAG: Mutex<()> = Mutex::new(());
+
     struct Scene {
         folder: PathBuf,
         file: PathBuf,
         _com: Com,
+        _turn: MutexGuard<'static, ()>,
     }
 
     impl Scene {
         fn new(name: &str) -> Self {
+            let _turn = ONE_DRAG.lock().unwrap_or_else(PoisonError::into_inner);
             let _com = Com::enter();
             let folder = std::env::temp_dir().join(format!("perli-drag-{name}-{}", std::process::id()));
             fs::create_dir_all(folder.join("into")).unwrap();
             let file = folder.join("a.txt");
             fs::write(&file, "dragged").unwrap();
-            Self { folder, file, _com }
+            Self { folder, file, _com, _turn }
         }
     }
 

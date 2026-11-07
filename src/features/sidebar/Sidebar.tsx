@@ -8,7 +8,7 @@ import "./sidebar.css";
 const ICON_DRIVE = "";
 const ICON_BIN = "";
 
-const FOLDERS: Record<string, { label: string; icon: string }> = {
+export const FOLDERS: Record<string, { label: string; icon: string }> = {
   home: { label: "Home", icon: "" },
   desktop: { label: "Desktop", icon: "" },
   documents: { label: "Documents", icon: "" },
@@ -17,6 +17,9 @@ const FOLDERS: Record<string, { label: string; icon: string }> = {
   music: { label: "Music", icon: "" },
   videos: { label: "Videos", icon: "" },
 };
+
+const ICON_NETWORK = "\uE8CE";
+const ICON_CLOUD = "\uE753";
 
 const FULL_SHARE = 0.9;
 
@@ -126,6 +129,15 @@ export function Sidebar(props: { view: FolderView; onMenu: PlaceMenu }) {
           <Place view={props.view} path={BIN_PATH} label="Recycle Bin" icon={ICON_BIN} onMenu={props.onMenu} />
         </Show>
       </ul>
+      <Show when={places()?.clouds.length}>
+        <ul>
+          <For each={places()?.clouds}>
+            {(cloud) => (
+              <Place view={props.view} path={cloud.path} label={cloud.name} icon={ICON_CLOUD} onMenu={props.onMenu} />
+            )}
+          </For>
+        </ul>
+      </Show>
       <ul>
         <For each={places()?.drives}>
           {(drive) => (
@@ -133,7 +145,7 @@ export function Sidebar(props: { view: FolderView; onMenu: PlaceMenu }) {
               view={props.view}
               path={drive.path}
               label={drive.name}
-              icon={ICON_DRIVE}
+              icon={drive.network ? ICON_NETWORK : ICON_DRIVE}
               onMenu={props.onMenu}
               space={spaces()[drive.path]}
             />

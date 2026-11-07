@@ -41,10 +41,18 @@ interface PooledRow {
 
 const dates = new Intl.DateTimeFormat(undefined, { dateStyle: "short", timeStyle: "short" });
 
+/** A server's shares have no dates. */
+const dateText = (time: number) => (time > 0 ? dates.format(time) : "");
+
+const syncText = (row: Row | undefined) => {
+  if (row?.isCloud) return "In the cloud";
+  return row?.isPinned ? "Always on this device" : undefined;
+};
+
 const CELL_TEXT: Record<SortKey, (row: Row, folder: string) => string> = {
   name: (row) => row.name,
-  modified: (row) => dates.format(row.modified),
-  created: (row) => dates.format(row.created),
+  modified: (row) => dateText(row.modified),
+  created: (row) => dateText(row.created),
   type: (row) => typeText(row.name, row.isDir),
   size: (row) => (row.isDir ? "" : formatSize(row.size)),
   // A deep path would be clipped just where it starts to differ.
@@ -242,6 +250,11 @@ export function FileList(props: {
     pooled.element.toggleAttribute("data-folder", row?.isDir ?? false);
     pooled.element.toggleAttribute("data-hidden", row?.isHidden ?? false);
     pooled.element.toggleAttribute("data-cut", !!row && !!props.cut?.has(row.name));
+    pooled.element.toggleAttribute("data-cloud", row?.isCloud ?? false);
+    pooled.element.toggleAttribute("data-pinned", row?.isPinned ?? false);
+    const sync = syncText(row);
+    if (sync) pooled.element.setAttribute("aria-description", sync);
+    else pooled.element.removeAttribute("aria-description");
     for (const cell of pooled.cells) cell.element.textContent = row ? CELL_TEXT[cell.id](row, props.folder) : "";
     showThumb(pooled, row && thumbKey(row));
   }
@@ -561,6 +574,7 @@ export function FileList(props: {
       selection: () => ({ view: props.view, request: shown, rows: selection.rows() }),
       rename: () => startRename(selection.focused()),
       isEditing: () => editor() !== undefined,
+      focus: () => grid.focus({ preventScroll: true }),
     });
     if (props.selected?.length) {
       selection.restore(props.selected);
