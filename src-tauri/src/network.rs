@@ -162,6 +162,12 @@ mod tests {
     }
 
     #[test]
+    fn a_share_typed_with_forward_slashes_signs_in_once_resolved() {
+        let resolved = crate::folder::resolve("//server/share/deep").unwrap();
+        assert_eq!(remote_of(&resolved).unwrap(), r"\\server\share");
+    }
+
+    #[test]
     fn a_local_drive_is_not_mapped() {
         assert_eq!(mapped_drive(&std::env::var("SystemDrive").unwrap()), None);
         assert_eq!(mapped_drive("shell:RecycleBinFolder"), None);

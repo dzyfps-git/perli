@@ -385,6 +385,7 @@ async fn open_folder(
         .unwrap_or_else(|error| error.into_inner())
         .take_if(|(preloaded, _)| *preloaded == path);
     let resolved = folder::resolve(&path).map_err(|error| error.message())?;
+    let full = resolved.clone();
     let listing = async_runtime::spawn_blocking(move || {
         let read = || folder::Listing::read(&path, order);
         let first = match waiting {
@@ -395,7 +396,7 @@ async fn open_folder(
             None => read(),
         };
         first.or_else(|failure| {
-            if network::reconnect(&path, &failure, jobs::owner(&app)) {
+            if network::reconnect(&full, &failure, jobs::owner(&app)) {
                 read()
             } else {
                 Err(failure)

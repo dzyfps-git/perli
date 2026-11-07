@@ -65,24 +65,31 @@ impl Roots {
         shown.as_deref() == Some(VERB)
     }
 
+    /// Perli's own values never count as old ones. A backup can still be here because another
+    /// app took the folders over since, and what it holds for values still Perli's is the truth.
     fn write(&self, exe: &str) -> Result<()> {
+        let saved_for = registry::read_text(USER, &self.backup, Some(BACKUP_EXE));
+        let own = saved_for.map_or_else(Vec::new, |exe| values(&exe));
         registry::write_text(USER, &self.backup, BACKUP_EXE, exe)?;
         for (index, value) in values(exe).iter().enumerate() {
             let key = self.class(&value.key);
-            if let Some(old) = registry::read_text(USER, &key, Some(value.name)) {
-                registry::write_text(USER, &self.backup, &index.to_string(), &old)?;
+            let old = registry::read_text(USER, &key, Some(value.name));
+            if own.get(index).is_none_or(|own| old.as_ref() != Some(&own.data)) {
+                let slot = index.to_string();
+                match old {
+                    Some(old) => registry::write_text(USER, &self.backup, &slot, &old)?,
+                    None => registry::delete_value(USER, &self.backup, &slot),
+                }
             }
             registry::write_text(USER, &key, value.name, &value.data)?;
         }
         Ok(())
     }
 
-    /// A second call must not save Perli's own values as the old ones.
     fn enable(&self, exe: &str) -> Result<()> {
         if self.is_default() {
             return Ok(());
         }
-        registry::delete_tree(USER, &self.backup);
         self.write(exe).inspect_err(|_| self.restore())
     }
 
@@ -103,9 +110,6 @@ impl Roots {
                 }
                 None => registry::delete_value(USER, &key, value.name),
             }
-        }
-        for kind in FOLDER_KINDS {
-            registry::delete_tree(USER, &self.class(&format!(r"{kind}\shell\{VERB}")));
         }
         for key in made_keys(&values) {
             registry::delete_if_empty(USER, &self.class(&key));
@@ -249,6 +253,67 @@ mod tests {
         scratch.roots.restore();
 
         assert_eq!(scratch.read(r"Drive\shell", "").unwrap(), "other");
+    }
+
+    #[test]
+    fn enabling_after_another_app_took_over_keeps_the_real_old_values() {
+        let scratch = Scratch::new();
+        scratch.write(r"Drive\shell", "", "first");
+        scratch.write(WIN_E, "DelegateExecute", "{old}");
+        scratch.roots.enable(EXE).unwrap();
+
+        scratch.write(r"Directory\shell", "", "newer");
+        scratch.roots.enable(EXE).unwrap();
+        assert!(scratch.roots.is_default());
+        scratch.roots.restore();
+
+        assert_eq!(scratch.read(r"Directory\shell", "").unwrap(), "newer");
+        assert_eq!(scratch.read(r"Drive\shell", "").unwrap(), "first");
+        assert_eq!(scratch.read(WIN_E, "DelegateExecute").unwrap(), "{old}");
+        assert_eq!(scratch.read(WIN_E, ""), None);
+        for kind in FOLDER_KINDS {
+            assert!(!exists(USER, &scratch.roots.class(&format!(r"{kind}\shell\perli"))));
+        }
+    }
+
+    #[test]
+    fn enabling_again_lets_a_value_another_app_removed_stay_removed() {
+        let scratch = Scratch::new();
+        scratch.write(r"Drive\shell", "", "first");
+        scratch.roots.enable(EXE).unwrap();
+
+        registry::delete_value(USER, &scratch.roots.class(r"Drive\shell"), "");
+        scratch.write(r"Directory\shell", "", "newer");
+        scratch.roots.enable(EXE).unwrap();
+        scratch.roots.restore();
+
+        assert_eq!(scratch.read(r"Drive\shell", ""), None);
+    }
+
+    #[test]
+    fn restoring_leaves_what_someone_else_put_in_perlis_keys() {
+        let scratch = Scratch::new();
+        scratch.roots.enable(EXE).unwrap();
+        scratch.write(r"Directory\shell\perli\command", "", "theirs.exe");
+        scratch.write(r"Drive\shell\perli", "Icon", "theirs.ico");
+
+        scratch.roots.restore();
+
+        assert_eq!(scratch.read(r"Directory\shell\perli\command", "").unwrap(), "theirs.exe");
+        assert_eq!(scratch.read(r"Drive\shell\perli", "Icon").unwrap(), "theirs.ico");
+        assert_eq!(scratch.read(r"Drive\shell\perli", ""), None);
+        assert!(!exists(USER, &scratch.roots.class(r"Drive\shell\perli\command")));
+    }
+
+    #[test]
+    fn restoring_brings_back_a_command_that_was_there_first() {
+        let scratch = Scratch::new();
+        scratch.write(r"Directory\shell\perli\command", "", "old.exe");
+
+        scratch.roots.enable(EXE).unwrap();
+        scratch.roots.restore();
+
+        assert_eq!(scratch.read(r"Directory\shell\perli\command", "").unwrap(), "old.exe");
     }
 
     #[test]

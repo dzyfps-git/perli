@@ -15,6 +15,9 @@ use crate::{places, registry, shell};
 
 /// Longest text a `ShellNew` item name resolves to.
 const LONGEST_TEXT: usize = 512;
+/// Offered even on a PC whose Windows lists no such type. Its own template wins if it has one.
+const TEXT_EXTENSION: &str = "txt";
+const TEXT_NAME: &str = "Text Document";
 
 /// A type for the New menu.
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -114,6 +117,9 @@ fn read_types() -> Vec<NewType> {
         .into_iter()
         .map(|(extension, name)| NewType { extension, name })
         .collect();
+    if !types.iter().any(|kind| kind.extension == TEXT_EXTENSION) {
+        types.push(NewType { extension: TEXT_EXTENSION.into(), name: TEXT_NAME.into() });
+    }
     types.sort_by_key(|kind| kind.name.to_lowercase());
     types
 }
@@ -128,9 +134,14 @@ pub fn new_types() -> Vec<NewType> {
 /// What a new file of `extension` should be named and hold.
 pub fn template(extension: &str) -> Result<Template, String> {
     let dotted = format!(".{extension}");
-    let unknown = || format!("Windows has no template for {dotted} files");
-    let key = shell_new_key(&dotted).ok_or_else(unknown)?;
-    let content = content_of(&key).ok_or_else(unknown)?;
+    let found = shell_new_key(&dotted).and_then(|key| content_of(&key).map(|content| (key, content)));
+    let Some((key, content)) = found else {
+        if extension != TEXT_EXTENSION {
+            return Err(format!("Windows has no template for {dotted} files"));
+        }
+        let stem = format!("New {TEXT_NAME}");
+        return Ok(Template { stem, extension: dotted, content: Content::Empty });
+    };
     let stem = item_name(&key).unwrap_or_else(|| {
         let names = shell::type_names(vec![extension.to_string()]).unwrap_or_default();
         let name = names.get(extension).map_or(extension, String::as_str);
@@ -226,6 +237,12 @@ mod tests {
         assert!(types.iter().any(|kind| kind.extension == plain.0), "{types:?}");
         assert!(!types.iter().any(|kind| kind.extension == scratch.0), "{types:?}");
         assert!(!types.iter().any(|kind| kind.extension == "lnk"), "{types:?}");
+    }
+
+    #[test]
+    fn a_text_document_is_always_offered() {
+        assert!(read_types().iter().any(|kind| kind.extension == TEXT_EXTENSION));
+        assert_eq!(template(TEXT_EXTENSION).unwrap().extension, ".txt");
     }
 
     #[test]
