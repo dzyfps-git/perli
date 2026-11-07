@@ -15,6 +15,7 @@ import {
   type SortKey,
 } from "./api";
 import { createFileActions } from "./features/fileops/actions";
+import { followFileDrag } from "./features/fileops/fileDrag";
 import { checkCut, cutNames, takeBackCut } from "./features/fileops/clipboard";
 import { ConfirmDelete, type DeleteRequest } from "./features/fileops/ConfirmDelete";
 import { createJobs } from "./features/fileops/jobs";
@@ -118,6 +119,7 @@ export function App() {
 
   // Covers every way to close, including Alt+F4 and the taskbar.
   const closeListener = onCloseAsked(onClose);
+  const dragListener = followFileDrag(tabs.allViews, jobs.report);
   // Other apps and Windows' own commands change folders without Perli running a job.
   const folderListener = onFolderChanged((id) => tabs.allViews().find((view) => view.id === id)?.reload());
 
@@ -418,6 +420,7 @@ export function App() {
     window.clearTimeout(saveTimer);
     closeListener.then((stop) => stop());
     folderListener.then((stop) => stop());
+    dragListener.then((stop) => stop());
     window.removeEventListener("keydown", onKeyDown);
     window.removeEventListener("mouseup", onMouseButton);
     window.removeEventListener("contextmenu", hideBrowserMenu);
@@ -433,6 +436,7 @@ export function App() {
     return (
       <section
         class="pane"
+        data-view={view.id}
         classList={{ "pane-active": tab.panes().length > 1 && view === tab.active() }}
         onPointerDown={activate}
         onFocusIn={activate}
@@ -467,6 +471,7 @@ export function App() {
                 layout={view.layout()}
                 sort={view.sort()}
                 onSort={(key) => view.setSort(nextSort(view.sort(), key))}
+                onDragOut={() => actions.dragOut(view)}
                 onOpen={(row, toSide) => openRow(view, row, toSide)}
                 onMenu={(event, row) => showRowMenu(event, view, row)}
                 onBackgroundMenu={(event) => showBackgroundMenu(event, view)}

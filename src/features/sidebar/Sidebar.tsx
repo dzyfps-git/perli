@@ -2,7 +2,7 @@ import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { driveSpace, listPlaces, onDrivesChanged, type DriveSpace, type Places } from "../../api";
 import { formatSize } from "../../ui/format";
 import type { FolderView } from "../navigation/folderView";
-import { BIN_PATH, samePath } from "../navigation/path";
+import { BIN_PATH, isBin, samePath } from "../navigation/path";
 import "./sidebar.css";
 
 const ICON_DRIVE = "";
@@ -35,6 +35,7 @@ function Place(props: {
     <li>
       <button
         class="place"
+        data-drop={isBin(props.path) ? undefined : props.path}
         aria-current={samePath(props.view.folder()?.path, props.path) ? "location" : undefined}
         onClick={() => props.view.open(props.path)}
         onContextMenu={(event) => props.onMenu(event, props.path)}

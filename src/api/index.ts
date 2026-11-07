@@ -74,6 +74,7 @@ export type Task =
   | { kind: "new"; folder: string; directory: boolean }
   | { kind: "template"; folder: string; extension: string }
   | { kind: "paste"; folder: string }
+  | { kind: "drop"; folder: string }
   | { kind: "recycle" | "delete" | "restore" | "purge"; selection: Selection }
   | { kind: "empty" };
 
@@ -147,6 +148,9 @@ export interface NewType {
   extension: string;
   name: string;
 }
+
+/** Files being dragged over the window, in physical pixels inside it. */
+export type FileDrag = { kind: "over" | "drop"; x: number; y: number } | { kind: "leave" };
 
 /** What a Windows menu or Properties window is for. */
 export type ShellTarget = { kind: "rows"; selection: Selection } | { kind: "folder"; path: string };
@@ -291,6 +295,15 @@ export const onFolderChanged = (handler: (view: number) => void) =>
   listen<number>("folder-changed", (event) => handler(event.payload));
 
 export const onDrivesChanged = (handler: () => void) => listen("drives-changed", handler);
+
+export const onFileDrag = (handler: (event: FileDrag) => void) =>
+  listen<FileDrag>("file-drag", (event) => handler(event.payload));
+
+/** Names the folder under a drag, which decides the cursor. */
+export const setDropTarget = (folder: string | null) => invoke<void>("set_drop_target", { folder });
+
+/** Starts dragging the selected files to any app. Ends when the user lets go. */
+export const startDrag = (selection: Selection) => invoke<void>("start_drag", { selection });
 
 export async function fetchRows(
   view: number,

@@ -4,16 +4,16 @@ use std::mem;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use windows::core::{implement, Error, Ref, Result, HRESULT, HSTRING, PCWSTR};
+use windows::core::{implement, Error, Interface, Ref, Result, HRESULT, HSTRING, PCWSTR};
 use windows::Win32::Foundation::{E_FAIL, HWND, S_OK};
 use windows::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL};
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_ALL,
-    COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE,
+    CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, IPersistFile, CLSCTX_ALL,
+    CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE,
 };
 use windows::Win32::UI::Shell::{
     FileOperation, IFileOperation, IFileOperationProgressSink, IFileOperationProgressSink_Impl,
-    IShellItem, SHCreateItemFromParsingName, COPYENGINE_E_USER_CANCELLED,
+    IShellItem, IShellLinkW, SHCreateItemFromParsingName, ShellLink, COPYENGINE_E_USER_CANCELLED,
     COPYENGINE_S_DONT_PROCESS_CHILDREN, FILEOPERATION_FLAGS,
     FOFX_RECYCLEONDELETE, FOFX_REQUIREELEVATION, FOFX_SHOWELEVATIONPROMPT, FOF_ALLOWUNDO,
     FOF_NOCONFIRMMKDIR, FOF_NORECURSEREPARSE, FOF_NO_UI, SIGDN_FILESYSPATH,
@@ -41,6 +41,18 @@ impl Drop for Com {
         if self.0 {
             unsafe { CoUninitialize() };
         }
+    }
+}
+
+/// Writes a Windows shortcut file at `target` that opens `source`.
+pub fn write_shortcut(source: &Path, target: &Path) -> Result<()> {
+    unsafe {
+        let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)?;
+        link.SetPath(&HSTRING::from(source.as_os_str()))?;
+        if let Some(folder) = source.parent() {
+            link.SetWorkingDirectory(&HSTRING::from(folder.as_os_str()))?;
+        }
+        link.cast::<IPersistFile>()?.Save(&HSTRING::from(target.as_os_str()), true)
     }
 }
 

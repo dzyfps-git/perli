@@ -75,7 +75,7 @@ fn encode(paths: &[PathBuf]) -> Vec<u8> {
 }
 
 // ponytail: UTF-16 lists only, which every program since Windows 2000 writes.
-fn decode(bytes: &[u8]) -> Option<Vec<PathBuf>> {
+pub fn decode(bytes: &[u8]) -> Option<Vec<PathBuf>> {
     let word = |at: usize| Some(u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?));
     if word(WIDE_FLAG_OFFSET)? == 0 {
         return None;
@@ -109,7 +109,11 @@ unsafe fn put(format: u32, bytes: &[u8]) -> Result<()> {
 }
 
 unsafe fn take(format: u32) -> Option<Vec<u8>> {
-    let memory = HGLOBAL(GetClipboardData(format).ok()?.0);
+    copy_memory(HGLOBAL(GetClipboardData(format).ok()?.0))
+}
+
+/// Copies out a block of global memory that holds a file list or a clipboard value.
+pub unsafe fn copy_memory(memory: HGLOBAL) -> Option<Vec<u8>> {
     let source = GlobalLock(memory) as *const u8;
     if source.is_null() {
         return None;
