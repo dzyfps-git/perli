@@ -5,11 +5,12 @@ use std::mem::size_of;
 use serde::Serialize;
 use windows::core::{Result, GUID, HSTRING};
 use windows::Win32::Storage::FileSystem::{
-    GetDiskFreeSpaceExW, GetLogicalDrives, FILE_FLAGS_AND_ATTRIBUTES,
+    GetDiskFreeSpaceExW, GetDriveTypeW, GetLogicalDrives, FILE_FLAGS_AND_ATTRIBUTES,
 };
 use windows::Win32::System::Com::{
     CoInitializeEx, CoTaskMemFree, CoUninitialize, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE,
 };
+use windows::Win32::System::WindowsProgramming::{DRIVE_REMOTE, DRIVE_REMOVABLE};
 use windows::Win32::UI::Shell::{
     FOLDERID_Desktop, FOLDERID_Documents, FOLDERID_Downloads, FOLDERID_Music, FOLDERID_Pictures,
     FOLDERID_Profile, FOLDERID_Videos, SHGetFileInfoW, SHGetKnownFolderPath, KF_FLAG_DEFAULT,
@@ -81,7 +82,7 @@ pub fn read() -> Result<Places> {
 }
 
 /// Follows redirection, so a Documents folder moved to OneDrive or D: is found.
-fn known_folder(id: &GUID) -> Option<String> {
+pub fn known_folder(id: &GUID) -> Option<String> {
     unsafe {
         let path = SHGetKnownFolderPath(id, KF_FLAG_DEFAULT, None).ok()?;
         let text = path.to_string().ok();
@@ -90,20 +91,35 @@ fn known_folder(id: &GUID) -> Option<String> {
     }
 }
 
-fn read_drives() -> Vec<Drive> {
+fn drive_paths() -> impl Iterator<Item = String> {
     let letters = unsafe { GetLogicalDrives() };
     (0..26)
-        .filter(|bit| letters & (1 << bit) != 0)
-        .map(|bit| {
-            let path = format!(r"{}:\", char::from(b'A' + bit));
+        .filter(move |bit| letters & (1 << bit) != 0)
+        .map(|bit| format!(r"{}:\", char::from(b'A' + bit)))
+}
+
+fn read_drives() -> Vec<Drive> {
+    drive_paths()
+        .map(|path| {
             let name = display_name(&path).unwrap_or_else(|| path.clone());
             Drive { name, path }
         })
         .collect()
 }
 
+/// Drives a file can be sent to, with the name Explorer shows and the path.
+pub fn removable_drives() -> Vec<(String, String)> {
+    drive_paths()
+        .filter(|path| {
+            let kind = unsafe { GetDriveTypeW(&HSTRING::from(path)) };
+            kind == DRIVE_REMOVABLE || kind == DRIVE_REMOTE
+        })
+        .map(|path| (display_name(&path).unwrap_or_else(|| path.clone()), path))
+        .collect()
+}
+
 /// The name Explorer shows, such as "Local Disk (C:)".
-fn display_name(path: &str) -> Option<String> {
+pub fn display_name(path: &str) -> Option<String> {
     let mut info = SHFILEINFOW::default();
     let found = unsafe {
         SHGetFileInfoW(

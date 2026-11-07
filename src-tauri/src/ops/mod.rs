@@ -22,7 +22,8 @@ use windows::core::{Error, Result};
 
 pub use bin::{read as read_bin, BinItem};
 pub use names::check_rename;
-pub use transfer::{put_back, remove_leftovers};
+pub use shell::shell_item;
+pub use transfer::{is_temp_name, put_back, remove_leftovers};
 pub use tree::measure;
 
 /// One unit of work, run to the end by `run`.
@@ -31,12 +32,32 @@ pub enum Job {
     Move { sources: Vec<PathBuf>, folder: PathBuf },
     Rename { path: PathBuf, name: String },
     New { folder: PathBuf, directory: bool },
+    Template { folder: PathBuf, template: Template },
     Recycle { paths: Vec<PathBuf> },
     Delete { paths: Vec<PathBuf> },
     Restore { items: Vec<BinItem> },
     Purge { items: Vec<BinItem> },
     Empty,
     Undo { records: Vec<Done> },
+}
+
+/// A new file of a type Windows knows, such as a blank spreadsheet.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Template {
+    /// The name before any number, such as "New Text Document".
+    pub stem: String,
+    /// Starts with a dot.
+    pub extension: String,
+    pub content: Content,
+}
+
+/// What a new file starts with.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Content {
+    Empty,
+    Bytes(Vec<u8>),
+    /// A blank document of that type, to copy.
+    Copy(PathBuf),
 }
 
 /// One change a job made, in a form that can be undone.
@@ -247,6 +268,7 @@ impl<'a> Run<'a> {
             Job::Move { sources, folder } => self.move_sources(sources, &folder),
             Job::Rename { path, name } => self.rename(&path, &name),
             Job::New { folder, directory } => self.new_item(&folder, directory),
+            Job::Template { folder, template } => self.new_from(&folder, &template),
             Job::Recycle { paths } => {
                 self.add_total(paths.len() as u64, 0);
                 self.recycle(paths)
@@ -295,6 +317,22 @@ impl<'a> Run<'a> {
             } else {
                 sys::create_file(&target)
             }
+        })?;
+        if made.is_some() {
+            self.done.push(Done::Created { path: target });
+        }
+        self.step(1, 0);
+        Ok(())
+    }
+
+    // ponytail: no admin route for templates, as the shell's new item can't carry their content.
+    fn new_from(&mut self, folder: &Path, template: &Template) -> Flow {
+        self.add_total(1, 0);
+        let target = names::free(folder, &template.stem, &template.extension);
+        let made = self.attempt(folder, None, |_| match &template.content {
+            Content::Empty => sys::create_file(&target),
+            Content::Bytes(bytes) => sys::write_new(&target, bytes),
+            Content::Copy(file) => sys::copy_file(file, &target, false, |_| true),
         })?;
         if made.is_some() {
             self.done.push(Done::Created { path: target });
@@ -389,9 +427,14 @@ impl<'a> Run<'a> {
         if can_elevate && sys::is_access_denied(error) {
             choices.insert(1, Answer::Elevate);
         }
+        let users = if sys::is_in_use(error) {
+            sys::users_of(&[path.to_path_buf()])
+        } else {
+            Vec::new()
+        };
         let question = Question::Problem {
             path: path.to_string_lossy().into_owned(),
-            message: error.message(),
+            message: with_users(&error.message(), &users),
             choices,
         };
         self.ask(Key::Problem(error.code().0), question)
@@ -457,6 +500,14 @@ impl<'a> Run<'a> {
             cancelled,
         }
     }
+}
+
+/// Adds the apps holding a file to what Windows said about it.
+fn with_users(message: &str, users: &[String]) -> String {
+    if users.is_empty() {
+        return message.to_string();
+    }
+    format!("{} Open in {}.", message.trim_end(), users.join(", "))
 }
 
 /// Runs a job to its end on this thread, which also hosts any shell work it needs.

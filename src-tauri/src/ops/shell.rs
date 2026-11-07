@@ -44,7 +44,7 @@ impl Drop for Com {
     }
 }
 
-fn shell_item(path: &Path) -> Result<IShellItem> {
+pub fn shell_item(path: &Path) -> Result<IShellItem> {
     let plain = path.as_os_str().len() <= MAX_PATH;
     let name = if plain { HSTRING::from(path.as_os_str()) } else { sys::extended(path) };
     unsafe { SHCreateItemFromParsingName(&name, None) }

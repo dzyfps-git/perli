@@ -1013,6 +1013,60 @@ fn new_items_take_free_names_and_undo_recycles_them() {
 }
 
 #[test]
+fn a_template_fills_the_new_file_and_undo_recycles_it() {
+    let sandbox = Sandbox::new();
+    let folder = sandbox.folder("here");
+    let blank = folder.join("blank.bin");
+    fs::write(&blank, "from a file").unwrap();
+    let new = |content| {
+        let template = Template {
+            stem: "New Note".to_string(),
+            extension: ".note".to_string(),
+            content,
+        };
+        go(Job::Template {
+            folder: folder.clone(),
+            template,
+        })
+    };
+
+    new(Content::Empty);
+    new(Content::Bytes(b"from the registry".to_vec()));
+    let outcome = new(Content::Copy(blank));
+
+    assert_eq!(read(&folder.join("New Note.note")), "");
+    assert_eq!(read(&folder.join("New Note (2).note")), "from the registry");
+    assert_eq!(read(&folder.join("New Note (3).note")), "from a file");
+    let undone = undo(outcome);
+    assert!(!folder.join("New Note (3).note").exists());
+    purge(&undone);
+}
+
+#[test]
+fn a_locked_file_names_the_app_holding_it() {
+    let sandbox = Sandbox::new();
+    let folder = sandbox.folder("here");
+    let file = folder.join("held.txt");
+    fs::write(&file, "held").unwrap();
+    let _held = lock(&file);
+
+    let users = sys::users_of(&[folder]);
+
+    // Windows names this test program by its product, not by its file.
+    assert!(users.iter().any(|user| user.to_lowercase().contains("perli")), "{users:?}");
+}
+
+#[test]
+fn only_perlis_own_temp_names_count() {
+    assert!(is_temp_name("~perli-12-3.part"));
+    assert!(is_temp_name("~perli-12-3.moved"));
+    assert!(!is_temp_name("~perli-12-3.txt"));
+    assert!(!is_temp_name("~perli-a-3.part"));
+    assert!(!is_temp_name("~perli-12.part"));
+    assert!(!is_temp_name("notes.part"));
+}
+
+#[test]
 fn name_rules() {
     for bad in ["", ".", "..", "a/b", "a\\b", "a:b", "a*b", "a?b", "a\"b", "a<b", "a>b", "a|b"] {
         assert!(check_name(bad).is_err(), "{bad}");

@@ -1,5 +1,5 @@
 import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
-import { driveSpace, listPlaces, type DriveSpace, type Places } from "../../api";
+import { driveSpace, listPlaces, onDrivesChanged, type DriveSpace, type Places } from "../../api";
 import { formatSize } from "../../ui/format";
 import type { FolderView } from "../navigation/folderView";
 import { BIN_PATH, samePath } from "../navigation/path";
@@ -96,12 +96,17 @@ export function Sidebar(props: { view: FolderView; onMenu: PlaceMenu }) {
     }
   }
 
-  // ponytail: read once, so a newly plugged drive needs a restart. Watch for drive changes in Phase 3.
+  const readPlaces = () => listPlaces().then(setPlaces).then(readSpaces).catch(console.error);
+  const drivesListener = onDrivesChanged(readPlaces);
+
   onMount(() => {
-    listPlaces().then(setPlaces).then(readSpaces).catch(console.error);
+    readPlaces();
     window.addEventListener("focus", readSpaces);
   });
-  onCleanup(() => window.removeEventListener("focus", readSpaces));
+  onCleanup(() => {
+    drivesListener.then((stop) => stop());
+    window.removeEventListener("focus", readSpaces);
+  });
 
   return (
     <nav

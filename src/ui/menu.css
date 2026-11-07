@@ -11,6 +11,8 @@
   display: flex;
   flex-direction: column;
   min-width: 180px;
+  max-height: calc(100vh - var(--space-2));
+  overflow-y: auto;
   padding: var(--space-1);
   background: var(--overlay-tint);
   border: 1px solid var(--border);
@@ -18,6 +20,10 @@
   box-shadow: var(--shadow);
   backdrop-filter: var(--blur);
   animation: menu-in var(--motion);
+}
+
+.menu-still {
+  animation: none;
 }
 
 .menu-item {

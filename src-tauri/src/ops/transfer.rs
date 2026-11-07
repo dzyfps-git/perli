@@ -11,18 +11,31 @@ use super::sys::{self, Stat};
 use super::tree::Node;
 use super::{names, Answer, Done, Elevated, Facts, Flow, Key, Question, Run};
 
+const TEMP_PREFIX: &str = "~perli-";
+
 static TEMP_NUMBER: AtomicU64 = AtomicU64::new(0);
 
 /// A copy is written here and renamed when whole, so a real name never holds half a file.
 fn temp_path(folder: &Path) -> PathBuf {
     let number = TEMP_NUMBER.fetch_add(1, Ordering::Relaxed);
-    folder.join(format!("~perli-{}-{number}.part", std::process::id()))
+    folder.join(format!("{TEMP_PREFIX}{}-{number}.part", std::process::id()))
 }
 
 /// Holds the source of a move while the file it replaces leaves. This is the only copy of
 /// that file, so unlike a `temp_path` file it never counts as a leftover.
 fn staged_path(folder: &Path) -> PathBuf {
     temp_path(folder).with_extension("moved")
+}
+
+/// True for a name `temp_path` or `staged_path` gave out. These are Perli's working files.
+pub fn is_temp_name(name: &str) -> bool {
+    let digits = |text: &str| !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit());
+    let numbers = name
+        .strip_prefix(TEMP_PREFIX)
+        .and_then(|rest| rest.strip_suffix(".part").or_else(|| rest.strip_suffix(".moved")));
+    numbers
+        .and_then(|numbers| numbers.split_once('-'))
+        .is_some_and(|(process, number)| digits(process) && digits(number))
 }
 
 /// Returns a staged file to `source`, or beside it if something took that name meanwhile.
@@ -37,7 +50,7 @@ pub fn put_back(staged: &Path, source: &Path) -> windows::core::Result<()> {
 
 /// Removes what a process that is gone left behind in `folder`, as `temp_path` named it.
 pub fn remove_leftovers(folder: &Path, process: u32) -> io::Result<()> {
-    let prefix = format!("~perli-{process}-");
+    let prefix = format!("{TEMP_PREFIX}{process}-");
     for entry in fs::read_dir(folder)? {
         let entry = entry?;
         let name = entry.file_name();

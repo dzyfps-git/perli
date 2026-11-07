@@ -2,14 +2,16 @@
 //! and passes the test guard first, so a test cannot touch anything outside its temp folder.
 
 use std::ffi::{c_void, OsString};
+use std::io::Write;
 use std::mem::size_of;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 
-use windows::core::{Error, Owned, Result, HSTRING};
+use windows::core::{Error, Owned, Result, HSTRING, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{
-    ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_NOT_SAME_DEVICE,
-    ERROR_NO_MORE_FILES, ERROR_PATH_NOT_FOUND, E_UNEXPECTED, FILETIME, GENERIC_WRITE, HANDLE,
+    ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_LOCK_VIOLATION,
+    ERROR_MORE_DATA, ERROR_NOT_SAME_DEVICE, ERROR_NO_MORE_FILES, ERROR_PATH_NOT_FOUND,
+    ERROR_SHARING_VIOLATION, ERROR_SUCCESS, E_UNEXPECTED, FILETIME, GENERIC_WRITE, HANDLE,
     STILL_ACTIVE,
 };
 use windows::Win32::Storage::FileSystem::{
@@ -31,6 +33,10 @@ use windows::Win32::Storage::FileSystem::{
     VOLUME_NAME_NT, WIN32_FIND_DATAW,
 };
 use windows::Win32::System::Ioctl::{FSCTL_GET_REPARSE_POINT, FSCTL_SET_REPARSE_POINT};
+use windows::Win32::System::RestartManager::{
+    RmEndSession, RmGetList, RmRegisterResources, RmStartSession, CCH_RM_SESSION_KEY,
+    RM_PROCESS_INFO,
+};
 use windows::Win32::System::Threading::{
     GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
 };
@@ -42,6 +48,9 @@ use windows::Win32::UI::Shell::{
 /// The reparse tag bit that says the object stands in for another name: a junction, mount
 /// point or symlink. Cloud placeholders lack it, so they count as normal files and folders.
 const NAME_SURROGATE: u32 = 0x2000_0000;
+
+/// How many files under a folder Restart Manager gets asked about.
+const USERS_FILE_LIMIT: usize = 1000;
 
 /// Attributes a new folder takes from the folder it copies.
 const FOLDER_ATTRIBUTES: u32 = FILE_ATTRIBUTE_HIDDEN.0 | FILE_ATTRIBUTE_SYSTEM.0 | FILE_ATTRIBUTE_READONLY.0;
@@ -227,6 +236,75 @@ pub fn is_access_denied(error: &Error) -> bool {
     error.code() == ERROR_ACCESS_DENIED.to_hresult()
 }
 
+/// Another program holds the file.
+pub fn is_in_use(error: &Error) -> bool {
+    let code = error.code();
+    code == ERROR_SHARING_VIOLATION.to_hresult() || code == ERROR_LOCK_VIOLATION.to_hresult()
+}
+
+/// Up to `room` more files at or under `path`, for asking who holds them.
+fn files_under(path: &Path, room: usize, files: &mut Vec<PathBuf>) {
+    match stat(path) {
+        Ok(Some(found)) if found.is_folder() => {
+            for (name, _) in read_dir(path).unwrap_or_default() {
+                if files.len() < room {
+                    files_under(&path.join(name), room, files);
+                }
+            }
+        }
+        Ok(Some(found)) if !found.is_dir() && files.len() < room => files.push(path.to_path_buf()),
+        _ => {}
+    }
+}
+
+/// The apps holding files at or under `paths`, through Windows Restart Manager. It can only ask
+/// about files, so a folder held open by something's current directory shows nothing.
+pub fn users_of(paths: &[PathBuf]) -> Vec<String> {
+    let mut files = Vec::new();
+    for path in paths {
+        files_under(path, USERS_FILE_LIMIT, &mut files);
+    }
+    let names: Vec<HSTRING> = files.iter().map(|file| HSTRING::from(file.as_os_str())).collect();
+    let raw: Vec<PCWSTR> = names.iter().map(|name| PCWSTR(name.as_ptr())).collect();
+    let mut session = 0;
+    let mut key = [0u16; CCH_RM_SESSION_KEY as usize + 1];
+    unsafe {
+        if RmStartSession(&raw mut session, None, PWSTR(key.as_mut_ptr())) != ERROR_SUCCESS {
+            return Vec::new();
+        }
+        let users = session_users(session, &raw);
+        let _ = RmEndSession(session);
+        users
+    }
+}
+
+unsafe fn session_users(session: u32, files: &[PCWSTR]) -> Vec<String> {
+    let (mut needed, mut count, mut reasons) = (0, 0, 0);
+    unsafe {
+        if RmRegisterResources(session, Some(files), None, None) != ERROR_SUCCESS
+            || RmGetList(session, &raw mut needed, &raw mut count, None, &raw mut reasons) != ERROR_MORE_DATA
+        {
+            return Vec::new();
+        }
+        let mut found = vec![RM_PROCESS_INFO::default(); needed as usize];
+        count = needed;
+        if RmGetList(session, &raw mut needed, &raw mut count, Some(found.as_mut_ptr()), &raw mut reasons)
+            != ERROR_SUCCESS
+        {
+            return Vec::new();
+        }
+        found.truncate(count as usize);
+        let name = |info: &RM_PROCESS_INFO| {
+            let length = info.strAppName.iter().position(|&unit| unit == 0)?;
+            Some(String::from_utf16_lossy(&info.strAppName[..length]))
+        };
+        let mut users: Vec<String> = found.iter().filter_map(name).collect();
+        users.sort();
+        users.dedup();
+        users
+    }
+}
+
 struct CopyState<'a> {
     report: &'a mut dyn FnMut(u64) -> bool,
     flush: bool,
@@ -332,6 +410,15 @@ pub fn create_dirs(path: &Path) -> Result<()> {
         }
         created => created,
     }
+}
+
+/// Writes a file that must not exist yet.
+pub fn write_new(path: &Path, bytes: &[u8]) -> Result<()> {
+    guard(path);
+    let target = PathBuf::from(extended(path).to_os_string());
+    let mut file = std::fs::File::options().write(true).create_new(true).open(target)?;
+    file.write_all(bytes)?;
+    Ok(())
 }
 
 pub fn create_file(path: &Path) -> Result<()> {

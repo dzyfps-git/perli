@@ -20,7 +20,6 @@ async function askWindows() {
 }
 
 /** Windows' name for this file's type. Shows a plain one until Windows answers. */
-// ponytail: sort by type still uses the extension, so JPG and JPEG sit apart under one name.
 export function typeText(name: string, isDir: boolean) {
   const dot = name.lastIndexOf(".");
   if (isDir || dot < 0) return typeLabel(name, isDir);

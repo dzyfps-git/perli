@@ -13,6 +13,8 @@ import { forgetCut, markCut } from "./clipboard";
 import type { DeleteRequest } from "./ConfirmDelete";
 import type { Jobs } from "./jobs";
 
+export type FileActions = ReturnType<typeof createFileActions>;
+
 /** What the keys and menus can do to files. `otherView` is the split pane, if there is one. */
 export function createFileActions(
   jobs: Jobs,
@@ -31,6 +33,8 @@ export function createFileActions(
   const movable = (view: FolderView) => (view.isBin() ? undefined : selected(view));
 
   return {
+    selected,
+
     copy(view: FolderView) {
       const selection = movable(view);
       if (selection) setClipboard(selection, false).then(forgetCut).catch(report);
@@ -57,6 +61,12 @@ export function createFileActions(
       if (selection && folder && !otherView()?.isBin()) start(view, { kind, selection, folder });
     },
 
+    /** Copies the selection to `folder`, which needs no other pane. */
+    copyTo(view: FolderView, folder: string) {
+      const selection = movable(view);
+      if (selection) start(view, { kind: "copy", selection, folder });
+    },
+
     /** Rejects with the reason a name can't be used. */
     rename(view: FolderView, selection: Selection, name: string) {
       return startJob({ kind: "rename", selection, name }, view.id);
@@ -69,6 +79,12 @@ export function createFileActions(
     newItem(view: FolderView, directory: boolean) {
       const folder = view.folder()?.path;
       if (folder && !view.isBin()) start(view, { kind: "new", folder, directory });
+    },
+
+    /** A new file of a type Windows knows. */
+    newFrom(view: FolderView, extension: string) {
+      const folder = view.folder()?.path;
+      if (folder && !view.isBin()) start(view, { kind: "template", folder, extension });
     },
 
     /** The Recycle Bin is the last stop, so deleting from it always asks first. */

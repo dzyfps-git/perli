@@ -100,6 +100,11 @@ pub fn copy_of(folder: &Path, name: &OsStr, is_dir: bool) -> PathBuf {
     free_name(folder, &stem, &extension)
 }
 
+/// A free name for a new file of a known type.
+pub fn free(folder: &Path, stem: &str, extension: &str) -> PathBuf {
+    free_name(folder, OsStr::new(stem), OsStr::new(extension))
+}
+
 /// A free name for a new, empty item.
 pub fn new_item(folder: &Path, directory: bool) -> PathBuf {
     if directory {
