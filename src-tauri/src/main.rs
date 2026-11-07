@@ -8,10 +8,12 @@ mod menus;
 mod ops;
 mod parts;
 mod places;
+mod search;
 mod session;
 mod shell;
 mod snap;
 mod templates;
+mod thumbs;
 mod watch;
 
 use std::collections::HashMap;
@@ -29,6 +31,7 @@ use tauri::{
 use drag::Drags;
 use jobs::{Jobs, Plan};
 use ops::{Job, Reply};
+use search::Searches;
 use watch::Watches;
 
 /// How long the UI gets to answer a close request before the window goes anyway, so a frozen
@@ -278,6 +281,14 @@ struct Clipped {
     sequence: u32,
 }
 
+/// More rows of a view's search are ready.
+#[derive(Clone, Serialize)]
+struct SearchGrew {
+    view: u32,
+    /// The search has ended, so these are the last.
+    done: bool,
+}
+
 /// What the app starts with. A folder from the command line replaces the saved session.
 #[derive(Clone, Serialize)]
 struct Start {
@@ -340,8 +351,10 @@ async fn open_folder(
     views: State<'_, Views>,
     preload: State<'_, Preload>,
     watches: State<'_, Watches>,
+    searches: State<'_, Searches>,
 ) -> Result<Opened, String> {
     let started = Instant::now();
+    searches.stop(view);
     follow(&watches, view, &path);
     views
         .0
@@ -428,8 +441,16 @@ async fn arrange_view(
     Ok(arranged)
 }
 
+fn find(app: &AppHandle, view: u32, asked: search::Asked, path: &str, order: folder::Order) -> ReadResult {
+    let events = app.clone();
+    app.state::<Searches>().rows(view, asked, path, order, move |done| {
+        let _ = events.emit("search-grew", SearchGrew { view, done });
+    })
+}
+
 /// Reads the shown folder again as a new snapshot, the same way an open would. Rows named in
-/// `select` become the selection, and without any the `selected` rows follow their files.
+/// `select` become the selection, and without any the `selected` rows follow their files. With
+/// `search`, the rows are the results of a search of the folder, which live refresh leaves alone.
 #[allow(clippy::too_many_arguments)]
 #[tauri::command]
 async fn reload_view(
@@ -440,10 +461,18 @@ async fn reload_view(
     order: folder::Order,
     selected: Vec<u32>,
     select: Vec<String>,
+    search: Option<search::Asked>,
     views: State<'_, Views>,
     watches: State<'_, Watches>,
+    searches: State<'_, Searches>,
+    app: AppHandle,
 ) -> Result<Reloaded, String> {
-    follow(&watches, view, &path);
+    if search.is_some() {
+        watches.stop(view);
+    } else {
+        searches.stop(view);
+        follow(&watches, view, &path);
+    }
     let keys = {
         let mut views = views.0.write().unwrap_or_else(|error| error.into_inner());
         let current = views.entry(view).or_default();
@@ -455,7 +484,11 @@ async fn reload_view(
     };
 
     let (listing, reloaded) = async_runtime::spawn_blocking(move || {
-        folder::Listing::read(&path, order).map(|listing| {
+        let listing = match search {
+            Some(asked) => find(&app, view, asked, &path, order),
+            None => folder::Listing::read(&path, order),
+        };
+        listing.map(|listing| {
             let reloaded = Reloaded {
                 count: listing.len(),
                 hidden_count: listing.hidden_count(),
@@ -665,8 +698,10 @@ async fn close_view(
     view: u32,
     views: State<'_, Views>,
     watches: State<'_, Watches>,
+    searches: State<'_, Searches>,
 ) -> Result<(), String> {
     watches.stop(view);
+    searches.stop(view);
     views
         .0
         .write()
@@ -827,6 +862,15 @@ async fn file_users(selection: Selection, views: State<'_, Views>) -> Result<Vec
     off_main(move || Ok(ops::sys::users_of(&paths))).await
 }
 
+/// The picture of one row, in the format `thumbs::read` describes.
+#[tauri::command]
+async fn thumbnail(view: u32, request: u64, row: u32, views: State<'_, Views>) -> Result<Response, String> {
+    let selection = Selection { view, request, rows: vec![row] };
+    let path = views.read(&selection, folder::Listing::paths)?.pop();
+    let path = path.ok_or("That row is gone")?;
+    Ok(Response::new(thumbs::read(path).await))
+}
+
 #[tauri::command]
 async fn set_drop_target(folder: Option<PathBuf>, drags: State<'_, Arc<Drags>>) -> Result<(), String> {
     drags.aim(folder);
@@ -888,6 +932,7 @@ fn main() {
         .manage(Closing::default())
         .manage(Watches::default())
         .manage(Arc::new(Drags::default()))
+        .manage(Searches::default())
         .manage(Preload(Mutex::new(preload)))
         .setup(|app| {
             watch::start(app.handle().clone());
@@ -939,6 +984,7 @@ fn main() {
             open_terminal,
             new_types,
             file_users,
+            thumbnail,
             set_drop_target,
             start_drag,
             clipboard_text

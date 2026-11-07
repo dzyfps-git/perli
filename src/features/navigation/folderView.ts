@@ -5,6 +5,7 @@ import {
   reloadView,
   type Opened,
   type Order,
+  type SearchStep,
   type Selection,
   type Sort,
 } from "../../api";
@@ -26,6 +27,31 @@ export type FolderView = ReturnType<typeof createFolderView>;
 
 /** The newest deletions are the ones worth seeing first. */
 const BIN_SORT: Sort = { key: "modified", descending: true };
+/** Keeps rows where they are as more arrive. */
+const SEARCH_SORT: Sort = { key: "found", descending: false };
+/** Weakest first. Each covers the ones before it, so one read can stand for all that waited. */
+const SEARCH_STEPS: SearchStep[] = ["grown", "again", "start"];
+
+const strongerStep = (a: SearchStep, b: SearchStep) =>
+  SEARCH_STEPS[Math.max(SEARCH_STEPS.indexOf(a), SEARCH_STEPS.indexOf(b))];
+
+/** What a new read of the shown folder is for. */
+interface ReadAgain {
+  /** Names the rows to select. Without any, the selection stays put. */
+  select: string[];
+  rename: boolean;
+  /** What a search wants from this read. A plain folder ignores it. */
+  step: SearchStep;
+  /** These rows have nothing to do with the ones before. */
+  top: boolean;
+}
+
+const combined = (a: ReadAgain, b: ReadAgain): ReadAgain => ({
+  select: [...a.select, ...b.select],
+  rename: a.rename || b.rename,
+  step: strongerStep(a.step, b.step),
+  top: a.top || b.top,
+});
 
 /** What the file list on screen tells its view. */
 export interface ListHandle {
@@ -41,6 +67,8 @@ export interface ShownFolder extends Opened {
   reveal?: boolean;
   /** Open the selected row's name for editing. */
   rename?: boolean;
+  /** Start from the top with nothing selected. */
+  top?: boolean;
 }
 
 /**
@@ -58,19 +86,29 @@ export function createFolderView(id: number, saved?: SavedPane) {
   const [sort, setSortValue] = createSignal(saved?.sort ?? lastSort());
   const [layout, setLayoutValue] = createSignal(saved?.layout ?? lastLayout());
   const [editingPath, setEditingPath] = createSignal(false);
+  /** What the rows are a search for. Empty for a plain folder. */
+  const [query, setQuery] = createSignal("");
+  /** The search is still walking. */
+  const [searching, setSearching] = createSignal(false);
+  const [searchSort, setSearchSort] = createSignal(SEARCH_SORT);
+  const [searchAsked, setSearchAsked] = createSignal(0);
   let latestRequest = 0;
   let opening = false;
   let rearrangeAfterOpen = false;
-  let reloadLater: { select: string[]; rename: boolean } | undefined;
+  let reloadLater: ReadAgain | undefined;
   let list: ListHandle | undefined;
   let savedOpened = false;
+  /** Whether the search walked hidden folders. */
+  let walkedHidden = false;
 
   /** The folder shown, or the saved one that has not been opened yet. */
   const path = () => folder()?.path ?? saved?.path;
-  // Date order is the point of the Recycle Bin, so folders don't jump ahead there.
+  const shownSort = () => (query() ? searchSort() : sort());
+  // Date order is the point of the Recycle Bin, and a search's order is how well rows fit, so
+  // folders don't jump ahead in either.
   const order = (target = path()): Order => ({
-    ...sort(),
-    group: isBin(target) ? "mixed" : grouping(),
+    ...shownSort(),
+    group: query() || isBin(target) ? "mixed" : grouping(),
     showHidden: showHidden(),
   });
   /** Row numbers mean nothing outside the snapshot they came from. */
@@ -98,7 +136,7 @@ export function createFolderView(id: number, saved?: SavedPane) {
   function runReloadLater() {
     const wanted = reloadLater;
     reloadLater = undefined;
-    if (wanted) reload(wanted.select, wanted.rename);
+    if (wanted) readAgain(wanted);
     return wanted !== undefined;
   }
 
@@ -111,6 +149,8 @@ export function createFolderView(id: number, saved?: SavedPane) {
   }
 
   async function load(target: string) {
+    setQuery("");
+    setSearching(false);
     const request = ++latestRequest;
     const folderSort = arrivalSort(target);
     if (folderSort) setSortValue(folderSort);
@@ -131,24 +171,28 @@ export function createFolderView(id: number, saved?: SavedPane) {
   }
 
   /**
-   * Reads the shown folder again, after a job changed it. The list stays in place and only its
-   * rows change. `select` names the rows to select, and without any the selection stays put.
+   * Reads the shown folder or its search again. The list stays in place and only its rows change.
    * Nothing else starts until the list takes the new rows, because until then the selection
    * still holds row numbers of the old ones.
    */
-  async function reload(select: string[] = [], rename = false) {
+  async function readAgain(wanted: ReadAgain) {
     const current = folder();
     if (!current) return;
     if (opening || list?.isEditing()) {
-      reloadLater = {
-        select: [...(reloadLater?.select ?? []), ...select],
-        rename: rename || !!reloadLater?.rename,
-      };
+      reloadLater = reloadLater ? combined(reloadLater, wanted) : wanted;
       return;
     }
 
+    // Rows of a search have no names to go by, because one name can be in many folders.
+    const { top, step } = wanted;
+    const search = query() ? { step, query: query() } : null;
+    const select = search ? [] : wanted.select;
     const request = ++latestRequest;
     opening = true;
+    if (search && step !== "grown") {
+      setSearching(true);
+      walkedHidden = showHidden();
+    }
     try {
       const reloaded = await reloadView(
         id,
@@ -156,18 +200,45 @@ export function createFolderView(id: number, saved?: SavedPane) {
         current.request,
         current.path,
         order(),
-        selectedRows(current.request),
+        top ? [] : selectedRows(current.request),
         select,
+        search,
       );
       if (request === latestRequest) {
         setError(undefined);
-        setFolder({ ...current, request, ...reloaded, reveal: select.length > 0, rename });
+        const rename = !search && wanted.rename;
+        setFolder({ ...current, request, ...reloaded, reveal: select.length > 0, rename, top });
         return;
       }
     } catch (failure) {
-      if (request === latestRequest) setError(String(failure));
+      if (request === latestRequest) {
+        setError(String(failure));
+        setSearching(false);
+      }
     }
     settle(request);
+  }
+
+  /** Shows what changed on disk. `select` names the rows to select. */
+  function reload(select: string[] = [], rename = false) {
+    return readAgain({ select, rename, step: "again", top: false });
+  }
+
+  /**
+   * Searches under the shown folder. No text ends the search. Neither starts the list over,
+   * because the search box must keep the focus while the user types.
+   */
+  function search(text: string) {
+    if (text === query() || isBin(path())) return;
+    if (!query()) setSearchSort(SEARCH_SORT);
+    setQuery(text);
+    if (!text) setSearching(false);
+    readAgain({ select: [], rename: false, step: "start", top: true });
+  }
+
+  function searchGrew(done: boolean) {
+    if (done) setSearching(false);
+    if (query()) readAgain({ select: [], rename: false, step: "grown", top: false });
   }
 
   /** Applies a changed order to the shown folder. An open in flight must not be cancelled. */
@@ -179,6 +250,8 @@ export function createFolderView(id: number, saved?: SavedPane) {
     rearrangeAfterOpen = false;
     const current = folder();
     if (!current) return;
+    // A search found no rows in hidden folders unless it walked them.
+    if (query() && showHidden() !== walkedHidden) return reload();
 
     const request = ++latestRequest;
     try {
@@ -191,6 +264,10 @@ export function createFolderView(id: number, saved?: SavedPane) {
   }
 
   function setSort(next: Sort) {
+    if (query()) {
+      setSearchSort(next);
+      return rearrange();
+    }
     setSortValue(next);
     const path = folder()?.path;
     // Its sorts make no sense for normal folders, so new panes must not pick them up.
@@ -216,11 +293,13 @@ export function createFolderView(id: number, saved?: SavedPane) {
 
   /** Also retries a saved folder that failed to open. */
   async function refresh() {
+    if (query()) return reload();
     const target = path();
     if (target) await load(target);
   }
 
   async function back() {
+    if (query()) return search("");
     const target = backStack().at(-1);
     const from = folder()?.path;
     if (!target || !from || !(await load(target))) return;
@@ -255,7 +334,9 @@ export function createFolderView(id: number, saved?: SavedPane) {
     order,
     error,
     trail,
-    sort,
+    sort: shownSort,
+    /** The folder's own sort, which a search leaves alone. */
+    folderSort: sort,
     setSort,
     layout,
     setLayout,
@@ -263,6 +344,15 @@ export function createFolderView(id: number, saved?: SavedPane) {
     setEditingPath,
     rearrange,
     reload,
+    query,
+    searching,
+    search,
+    searchGrew,
+    searchAsked,
+    /** Sends the user to the search box. */
+    askSearch() {
+      if (!isBin(folder()?.path)) setSearchAsked(searchAsked() + 1);
+    },
     /** The file list on screen reports in here, so a new order can keep its selection. */
     connectList(handle: ListHandle) {
       list = handle;
@@ -272,7 +362,7 @@ export function createFolderView(id: number, saved?: SavedPane) {
     editEnded: runReloadLater,
     /** The list took the rows of `snapshot`, or gave up on them. */
     swapped: settle,
-    canGoBack: () => backStack().length > 0,
+    canGoBack: () => !!query() || backStack().length > 0,
     canGoForward: () => forwardStack().length > 0,
     canGoUp: () => {
       const path = folder()?.path;

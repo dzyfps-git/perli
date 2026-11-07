@@ -21,7 +21,8 @@ function spotAt(x: number, y: number, views: FolderView[]): Spot | undefined {
   const pane = under?.closest<HTMLElement>(".pane");
   const view = views.find((item) => String(item.id) === pane?.dataset.view);
   const path = view?.folder()?.path;
-  if (!pane || !view || !path || view.isBin()) return undefined;
+  // A search's rows are from all over, so nothing there says where a drop would land.
+  if (!pane || !view || !path || view.isBin() || view.query()) return undefined;
   const row = under?.closest<HTMLElement>(".file-row[data-folder]");
   const name = row?.querySelector(".file-name")?.textContent;
   return row && name ? { element: row, folder: join(path, name), view } : { element: pane, folder: path, view };

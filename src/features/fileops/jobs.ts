@@ -79,8 +79,9 @@ export function createJobs(views: () => FolderView[]) {
       if (!path) continue;
       const own = view.id === card.origin;
       const made = own ? event.created.filter((item) => samePath(join(path, baseName(item)), item)) : [];
-      // The list of touched folders never names the Recycle Bin.
-      if (view.isBin() || made.length > 0 || event.touched.some((folder) => samePath(path, folder))) {
+      // The list of touched folders never names the Recycle Bin, and a search reaches further.
+      const anywhere = view.isBin() || !!view.query();
+      if (anywhere || made.length > 0 || event.touched.some((folder) => samePath(path, folder))) {
         view.reload(made.map(baseName), made.length > 0 && card.newItem);
       }
     }

@@ -45,6 +45,12 @@ function isInside(path: string, folder: string) {
   return a === b || a.startsWith(b.endsWith("\\") ? b : `${b}\\`);
 }
 
+/** `path` as seen from `folder`. The folder itself is empty, and anywhere else stays whole. */
+export function relativeTo(folder: string, path: string) {
+  if (samePath(path, folder)) return "";
+  return isInside(path, folder) ? path.slice(join(folder, "").length) : path;
+}
+
 /**
  * The deepest path to show in the path bar. Going up keeps the folders you came
  * from, so you can jump back into them. Going anywhere else starts a new trail.

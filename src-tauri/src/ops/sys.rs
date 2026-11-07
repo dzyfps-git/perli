@@ -67,7 +67,7 @@ pub struct Stat {
 }
 
 impl Stat {
-    fn from_find_data(data: &WIN32_FIND_DATAW) -> Self {
+    pub fn from_find_data(data: &WIN32_FIND_DATAW) -> Self {
         let ticks = |time: FILETIME| (u64::from(time.dwHighDateTime) << 32) | u64::from(time.dwLowDateTime);
         let reparse = data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0;
         Self {
