@@ -258,6 +258,7 @@
 }
 
 .file-row[data-hidden] .file-name,
+.file-row[data-hidden] .file-thumb,
 .file-row[data-hidden]::before {
   opacity: 55%;
 }
@@ -331,8 +332,26 @@
   color: var(--accent);
 }
 
+/* Its size comes from CSS alone, so changing the tile size asks for no new picture. */
+.file-thumb {
+  display: none;
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  object-fit: contain;
+}
+
+.file-row[data-thumb] .file-thumb {
+  display: block;
+}
+
+.file-grid[data-layout="grid"] .file-row[data-thumb]::before {
+  display: none;
+}
+
 .file-grid[data-layout="grid"] .file-name {
   display: -webkit-box;
+  flex: none;
   width: 100%;
   text-align: center;
   white-space: normal;

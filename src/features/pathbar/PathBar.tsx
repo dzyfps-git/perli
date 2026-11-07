@@ -1,4 +1,4 @@
-import { createEffect, For, onCleanup, onMount, Show } from "solid-js";
+import { createEffect, For, on, onCleanup, onMount, Show } from "solid-js";
 import { expandPath, isFile, openFile } from "../../api";
 import type { Layout } from "../filelist/layout";
 import { showHidden } from "../filelist/prefs";
@@ -15,6 +15,9 @@ const ICON_GRID = "\uF0E2";
 const ICON_SHOWN = "\uE7B3";
 const ICON_HIDDEN = "\uED1A";
 
+/** Long enough that typing a word starts one search, not one per letter. */
+const SEARCH_WAIT_MS = 120;
+
 export function PathBar(props: {
   view: FolderView;
   onToggleHidden: () => void;
@@ -23,6 +26,8 @@ export function PathBar(props: {
   const crumbs = () => toCrumbs(props.view.trail());
   const depth = () => toCrumbs(props.view.folder()?.path ?? "").length;
   let list!: HTMLOListElement;
+  let searchBox!: HTMLInputElement;
+  let searchTimer: number | undefined;
 
   // Narrow panes clip the crumbs, and the current folder must stay visible.
   const revealCurrent = () => list.querySelector("[aria-current]")?.scrollIntoView({ block: "nearest", inline: "end" });
@@ -71,11 +76,49 @@ export function PathBar(props: {
     if (document.hasFocus() && !movedToMenu) props.view.setEditingPath(false);
   }
 
+  function onSearchInput() {
+    window.clearTimeout(searchTimer);
+    searchTimer = window.setTimeout(() => props.view.search(searchBox.value), SEARCH_WAIT_MS);
+  }
+
+  function onSearchKey(event: KeyboardEvent) {
+    if (event.key === "Escape") {
+      event.stopPropagation();
+      window.clearTimeout(searchTimer);
+      searchBox.value = "";
+      props.view.search("");
+      focusList();
+    } else if (event.key === "Enter" || event.key === "ArrowDown") {
+      event.preventDefault();
+      focusList();
+    }
+  }
+
+  const searchStatus = () => {
+    const count = props.view.folder()?.count ?? 0;
+    if (!props.view.query()) return "";
+    if (props.view.searching()) return "Searching…";
+    return count === 1 ? "1 match" : `${count.toLocaleString()} matches`;
+  };
+
   createEffect(() => {
     crumbs();
     depth();
     revealCurrent();
   });
+
+  createEffect(
+    on(
+      props.view.searchAsked,
+      () => {
+        searchBox.focus();
+        searchBox.select();
+      },
+      { defer: true },
+    ),
+  );
+
+  onCleanup(() => window.clearTimeout(searchTimer));
 
   onMount(() => {
     const observer = new ResizeObserver(revealCurrent);
@@ -145,6 +188,22 @@ export function PathBar(props: {
           </button>
         )}
       </Show>
+      <span class="search-status" aria-live="polite">
+        {searchStatus()}
+      </span>
+      <input
+        ref={searchBox}
+        class="search-input"
+        aria-label="Search this folder"
+        aria-keyshortcuts="Control+F"
+        placeholder="Search"
+        spellcheck={false}
+        hidden={props.view.isBin()}
+        value={props.view.query()}
+        onInput={onSearchInput}
+        onKeyDown={onSearchKey}
+        onContextMenu={props.onInputMenu}
+      />
       <div class="layout-pill" role="group" aria-label="Layout" data-layout={props.view.layout()}>
         <button aria-label="List" aria-keyshortcuts="Control+Shift+1" aria-pressed={props.view.layout() === "list"} onClick={() => setLayout("list")}>
           {ICON_LIST}

@@ -10,7 +10,7 @@ export interface Column {
 
 export const MIN_COLUMN_WIDTH = 60;
 const NAME_MIN_WIDTH = 120;
-const LARGEST_FIRST: SortKey[] = ["modified", "created", "size"];
+const LARGEST_FIRST: Sort["key"][] = ["modified", "created", "size"];
 
 export const DEFAULT_COLUMNS: Column[] = [
   { id: "name", label: "Name", width: 0, visible: true },
@@ -28,7 +28,15 @@ export const BIN_COLUMNS: Column[] = [
   { id: "size", label: "Size", width: 90, visible: true },
 ];
 
-export function nextSort(sort: Sort, key: SortKey): Sort {
+/** A search's own columns. "location" holds the folder a row was found in. */
+export const SEARCH_COLUMNS: Column[] = [
+  { id: "name", label: "Name", width: 0, visible: true },
+  { id: "location", label: "Folder", width: 260, visible: true },
+  { id: "modified", label: "Modified", width: 160, visible: true },
+  { id: "size", label: "Size", width: 90, visible: true },
+];
+
+export function nextSort(sort: Sort, key: Sort["key"]): Sort {
   if (sort.key === key) return { key, descending: !sort.descending };
   return { key, descending: LARGEST_FIRST.includes(key) };
 }

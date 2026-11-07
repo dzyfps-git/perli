@@ -24,14 +24,15 @@ export interface Row {
   created: number;
   isDir: boolean;
   isHidden: boolean;
-  /** Where a deleted item came from. Empty outside the Recycle Bin. */
+  /** Where a deleted item came from, or where a search found the row. Otherwise empty. */
   location: string;
 }
 
 export type SortKey = "name" | "modified" | "created" | "type" | "size" | "location";
 
 export interface Sort {
-  key: SortKey;
+  /** `found` is the order a search found its rows in, which no column stands for. */
+  key: SortKey | "found";
   descending: boolean;
 }
 
@@ -152,10 +153,21 @@ export interface NewType {
 /** Files being dragged over the window, in physical pixels inside it. */
 export type FileDrag = { kind: "over" | "drop"; x: number; y: number } | { kind: "leave" };
 
+/** What a view wants from its search: a new query, the same one again, or the rows found so far. */
+export type SearchStep = "start" | "again" | "grown";
+
+/** A picture of a file, with plain alpha. */
+export interface Thumb {
+  width: number;
+  height: number;
+  pixels: Uint8ClampedArray<ArrayBuffer>;
+}
+
 /** What a Windows menu or Properties window is for. */
 export type ShellTarget = { kind: "rows"; selection: Selection } | { kind: "folder"; path: string };
 
 const HEADER_BYTES = 33;
+const THUMB_HEADER_BYTES = 8;
 const FLAG_FOLDER = 1;
 const FLAG_HIDDEN = 2;
 const UINT32_RANGE = 2 ** 32;
@@ -194,7 +206,10 @@ export const arrangeView = (
 ) =>
   invoke<{ count: number; selected: number[] }>("arrange_view", { view, request, shown, order, selected });
 
-/** Reads the shown folder again. `select` names the new selection, or `selected` rows keep theirs. */
+/**
+ * Reads the shown folder again. `select` names the new selection, or `selected` rows keep theirs.
+ * With `search`, the rows are what a search under the folder has found.
+ */
 export const reloadView = (
   view: number,
   request: number,
@@ -203,6 +218,7 @@ export const reloadView = (
   order: Order,
   selected: number[],
   select: string[],
+  search: { step: SearchStep; query: string } | null,
 ) =>
   invoke<{ count: number; hiddenCount: number; selected: number[] }>("reload_view", {
     view,
@@ -212,7 +228,14 @@ export const reloadView = (
     order,
     selected,
     select,
+    search,
   });
+
+/** More of a view's search is ready. `done` means that was the last of it. */
+export const onSearchGrew = (handler: (view: number, done: boolean) => void) =>
+  listen<{ view: number; done: boolean }>("search-grew", (event) =>
+    handler(event.payload.view, event.payload.done),
+  );
 
 /** `origin` is the view that asked, which selects what the job makes. */
 export const startJob = (task: Task, origin?: number) => invoke<void>("start_job", { task, origin });
@@ -312,6 +335,18 @@ export async function fetchRows(
   count: number,
 ): Promise<Row[]> {
   return decodeRows(await invoke<ArrayBuffer>("rows", { view, request, start, count }));
+}
+
+/** Decodes the format written by `read` in `src-tauri/src/thumbs.rs`. */
+export async function fetchThumb(view: number, request: number, row: number): Promise<Thumb | null> {
+  const buffer = await invoke<ArrayBuffer>("thumbnail", { view, request, row });
+  if (buffer.byteLength === 0) return null;
+  const head = new DataView(buffer);
+  return {
+    width: head.getUint32(0, true),
+    height: head.getUint32(4, true),
+    pixels: new Uint8ClampedArray(buffer, THUMB_HEADER_BYTES),
+  };
 }
 
 /** Decodes the format written by `encode_rows` in `src-tauri/src/folder.rs`. */

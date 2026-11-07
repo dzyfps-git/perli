@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { baseName, BIN_PATH, join, nextTrail, parentOf, samePath, toCrumbs, typedPath } from "./path.ts";
+import { baseName, BIN_PATH, join, nextTrail, parentOf, relativeTo, samePath, toCrumbs, typedPath } from "./path.ts";
+
+test("relativeTo shortens paths inside the folder and leaves the rest whole", () => {
+  assert.equal(relativeTo("C:\\Work", "C:\\Work\\deep\\inner"), "deep\\inner");
+  assert.equal(relativeTo("C:\\", "C:\\deep"), "deep");
+  assert.equal(relativeTo("C:\\Work", "C:\\Work"), "");
+  assert.equal(relativeTo("C:\\Work", "C:\\Workshop\\old"), "C:\\Workshop\\old");
+  assert.equal(relativeTo(BIN_PATH, "C:\\Work"), "C:\\Work");
+});
 
 test("samePath ignores case and handles no folder yet", () => {
   assert.equal(samePath("C:\\Users\\Me", "c:\\users\\me"), true);

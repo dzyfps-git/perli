@@ -7,12 +7,13 @@ import {
   holdClose,
   onCloseAsked,
   onFolderChanged,
+  onSearchGrew,
   openFile,
   saveSession,
   startState,
   type Grouping,
   type Row,
-  type SortKey,
+  type Sort,
 } from "./api";
 import { createFileActions } from "./features/fileops/actions";
 import { followFileDrag } from "./features/fileops/fileDrag";
@@ -21,7 +22,7 @@ import { ConfirmDelete, type DeleteRequest } from "./features/fileops/ConfirmDel
 import { createJobs } from "./features/fileops/jobs";
 import { JobsPanel } from "./features/fileops/JobsPanel";
 import { createShellItems } from "./features/fileops/shellItems";
-import { BIN_COLUMNS, nextGrouping, nextSort } from "./features/filelist/columns";
+import { BIN_COLUMNS, nextGrouping, nextSort, SEARCH_COLUMNS } from "./features/filelist/columns";
 import { FileList } from "./features/filelist/FileList";
 import { clampTile, isLargestTile, isSmallestTile, TILE_STEP, type Layout } from "./features/filelist/layout";
 import {
@@ -69,6 +70,14 @@ const hideBrowserMenu = (event: MouseEvent) => event.preventDefault();
 const blockBrowserZoom = (event: WheelEvent) => event.ctrlKey && event.preventDefault();
 const trackWindowFocus = (event: FocusEvent) =>
   document.documentElement.toggleAttribute("data-blurred", event.type === "blur");
+/** The columns a view keeps to itself, which the user can't change. */
+const ownColumns = (view: FolderView) => (view.isBin() ? BIN_COLUMNS : view.query() ? SEARCH_COLUMNS : undefined);
+const rowPath = (view: FolderView, row: Row) => join(row.location || view.folder()!.path, row.name);
+const emptyText = (view: FolderView) => {
+  if (view.isBin()) return "The Recycle Bin is empty.";
+  if (!view.query()) return "This folder is empty.";
+  return view.searching() ? "Searching…" : "No matches.";
+};
 
 // The main layout. Moving parts of the app around should only change this file.
 export function App() {
@@ -122,10 +131,17 @@ export function App() {
   const dragListener = followFileDrag(tabs.allViews, jobs.report);
   // Other apps and Windows' own commands change folders without Perli running a job.
   const folderListener = onFolderChanged((id) => tabs.allViews().find((view) => view.id === id)?.reload());
+  const searchListener = onSearchGrew((id, done) =>
+    tabs.allViews().find((view) => view.id === id)?.searchGrew(done),
+  );
+
+  async function searchIn(view: FolderView, path: string) {
+    if (await view.open(path)) view.askSearch();
+  }
 
   function openRow(view: FolderView, row: Row, toSide: boolean) {
     if (view.isBin()) return;
-    const path = join(view.folder()!.path, row.name);
+    const path = rowPath(view, row);
     if (!row.isDir) openFile(path).catch(console.error);
     else if (toSide) tabs.openToSide(path);
     else view.open(path);
@@ -136,7 +152,12 @@ export function App() {
     const items = [
       { label: "Open", action: () => view.open(path) },
       { label: "Open to side", action: () => tabs.openToSide(path) },
-      ...(isBin(path) ? [] : shell.placeItems(path, { x: event.clientX, y: event.clientY })),
+      ...(isBin(path)
+        ? []
+        : [
+            { label: "Search here", action: () => searchIn(view, path) },
+            ...shell.placeItems(path, { x: event.clientX, y: event.clientY }),
+          ]),
     ];
     setMenu({ x: event.clientX, y: event.clientY, items });
   }
@@ -152,7 +173,7 @@ export function App() {
       return setMenu({ x, y, items });
     }
 
-    const path = join(view.folder()!.path, row.name);
+    const path = rowPath(view, row);
     const single = view.list()?.selection().rows.length === 1;
     const canPaste = await clipboardHasFiles();
     const items: MenuItem[] = [
@@ -160,6 +181,7 @@ export function App() {
       row.isDir
         ? { label: "Open to side", action: () => openRow(view, row, true) }
         : shell.openWithItem(view),
+      ...(row.isDir ? [{ label: "Search here", action: () => searchIn(view, path) }] : []),
       { label: "Cut", divider: true, action: () => actions.cut(view) },
       { label: "Copy", action: () => actions.copy(view) },
       {
@@ -222,7 +244,7 @@ export function App() {
       checked: grouping() === group,
       action: () => changeOrder(() => setGrouping(group)),
     });
-    const sortItem = (label: string, key: SortKey) => ({
+    const sortItem = (label: string, key: Sort["key"]) => ({
       label,
       checked: view.sort().key === key,
       action: () => view.setSort(nextSort(view.sort(), key)),
@@ -240,8 +262,12 @@ export function App() {
         action: () => setTileSize(clampTile(tileSize() - TILE_STEP)),
       },
     ];
-    const sortItems = view.isBin()
-      ? BIN_COLUMNS.map((column) => sortItem(column.label, column.id))
+    const own = ownColumns(view);
+    const sortItems = own
+      ? [
+          ...(view.query() ? [sortItem("Best match", "found")] : []),
+          ...own.map((column) => sortItem(column.label, column.id)),
+        ]
       : [
           sortItem("Name", "name"),
           sortItem("Date modified", "modified"),
@@ -271,7 +297,7 @@ export function App() {
           },
         ],
       },
-      ...(view.isBin()
+      ...(own
         ? []
         : [
             {
@@ -310,6 +336,7 @@ export function App() {
       : [
           { label: "Paste", disabled: !(await clipboardHasFiles()), action: () => actions.paste(view) },
           shell.newItem(view),
+          { label: "Search here", action: () => view.askSearch() },
           ...undo,
         ];
     const shellItems = view.isBin() ? [] : shell.backgroundItems(view, { x, y });
@@ -373,6 +400,7 @@ export function App() {
     else if (event.altKey && key === "arrowup") view.up();
     else if (key === "backspace" && !isTyping(event)) view.up();
     else if ((event.ctrlKey && key === "l") || (event.altKey && key === "d")) view.setEditingPath(true);
+    else if (event.ctrlKey && key === "f") view.askSearch();
     else if (event.ctrlKey && event.shiftKey && key === "t") tabs.reopenClosed();
     else if (event.ctrlKey && key === "t") newTab();
     else if (event.ctrlKey && key === "w") tabs.closePane(tab, view);
@@ -421,6 +449,7 @@ export function App() {
     closeListener.then((stop) => stop());
     folderListener.then((stop) => stop());
     dragListener.then((stop) => stop());
+    searchListener.then((stop) => stop());
     window.removeEventListener("keydown", onKeyDown);
     window.removeEventListener("mouseup", onMouseButton);
     window.removeEventListener("contextmenu", hideBrowserMenu);
@@ -457,16 +486,19 @@ export function App() {
             {(_arrival) => (
               <FileList
                 view={view.id}
+                folder={view.folder()!.path}
                 snapshot={view.folder()!.request}
                 rearranged={view.folder()!.rearranged}
                 count={view.folder()!.count}
                 selected={view.folder()!.selected}
                 reveal={view.folder()!.reveal}
                 rename={view.folder()!.rename}
-                columns={view.isBin() ? BIN_COLUMNS : columns()}
-                fixedColumns={view.isBin()}
-                cut={cutNames(view.folder()!.path)}
-                emptyText={view.isBin() ? "The Recycle Bin is empty." : "This folder is empty."}
+                top={view.folder()!.top}
+                thumbs={!view.isBin()}
+                columns={ownColumns(view) ?? columns()}
+                fixedColumns={ownColumns(view) !== undefined}
+                cut={view.query() ? undefined : cutNames(view.folder()!.path)}
+                emptyText={emptyText(view)}
                 active={tab === tabs.active() && view === tab.active()}
                 layout={view.layout()}
                 sort={view.sort()}
@@ -475,13 +507,14 @@ export function App() {
                 onOpen={(row, toSide) => openRow(view, row, toSide)}
                 onMenu={(event, row) => showRowMenu(event, view, row)}
                 onBackgroundMenu={(event) => showBackgroundMenu(event, view)}
-                onHeaderMenu={(event) => (view.isBin() ? event.preventDefault() : showHeaderMenu(event))}
+                onHeaderMenu={(event) => (ownColumns(view) ? event.preventDefault() : showHeaderMenu(event))}
                 onGroup={cycleGrouping}
                 onRename={(selection, name) => actions.rename(view, selection, name)}
                 onEditEnd={view.editEnded}
                 onInputMenu={showInputMenu}
                 onFirstPaint={markReady}
                 onSwapped={view.swapped}
+                onEscape={() => view.search("")}
                 connect={view.connectList}
               />
             )}

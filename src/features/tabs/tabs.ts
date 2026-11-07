@@ -104,7 +104,7 @@ export function createTabs() {
     const saved = tabs().map((tab) => ({
       panes: tab.panes().flatMap((pane) => {
         const panePath = pane.path();
-        return panePath ? [{ path: panePath, sort: pane.sort(), layout: pane.layout() }] : [];
+        return panePath ? [{ path: panePath, sort: pane.folderSort(), layout: pane.layout() }] : [];
       }),
       active: tab.panes().indexOf(tab.active()),
       swapped: tab.swapped(),

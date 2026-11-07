@@ -33,8 +33,10 @@ pub enum SortKey {
     Created,
     Type,
     Size,
-    /// Where a deleted item came from. Only the Recycle Bin has one.
+    /// Where a deleted item came from, or where a search found a row.
     Location,
+    /// As a search found the rows, so that new ones never move the old ones.
+    Found,
 }
 
 /// Where folders go among files.
@@ -51,12 +53,13 @@ pub enum Grouping {
 #[derive(Clone, Copy, Default, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Order {
-    key: SortKey,
-    descending: bool,
-    group: Grouping,
-    show_hidden: bool,
+    pub key: SortKey,
+    pub descending: bool,
+    pub group: Grouping,
+    pub show_hidden: bool,
 }
 
+#[derive(Clone)]
 pub struct Entry {
     /// UTF-16 and null-terminated, ready for `StrCmpLogicalW`.
     name: Box<[u16]>,
@@ -70,7 +73,7 @@ pub struct Entry {
 }
 
 impl Entry {
-    fn from_find_data(data: &WIN32_FIND_DATAW) -> Option<Self> {
+    pub fn from_find_data(data: &WIN32_FIND_DATAW) -> Option<Self> {
         let length = data.cFileName.iter().position(|&c| c == 0)?;
         let name = &data.cFileName[..length];
         if name == [b'.' as u16] || name == [b'.' as u16, b'.' as u16] {
@@ -103,8 +106,12 @@ impl Entry {
         }
     }
 
-    fn name(&self) -> &[u16] {
+    pub fn name(&self) -> &[u16] {
         &self.name[..self.name.len() - 1]
+    }
+
+    pub fn is_hidden(&self) -> bool {
+        self.hidden
     }
 
     /// The null-terminated extension with its dot. Folders have none.
@@ -122,7 +129,7 @@ impl Entry {
     }
 }
 
-fn null_terminated(text: &Path) -> Box<[u16]> {
+pub fn null_terminated(text: &Path) -> Box<[u16]> {
     text.as_os_str().encode_wide().chain([0]).collect()
 }
 
@@ -133,6 +140,35 @@ struct Bin {
     locations: Vec<Box<[u16]>>,
 }
 
+/// Rows from many folders, with where each one is.
+#[derive(Clone, Default)]
+pub struct Found {
+    entries: Vec<Entry>,
+    /// Null-terminated, in the same order as `entries`.
+    locations: Vec<Box<[u16]>>,
+}
+
+impl Found {
+    pub fn push(&mut self, entry: Entry, location: Box<[u16]>) {
+        self.entries.push(entry);
+        self.locations.push(location);
+    }
+
+    /// Moves all of `other`'s rows to the end of this one.
+    pub fn append(&mut self, other: &mut Self) {
+        self.entries.append(&mut other.entries);
+        self.locations.append(&mut other.locations);
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
 /// One read of a folder. Rows are positions in `entries`, so a new sort or the hidden
 /// toggle needs no new read.
 #[derive(Clone, Default)]
@@ -140,6 +176,8 @@ pub struct Listing {
     folder: PathBuf,
     entries: Arc<Vec<Entry>>,
     bin: Option<Arc<Bin>>,
+    /// Where a search found each of `entries`. Empty for a plain folder.
+    found_in: Arc<Vec<Box<[u16]>>>,
     visible: Vec<u32>,
     order: Order,
 }
@@ -176,6 +214,15 @@ impl Listing {
         }
     }
 
+    pub fn searched(found: Found, order: Order) -> Self {
+        Self {
+            entries: Arc::new(found.entries),
+            found_in: Arc::new(found.locations),
+            ..Self::default()
+        }
+        .arrange(order)
+    }
+
     pub fn arranged(self, order: Order) -> Self {
         if order == self.order {
             self
@@ -198,7 +245,7 @@ impl Listing {
     }
 
     fn locations(&self) -> &[Box<[u16]>] {
-        self.bin.as_ref().map_or(&[], |bin| &bin.locations)
+        self.bin.as_ref().map_or(&self.found_in, |bin| &bin.locations)
     }
 
     pub fn len(&self) -> usize {
@@ -222,13 +269,21 @@ impl Listing {
             .map(|&entry| entry as usize)
     }
 
+    fn full_path(&self, entry: usize) -> PathBuf {
+        let name = OsString::from_wide(self.entries[entry].name());
+        match self.found_in.get(entry) {
+            Some(location) => PathBuf::from(OsString::from_wide(&location[..location.len() - 1])).join(name),
+            None => self.folder.join(name),
+        }
+    }
+
     /// What is on disk for each of `rows`: its full path, built from the raw name so that odd
     /// names survive, or its `$R` item in the Recycle Bin.
     pub fn paths(&self, rows: &[u32]) -> Vec<PathBuf> {
         self.chosen(rows)
             .map(|entry| match &self.bin {
                 Some(bin) => bin.items[entry].item.clone(),
-                None => self.folder.join(OsString::from_wide(self.entries[entry].name())),
+                None => self.full_path(entry),
             })
             .collect()
     }
@@ -248,12 +303,13 @@ impl Listing {
             .collect()
     }
 
-    /// What tells an entry apart from one read to the next: its name, or in the Recycle Bin,
-    /// where names repeat, its `$R` item.
+    /// What tells an entry apart from one read to the next: its name, or where names repeat,
+    /// its `$R` item in the Recycle Bin and its full path in a search.
     fn key(&self, entry: usize) -> Vec<u16> {
         match &self.bin {
             Some(bin) => bin.items[entry].item.as_os_str().encode_wide().collect(),
-            None => self.entries[entry].name().to_vec(),
+            None if self.found_in.is_empty() => self.entries[entry].name().to_vec(),
+            None => self.full_path(entry).as_os_str().encode_wide().collect(),
         }
     }
 
@@ -408,6 +464,7 @@ fn compare(
             SortKey::Type => types[first as usize].cmp(&types[second as usize]),
             SortKey::Size => a.size.cmp(&b.size),
             SortKey::Location => natural(location_of(locations, first), location_of(locations, second)),
+            SortKey::Found => first.cmp(&second),
         };
         let by_key = if order.descending {
             by_key.reverse()

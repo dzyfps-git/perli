@@ -46,7 +46,8 @@ export function createFileActions(
       const folder = view.folder()?.path;
       if (!selection || !folder) return;
       setClipboard(selection, true)
-        .then(({ names, sequence }) => markCut(folder, names, sequence))
+        // Search rows are in other folders, so their names must not fade this folder's rows.
+        .then(({ names, sequence }) => markCut(folder, view.query() ? [] : names, sequence))
         .catch(report);
     },
 

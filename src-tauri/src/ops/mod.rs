@@ -22,9 +22,7 @@ use windows::core::{Error, Result};
 
 pub use bin::{read as read_bin, BinItem};
 pub use names::check_rename;
-pub use shell::shell_item;
-#[cfg(test)]
-pub use shell::Com;
+pub use shell::{shell_item, Com};
 pub use transfer::{is_temp_name, put_back, remove_leftovers};
 pub use tree::measure;
 

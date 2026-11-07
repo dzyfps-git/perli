@@ -1,12 +1,14 @@
 import { createEffect, createMemo, createSignal, on, onCleanup, onMount, Show } from "solid-js";
-import { fetchRows, findRow, type Row, type Selection, type Sort, type SortKey } from "../../api";
+import { fetchRows, fetchThumb, findRow, type Row, type Selection, type Sort, type SortKey } from "../../api";
 import { ColumnHeader, SortStrip } from "./ColumnHeader";
 import { formatSize } from "../../ui/format";
 import type { ListHandle } from "../navigation/folderView";
+import { relativeTo } from "../navigation/path";
 import { columnsWidth, gridTemplate, type Column } from "./columns";
 import { clampTile, moveTarget, TILE_STEP, type Layout } from "./layout";
 import { setTileSize, tileSize } from "./prefs";
 import { createSelection } from "./selection";
+import { cachedThumb, createThumbLoader } from "./thumbs";
 import { createTypeJump } from "./typeJump";
 import { typesLearned, typeText } from "./typeNames";
 import "./filelist.css";
@@ -31,17 +33,22 @@ interface PooledRow {
   cells: { id: SortKey; element: HTMLSpanElement }[];
   index: number;
   filled: boolean;
+  /** Only rows in the grid have a picture. */
+  thumb?: HTMLCanvasElement;
+  /** What `thumb` is for. */
+  thumbKey?: string;
 }
 
 const dates = new Intl.DateTimeFormat(undefined, { dateStyle: "short", timeStyle: "short" });
 
-const CELL_TEXT: Record<SortKey, (row: Row) => string> = {
+const CELL_TEXT: Record<SortKey, (row: Row, folder: string) => string> = {
   name: (row) => row.name,
   modified: (row) => dates.format(row.modified),
   created: (row) => dates.format(row.created),
   type: (row) => typeText(row.name, row.isDir),
   size: (row) => (row.isDir ? "" : formatSize(row.size)),
-  location: (row) => row.location,
+  // A deep path would be clipped just where it starts to differ.
+  location: (row, folder) => relativeTo(folder, row.location),
 };
 
 const CELL_CLASS: Partial<Record<SortKey, string>> = {
@@ -58,20 +65,28 @@ function createCell(parent: HTMLElement, id: SortKey) {
   return { id, element };
 }
 
-function createRow(cells: SortKey[]): PooledRow {
+function createRow(cells: SortKey[], withThumb: boolean): PooledRow {
   const element = document.createElement("div");
   element.className = "file-row";
   element.setAttribute("role", "row");
+  const thumb = withThumb ? document.createElement("canvas") : undefined;
+  if (thumb) {
+    thumb.className = "file-thumb";
+    element.append(thumb);
+  }
   return {
     element,
     cells: cells.map((id) => createCell(element, id)),
     index: -1,
     filled: false,
+    thumb,
   };
 }
 
 export function FileList(props: {
   view: number;
+  /** The folder shown, where rows with no location of their own are. */
+  folder: string;
   snapshot: number;
   count: number;
   /** Rows to select on arrival. */
@@ -80,6 +95,10 @@ export function FileList(props: {
   reveal?: boolean;
   /** Open the first selected row's name for editing when a new snapshot arrives. */
   rename?: boolean;
+  /** Start from the top with nothing selected when a new snapshot arrives. */
+  top?: boolean;
+  /** Show pictures of files in the grid. */
+  thumbs: boolean;
   columns: Column[];
   fixedColumns: boolean;
   /** Names waiting to move, which fade. */
@@ -104,6 +123,7 @@ export function FileList(props: {
   rearranged?: boolean;
   onFirstPaint: () => void;
   onSwapped: (snapshot: number) => void;
+  onEscape: () => void;
   connect: (list: ListHandle) => void;
 }) {
   const pages = new Map<number, Row[]>();
@@ -145,6 +165,37 @@ export function FileList(props: {
     [],
     { equals: (a, b) => a.join() === b.join() },
   );
+
+  const thumbKey = (row: Row) => `${row.location || props.folder}\\${row.name}|${row.modified}|${row.size}`;
+
+  function rowShowing(index: number, key: string) {
+    const pooled = pool[index % pool.length];
+    return pooled?.index === index && pooled.thumbKey === key ? pooled : undefined;
+  }
+
+  const thumbs = createThumbLoader(
+    (index) => fetchThumb(props.view, shown, index),
+    (index, key) => rowShowing(index, key) !== undefined,
+    (index, key) => {
+      const pooled = rowShowing(index, key);
+      if (pooled) showThumb(pooled, key);
+    },
+  );
+
+  function showThumb(pooled: PooledRow, key: string | undefined) {
+    const { thumb: canvas } = pooled;
+    if (!canvas) return;
+    pooled.thumbKey = key;
+    const thumb = key ? cachedThumb(key) : null;
+    pooled.element.toggleAttribute("data-thumb", !!thumb);
+    if (thumb) {
+      canvas.width = thumb.width;
+      canvas.height = thumb.height;
+      canvas.getContext("2d")!.putImageData(new ImageData(thumb.pixels, thumb.width, thumb.height), 0, 0);
+    } else if (key && thumb === undefined) {
+      thumbs.ask(pooled.index, key);
+    }
+  }
 
   function loadPage(page: number) {
     if (loading.has(page)) return;
@@ -191,7 +242,8 @@ export function FileList(props: {
     pooled.element.toggleAttribute("data-folder", row?.isDir ?? false);
     pooled.element.toggleAttribute("data-hidden", row?.isHidden ?? false);
     pooled.element.toggleAttribute("data-cut", !!row && !!props.cut?.has(row.name));
-    for (const cell of pooled.cells) cell.element.textContent = row ? CELL_TEXT[cell.id](row) : "";
+    for (const cell of pooled.cells) cell.element.textContent = row ? CELL_TEXT[cell.id](row, props.folder) : "";
+    showThumb(pooled, row && thumbKey(row));
   }
 
   function paint() {
@@ -250,7 +302,8 @@ export function FileList(props: {
     if (size === pool.length && shape === builtFor) return paint();
 
     builtFor = shape;
-    pool = Array.from({ length: size }, () => createRow(cells()));
+    const withThumb = props.thumbs && props.layout === "grid";
+    pool = Array.from({ length: size }, () => createRow(cells(), withThumb));
     spacer.replaceChildren(...pool.map((pooled) => pooled.element));
     paint();
     moveMarker(true);
@@ -360,7 +413,7 @@ export function FileList(props: {
   /** New rows take over in one step, so nothing blinks and the scroll position stays. */
   async function swapRows(snapshot: number) {
     const selected = props.selected ?? [];
-    const first = Math.max(0, Math.floor(grid.scrollTop / itemHeight) - OVERSCAN) * perRow;
+    const first = props.top ? 0 : Math.max(0, Math.floor(grid.scrollTop / itemHeight) - OVERSCAN) * perRow;
     const onScreen = (Math.ceil(grid.clientHeight / itemHeight) + OVERSCAN * 2) * perRow;
     const wanted = new Set<number>();
     for (let index = first; index < first + onScreen + PAGE_SIZE; index += PAGE_SIZE) {
@@ -378,6 +431,10 @@ export function FileList(props: {
     pages.clear();
     for (const [page, rows] of fresh) pages.set(page, rows);
     shown = snapshot;
+    if (props.top) {
+      grid.scrollTop = 0;
+      selection.clear();
+    }
 
     // With its rows gone, the next one takes over, so Delete can be pressed again and again.
     const focused = selection.focused();
@@ -479,6 +536,7 @@ export function FileList(props: {
       selection.selectAll(props.count);
     } else if (event.key === "Escape") {
       selection.clear();
+      props.onEscape();
     } else if (event.key.length === 1 && !event.ctrlKey && !event.metaKey) {
       event.preventDefault();
       return jumpTo(event.key);
