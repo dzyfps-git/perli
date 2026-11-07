@@ -170,6 +170,7 @@ export function PathBar(props: {
               <button
                 class="crumb"
                 classList={{ "crumb-left": index() >= depth() }}
+                data-drop={crumb.path}
                 aria-current={index() === depth() - 1 ? "location" : undefined}
                 onClick={() => props.view.open(crumb.path)}
               >
