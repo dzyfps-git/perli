@@ -4,6 +4,7 @@ import {
   cancelJobsAndClose,
   clipboardCanPaste,
   clipboardText,
+  deleteTag,
   disconnectDrive,
   holdClose,
   listPlaces,
@@ -11,14 +12,17 @@ import {
   onCloseAsked,
   onFolderChanged,
   onSearchGrew,
+  onSizesGrew,
   openFile,
   openTerminal,
   saveSession,
   startState,
+  stopSizes,
   type Grouping,
   type Places,
   type Row,
   type Sort,
+  type Tag,
 } from "./api";
 import { createFileActions } from "./features/fileops/actions";
 import { BatchRename, type RenameRequest } from "./features/fileops/BatchRename";
@@ -28,12 +32,16 @@ import { ConfirmDelete, type DeleteRequest } from "./features/fileops/ConfirmDel
 import { createJobs } from "./features/fileops/jobs";
 import { JobsPanel } from "./features/fileops/JobsPanel";
 import { createShellItems } from "./features/fileops/shellItems";
+import { NO_FILTER } from "./features/filelist/filter";
 import { BIN_COLUMNS, nextGrouping, nextSort, SEARCH_COLUMNS } from "./features/filelist/columns";
 import { FileList } from "./features/filelist/FileList";
+import { FilterDialog } from "./features/filelist/FilterDialog";
 import { clampTile, isLargestTile, isSmallestTile, TILE_STEP, type Layout } from "./features/filelist/layout";
 import {
   columns,
+  folderSizes,
   grouping,
+  setFolderSizes,
   setGrouping,
   setShowHidden,
   setTileSize,
@@ -41,7 +49,8 @@ import {
   tileSize,
   toggleColumn,
 } from "./features/filelist/prefs";
-import type { FolderView } from "./features/navigation/folderView";
+import { SelectPattern } from "./features/filelist/SelectPattern";
+import { FLAT_QUERY, type FolderView } from "./features/navigation/folderView";
 import { BIN_PATH, isBin, isDriveRoot, join } from "./features/navigation/path";
 import { Palette, type Command } from "./features/palette/Palette";
 import { PathBar } from "./features/pathbar/PathBar";
@@ -49,6 +58,8 @@ import { Settings } from "./features/settings/Settings";
 import { FOLDERS, Sidebar } from "./features/sidebar/Sidebar";
 import { parseSession } from "./features/tabs/session";
 import { createTabs, type Tab } from "./features/tabs/tabs";
+import { NewTag } from "./features/tags/NewTag";
+import { refreshTags } from "./features/tags/tags";
 import { TitleBar } from "./features/titlebar/TitleBar";
 import { Menu, type MenuItem } from "./ui/Menu";
 import { Tooltip } from "./ui/Tooltip";
@@ -80,10 +91,12 @@ const trackWindowFocus = (event: FocusEvent) =>
 const ownColumns = (view: FolderView) => (view.isBin() ? BIN_COLUMNS : view.query() ? SEARCH_COLUMNS : undefined);
 const rowPath = (view: FolderView, row: Row) => join(row.location || view.folder()!.path, row.name);
 const emptyText = (view: FolderView) => {
+  if (view.searching()) return "Searching…";
+  if (view.filtered()) return "Nothing fits the filter.";
   if (view.isBin()) return "The Recycle Bin is empty.";
-  if (!view.query()) return "This folder is empty.";
-  return view.searching() ? "Searching…" : "No matches.";
+  return view.query() ? "No matches." : "This folder is empty.";
 };
+const toggleFlat = (view: FolderView) => view.search(view.query() === FLAT_QUERY ? "" : FLAT_QUERY);
 
 // The main layout. Moving parts of the app around should only change this file.
 export function App() {
@@ -94,6 +107,12 @@ export function App() {
   const [places, setPlaces] = createSignal<Places>();
   const [deleting, setDeleting] = createSignal<DeleteRequest>();
   const [renaming, setRenaming] = createSignal<RenameRequest>();
+  const [filtering, setFiltering] = createSignal<FolderView>();
+  const [selectingPattern, setSelectingPattern] = createSignal<FolderView>();
+  const [namingTag, setNamingTag] = createSignal<FolderView>();
+  /** The dialog covers the tabs, so nothing behind it may change. */
+  const dialogOpen = () =>
+    settingsOpen() || !!deleting() || !!renaming() || !!filtering() || !!selectingPattern() || !!namingTag();
   const jobs = createJobs(tabs.allViews);
   const actions = createFileActions(jobs, setDeleting, () => tabs.active().other(), setRenaming);
   const shell = createShellItems(jobs, actions);
@@ -143,6 +162,7 @@ export function App() {
   const searchListener = onSearchGrew((id, walk) =>
     tabs.allViews().find((view) => view.id === id)?.searchGrew(walk),
   );
+  const sizesListener = onSizesGrew((id) => tabs.allViews().find((view) => view.id === id)?.sizesGrew());
 
   async function searchIn(view: FolderView, path: string) {
     if (await view.open(path)) view.askSearch();
@@ -206,6 +226,7 @@ export function App() {
       { label: "Rename", action: () => actions.startRename(view) },
       { label: "Delete", action: () => actions.remove(view, false) },
       ...toolItems,
+      shell.tagsItem(view, showTagChange, () => setNamingTag(view)),
     ];
     if (tabs.active().other()) {
       items.push(
@@ -215,6 +236,25 @@ export function App() {
     }
     items.push(...shell.rowItems(view, { x, y }, row.isDir ? path : undefined, () => openRow(view, row, false)));
     setMenu({ x, y, items });
+  }
+
+  /** A search would start over, and its rows don't show tags. */
+  function showTagChange() {
+    for (const view of tabs.allViews()) if (!view.query()) view.reload();
+  }
+
+  function askDeleteTag(tag: Tag) {
+    setDeleting({
+      title: `Delete the tag ${tag.name}?`,
+      note: "It comes off every file that has it. The files stay as they are.",
+      confirmLabel: "Delete tag",
+      async confirm() {
+        await deleteTag(tag.id).catch(jobs.report);
+        for (const view of tabs.allViews()) view.forgetTag(tag.id);
+        await refreshTags();
+        showTagChange();
+      },
+    });
   }
 
   function showHeaderMenu(event: MouseEvent) {
@@ -247,6 +287,15 @@ export function App() {
 
   const toggleHidden = () => changeOrder(() => setShowHidden(!showHidden()));
   const cycleGrouping = () => changeOrder(() => setGrouping(nextGrouping(grouping())));
+
+  async function toggleSizes() {
+    setFolderSizes(!folderSizes());
+    if (!folderSizes()) await stopSizes().catch(jobs.report);
+    for (const view of tabs.allViews()) {
+      if (folderSizes()) view.scanFolder();
+      else view.reload();
+    }
+  }
 
   function viewItems(view: FolderView): MenuItem[] {
     const layoutItem = (label: string, layout: Layout) => ({
@@ -289,6 +338,7 @@ export function App() {
           sortItem("Date created", "created"),
           sortItem("Type", "type"),
           sortItem("Size", "size"),
+          sortItem("Tags", "tags"),
         ];
     return [
       {
@@ -330,6 +380,9 @@ export function App() {
         checked: showHidden(),
         action: toggleHidden,
       },
+      ...(view.isBin()
+        ? []
+        : [{ label: "Flat view", checked: view.query() === FLAT_QUERY, action: () => toggleFlat(view) }]),
     ];
   }
 
@@ -352,6 +405,8 @@ export function App() {
           { label: "Paste", disabled: !(await clipboardCanPaste()), action: () => actions.paste(view) },
           shell.newItem(view),
           { label: "Search here", action: () => view.askSearch() },
+          { label: "Select by pattern…", action: () => setSelectingPattern(view) },
+          { label: "Filter…", action: () => setFiltering(view) },
           ...undo,
         ];
     const shellItems = view.isBin() ? [] : shell.backgroundItems(view, { x, y });
@@ -398,6 +453,7 @@ export function App() {
       { label: "Save as template", run: () => actions.saveTemplate(view) },
       { label: "Open templates folder", run: () => actions.openTemplates(view) },
       { label: "Open in terminal", run: terminal },
+      { label: "Flat view", run: () => toggleFlat(view) },
     ];
   }
 
@@ -423,6 +479,9 @@ export function App() {
       { label: "Show hidden files", keys: "Ctrl+H", run: toggleHidden },
       { label: "List view", keys: "Ctrl+Shift+1", run: () => view.setLayout("list") },
       { label: "Grid view", keys: "Ctrl+Shift+2", run: () => view.setLayout("grid") },
+      { label: "Select by pattern", keys: "Ctrl+Shift+A", run: () => setSelectingPattern(view) },
+      { label: "Filter", keys: "Ctrl+Shift+F", run: () => setFiltering(view) },
+      ...(view.filtered() ? [{ label: "Clear filter", run: () => view.setFilterForm(NO_FILTER) }] : []),
       ...(view.isBin() ? [] : folderCommands(view)),
       { label: "Undo", keys: "Ctrl+Z", run: () => actions.undo(view) },
       { label: "Redo", keys: "Ctrl+Y", run: () => actions.redo(view) },
@@ -469,12 +528,11 @@ export function App() {
     // Left alone, this key prints the page.
     if (event.ctrlKey && key === "p") {
       event.preventDefault();
-      if (!settingsOpen() && !deleting() && !renaming()) togglePalette();
+      if (!dialogOpen()) togglePalette();
       return;
     }
 
-    if (settingsOpen() || deleting() || renaming() || paletteOpen()) {
-      // The dialog covers the tabs, so nothing behind it may change.
+    if (dialogOpen() || paletteOpen()) {
       if (isBrowserKey(event, key)) event.preventDefault();
       return;
     }
@@ -486,6 +544,8 @@ export function App() {
     else if (event.altKey && key === "arrowup") view.up();
     else if (key === "backspace" && !isTyping(event)) view.up();
     else if ((event.ctrlKey && key === "l") || (event.altKey && key === "d")) view.setEditingPath(true);
+    else if (event.ctrlKey && event.shiftKey && key === "f") setFiltering(view);
+    else if (event.ctrlKey && event.shiftKey && key === "a") setSelectingPattern(view);
     else if (event.ctrlKey && key === "f") view.askSearch();
     else if (event.ctrlKey && event.shiftKey && key === "t") tabs.reopenClosed();
     else if (event.ctrlKey && key === "t") newTab();
@@ -520,6 +580,7 @@ export function App() {
     window.addEventListener("focus", trackWindowFocus);
     window.addEventListener("blur", trackWindowFocus);
     window.addEventListener("focus", checkCut);
+    refreshTags();
     const start = await startState();
     const session = start.folder ? undefined : parseSession(start.session);
     if (session) {
@@ -536,6 +597,7 @@ export function App() {
     folderListener.then((stop) => stop());
     dragListener.then((stop) => stop());
     searchListener.then((stop) => stop());
+    sizesListener.then((stop) => stop());
     window.removeEventListener("keydown", onKeyDown);
     window.removeEventListener("mouseup", onMouseButton);
     window.removeEventListener("contextmenu", hideBrowserMenu);
@@ -559,6 +621,7 @@ export function App() {
         <PathBar
           view={view}
           onToggleHidden={toggleHidden}
+          onFilter={() => setFiltering(view)}
           onInputMenu={showInputMenu}
         />
         <div class="file-area">
@@ -650,13 +713,34 @@ export function App() {
       <Show when={renaming()} keyed>
         {(request) => <BatchRename request={request} onClose={() => setRenaming(undefined)} />}
       </Show>
+      <Show when={filtering()} keyed>
+        {(view) => <FilterDialog view={view} onClose={() => setFiltering(undefined)} />}
+      </Show>
+      <Show when={selectingPattern()} keyed>
+        {(view) => <SelectPattern view={view} onClose={() => setSelectingPattern(undefined)} />}
+      </Show>
+      <Show when={namingTag()} keyed>
+        {(view) => (
+          <NewTag
+            selection={() => actions.selected(view)}
+            onDone={showTagChange}
+            onClose={() => setNamingTag(undefined)}
+          />
+        )}
+      </Show>
       <Palette
         open={paletteOpen()}
         commands={commands}
         onClose={() => setPaletteOpen(false)}
         focusList={() => tabs.activeView().list()?.focus()}
       />
-      <Settings open={settingsOpen()} onClose={() => setSettingsOpen(false)} />
+      <Settings
+        open={settingsOpen()}
+        onClose={() => setSettingsOpen(false)}
+        onToggleSizes={toggleSizes}
+        onTagsChanged={showTagChange}
+        onDeleteTag={askDeleteTag}
+      />
       <Tooltip />
     </div>
   );

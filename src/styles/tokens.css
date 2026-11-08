@@ -15,6 +15,16 @@
   --text-muted: light-dark(#66646e, #9a99a3);
   --danger: #c42b1c;
 
+  --tag-0: #d13438;
+  --tag-1: #e8710a;
+  --tag-2: #d4a300;
+  --tag-3: #2e9e4f;
+  --tag-4: #0f9d9d;
+  --tag-5: #2f7be5;
+  --tag-6: #8250df;
+  --tag-7: #d6479f;
+  --tag-dot-size: 8px;
+
   --scrollbar-size: 10px;
   --scrollbar-thumb: light-dark(rgb(0 0 0 / 20%), rgb(255 255 255 / 18%));
   --scrollbar-thumb-hover: light-dark(rgb(0 0 0 / 36%), rgb(255 255 255 / 32%));

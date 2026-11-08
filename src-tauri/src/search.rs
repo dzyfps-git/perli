@@ -16,6 +16,8 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use windows::core::Result;
 
+#[cfg(test)]
+use crate::folder::Filter;
 use crate::folder::{self, Entry, Found, Listing, Order, SortKey};
 use crate::network;
 use crate::ops::sys::{self, Stat};
@@ -29,6 +31,8 @@ const LETTER: i32 = 1;
 const IN_A_ROW: i32 = 8;
 const WORD_START: i32 = 6;
 const SKIPPED_COST: i32 = 1;
+/// Stands for every file under a folder, which makes a flat view of it. No file name can hold it.
+const EVERY_FILE: &str = "*";
 
 // ponytail: each report copies every row found so far, so reports thin out as rows grow. Rows
 // that share their memory would lift this.
@@ -44,6 +48,7 @@ fn lower(letter: char) -> char {
 struct Query {
     text: String,
     letters: Vec<char>,
+    every_file: bool,
 }
 
 impl Query {
@@ -51,11 +56,23 @@ impl Query {
         Self {
             text: text.to_lowercase(),
             letters: text.chars().map(lower).collect(),
+            every_file: text == EVERY_FILE,
         }
     }
 
-    fn is_in(&self, name: &[u16]) -> bool {
-        String::from_utf16_lossy(name).to_lowercase().contains(&self.text)
+    fn is_in(&self, entry: &Entry) -> bool {
+        if self.every_file {
+            return !entry.is_dir();
+        }
+        String::from_utf16_lossy(entry.name()).to_lowercase().contains(&self.text)
+    }
+
+    /// How well an entry of the searched folder itself fits.
+    fn fit_of(&self, entry: &Entry) -> Option<i32> {
+        if self.every_file {
+            return (!entry.is_dir()).then_some(0);
+        }
+        self.fit(entry.name())
     }
 
     /// How well a name fits if its letters match from `start`, which holds the query's first.
@@ -139,7 +156,7 @@ fn read_top(folder: &Path, query: &Query, show_hidden: bool) -> Result<(Found, V
     let mut below = VecDeque::new();
     let mut fits = Vec::new();
     read_folder(folder, show_hidden, &mut below, |entry| {
-        if let Some(fit) = query.fit(entry.name()) {
+        if let Some(fit) = query.fit_of(&entry) {
             fits.push((fit, entry));
         }
     })?;
@@ -253,7 +270,7 @@ impl Search {
             let location: Arc<[u16]> = folder::null_terminated(&folder).into();
             // A folder that can't be read has nothing to show, which is no reason to stop.
             let _ = read_folder(&folder, show_hidden, &mut below, |entry| {
-                if query.is_in(entry.name()) {
+                if query.is_in(&entry) {
                     in_sight += usize::from(show_hidden || !entry.is_hidden());
                     rows.push(entry, location.clone());
                 }
@@ -290,6 +307,11 @@ pub struct Asked {
     pub query: String,
 }
 
+/// A filter can leave so few rows that scrolling never asks for more.
+fn needs_every_row(order: &Order) -> bool {
+    order.key != SortKey::Found || order.filter.is_active()
+}
+
 /// The search of each view that has one.
 #[derive(Default)]
 pub struct Searches(Mutex<HashMap<u32, Arc<Search>>>);
@@ -316,8 +338,8 @@ impl Searches {
     }
 
     /// Any order but found is only right with every row there.
-    pub fn arranged(&self, view: u32, order: Order) {
-        if let Some(search) = self.all().get(&view).filter(|_| order.key != SortKey::Found) {
+    pub fn arranged(&self, view: u32, order: &Order) {
+        if let Some(search) = self.all().get(&view).filter(|_| needs_every_row(order)) {
             search.make_room(usize::MAX);
         }
     }
@@ -343,7 +365,7 @@ impl Searches {
         let quiet = asked.step == Step::Again;
         let kept = running.filter(|_| quiet);
         let room = match &kept {
-            _ if order.key != SortKey::Found => usize::MAX,
+            _ if needs_every_row(&order) => usize::MAX,
             Some(search) => search.room(),
             None => AHEAD,
         };
@@ -352,7 +374,8 @@ impl Searches {
         let search = Arc::new(Search::new(shown.clone(), room));
         self.all().insert(view, search.clone());
         let rows = if quiet { first } else { Found::default() };
-        thread::spawn(move || search.walk(&query, rows, below, order.show_hidden, quiet, report));
+        let show_hidden = order.show_hidden;
+        thread::spawn(move || search.walk(&query, rows, below, show_hidden, quiet, report));
         Ok(Listing::searched(shown, order))
     }
 }
@@ -476,6 +499,19 @@ mod tests {
     }
 
     #[test]
+    fn a_flat_view_lists_every_file_and_no_folder() {
+        let searches = Searches::default();
+        let tree = Tree::new("flat");
+
+        let (_, heard) = start(&searches, &tree, "*", found_order());
+        heard.recv_timeout(WAIT).unwrap();
+
+        let mut all = names(&grown(&searches, &tree, found_order()));
+        all.sort();
+        assert_eq!(all, ["Report.md", "other.txt", "plain.txt", "report final.txt", "report.txt"]);
+    }
+
+    #[test]
     fn letters_must_all_be_there_in_order() {
         assert!(fit("rprt", "report.txt").is_some());
         assert!(fit("RPRT", "report.txt").is_some());
@@ -557,7 +593,7 @@ mod tests {
         assert!(!plain.contains(&"report hidden.txt".to_string()));
 
         let shown = Order { show_hidden: true, ..found_order() };
-        let (_, heard) = start(&searches, &tree, "report", shown);
+        let (_, heard) = start(&searches, &tree, "report", shown.clone());
         wait_until_done(&heard);
         assert!(names(&grown(&searches, &tree, shown)).contains(&"report hidden.txt".to_string()));
 
@@ -677,10 +713,11 @@ mod tests {
         let search = Arc::new(Search::new(Found::default(), AHEAD));
         searches.all().insert(1, search.clone());
 
-        searches.arranged(1, found_order());
+        searches.arranged(1, &found_order());
         assert_eq!(search.room(), AHEAD);
 
-        searches.arranged(1, Order::default());
+        let filter = Filter { name: "a".to_string(), ..Filter::default() };
+        searches.arranged(1, &Order { filter, ..found_order() });
         assert_eq!(search.room(), usize::MAX);
 
         let tree = Tree::new("order");

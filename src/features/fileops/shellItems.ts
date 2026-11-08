@@ -1,6 +1,7 @@
 import {
   appsFor,
   chooseApp,
+  commonTags,
   fileUsers,
   newTypes,
   openTerminal,
@@ -9,6 +10,7 @@ import {
   rowFacts,
   sendTargets,
   sendTo,
+  setTag,
   showProperties,
   showShellMenu,
   type Row,
@@ -17,6 +19,7 @@ import {
 } from "../../api";
 import type { MenuItem } from "../../ui/Menu";
 import type { FolderView } from "../navigation/folderView";
+import { refreshTags, tags } from "../tags/tags";
 import type { FileActions } from "./actions";
 import type { Jobs } from "./jobs";
 
@@ -123,6 +126,28 @@ export function createShellItems(jobs: Jobs, actions: FileActions) {
             action: () => actions.newFrom(view, extension),
           })),
           { label: "Open templates folder", divider: true, action: () => actions.openTemplates(view) },
+        ];
+      },
+    }),
+
+    /** `changed` runs once the rows' tags differ. `create` asks for a new tag for them. */
+    tagsItem: (view: FolderView, changed: () => void, create: () => void): MenuItem => ({
+      label: "Tags",
+      divider: true,
+      async load() {
+        const selection = actions.selected(view);
+        if (!selection) return [];
+        await refreshTags();
+        // A drive with no file IDs says so when a tag is chosen.
+        const common = await commonTags(selection).catch((): number[] => []);
+        const toggle = (id: number) =>
+          withRows(view, async (rows) => {
+            await setTag(rows, id, !common.includes(id));
+            changed();
+          });
+        return [
+          ...tags().map(({ id, name }) => ({ label: name, checked: common.includes(id), action: () => toggle(id) })),
+          { label: "New tag…", divider: tags().length > 0, action: create },
         ];
       },
     }),

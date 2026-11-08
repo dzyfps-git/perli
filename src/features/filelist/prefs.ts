@@ -27,6 +27,8 @@ export const [grouping, setGrouping] = stored<Grouping>(
   "grouping",
   (saved("grouping") as Grouping | null) ?? "foldersFirst",
 );
+/** Costs a walk of every folder opened, so it waits to be asked for. */
+export const [folderSizes, setFolderSizes] = stored("folder-sizes", saved("folder-sizes") === true);
 export const [tileSize, setTileSize] = stored("tile-size", (saved("tile-size") as number | null) ?? 112);
 /** What new panes start with. Each pane then keeps its own. */
 export const [lastSort, setLastSort] = stored<Sort>(
