@@ -18,6 +18,16 @@ import {
   THEMES,
 } from "./appearance";
 import { paletteStyle, type Palette } from "./palettes";
+import {
+  checkOnStart,
+  currentVersion,
+  installNow,
+  lookForUpdate,
+  setCheckOnStart,
+  updateFailure,
+  updateOffer,
+  updateState,
+} from "./updates";
 import "./settings.css";
 
 const COLOR_NAMES = ["First color", "Middle color", "Last color"];
@@ -38,6 +48,8 @@ export function Settings(props: {
   onToggleSizes: () => void;
   onTagsChanged: () => void;
   onDeleteTag: (tag: Tag) => void;
+  /** Saves what must survive Perli ending for an update. */
+  onBeforeUpdate: () => Promise<unknown>;
 }) {
   const [isDefault, setIsDefault] = createSignal(false);
   const [defaultFailure, setDefaultFailure] = createSignal<string>();
@@ -196,6 +208,54 @@ export function Settings(props: {
         The Size column fills in as Perli walks each folder you open. Links are not followed, and cloud
         files stay in the cloud.
       </p>
+
+      <h3>Updates</h3>
+      <p class="settings-note settings-update" role="status">
+        {
+          {
+            idle: `Perli ${currentVersion()}`,
+            checking: "Checking for updates…",
+            current: `Perli ${currentVersion()} is up to date.`,
+            ready: `Perli ${updateOffer()?.version} is ready to install.`,
+            installing: "Downloading the update. Perli restarts when it is done.",
+            failed: "Perli could not check for updates.",
+          }[updateState()]
+        }
+      </p>
+      <Show when={updateState() === "ready" && updateOffer()?.notes}>
+        <p class="settings-note">{updateOffer()?.notes}</p>
+      </Show>
+      <div class="settings-update-buttons">
+        <Show
+          when={updateState() === "ready" || updateState() === "installing"}
+          fallback={
+            <button class="settings-theme" disabled={updateState() === "checking"} onClick={() => lookForUpdate()}>
+              Check for updates
+            </button>
+          }
+        >
+          <button
+            class="settings-theme"
+            disabled={updateState() === "installing"}
+            onClick={() => installNow(props.onBeforeUpdate)}
+          >
+            Install and restart
+          </button>
+        </Show>
+        <button
+          class="settings-theme"
+          role="switch"
+          aria-checked={checkOnStart()}
+          onClick={() => setCheckOnStart(!checkOnStart())}
+        >
+          Check when Perli starts
+        </button>
+      </div>
+      <Show when={updateFailure()}>
+        <p class="settings-note" role="alert">
+          {updateFailure()}
+        </p>
+      </Show>
 
       <h3>Default file manager</h3>
       <button class="settings-theme settings-default" role="switch" aria-checked={isDefault()} onClick={toggleDefault}>

@@ -4,7 +4,7 @@ use std::cell::Cell;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
@@ -230,6 +230,9 @@ impl UndoLog {
 pub struct Jobs {
     next: AtomicU64,
     running: Mutex<HashMap<u64, Arc<Entry>>>,
+    /// Set while an update installs, which ends Perli, so no job may start. Read and written
+    /// only under the `running` lock.
+    closed: AtomicBool,
     undo: Mutex<UndoLog>,
     /// Reads the saved log off the main thread, so a big one can't slow the start.
     loading: Mutex<Option<JoinHandle<UndoLog>>>,
@@ -257,6 +260,30 @@ impl Jobs {
 
     pub fn running(&self) -> bool {
         !lock(&self.running).is_empty()
+    }
+
+    /// Stops new jobs from starting, if none is running. Says whether it did.
+    pub fn close(&self) -> bool {
+        let running = lock(&self.running);
+        let idle = running.is_empty();
+        if idle {
+            self.closed.store(true, Ordering::SeqCst);
+        }
+        idle
+    }
+
+    pub fn reopen(&self) {
+        let _running = lock(&self.running);
+        self.closed.store(false, Ordering::SeqCst);
+    }
+
+    fn admit(&self, id: u64, entry: Arc<Entry>) -> Result<(), String> {
+        let mut running = lock(&self.running);
+        if self.closed.load(Ordering::SeqCst) {
+            return Err("Perli is installing an update, so nothing new can start.".into());
+        }
+        running.insert(id, entry);
+        Ok(())
     }
 
     pub fn cancel_all(&self) {
@@ -302,7 +329,7 @@ pub fn start(app: &AppHandle, plan: Plan) -> Result<(), String> {
     let jobs = app.state::<Jobs>();
     let id = jobs.next.fetch_add(1, Ordering::Relaxed);
     let entry = Arc::<Entry>::default();
-    lock(&jobs.running).insert(id, entry.clone());
+    jobs.admit(id, entry.clone())?;
 
     let bridge = Bridge {
         app: app.clone(),
@@ -506,6 +533,20 @@ mod tests {
         vec![Done::Created {
             path: PathBuf::from(number.to_string()),
         }]
+    }
+
+    #[test]
+    fn closing_waits_for_jobs_and_keeps_new_ones_out() {
+        let jobs = Jobs::default();
+        jobs.admit(1, Arc::default()).unwrap();
+        assert!(!jobs.close(), "a running job keeps it open");
+        lock(&jobs.running).clear();
+
+        assert!(jobs.close());
+        assert!(jobs.admit(2, Arc::default()).is_err());
+        assert!(!jobs.running());
+        jobs.reopen();
+        assert!(jobs.admit(3, Arc::default()).is_ok());
     }
 
     #[test]

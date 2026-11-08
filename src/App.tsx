@@ -59,6 +59,7 @@ import { BIN_PATH, isBin, isDriveRoot, join, parentOf, baseName } from "./featur
 import { Palette, type Command } from "./features/palette/Palette";
 import { PathBar } from "./features/pathbar/PathBar";
 import { Settings } from "./features/settings/Settings";
+import { startUpdates, updateState } from "./features/settings/updates";
 import { BookmarksBar } from "./features/sidebar/BookmarksBar";
 import { holds } from "./features/sidebar/placeLists";
 import {
@@ -207,13 +208,20 @@ export function App() {
   let unsaved: unknown;
   let saving = Promise.resolve();
 
-  /** Writes one at a time, so an older save can never land after a newer one. */
+  /** Writes one at a time, so an older save can never land after a newer one. Rejects when the
+   * write fails, and the session then waits for the next flush to try again. */
   function flushSession() {
     window.clearTimeout(saveTimer);
     if (unsaved === undefined) return saving;
-    const text = JSON.stringify(unsaved);
+    const session = unsaved;
     unsaved = undefined;
-    saving = saving.then(() => saveSession(text)).catch(console.error);
+    saving = saving
+      .catch(() => undefined)
+      .then(() => saveSession(JSON.stringify(session)))
+      .catch((error: unknown) => {
+        unsaved ??= session;
+        throw error;
+      });
     return saving;
   }
 
@@ -222,7 +230,7 @@ export function App() {
     if (!session) return;
     unsaved = session;
     window.clearTimeout(saveTimer);
-    saveTimer = window.setTimeout(flushSession, SAVE_DELAY_MS);
+    saveTimer = window.setTimeout(() => flushSession().catch(console.error), SAVE_DELAY_MS);
   });
 
   const stopJobs: DeleteRequest = {
@@ -234,7 +242,8 @@ export function App() {
   };
 
   async function onClose(request: number) {
-    const [held] = await Promise.all([holdClose(request), flushSession()]);
+    // A failed save must not keep the window open.
+    const [held] = await Promise.all([holdClose(request), flushSession().catch(console.error)]);
     if (held) setDeleting(stopJobs);
     else await getCurrentWindow().destroy();
   }
@@ -724,6 +733,7 @@ export function App() {
     window.addEventListener("blur", trackWindowFocus);
     window.addEventListener("focus", checkCut);
     refreshTags();
+    startUpdates();
     const start = await startState();
     const session = start.folder ? undefined : parseSession(start.session);
     if (session) {
@@ -829,7 +839,7 @@ export function App() {
         />
         <button
           class="settings-button"
-          aria-label="Settings"
+          aria-label={updateState() === "ready" ? "Settings, update ready" : "Settings"}
           aria-keyshortcuts="Control+,"
           onClick={() => setSettingsOpen(true)}
         >
@@ -837,6 +847,9 @@ export function App() {
             {ICON_SETTINGS}
           </span>
           Settings
+          <Show when={updateState() === "ready"}>
+            <span class="update-dot" aria-hidden="true" />
+          </Show>
         </button>
       </aside>
       <main class="files">
@@ -890,6 +903,7 @@ export function App() {
         onToggleSizes={toggleSizes}
         onTagsChanged={showTagChange}
         onDeleteTag={askDeleteTag}
+        onBeforeUpdate={flushSession}
       />
       <Tooltip />
     </div>
