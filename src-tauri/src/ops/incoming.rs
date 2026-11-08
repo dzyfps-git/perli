@@ -53,7 +53,8 @@ pub fn offers_files(data: &IDataObject) -> bool {
 
 /// A dragged data object on its way to the job's thread.
 pub struct Incoming {
-    stream: IStream,
+    /// Spent once the data object is unpacked from it.
+    stream: Option<IStream>,
     /// The source went on with its life and waits to hear that the job ended.
     waits: bool,
 }
@@ -69,7 +70,32 @@ impl Incoming {
         let waits = data.cast::<IDataObjectAsyncCapability>().is_ok_and(|source| unsafe {
             source.GetAsyncMode().is_ok_and(|on| on.as_bool()) && source.StartOperation(None::<&IBindCtx>).is_ok()
         });
-        Ok(Self { stream, waits })
+        Ok(Self { stream: Some(stream), waits })
+    }
+
+    /// Unpacks the data object on this thread. Works once.
+    fn open(&mut self) -> Result<IDataObject> {
+        // The call lets go of the stream itself, so it must not be released again here.
+        let stream = ManuallyDrop::new(self.stream.take().ok_or_else(|| Error::new(E_FAIL, UNREADABLE))?);
+        unsafe { CoGetInterfaceAndReleaseStream(&*stream) }
+    }
+
+    /// Tells a waiting source the job ended, so it can let go of its data.
+    fn finish(&mut self, data: &IDataObject, outcome: HRESULT) {
+        if std::mem::take(&mut self.waits) {
+            if let Ok(source) = data.cast::<IDataObjectAsyncCapability>() {
+                let _ = unsafe { source.EndOperation(outcome, None::<&IBindCtx>, DROPEFFECT_COPY.0) };
+            }
+        }
+    }
+}
+
+/// A drop that never became a job, such as a dismissed choice menu, still frees the source.
+impl Drop for Incoming {
+    fn drop(&mut self) {
+        if let Ok(data) = self.open() {
+            self.finish(&data, E_ABORT);
+        }
     }
 }
 
@@ -146,21 +172,13 @@ fn contents(data: &IDataObject, index: usize) -> Result<Contents> {
 }
 
 impl Run<'_> {
-    pub(super) fn receive(&mut self, incoming: Incoming, folder: &Path) -> Flow {
-        // The call lets go of the stream itself, so it must not be released again here.
-        let stream = ManuallyDrop::new(incoming.stream);
-        let opened: Result<IDataObject> = unsafe { CoGetInterfaceAndReleaseStream(&*stream) };
-        let data = match opened {
+    pub(super) fn receive(&mut self, mut incoming: Incoming, folder: &Path) -> Flow {
+        let data = match incoming.open() {
             Ok(data) => data,
             Err(error) => return self.refuse(folder, &error.message()),
         };
         let received = self.receive_items(&data, folder);
-        if incoming.waits {
-            let outcome: HRESULT = if received.is_ok() { S_OK } else { E_ABORT };
-            if let Ok(source) = data.cast::<IDataObjectAsyncCapability>() {
-                let _ = unsafe { source.EndOperation(outcome, None::<&IBindCtx>, DROPEFFECT_COPY.0) };
-            }
-        }
+        incoming.finish(&data, if received.is_ok() { S_OK } else { E_ABORT });
         received
     }
 

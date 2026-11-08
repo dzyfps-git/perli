@@ -13,16 +13,16 @@ use std::thread;
 use std::time::Duration;
 
 use windows::core::{implement, Interface, Ref, BOOL, HRESULT, HSTRING};
-use windows::Win32::Foundation::{DV_E_FORMATETC, E_NOTIMPL, HGLOBAL, S_OK, SIZE};
+use windows::Win32::Foundation::{DV_E_FORMATETC, E_ABORT, E_NOTIMPL, HGLOBAL, S_OK, SIZE};
 use windows::Win32::Storage::FileSystem::{GetLogicalDrives, FILE_ATTRIBUTE_DIRECTORY};
 use windows::Win32::System::Com::{
-    CoCreateInstance, IAdviseSink, IDataObject, IDataObject_Impl, IEnumFORMATETC, IEnumSTATDATA, IPersistFile,
+    CoCreateInstance, IAdviseSink, IBindCtx, IDataObject, IDataObject_Impl, IEnumFORMATETC, IEnumSTATDATA, IPersistFile,
     CLSCTX_INPROC_SERVER, FORMATETC, STGMEDIUM, STGMEDIUM_0, STGM_READ, TYMED_HGLOBAL, TYMED_ISTREAM,
 };
 use windows::Win32::System::DataExchange::RegisterClipboardFormatW;
 use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
 use windows::Win32::UI::Shell::{
-    IShellLinkW, SHCreateMemStream, ShellLink, CFSTR_FILECONTENTS, CFSTR_FILEDESCRIPTORW, FD_ATTRIBUTES,
+    IDataObjectAsyncCapability, IDataObjectAsyncCapability_Impl, IShellLinkW, SHCreateMemStream, ShellLink, CFSTR_FILECONTENTS, CFSTR_FILEDESCRIPTORW, FD_ATTRIBUTES,
     FD_FILESIZE, FILEDESCRIPTORW,
 };
 
@@ -1113,6 +1113,22 @@ fn a_link_entry_lands_as_a_plain_file() {
 }
 
 #[test]
+fn extracting_never_goes_through_a_junction_in_the_way() {
+    let sandbox = Sandbox::new();
+    let outside = sandbox.folder("outside");
+    sandbox.junction(r"here\sub", &outside);
+    let archive = sandbox.path(r"here\a.zip");
+    zip_of(&archive, &[("sub/payload.exe", b"bad"), ("sub/deep/more.txt", b"bad")]);
+
+    let script = Script::always(Answer::Skip);
+    let outcome = run_with(unzip(&archive, false), &script);
+
+    assert!(sandbox.names("outside").is_empty(), "nothing lands through the link");
+    assert!(outcome.done.is_empty());
+    assert!(script.asked() >= 1);
+}
+
+#[test]
 fn extracting_onto_a_file_gives_the_usual_choices() {
     let sandbox = Sandbox::new();
     let archive = sandbox.path(r"here\a.zip");
@@ -1271,8 +1287,37 @@ struct Virtual {
     as_stream: bool,
 }
 
-#[implement(IDataObject)]
+#[implement(IDataObject, IDataObjectAsyncCapability)]
 struct Source(Vec<Virtual>);
+
+thread_local! {
+    /// What each source on this thread heard at the end of its operation.
+    static ENDED: RefCell<Vec<HRESULT>> = const { RefCell::new(Vec::new()) };
+}
+
+#[allow(non_snake_case)]
+impl IDataObjectAsyncCapability_Impl for Source_Impl {
+    fn SetAsyncMode(&self, _: BOOL) -> windows::core::Result<()> {
+        Ok(())
+    }
+
+    fn GetAsyncMode(&self) -> windows::core::Result<BOOL> {
+        Ok(true.into())
+    }
+
+    fn StartOperation(&self, _: Ref<IBindCtx>) -> windows::core::Result<()> {
+        Ok(())
+    }
+
+    fn InOperation(&self) -> windows::core::Result<BOOL> {
+        Ok(false.into())
+    }
+
+    fn EndOperation(&self, outcome: HRESULT, _: Ref<IBindCtx>, _: u32) -> windows::core::Result<()> {
+        ENDED.with_borrow_mut(|ended| ended.push(outcome));
+        Ok(())
+    }
+}
 
 fn global(bytes: &[u8]) -> HGLOBAL {
     unsafe {
@@ -1399,6 +1444,28 @@ fn dragged_files_land_with_their_folders_and_a_warning() {
         outcome.done,
         [Done::Created { path: sandbox.path(r"into\sub") }, Done::Created { path: file }]
     );
+}
+
+#[test]
+fn a_drop_that_never_runs_still_frees_its_source() {
+    let _com = Com::enter();
+    let data: IDataObject = Source(Vec::new()).into();
+    ENDED.with_borrow_mut(Vec::clear);
+
+    drop(Incoming::take_over(&data).unwrap());
+
+    assert_eq!(ENDED.with_borrow(Clone::clone), [E_ABORT]);
+}
+
+#[test]
+fn a_finished_drop_tells_its_source_once() {
+    let sandbox = Sandbox::new();
+    ENDED.with_borrow_mut(Vec::clear);
+    let items = vec![Virtual { name: "a.txt", bytes: Some(b"a"), as_stream: false }];
+
+    receive(&sandbox, items, &Script::default());
+
+    assert_eq!(ENDED.with_borrow(Clone::clone), [S_OK]);
 }
 
 #[test]
