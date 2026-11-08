@@ -1010,19 +1010,23 @@ async fn check_update(app: AppHandle, pending: State<'_, PendingUpdate>) -> Resu
 }
 
 /// Downloads the update, checks its signature, and starts its installer, which ends Perli and
-/// opens the new version. Running jobs would be cut off, so they must finish first.
+/// opens the new version. Running jobs would be cut off, so they must finish first, and none
+/// may start until the install fails or Perli ends.
 #[tauri::command]
 async fn install_update(pending: State<'_, PendingUpdate>, jobs: State<'_, Jobs>) -> Result<(), String> {
-    if jobs.running() {
+    if !jobs.close() {
         return Err("Jobs are still running. Let them finish, then install the update.".into());
     }
     // A copy stays, so a failed download can be tried again.
     let update = pending.0.lock().unwrap_or_else(PoisonError::into_inner).clone();
-    let update = update.ok_or("No update is waiting. Check for updates first.")?;
-    update
-        .download_and_install(|_, _| {}, || {})
-        .await
-        .map_err(|error| error.to_string())
+    let installed = match update {
+        Some(update) => update.download_and_install(|_, _| {}, || {}).await.map_err(|error| error.to_string()),
+        None => Err("No update is waiting. Check for updates first.".into()),
+    };
+    if installed.is_err() {
+        jobs.reopen();
+    }
+    installed
 }
 
 /// Tags go through a database, which must not hold up the window.

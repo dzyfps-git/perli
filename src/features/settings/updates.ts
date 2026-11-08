@@ -38,7 +38,10 @@ export async function installNow(beforeExit: () => Promise<unknown>) {
   setState("installing");
   setFailure(undefined);
   try {
-    await beforeExit();
+    await beforeExit().catch((error: unknown) => {
+      // Shown as is, like the backend's own failures.
+      throw `Your open tabs couldn't be saved, so the update waits. ${String(error)}`;
+    });
     await installUpdate();
   } catch (error) {
     setState("ready");
