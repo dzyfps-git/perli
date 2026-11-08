@@ -93,7 +93,7 @@ function Place(props: {
 }
 
 /** A part of the sidebar under a heading, which folds away on a click. */
-function Section(props: { id: SectionId; label: string; onMenu: (event: MouseEvent) => void; children: JSX.Element }) {
+function Section(props: { id: SectionId; label: string; children: JSX.Element }) {
   const folded = () => foldedSections().includes(props.id);
   return (
     <Show when={!hiddenSections().includes(props.id)}>
@@ -102,10 +102,6 @@ function Section(props: { id: SectionId; label: string; onMenu: (event: MouseEve
           class="place-heading"
           aria-expanded={!folded()}
           onClick={() => toggleFolded(props.id)}
-          onContextMenu={(event) => {
-            event.preventDefault();
-            props.onMenu(event);
-          }}
         >
           {props.label}
           <span class="place-chevron" aria-hidden="true">
@@ -191,10 +187,17 @@ export function Sidebar(props: {
       aria-label="Places"
       onPointerOver={moveGlide}
       onPointerLeave={() => glide.classList.remove("place-glide-on")}
+      // Headings and empty space both open the sections menu, so hiding every section never
+      // strands it. Places handle their own right-click first.
+      onContextMenu={(event) => {
+        if (event.defaultPrevented) return;
+        event.preventDefault();
+        props.onSectionMenu(event);
+      }}
     >
       <span ref={glide} class="place-glide" />
       <Show when={pinned().length}>
-        <Section id="pinned" label="Pinned" onMenu={props.onSectionMenu}>
+        <Section id="pinned" label="Pinned">
           <For each={pinned()}>
             {(path) => (
               <Place
@@ -209,7 +212,7 @@ export function Sidebar(props: {
           </For>
         </Section>
       </Show>
-      <Section id="places" label="Places" onMenu={props.onSectionMenu}>
+      <Section id="places" label="Places">
         <For each={places()?.folders}>
           {(folder) => (
             <Place
@@ -227,7 +230,7 @@ export function Sidebar(props: {
         </Show>
       </Section>
       <Show when={recent().length}>
-        <Section id="recent" label="Recent" onMenu={props.onSectionMenu}>
+        <Section id="recent" label="Recent">
           <For each={recent()}>
             {(item) => (
               <Place
@@ -243,7 +246,7 @@ export function Sidebar(props: {
         </Section>
       </Show>
       <Show when={places()?.clouds.length}>
-        <Section id="cloud" label="Cloud" onMenu={props.onSectionMenu}>
+        <Section id="cloud" label="Cloud">
           <For each={places()?.clouds}>
             {(cloud) => (
               <Place
@@ -258,7 +261,7 @@ export function Sidebar(props: {
           </For>
         </Section>
       </Show>
-      <Section id="drives" label="Drives" onMenu={props.onSectionMenu}>
+      <Section id="drives" label="Drives">
         <For each={places()?.drives}>
           {(drive) => (
             <Place
