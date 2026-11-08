@@ -69,6 +69,11 @@ fn remote_of(path: &str) -> Option<String> {
     Some(format!(r"\\{server}\{share}"))
 }
 
+/// True for a share path or a mapped drive, where asking the disk can hang on an offline server.
+pub fn is_remote(path: &str) -> bool {
+    path.starts_with(r"\\") || mapped_drive(path).is_some()
+}
+
 /// The `Z:` of a path on a mapped drive.
 fn mapped_drive(path: &str) -> Option<&str> {
     let device = path.get(..2).filter(|device| device.ends_with(':'))?;

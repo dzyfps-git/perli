@@ -6,11 +6,12 @@ use std::time::SystemTime;
 
 use serde::Serialize;
 use windows::core::{Interface, HSTRING};
+use windows::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_DIRECTORY, WIN32_FIND_DATAW};
 use windows::Win32::System::Com::{CoCreateInstance, IPersistFile, CLSCTX_INPROC_SERVER, STGM_READ};
 use windows::Win32::UI::Shell::{FOLDERID_Recent, IShellLinkW, ShellLink};
 
 use crate::ops::Com;
-use crate::places;
+use crate::{network, places};
 
 /// Longest path a shortcut stores in plain form.
 const MAX_PATH: usize = 260;
@@ -44,17 +45,19 @@ fn read_from(folder: &Path, limit: usize) -> Vec<Recent> {
         if found.len() == limit {
             break;
         }
-        let Some(target) = target_of(&shortcut) else { continue };
+        let Some((target, stored_dir)) = target_of(&shortcut) else { continue };
         if found.iter().any(|known| known.path.eq_ignore_ascii_case(&target)) {
             continue;
         }
-        // ponytail: a gone target on a network share is kept, because asking an offline server
-        // can hang for seconds. Opening it then reports the failure.
-        let remote = target.starts_with(r"\\");
-        let is_dir = match fs::metadata(&target) {
-            Ok(data) => data.is_dir(),
-            Err(_) if remote => false,
-            Err(_) => continue,
+        // ponytail: a remote target is never asked about, because an offline server can hang
+        // for seconds, so a gone one stays listed and opening it reports the failure.
+        let is_dir = if network::is_remote(&target) {
+            stored_dir
+        } else {
+            match fs::metadata(&target) {
+                Ok(data) => data.is_dir(),
+                Err(_) => continue,
+            }
         };
         let name = Path::new(&target)
             .file_name()
@@ -64,16 +67,19 @@ fn read_from(folder: &Path, limit: usize) -> Vec<Recent> {
     found
 }
 
-/// Where a shortcut points, without asking Windows to search for a moved target.
-fn target_of(shortcut: &Path) -> Option<String> {
+/// Where a shortcut points, and whether it was a folder when the shortcut was made, without
+/// asking Windows to search for a moved target.
+fn target_of(shortcut: &Path) -> Option<(String, bool)> {
     let mut path = [0u16; MAX_PATH];
+    let mut data = WIN32_FIND_DATAW::default();
     unsafe {
         let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).ok()?;
         link.cast::<IPersistFile>().ok()?.Load(&HSTRING::from(shortcut.as_os_str()), STGM_READ).ok()?;
-        link.GetPath(&mut path, std::ptr::null_mut(), 0).ok()?;
+        link.GetPath(&mut path, &raw mut data, 0).ok()?;
     }
     let end = path.iter().position(|&unit| unit == 0)?;
-    (end > 0).then(|| String::from_utf16_lossy(&path[..end]))
+    let is_dir = data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0;
+    (end > 0).then(|| (String::from_utf16_lossy(&path[..end]), is_dir))
 }
 
 #[cfg(test)]
@@ -115,6 +121,9 @@ mod tests {
         let names: Vec<_> = found.iter().map(|recent| (recent.name.as_str(), recent.is_dir)).collect();
         assert_eq!(names, [("folder", true), ("new.txt", false), ("old.txt", false)]);
         assert_eq!(read_from(&links, 1).len(), 1);
+        assert_eq!(target_of(&links.join("folder.lnk")).map(|(_, dir)| dir), Some(true), "the shortcut knows");
+        assert!(network::is_remote(r"\\server\share\a.txt"));
+        assert!(!network::is_remote(&files.to_string_lossy()));
         fs::remove_dir_all(&root).unwrap();
     }
 }
