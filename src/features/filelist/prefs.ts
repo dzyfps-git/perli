@@ -41,6 +41,7 @@ export const [lastLayout, setLastLayout] = stored<Layout>(
 );
 /** A card with a file's details and a preview, when the pointer rests on its row. */
 export const [hoverCards, setHoverCards] = stored("hover-cards", saved("hover-cards") !== false);
+export const [detailsPanel, setDetailsPanel] = stored("details-panel", saved("details-panel") === true);
 
 const [sortMemory, setSortMemory] = stored<SortMemory>(
   "folder-sorts",

@@ -32,6 +32,30 @@ export function join(folder: string, name: string) {
 
 export const baseName = (path: string) => path.slice(path.lastIndexOf("\\") + 1);
 
+/**
+ * Where `relative`, as a document in `folder` writes it, points: either slash, `.` and `..`,
+ * and `%20` for spaces. `..` never climbs above the drive or share.
+ */
+export function resolveRelative(folder: string, relative: string) {
+  let decoded = relative.replace(/[?#].*$/, "");
+  try {
+    decoded = decodeURI(decoded);
+  } catch {
+    // A stray % is part of the name.
+  }
+  const network = folder.startsWith("\\\\");
+  const parts = folder.replace(/^\\\\/, "").replace(/\\+$/, "").split("\\");
+  const root = network ? 2 : 1;
+  for (const part of decoded.split(/[\\/]/)) {
+    if (part === "..") {
+      if (parts.length > root) parts.pop();
+    } else if (part && part !== ".") parts.push(part);
+  }
+  const path = parts.join("\\");
+  if (network) return `\\\\${path}`;
+  return parts.length === 1 ? `${path}\\` : path;
+}
+
 /** What to open for text typed into the path bar. Text with no drive is read from `folder`. */
 export function typedPath(folder: string, text: string) {
   const path = text.trim().replace(/^"|"$/g, "");

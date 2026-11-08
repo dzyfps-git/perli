@@ -150,6 +150,16 @@
   margin-top: var(--space-2);
 }
 
+.settings-search {
+  width: 100%;
+  margin-top: var(--space-3);
+}
+
+.settings-section[hidden] {
+  display: none;
+}
+
+.settings-search,
 .settings-palette-name {
   flex: 1;
   min-width: 0;
@@ -162,6 +172,7 @@
   font: inherit;
 }
 
+.settings-search:focus-visible,
 .settings-palette-name:focus-visible {
   border-color: var(--accent);
   outline: none;

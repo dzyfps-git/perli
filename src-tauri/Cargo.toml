@@ -10,7 +10,7 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-windows = { version = "0.62", features = ["Win32_Graphics_Gdi", "Win32_Graphics_Imaging", "Win32_NetworkManagement_NetManagement", "Win32_NetworkManagement_WNet", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_Com_Marshal", "Win32_System_Com_StructuredStorage", "Win32_System_DataExchange", "Win32_System_Environment", "Win32_System_IO", "Win32_System_Ioctl", "Win32_System_LibraryLoader", "Win32_System_Memory", "Win32_System_Ole", "Win32_System_Registry", "Win32_System_RestartManager", "Win32_System_StationsAndDesktops", "Win32_System_SystemServices", "Win32_System_Threading", "Win32_System_Time", "Win32_System_WindowsProgramming", "Win32_UI_HiDpi", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_UI_WindowsAndMessaging"] }
+windows = { version = "0.62", features = ["Win32_Graphics_Gdi", "Win32_Graphics_Imaging", "Win32_NetworkManagement_NetManagement", "Win32_NetworkManagement_WNet", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_Com_Marshal", "Win32_System_Com_StructuredStorage", "Win32_System_DataExchange", "Win32_System_Environment", "Win32_System_IO", "Win32_System_Ioctl", "Win32_System_LibraryLoader", "Win32_System_Memory", "Win32_System_Ole", "Win32_System_Registry", "Win32_System_RestartManager", "Win32_System_StationsAndDesktops", "Win32_System_SystemServices", "Win32_System_Threading", "Win32_System_Time", "Win32_System_WindowsProgramming", "Win32_UI_HiDpi", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_UI_Shell_PropertiesSystem", "Win32_UI_WindowsAndMessaging"] }
 # The `implement` macro names this crate directly. It is already in the tree through `windows`.
 windows-core = "0.62"
 zip = { version = "9.4.1", default-features = false, features = ["deflate-flate2", "deflate64"] }
@@ -19,6 +19,7 @@ flate2 = { version = "1", default-features = false, features = ["rust_backend"] 
 rusqlite = { version = "0.41.1", features = ["bundled"] }
 # Windows' own TLS, which needs no crypto library of its own.
 tauri-plugin-updater = { version = "2.14.1", default-features = false, features = ["native-tls"] }
+pulldown-cmark = { version = "0.13.6", default-features = false, features = ["html"] }
 
 [profile.release]
 lto = true
