@@ -474,7 +474,18 @@ export async function fetchRows(
 export type Preview =
   | { kind: "text"; text: string; next: number | null }
   | { kind: "markdown"; html: string }
+  | { kind: "archive"; entries: ArchiveEntry[]; more: boolean }
+  | { kind: "comic"; pages: string[] }
+  | { kind: "book"; title: string; chapters: string[] }
   | { kind: "picture" };
+
+/** One file or folder inside a ZIP. `modified` is as the archive wrote it. */
+export interface ArchiveEntry {
+  name: string;
+  size: number;
+  folder: boolean;
+  modified: string | null;
+}
 
 export const previewRow = (view: number, request: number, row: number, offset = 0) =>
   invoke<Preview>("preview_row", { view, request, row, offset });
@@ -493,6 +504,14 @@ export const openLink = (url: string) => invoke<void>("open_link", { url });
 /** A picture of a row, `edge` device pixels on its longest side. */
 export const fetchBigPicture = (view: number, request: number, row: number, edge: number) =>
   invoke<ArrayBuffer>("big_picture", { view, request, row, edge }).then(decodeThumb);
+
+/** A comic page or a book's picture, by its name inside the archive. */
+export const fetchArchivePicture = (view: number, request: number, row: number, entry: string, edge: number) =>
+  invoke<ArrayBuffer>("archive_picture", { view, request, row, entry, edge }).then(decodeThumb);
+
+/** One chapter of a book as safe HTML, by its name inside the archive. */
+export const bookChapter = (view: number, request: number, row: number, entry: string) =>
+  invoke<string>("book_chapter", { view, request, row, entry });
 
 /** A picture on this PC that a Markdown file points to. */
 export const fetchPictureFile = (path: string, edge: number) =>

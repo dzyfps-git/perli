@@ -20,6 +20,7 @@ rusqlite = { version = "0.41.1", features = ["bundled"] }
 # Windows' own TLS, which needs no crypto library of its own.
 tauri-plugin-updater = { version = "2.14.1", default-features = false, features = ["native-tls"] }
 pulldown-cmark = { version = "0.13.6", default-features = false, features = ["html"] }
+quick-xml = "0.42.0"
 
 [profile.release]
 lto = true

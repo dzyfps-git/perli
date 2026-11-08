@@ -137,6 +137,55 @@
   border-top: 1px solid var(--border);
 }
 
+.preview-book {
+  font-family: Georgia, "Segoe UI Variable Text", serif;
+  font-size: 16px;
+  line-height: 1.7;
+}
+
+.preview-archive {
+  padding: var(--space-3) var(--space-4);
+}
+
+.preview-archive-sum {
+  margin: 0 0 var(--space-2);
+  color: var(--text-muted);
+}
+
+.preview-archive table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.preview-archive th {
+  position: sticky;
+  top: 0;
+  padding: var(--space-1) var(--space-2);
+  color: var(--text-muted);
+  background: var(--surface);
+  font-weight: 400;
+  text-align: left;
+}
+
+.preview-archive td {
+  padding: 2px var(--space-2);
+  border-top: 1px solid var(--border);
+  overflow-wrap: anywhere;
+}
+
+.preview-archive :is(th, td):not(:first-child) {
+  width: 1%;
+  white-space: nowrap;
+}
+
+.preview-archive td:nth-child(2) {
+  text-align: right;
+}
+
+.preview-archive tr[data-folder] td:first-child {
+  font-weight: 600;
+}
+
 .md-picture {
   max-width: 100%;
   height: auto;

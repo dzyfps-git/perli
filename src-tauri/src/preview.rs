@@ -20,6 +20,7 @@ use windows::Win32::UI::Shell::PropertiesSystem::{
     SHGetPropertyStoreFromParsingName, GPS_DEFAULT, GPS_FASTPROPERTIESONLY, PDFF_DEFAULT, PDTF_ISVIEWABLE,
 };
 
+use crate::inside;
 use crate::ops::Com;
 use crate::thumbs;
 
@@ -37,6 +38,12 @@ pub enum Preview {
     #[serde(rename_all = "camelCase")]
     Text { text: String, next: Option<u64> },
     Markdown { html: String },
+    /// What a ZIP holds, and whether there was more than the list.
+    Archive { entries: Vec<inside::Entry>, more: bool },
+    /// A comic's pages, by their names inside it.
+    Comic { pages: Vec<String> },
+    /// A book's title and its chapters, by their names inside it.
+    Book { title: String, chapters: Vec<String> },
     /// Anything else shows Windows' own picture of it.
     Picture,
 }
@@ -63,6 +70,11 @@ pub fn read(path: &Path, offset: u64) -> Preview {
     if path.is_dir() || thumbs::is_online_only(path) {
         return Preview::Picture;
     }
+    if offset == 0 {
+        if let Some(preview) = inside_of(path) {
+            return preview;
+        }
+    }
     let size = path.metadata().map_or(0, |data| data.len());
     if offset == 0 && is_markdown(path) && size <= MARKDOWN_BYTES {
         if let Some(text) = std::fs::read(path).ok().and_then(|bytes| as_text(strip_bom(&bytes), false).map(markdown)) {
@@ -70,6 +82,24 @@ pub fn read(path: &Path, offset: u64) -> Preview {
         }
     }
     piece(path, offset).unwrap_or(Preview::Picture)
+}
+
+/// A comic or a book that can't be read still shows what it holds, as any ZIP does.
+fn inside_of(path: &Path) -> Option<Preview> {
+    let extension = path.extension()?.to_string_lossy().to_lowercase();
+    let listed = || inside::entries(path).ok().map(|(entries, more)| Preview::Archive { entries, more });
+    match extension.as_str() {
+        "zip" => listed(),
+        "cbz" => match inside::pages(path) {
+            Ok(pages) if !pages.is_empty() => Some(Preview::Comic { pages }),
+            _ => listed(),
+        },
+        "epub" => match inside::book(path) {
+            Ok(book) if !book.chapters.is_empty() => Some(Preview::Book { title: book.title, chapters: book.chapters }),
+            _ => listed(),
+        },
+        _ => None,
+    }
 }
 
 fn strip_bom(bytes: &[u8]) -> &[u8] {
@@ -130,12 +160,12 @@ pub fn markdown(text: &str) -> String {
     out
 }
 
-fn is_web_link(dest: &str) -> bool {
+pub(crate) fn is_web_link(dest: &str) -> bool {
     let lower = dest.to_ascii_lowercase();
     ["https://", "http://", "mailto:"].iter().any(|scheme| lower.starts_with(scheme))
 }
 
-fn escape(text: &str) -> String {
+pub(crate) fn escape(text: &str) -> String {
     text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
 }
 
