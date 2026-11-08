@@ -42,3 +42,18 @@ export function moveTarget(key: string, focused: number, { count, perRow, pageRo
   }
   return undefined;
 }
+
+/**
+ * Where a box of `width` by `height` goes beside the point (`x`, `y`): below and to the right,
+ * flipped to the other side of the point at a window edge, and never off the window.
+ */
+export function besidePoint(x: number, y: number, width: number, height: number, window: { width: number; height: number }) {
+  const GAP = 16;
+  const EDGE = 4;
+  const side = (at: number, size: number, room: number) => {
+    const after = at + GAP;
+    const spot = after + size + EDGE <= room ? after : at - GAP - size;
+    return Math.max(EDGE, Math.min(spot, room - size - EDGE));
+  };
+  return { left: side(x, width, window.width), top: side(y, height, window.height) };
+}

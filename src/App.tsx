@@ -20,6 +20,7 @@ import {
   stopSizes,
   type Grouping,
   type Places,
+  type Recent,
   type Row,
   type Sort,
   type Tag,
@@ -40,9 +41,12 @@ import { clampTile, isLargestTile, isSmallestTile, TILE_STEP, type Layout } from
 import {
   columns,
   folderSizes,
+  forgetSorts,
   grouping,
   setFolderSizes,
   setGrouping,
+  setLastLayout,
+  setLastSort,
   setShowHidden,
   setTileSize,
   showHidden,
@@ -51,15 +55,31 @@ import {
 } from "./features/filelist/prefs";
 import { SelectPattern } from "./features/filelist/SelectPattern";
 import { FLAT_QUERY, type FolderView } from "./features/navigation/folderView";
-import { BIN_PATH, isBin, isDriveRoot, join } from "./features/navigation/path";
+import { BIN_PATH, isBin, isDriveRoot, join, parentOf, baseName } from "./features/navigation/path";
 import { Palette, type Command } from "./features/palette/Palette";
 import { PathBar } from "./features/pathbar/PathBar";
 import { Settings } from "./features/settings/Settings";
+import { BookmarksBar } from "./features/sidebar/BookmarksBar";
+import { holds } from "./features/sidebar/placeLists";
+import {
+  bookmarks,
+  bookmarksBar,
+  hiddenSections,
+  lookOf,
+  movePinned,
+  pinned,
+  SECTIONS,
+  setBookmarksBar,
+  setLook,
+  toggleBookmark,
+  togglePinned,
+  toggleSection,
+} from "./features/sidebar/saved";
 import { FOLDERS, Sidebar } from "./features/sidebar/Sidebar";
 import { parseSession } from "./features/tabs/session";
 import { createTabs, type Tab } from "./features/tabs/tabs";
 import { NewTag } from "./features/tags/NewTag";
-import { refreshTags } from "./features/tags/tags";
+import { refreshTags, TAG_COLORS } from "./features/tags/tags";
 import { TitleBar } from "./features/titlebar/TitleBar";
 import { Menu, type MenuItem } from "./ui/Menu";
 import { Tooltip } from "./ui/Tooltip";
@@ -97,6 +117,71 @@ const emptyText = (view: FolderView) => {
   return view.query() ? "No matches." : "This folder is empty.";
 };
 const toggleFlat = (view: FolderView) => view.search(view.query() === FLAT_QUERY ? "" : FLAT_QUERY);
+
+/** Glyphs a folder can wear, from Segoe Fluent Icons. */
+const LOOK_ICONS: [string, string | undefined][] = [
+  ["Folder", undefined],
+  ["Star", "\uE734"],
+  ["Heart", "\uEB51"],
+  ["Work", "\uE821"],
+  ["Code", "\uE943"],
+  ["Music", "\uE8D6"],
+  ["Pictures", "\uE8B9"],
+  ["Video", "\uE714"],
+  ["Games", "\uE7FC"],
+  ["Package", "\uE7B8"],
+  ["Lock", "\uE72E"],
+  ["People", "\uE716"],
+  ["Globe", "\uE774"],
+];
+
+function lookItem(path: string): MenuItem {
+  const look = lookOf(path);
+  return {
+    label: "Folder look",
+    items: [
+      {
+        label: "Color",
+        items: [
+          { label: "None", checked: look?.color === undefined, action: () => setLook(path, { color: undefined }) },
+          ...TAG_COLORS.map((name, color) => ({
+            label: name,
+            checked: look?.color === color,
+            action: () => setLook(path, { color }),
+          })),
+        ],
+      },
+      {
+        label: "Icon",
+        items: LOOK_ICONS.map(([label, icon]) => ({
+          label,
+          checked: look?.icon === icon,
+          action: () => setLook(path, { icon }),
+        })),
+      },
+    ],
+  };
+}
+
+/** Pinning, bookmarking and the look of a folder. */
+function keepItems(path: string): MenuItem[] {
+  const isPinned = holds(pinned(), path);
+  const at = pinned().findIndex((item) => item.toLowerCase() === path.toLowerCase());
+  return [
+    { label: isPinned ? "Unpin from sidebar" : "Pin to sidebar", divider: true, action: () => togglePinned(path) },
+    ...(isPinned
+      ? [
+          { label: "Move up", disabled: at === 0, action: () => movePinned(path, -1) },
+          { label: "Move down", disabled: at === pinned().length - 1, action: () => movePinned(path, 1) },
+        ]
+      : []),
+    {
+      label: holds(bookmarks(), path) ? "Remove bookmark" : "Add bookmark",
+      action: () => toggleBookmark(path),
+    },
+    lookItem(path),
+  ];
+}
 
 // The main layout. Moving parts of the app around should only change this file.
 export function App() {
@@ -190,11 +275,55 @@ export function App() {
         ? []
         : [
             { label: "Search here", action: () => searchIn(view, path) },
+            ...keepItems(path),
             ...shell.placeItems(path, { x: event.clientX, y: event.clientY }),
             ...(isDriveRoot(path) ? networkItems() : []),
           ]),
     ];
     setMenu({ x: event.clientX, y: event.clientY, items });
+  }
+
+  /** Shows the file among its neighbours, the way Explorer's Open file location does. */
+  async function showInFolder(view: FolderView, path: string) {
+    const folder = parentOf(path);
+    if (folder && (await view.open(folder))) view.reload([baseName(path)]);
+  }
+
+  function showRecentMenu(event: MouseEvent, view: FolderView, recent: Recent) {
+    event.preventDefault();
+    const open = recent.isDir ? () => view.open(recent.path) : () => openFile(recent.path).catch(jobs.report);
+    const items: MenuItem[] = [
+      { label: "Open", action: open },
+      ...(recent.isDir ? [{ label: "Open to side", action: () => tabs.openToSide(recent.path) }] : []),
+      { label: "Show in folder", action: () => showInFolder(view, recent.path) },
+    ];
+    setMenu({ x: event.clientX, y: event.clientY, items });
+  }
+
+  function showSectionMenu(event: MouseEvent) {
+    const items: MenuItem[] = [
+      ...SECTIONS.map((section) => ({
+        label: section.label,
+        checked: !hiddenSections().includes(section.id),
+        action: () => toggleSection(section.id),
+      })),
+      { label: "Bookmarks bar", divider: true, checked: bookmarksBar(), action: () => setBookmarksBar(!bookmarksBar()) },
+    ];
+    setMenu({ x: event.clientX, y: event.clientY, items });
+  }
+
+  /** Like Explorer's Apply to folders: the shown view becomes the one every folder starts with. */
+  function viewForAll(view: FolderView) {
+    const sort = view.folderSort();
+    const layout = view.layout();
+    forgetSorts();
+    setLastSort(sort);
+    setLastLayout(layout);
+    for (const other of tabs.allViews()) {
+      if (other.isBin()) continue;
+      other.setLayout(layout);
+      if (!other.query()) other.setSort(sort);
+    }
   }
 
   async function showRowMenu(event: MouseEvent, view: FolderView, row: Row) {
@@ -216,6 +345,7 @@ export function App() {
         ? { label: "Open to side", action: () => openRow(view, row, true) }
         : shell.openWithItem(view),
       ...(row.isDir ? [{ label: "Search here", action: () => searchIn(view, path) }] : []),
+      ...(row.isDir ? keepItems(path) : []),
       { label: "Cut", divider: true, action: () => actions.cut(view) },
       { label: "Copy", action: () => actions.copy(view) },
       {
@@ -383,6 +513,7 @@ export function App() {
       ...(view.isBin()
         ? []
         : [{ label: "Flat view", checked: view.query() === FLAT_QUERY, action: () => toggleFlat(view) }]),
+      ...(own ? [] : [{ label: "Use this view for all folders", action: () => viewForAll(view) }]),
     ];
   }
 
@@ -454,6 +585,17 @@ export function App() {
       { label: "Open templates folder", run: () => actions.openTemplates(view) },
       { label: "Open in terminal", run: terminal },
       { label: "Flat view", run: () => toggleFlat(view) },
+      { label: "Use this view for all folders", run: () => viewForAll(view) },
+      ...keepCommands(view),
+    ];
+  }
+
+  function keepCommands(view: FolderView): Command[] {
+    const path = view.folder()?.path;
+    if (!path || view.query()) return [];
+    return [
+      { label: holds(pinned(), path) ? "Unpin from sidebar" : "Pin to sidebar", run: () => togglePinned(path) },
+      { label: holds(bookmarks(), path) ? "Remove bookmark" : "Add bookmark", run: () => toggleBookmark(path) },
     ];
   }
 
@@ -493,6 +635,7 @@ export function App() {
       ...(known?.folders ?? []).map(({ kind, path }) => goTo(FOLDERS[kind].label, path)),
       ...(known?.clouds ?? []).map(({ name, path }) => goTo(name, path)),
       ...(known?.drives ?? []).map(({ name, path }) => goTo(name, path)),
+      ...[...pinned(), ...bookmarks()].map((path) => goTo(baseName(path) || path, path)),
     ];
   }
 
@@ -681,6 +824,8 @@ export function App() {
         <Sidebar
           view={tabs.activeView()}
           onMenu={(event, path) => showFolderMenu(event, tabs.activeView(), path)}
+          onRecentMenu={(event, recent) => showRecentMenu(event, tabs.activeView(), recent)}
+          onSectionMenu={showSectionMenu}
         />
         <button
           class="settings-button"
@@ -695,6 +840,11 @@ export function App() {
         </button>
       </aside>
       <main class="files">
+        <BookmarksBar
+          view={tabs.activeView()}
+          onNewTab={(path) => tabs.add([path])}
+          onMenu={(event, path) => showFolderMenu(event, tabs.activeView(), path)}
+        />
         <For each={tabs.tabs()}>
           {(tab) => (
             <div class="panes" classList={{ "panes-swapped": tab.swapped() }} hidden={tab !== tabs.active()}>

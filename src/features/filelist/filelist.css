@@ -332,6 +332,104 @@
   color: var(--accent);
 }
 
+/* A folder's own look, from its row menu. */
+.file-grid[data-layout="grid"] .file-row[data-glyph]::before {
+  content: attr(data-glyph);
+}
+
+.file-grid[data-layout="grid"] .file-row[data-look]::before {
+  color: var(--look-color, var(--accent));
+}
+
+.file-look::before {
+  content: attr(data-glyph);
+}
+
+.file-look {
+  margin-right: var(--space-1);
+  color: var(--look-color, var(--accent));
+  font-family: var(--font-icons);
+  font-size: 12px;
+  font-weight: normal;
+}
+
+.hover-card {
+  position: fixed;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  width: 280px;
+  padding: var(--space-3);
+  color: var(--text);
+  background: var(--overlay-tint);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  backdrop-filter: var(--blur);
+  animation: tooltip-in var(--motion);
+  pointer-events: none;
+}
+
+.hover-card-picture {
+  align-self: center;
+  max-width: 100%;
+  max-height: 180px;
+  object-fit: contain;
+}
+
+.hover-card-text {
+  max-height: 180px;
+  margin: 0;
+  padding: var(--space-2);
+  overflow: hidden;
+  color: var(--text-muted);
+  background: var(--surface);
+  border-radius: var(--space-1);
+  font: 11px / 1.4 "Cascadia Mono", Consolas, monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.hover-card-name {
+  margin: 0;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.hover-card-facts {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 2px var(--space-2);
+  margin: 0;
+  font-size: 12px;
+}
+
+.hover-card-facts dt {
+  color: var(--text-muted);
+}
+
+.hover-card-facts dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.hover-card-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-2);
+  margin: 0;
+  padding: 0;
+  font-size: 12px;
+  list-style: none;
+}
+
+.hover-card-tags li {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
 /* Sits in the row's padding, so it never covers a name. */
 .file-row[data-pinned]::after,
 .file-row[data-cloud]::after {

@@ -21,9 +21,103 @@
 }
 
 .places ul {
-  margin: var(--space-3) 0 0;
+  margin: 0;
   padding: 0;
   list-style: none;
+}
+
+.place-section {
+  margin-top: var(--space-2);
+}
+
+/* Quiet until hovered, so the places stay what the eye finds first. */
+.place-heading {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  width: 100%;
+  height: 24px;
+  padding: 0 var(--space-2);
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  text-align: left;
+  transition: color var(--motion);
+}
+
+.place-heading:hover {
+  color: var(--text);
+}
+
+.place-heading:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.place-chevron {
+  font-family: var(--font-icons);
+  font-size: 8px;
+  opacity: 0;
+  transition:
+    opacity var(--motion),
+    rotate var(--motion-slide);
+}
+
+.place-heading:hover .place-chevron,
+.place-heading:focus-visible .place-chevron,
+.place-heading[aria-expanded="false"] .place-chevron {
+  opacity: 1;
+}
+
+.place-heading[aria-expanded="false"] .place-chevron {
+  rotate: -90deg;
+}
+
+/* A strip of folders above the panes, one click away from any tab. */
+.bookmarks {
+  display: flex;
+  gap: var(--space-1);
+  padding: 0 var(--space-1) var(--space-1) 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.bookmark {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: var(--space-1);
+  max-width: 180px;
+  height: 24px;
+  padding: 0 var(--space-2);
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  transition: background var(--motion);
+}
+
+.bookmark:hover {
+  background: var(--surface-hover);
+}
+
+.bookmark:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.bookmark[aria-current] {
+  background: var(--surface-selected);
+}
+
+.bookmark .place-icon {
+  font-size: 12px;
 }
 
 .place {

@@ -30,6 +30,9 @@ const EDGE: i32 = 256;
 const WORKERS: usize = 4;
 /// Where the pixels start in what `read` gives.
 const HEADER_BYTES: usize = 8;
+/// Enough for the lines a hover card shows.
+const PEEK_BYTES: usize = 2048;
+const PEEK_LINES: usize = 12;
 
 type Work = Box<dyn FnOnce() + Send>;
 
@@ -63,6 +66,28 @@ pub async fn read(path: PathBuf) -> Vec<u8> {
     });
     let _ = queue().lock().unwrap_or_else(PoisonError::into_inner).send(work);
     result.recv().await.unwrap_or_default()
+}
+
+/// The first lines of a file that reads as UTF-8 text, for a preview. Bytes that are not UTF-8,
+/// or control characters, mean it is not text. A file in the cloud stays there. Blocks, so call
+/// it off the main thread.
+pub fn text_start(path: &Path) -> Option<String> {
+    use std::io::Read;
+    if is_online_only(path) {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(PEEK_BYTES);
+    fs::File::open(path).ok()?.take(PEEK_BYTES as u64).read_to_end(&mut bytes).ok()?;
+    let body = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&bytes);
+    let text = match std::str::from_utf8(body) {
+        Ok(text) => text,
+        // The cut landed inside a character, which is fine.
+        Err(cut) if cut.error_len().is_none() => std::str::from_utf8(&body[..cut.valid_up_to()]).ok()?,
+        Err(_) => return None,
+    };
+    let plain = |c: char| !c.is_control() || matches!(c, '\n' | '\r' | '\t' | '\x0c');
+    (!text.is_empty() && text.chars().all(plain))
+        .then(|| text.lines().take(PEEK_LINES).collect::<Vec<_>>().join("\n"))
 }
 
 /// True if opening the file would fetch it from the cloud.
@@ -199,6 +224,33 @@ mod tests {
             assert_eq!(bytes.len(), HEADER_BYTES + width * height * 4);
             assert!(bytes[HEADER_BYTES..].iter().any(|&byte| byte != 0), "{path:?} is blank");
         }
+        fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
+    fn only_text_has_a_text_start() {
+        let folder = folder("peek");
+        let lines: String = (1..=20).map(|line| format!("line {line}\n")).collect();
+        let cut = format!("{}é", "a".repeat(PEEK_BYTES - 1));
+        let files = [
+            ("a.txt", format!("\u{FEFF}{lines}").into_bytes()),
+            ("cut.txt", cut.into_bytes()),
+            ("a.bin", b"MZ\0\0".to_vec()),
+            ("a.pdf", b"%PDF-1.7\n%\xE2\xE3\xCF\xD3\n".to_vec()),
+            ("empty.txt", Vec::new()),
+        ];
+        for (name, bytes) in &files {
+            fs::write(folder.join(name), bytes).unwrap();
+        }
+
+        let start = text_start(&folder.join("a.txt")).unwrap();
+        assert_eq!(start.lines().count(), PEEK_LINES);
+        assert!(start.starts_with("line 1\nline 2"), "{start:?}");
+        assert_eq!(text_start(&folder.join("cut.txt")).unwrap(), "a".repeat(PEEK_BYTES - 1));
+        assert_eq!(text_start(&folder.join("a.bin")), None);
+        assert_eq!(text_start(&folder.join("a.pdf")), None);
+        assert_eq!(text_start(&folder.join("empty.txt")), None);
+        assert_eq!(text_start(&folder.join("missing.txt")), None);
         fs::remove_dir_all(folder).unwrap();
     }
 

@@ -2,10 +2,33 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { createEffect, createSignal, For, on, Show } from "solid-js";
 import { isDefaultApp, setDefaultApp } from "../../api";
 import type { Tag } from "../../api";
-import { folderSizes } from "../filelist/prefs";
+import { folderSizes, hoverCards, setHoverCards } from "../filelist/prefs";
 import { TagSettings } from "../tags/TagSettings";
-import { accent, ACCENTS, setAccent, setTheme, theme, THEMES } from "./appearance";
+import {
+  accent,
+  ACCENTS,
+  addPalette,
+  changePalette,
+  deletePalette,
+  ownPalette,
+  palettes,
+  setAccent,
+  setTheme,
+  theme,
+  THEMES,
+} from "./appearance";
+import { paletteStyle, type Palette } from "./palettes";
 import "./settings.css";
+
+const COLOR_NAMES = ["First color", "Middle color", "Last color"];
+const ACCENT_VARS = ["--accent-start", "--accent", "--accent-end"];
+
+/** Changes one color, and keeps the other two. */
+function withColor(palette: Palette, at: number, color: string): Palette {
+  const colors = [...palette.colors] as Palette["colors"];
+  colors[at] = color;
+  return { ...palette, colors };
+}
 
 const ICON_CLOSE = "";
 
@@ -24,6 +47,11 @@ export function Settings(props: {
     const root = document.documentElement;
     root.dataset.theme = theme();
     root.dataset.accent = accent();
+    // The user's own colors have no rule in the style sheet, so they go on the page itself.
+    const own = ownPalette();
+    ACCENT_VARS.forEach((name, at) =>
+      own ? root.style.setProperty(name, own.colors[at]) : root.style.removeProperty(name),
+    );
   });
 
   // The window frame and Mica follow Windows unless told otherwise.
@@ -96,10 +124,64 @@ export function Settings(props: {
             </button>
           )}
         </For>
+        <For each={palettes()}>
+          {(palette) => (
+            <button
+              class="settings-accent"
+              role="radio"
+              aria-checked={accent() === palette.id}
+              onClick={() => setAccent(palette.id)}
+            >
+              <span class="settings-swatch" data-accent={palette.id} style={paletteStyle(palette)} />
+              {palette.name}
+            </button>
+          )}
+        </For>
+        <button class="settings-accent" onClick={addPalette}>
+          New palette
+        </button>
       </div>
+      <Show when={ownPalette()} keyed>
+        {(palette) => (
+          <div class="settings-palette">
+            <input
+              class="settings-palette-name"
+              aria-label="Palette name"
+              spellcheck={false}
+              value={palette.name}
+              onChange={(event) => changePalette({ ...palette, name: event.currentTarget.value.trim() || palette.name })}
+            />
+            <For each={COLOR_NAMES}>
+              {(name, at) => (
+                <input
+                  class="settings-palette-color"
+                  type="color"
+                  aria-label={name}
+                  value={palette.colors[at()]}
+                  onChange={(event) => changePalette(withColor(palette, at(), event.currentTarget.value))}
+                />
+              )}
+            </For>
+            <button class="settings-theme" onClick={() => deletePalette(palette.id)}>
+              Delete palette
+            </button>
+          </div>
+        )}
+      </Show>
 
       <h3>Tags</h3>
       <TagSettings onChanged={props.onTagsChanged} onDelete={props.onDeleteTag} />
+
+      <h3>Hover cards</h3>
+      <button
+        class="settings-theme settings-default"
+        role="switch"
+        aria-checked={hoverCards()}
+        onClick={() => setHoverCards(!hoverCards())}
+      >
+        Show details when the pointer rests on a file
+      </button>
+      <p class="settings-note">Text files show their first lines, and other files their picture.</p>
 
       <h3>Folder sizes</h3>
       <button
