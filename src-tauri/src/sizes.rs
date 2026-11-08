@@ -76,7 +76,14 @@ fn scan(folder: &Path, stop: &AtomicBool, report: impl Fn()) {
         let Some(bytes) = total(&found, stop) else {
             return;
         };
-        KNOWN.write().unwrap_or_else(PoisonError::into_inner).insert(key(&found), bytes);
+        {
+            let mut known = KNOWN.write().unwrap_or_else(PoisonError::into_inner);
+            // Checked under the lock: `forget` stops scans before it clears, so no total lands after.
+            if stop.load(Ordering::SeqCst) {
+                return;
+            }
+            known.insert(key(&found), bytes);
+        }
         if reported.elapsed() >= REPORT_GAP {
             report();
             reported = Instant::now();

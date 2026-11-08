@@ -322,7 +322,12 @@ impl Run<'_> {
                 return Ok(None);
             };
             match found {
-                Some(stat) if stat.is_dir() => fresh = false,
+                Some(stat) if stat.is_folder() => fresh = false,
+                // A link could carry the rest of the path somewhere outside the landing.
+                Some(stat) if stat.is_link() => {
+                    self.tell(&folder, "A link has the name this folder needs, so nothing goes through it.")?;
+                    return Ok(None);
+                }
                 Some(_) => {
                     self.tell(&folder, "A file already has the name this folder needs.")?;
                     return Ok(None);
