@@ -2,7 +2,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { createEffect, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import {
   cancelJobsAndClose,
-  clipboardHasFiles,
+  clipboardCanPaste,
   clipboardText,
   disconnectDrive,
   holdClose,
@@ -21,6 +21,7 @@ import {
   type Sort,
 } from "./api";
 import { createFileActions } from "./features/fileops/actions";
+import { BatchRename, type RenameRequest } from "./features/fileops/BatchRename";
 import { followFileDrag } from "./features/fileops/fileDrag";
 import { checkCut, cutNames, takeBackCut } from "./features/fileops/clipboard";
 import { ConfirmDelete, type DeleteRequest } from "./features/fileops/ConfirmDelete";
@@ -92,8 +93,9 @@ export function App() {
   const [paletteOpen, setPaletteOpen] = createSignal(false);
   const [places, setPlaces] = createSignal<Places>();
   const [deleting, setDeleting] = createSignal<DeleteRequest>();
+  const [renaming, setRenaming] = createSignal<RenameRequest>();
   const jobs = createJobs(tabs.allViews);
-  const actions = createFileActions(jobs, setDeleting, () => tabs.active().other());
+  const actions = createFileActions(jobs, setDeleting, () => tabs.active().other(), setRenaming);
   const shell = createShellItems(jobs, actions);
   // A run started on one folder is a detour, so it must not replace the saved tabs.
   const [keepSession, setKeepSession] = createSignal(false);
@@ -135,7 +137,7 @@ export function App() {
 
   // Covers every way to close, including Alt+F4 and the taskbar.
   const closeListener = onCloseAsked(onClose);
-  const dragListener = followFileDrag(tabs.allViews, jobs.report);
+  const dragListener = followFileDrag(tabs.allViews, jobs.report, (x, y, items) => setMenu({ x, y, items }));
   // Other apps and Windows' own commands change folders without Perli running a job.
   const folderListener = onFolderChanged((id) => tabs.allViews().find((view) => view.id === id)?.reload());
   const searchListener = onSearchGrew((id, walk) =>
@@ -187,8 +189,7 @@ export function App() {
     }
 
     const path = rowPath(view, row);
-    const single = view.list()?.selection().rows.length === 1;
-    const canPaste = await clipboardHasFiles();
+    const [canPaste, toolItems] = await Promise.all([clipboardCanPaste(), shell.fileToolItems(view, row)]);
     const items: MenuItem[] = [
       { label: "Open", action: () => openRow(view, row, false) },
       row.isDir
@@ -202,8 +203,9 @@ export function App() {
         disabled: !canPaste,
         action: () => actions.paste(view, row.isDir ? path : undefined),
       },
-      { label: "Rename", disabled: !single, action: () => actions.startRename(view) },
+      { label: "Rename", action: () => actions.startRename(view) },
       { label: "Delete", action: () => actions.remove(view, false) },
+      ...toolItems,
     ];
     if (tabs.active().other()) {
       items.push(
@@ -347,7 +349,7 @@ export function App() {
           ...undo,
         ]
       : [
-          { label: "Paste", disabled: !(await clipboardHasFiles()), action: () => actions.paste(view) },
+          { label: "Paste", disabled: !(await clipboardCanPaste()), action: () => actions.paste(view) },
           shell.newItem(view),
           { label: "Search here", action: () => view.askSearch() },
           ...undo,
@@ -390,6 +392,11 @@ export function App() {
       { label: "Cut", keys: "Ctrl+X", run: () => actions.cut(view) },
       { label: "Rename", keys: "F2", run: () => actions.startRename(view) },
       { label: "Properties", keys: "Alt+Enter", run: () => shell.properties(view) },
+      { label: "Compress to ZIP", run: () => actions.compress(view) },
+      { label: "Extract here", run: () => actions.extract(view, false) },
+      { label: "Extract to own folder", run: () => actions.extract(view, true) },
+      { label: "Save as template", run: () => actions.saveTemplate(view) },
+      { label: "Open templates folder", run: () => actions.openTemplates(view) },
       { label: "Open in terminal", run: terminal },
     ];
   }
@@ -462,11 +469,11 @@ export function App() {
     // Left alone, this key prints the page.
     if (event.ctrlKey && key === "p") {
       event.preventDefault();
-      if (!settingsOpen() && !deleting()) togglePalette();
+      if (!settingsOpen() && !deleting() && !renaming()) togglePalette();
       return;
     }
 
-    if (settingsOpen() || deleting() || paletteOpen()) {
+    if (settingsOpen() || deleting() || renaming() || paletteOpen()) {
       // The dialog covers the tabs, so nothing behind it may change.
       if (isBrowserKey(event, key)) event.preventDefault();
       return;
@@ -639,6 +646,9 @@ export function App() {
       <JobsPanel jobs={jobs} />
       <Show when={deleting()} keyed>
         {(request) => <ConfirmDelete request={request} onClose={() => setDeleting(undefined)} />}
+      </Show>
+      <Show when={renaming()} keyed>
+        {(request) => <BatchRename request={request} onClose={() => setRenaming(undefined)} />}
       </Show>
       <Palette
         open={paletteOpen()}

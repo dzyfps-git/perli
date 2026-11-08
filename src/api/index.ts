@@ -78,10 +78,14 @@ export interface Selection {
 export type Task =
   | { kind: "copy" | "move"; selection: Selection; folder: string }
   | { kind: "rename"; selection: Selection; name: string }
+  | { kind: "renameAll"; selection: Selection; names: string[] }
   | { kind: "new"; folder: string; directory: boolean }
   | { kind: "template"; folder: string; extension: string }
+  | { kind: "ownTemplate"; folder: string; name: string }
+  | { kind: "saveTemplate" | "zip"; selection: Selection }
+  | { kind: "unzip"; selection: Selection; ownFolder: boolean }
   | { kind: "paste"; folder: string }
-  | { kind: "drop"; folder: string }
+  | { kind: "drop"; folder: string; action?: DropAction }
   | { kind: "recycle" | "delete" | "restore" | "purge"; selection: Selection }
   | { kind: "empty" };
 
@@ -157,7 +161,14 @@ export interface NewType {
 }
 
 /** Files being dragged over the window, in physical pixels inside it. */
-export type FileDrag = { kind: "over" | "drop"; x: number; y: number } | { kind: "leave" };
+export type FileDrag =
+  | { kind: "over"; x: number; y: number }
+  /** `right` means the right button dragged, so the user gets to pick what happens. */
+  | { kind: "drop"; x: number; y: number; right: boolean }
+  | { kind: "leave" };
+
+/** What a drop can do, when the user picks it from a menu. */
+export type DropAction = "move" | "copy" | "link";
 
 /** What a view wants from its search: a new query, the same one again, or the rows found so far. */
 export type SearchStep = "start" | "again" | "grown";
@@ -283,6 +294,13 @@ export const answerJob = (id: number, answer: Answer, all: boolean) =>
 export const onJobEvent = (handler: (event: JobEvent) => void) =>
   listen<JobEvent>("job", (event) => handler(event.payload));
 
+/** What is wrong with each of `names`, which line up with the selected rows. */
+export const checkRenames = (selection: Selection, names: string[]) =>
+  invoke<(string | null)[]>("check_renames", { selection, names });
+
+/** The selected rows' names, and whether each is a folder. */
+export const rowFacts = (selection: Selection) => invoke<[string, boolean][]>("row_facts", { selection });
+
 export const measureSelection = (selection: Selection) => invoke<Measured>("measure_selection", { selection });
 
 export const binSummary = () => invoke<Measured>("bin_summary");
@@ -294,7 +312,8 @@ export const cancelCut = (sequence: number) => invoke<void>("cancel_cut", { sequ
 
 export const clipboardSequence = () => invoke<number>("clipboard_sequence");
 
-export const clipboardHasFiles = () => invoke<boolean>("clipboard_has_files");
+/** True if a paste would make something: files, an image or text. */
+export const clipboardCanPaste = () => invoke<boolean>("clipboard_can_paste");
 
 /** The first row at or after `start` whose name starts with `prefix`, wrapping around. */
 export const findRow = (view: number, request: number, prefix: string, start: number) =>
@@ -332,6 +351,11 @@ export const openTerminal = (path: string) => invoke<void>("open_terminal", { pa
 
 export const newTypes = () => invoke<NewType[]>("new_types");
 
+/** The names of the user's own templates, A to Z. */
+export const ownTemplates = () => invoke<string[]>("own_templates");
+
+export const templatesFolder = () => invoke<string>("templates_folder");
+
 /** The apps holding the selected files. */
 export const fileUsers = (selection: Selection) => invoke<string[]>("file_users", { selection });
 
@@ -346,6 +370,9 @@ export const onFileDrag = (handler: (event: FileDrag) => void) =>
 
 /** Names the folder under a drag, which decides the cursor. */
 export const setDropTarget = (folder: string | null) => invoke<void>("set_drop_target", { folder });
+
+/** What the last drop can do on `folder`, for the user to pick from. */
+export const dropChoices = (folder: string) => invoke<DropAction[]>("drop_choices", { folder });
 
 /** Starts dragging the selected files to any app. Ends when the user lets go. */
 export const startDrag = (selection: Selection) => invoke<void>("start_drag", { selection });

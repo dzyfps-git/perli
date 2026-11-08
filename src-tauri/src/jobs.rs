@@ -375,7 +375,7 @@ impl Bridge {
                 _ => title(&plan.job),
             },
             origin: plan.origin,
-            new_item: matches!(plan.job, Job::New { .. } | Job::Template { .. }),
+            new_item: matches!(plan.job, Job::New { .. } | Job::Template { .. } | Job::Zip { .. }),
             recycle: matches!(plan.job, Job::Recycle { .. }),
         });
 
@@ -479,9 +479,13 @@ fn title(job: &Job) -> String {
         Job::Copy { sources, .. } => listed("Copying", sources),
         Job::Move { sources, .. } => listed("Moving", sources),
         Job::Rename { name, .. } => format!("Renaming to {name}"),
+        Job::RenameAll { renames } => format!("Renaming {} items", renames.len()),
         Job::New { directory: true, .. } => "Creating a folder".to_string(),
         Job::New { .. } | Job::Template { .. } => "Creating a file".to_string(),
         Job::Shortcut { sources, .. } => listed("Linking to", sources),
+        Job::Zip { sources } => listed("Compressing", sources),
+        Job::Unzip { archives, .. } => listed("Extracting", archives),
+        Job::Receive { .. } => "Copying dragged files".to_string(),
         Job::Recycle { paths } => listed("Recycling", paths),
         Job::Delete { paths } => listed("Deleting", paths),
         Job::Restore { items } => deleted("Restoring", items),

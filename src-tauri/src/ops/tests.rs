@@ -12,10 +12,19 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use windows::core::{Interface, HSTRING};
-use windows::Win32::Storage::FileSystem::GetLogicalDrives;
-use windows::Win32::System::Com::{CoCreateInstance, IPersistFile, CLSCTX_INPROC_SERVER, STGM_READ};
-use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
+use windows::core::{implement, Interface, Ref, BOOL, HRESULT, HSTRING};
+use windows::Win32::Foundation::{DV_E_FORMATETC, E_ABORT, E_NOTIMPL, HGLOBAL, S_OK, SIZE};
+use windows::Win32::Storage::FileSystem::{GetLogicalDrives, FILE_ATTRIBUTE_DIRECTORY};
+use windows::Win32::System::Com::{
+    CoCreateInstance, IAdviseSink, IBindCtx, IDataObject, IDataObject_Impl, IEnumFORMATETC, IEnumSTATDATA, IPersistFile,
+    CLSCTX_INPROC_SERVER, FORMATETC, STGMEDIUM, STGMEDIUM_0, STGM_READ, TYMED_HGLOBAL, TYMED_ISTREAM,
+};
+use windows::Win32::System::DataExchange::RegisterClipboardFormatW;
+use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+use windows::Win32::UI::Shell::{
+    IDataObjectAsyncCapability, IDataObjectAsyncCapability_Impl, IShellLinkW, SHCreateMemStream, ShellLink, CFSTR_FILECONTENTS, CFSTR_FILEDESCRIPTORW, FD_ATTRIBUTES,
+    FD_FILESIZE, FILEDESCRIPTORW,
+};
 
 use super::bin::{parse_info, read_root};
 use super::names::check as check_name;
@@ -937,6 +946,546 @@ fn junction_moved_across_drives_leaves_its_target_alone() {
     assert_eq!(read(&outside), "secret");
 }
 
+// ZIP.
+
+fn zip_of(path: &Path, entries: &[(&str, &[u8])]) {
+    let mut zip = zip::ZipWriter::new(fs::File::create(path).unwrap());
+    for (name, bytes) in entries {
+        let stored = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        zip.start_file(*name, stored).unwrap();
+        std::io::Write::write_all(&mut zip, bytes).unwrap();
+    }
+    zip.finish().unwrap();
+}
+
+fn unzip(archive: &Path, own_folder: bool) -> Job {
+    Job::Unzip {
+        archives: vec![archive.to_path_buf()],
+        own_folder,
+    }
+}
+
+fn entries_of(archive: &Path) -> Vec<String> {
+    let zip = zip::ZipArchive::new(fs::File::open(archive).unwrap()).unwrap();
+    let mut names: Vec<String> = zip.file_names().map(|name| name.unwrap().into_owned()).collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn a_zip_holds_a_tree_and_extracts_to_the_same_tree() {
+    let sandbox = Sandbox::new();
+    let folder = sandbox.path(r"here\tree");
+    sandbox.file(r"here\tree\top.txt", "top");
+    sandbox.file(r"here\tree\deep\ünï.txt", "deep");
+    fs::create_dir_all(folder.join("empty")).unwrap();
+    let long_ago = sys::stat(&sandbox.path(r"here\tree\top.txt")).unwrap().unwrap().modified;
+
+    let outcome = go(Job::Zip { sources: vec![folder] });
+
+    let archive = sandbox.path(r"here\tree.zip");
+    assert_eq!(outcome.done, [Done::Created { path: archive.clone() }]);
+    assert_eq!(sandbox.names("here"), ["tree", "tree.zip"], "no working file stays");
+    assert_eq!(entries_of(&archive), ["tree/", "tree/deep/", "tree/deep/ünï.txt", "tree/empty/", "tree/top.txt"]);
+
+    fs::create_dir(sandbox.path("out")).unwrap();
+    fs::rename(&archive, sandbox.path(r"out\tree.zip")).unwrap();
+    let extracted = go(unzip(&sandbox.path(r"out\tree.zip"), false));
+
+    assert_eq!(read(&sandbox.path(r"out\tree\top.txt")), "top");
+    assert_eq!(read(&sandbox.path(r"out\tree\deep\ünï.txt")), "deep");
+    assert!(sandbox.path(r"out\tree\empty").is_dir());
+    assert_eq!(extracted.done, [Done::Created { path: sandbox.path(r"out\tree") }], "the top folder stands for the rest");
+    let landed = sys::stat(&sandbox.path(r"out\tree\top.txt")).unwrap().unwrap().modified;
+    let seconds = landed.abs_diff(long_ago) / 10_000_000;
+    assert!(seconds <= 2, "ZIP keeps times to two seconds, this is {seconds} off");
+}
+
+#[test]
+fn a_new_zip_gets_its_name_from_what_went_in() {
+    let sandbox = Sandbox::new();
+    let (a, b) = (sandbox.file(r"here\a.tar.txt", "a"), sandbox.file(r"here\b.txt", "b"));
+
+    go(Job::Zip { sources: vec![a.clone()] });
+    go(Job::Zip { sources: vec![a.clone(), b.clone()] });
+    go(Job::Zip { sources: vec![a, b] });
+
+    assert_eq!(
+        sandbox.names("here"),
+        ["a.tar.txt", "a.tar.zip", "b.txt", "here (2).zip", "here.zip"]
+    );
+}
+
+#[test]
+fn a_file_given_up_on_leaves_a_good_archive() {
+    let sandbox = Sandbox::new();
+    let good = sandbox.file(r"here\good.txt", "good");
+    let held = sandbox.file(r"here\held.bin", &"x".repeat(1 << 20));
+    let _lock = lock(&held);
+
+    let outcome = go(Job::Zip { sources: vec![good, held.clone()] });
+
+    let archive = sandbox.path(r"here\here.zip");
+    assert_eq!(outcome.done.len(), 1);
+    assert_eq!(entries_of(&archive), ["good.txt"]);
+    go(unzip(&archive, true));
+    assert_eq!(read(&sandbox.path(r"here\here\good.txt")), "good");
+}
+
+#[test]
+fn a_cancelled_zip_leaves_nothing() {
+    let sandbox = Sandbox::new();
+    let a = sandbox.file(r"here\a.txt", "a");
+    let b = sandbox.file(r"here\b.txt", "b");
+    let control = Arc::new(Control::default());
+    let cancel = control.clone();
+    let script = Script {
+        during: Some(Box::new(move |_: &Progress| cancel.cancel())),
+        ..Script::default()
+    };
+
+    let outcome = run(Job::Zip { sources: vec![a, b] }, &script, &control);
+
+    assert!(outcome.cancelled);
+    assert!(outcome.done.is_empty());
+    assert_eq!(sandbox.names("here"), ["a.txt", "b.txt"]);
+}
+
+#[test]
+fn a_link_in_a_zip_stays_out_and_is_not_followed() {
+    let sandbox = Sandbox::new();
+    let outside = sandbox.folder("outside");
+    sandbox.file(r"outside\secret.txt", "secret");
+    sandbox.file(r"here\tree\a.txt", "a");
+    sandbox.junction(r"here\tree\link", &outside);
+
+    go(Job::Zip { sources: vec![sandbox.path(r"here\tree")] });
+
+    assert_eq!(entries_of(&sandbox.path(r"here\tree.zip")), ["tree/", "tree/a.txt"]);
+}
+
+#[test]
+fn names_from_an_archive_cannot_land_outside_or_break_windows() {
+    let sandbox = Sandbox::new();
+    let archive = sandbox.path(r"here\in\bad.zip");
+    fs::create_dir_all(archive.parent().unwrap()).unwrap();
+    zip_of(
+        &archive,
+        &[
+            ("../evil1.txt", b"x"),
+            (r"..\evil2.txt", b"x"),
+            ("a/../../evil3.txt", b"x"),
+            (r"C:\evil4.txt", b"x"),
+            ("/evil5.txt", b"x"),
+            ("CON.txt", b"x"),
+            ("name:stream.txt", b"x"),
+            ("trailing./fine.txt", b"x"),
+            ("ok.txt", b"fine"),
+        ],
+    );
+    let script = Script::always(Answer::Skip);
+
+    let outcome = run_with(unzip(&archive, false), &script);
+
+    // A rooted name loses its root, so it lands inside like any other.
+    assert_eq!(sandbox.names(r"here\in"), ["bad.zip", "evil4.txt", "evil5.txt", "ok.txt"]);
+    assert_eq!(sandbox.names("here"), ["in"]);
+    assert!(!Path::new(r"C:\evil4.txt").exists());
+    assert_eq!(outcome.done.len(), 3);
+    assert_eq!(read(&sandbox.path(r"here\in\ok.txt")), "fine");
+    assert_eq!(script.asked(), 1, "all answered by one Skip for all");
+}
+
+#[test]
+fn a_link_entry_lands_as_a_plain_file() {
+    let sandbox = Sandbox::new();
+    let archive = sandbox.path(r"here\links.zip");
+    fs::create_dir_all(archive.parent().unwrap()).unwrap();
+    let mut zip = zip::ZipWriter::new(fs::File::create(&archive).unwrap());
+    zip.add_symlink("link", r"C:\Windows", zip::write::SimpleFileOptions::default()).unwrap();
+    zip.finish().unwrap();
+
+    go(unzip(&archive, false));
+
+    let stat = sys::stat(&sandbox.path(r"here\link")).unwrap().unwrap();
+    assert!(stat.is_file());
+    assert_eq!(read(&sandbox.path(r"here\link")), r"C:\Windows");
+}
+
+#[test]
+fn extracting_never_goes_through_a_junction_in_the_way() {
+    let sandbox = Sandbox::new();
+    let outside = sandbox.folder("outside");
+    sandbox.junction(r"here\sub", &outside);
+    let archive = sandbox.path(r"here\a.zip");
+    zip_of(&archive, &[("sub/payload.exe", b"bad"), ("sub/deep/more.txt", b"bad")]);
+
+    let script = Script::always(Answer::Skip);
+    let outcome = run_with(unzip(&archive, false), &script);
+
+    assert!(sandbox.names("outside").is_empty(), "nothing lands through the link");
+    assert!(outcome.done.is_empty());
+    assert!(script.asked() >= 1);
+}
+
+#[test]
+fn extracting_onto_a_file_gives_the_usual_choices() {
+    let sandbox = Sandbox::new();
+    let archive = sandbox.path(r"here\a.zip");
+    let old = sandbox.file(r"here\a.txt", "old");
+    zip_of(&archive, &[("a.txt", b"new")]);
+
+    let skipped = run_with(unzip(&archive, false), &Script::answering(&[Answer::Skip]));
+    assert_eq!(read(&old), "old");
+    assert!(skipped.done.is_empty());
+
+    let kept = run_with(unzip(&archive, false), &Script::answering(&[Answer::KeepBoth]));
+    assert_eq!(read(&old), "old");
+    assert_eq!(read(&sandbox.path(r"here\a (2).txt")), "new");
+    assert_eq!(kept.done.len(), 1);
+
+    let replaced = run_with(unzip(&archive, false), &Script::answering(&[Answer::Replace]));
+    assert_eq!(read(&old), "new");
+    allow_bin_copy(&replaced);
+    purge(&replaced);
+    assert_eq!(sandbox.names("here"), ["a (2).txt", "a.txt", "a.zip"]);
+}
+
+#[test]
+fn an_archive_never_overwrites_itself() {
+    let sandbox = Sandbox::new();
+    let archive = sandbox.path(r"here\a.zip");
+    fs::create_dir_all(archive.parent().unwrap()).unwrap();
+    zip_of(&archive, &[("a.zip", b"not an archive")]);
+    let before = fs::read(&archive).unwrap();
+
+    let outcome = run_with(unzip(&archive, false), &Script::always(Answer::Replace));
+
+    assert!(outcome.done.is_empty());
+    assert_eq!(fs::read(&archive).unwrap(), before);
+}
+
+#[test]
+fn extract_to_a_folder_picks_a_free_name_and_undoes_in_one_step() {
+    let sandbox = Sandbox::new();
+    let archive = sandbox.path(r"here\a.zip");
+    sandbox.file(r"here\a\old.txt", "old");
+    zip_of(&archive, &[("in.txt", b"in"), ("top.txt", b"top")]);
+
+    let outcome = go(unzip(&archive, true));
+
+    assert_eq!(read(&sandbox.path(r"here\a (2)\in.txt")), "in");
+    assert_eq!(outcome.done, [Done::Created { path: sandbox.path(r"here\a (2)") }]);
+    let undone = undo(outcome);
+    assert_eq!(sandbox.names("here"), ["a", "a.zip"]);
+    purge(&undone);
+}
+
+#[test]
+fn files_landing_in_an_existing_folder_undo_one_by_one() {
+    let sandbox = Sandbox::new();
+    let archive = sandbox.path(r"here\a.zip");
+    sandbox.file(r"here\sub\old.txt", "old");
+    zip_of(&archive, &[("sub/new.txt", b"new"), ("sub/more/deep.txt", b"deep")]);
+
+    let outcome = go(unzip(&archive, false));
+
+    assert_eq!(
+        outcome.done,
+        [
+            Done::Created { path: sandbox.path(r"here\sub\new.txt") },
+            Done::Created { path: sandbox.path(r"here\sub\more") },
+        ]
+    );
+    let undone = undo(outcome);
+    assert_eq!(sandbox.names(r"here\sub"), ["old.txt"]);
+    purge(&undone);
+}
+
+#[test]
+fn a_cancelled_extract_keeps_what_landed() {
+    let sandbox = Sandbox::new();
+    let archive = sandbox.path(r"here\a.zip");
+    fs::create_dir_all(archive.parent().unwrap()).unwrap();
+    zip_of(&archive, &[("one.txt", b"1"), ("two.txt", b"2")]);
+    let control = Arc::new(Control::default());
+    let cancel = control.clone();
+    let script = Script {
+        during: Some(Box::new(move |progress: &Progress| {
+            if progress.items > 0 {
+                cancel.cancel();
+            }
+        })),
+        ..Script::default()
+    };
+
+    let outcome = run(unzip(&archive, false), &script, &control);
+
+    assert!(outcome.cancelled);
+    assert_eq!(sandbox.names("here"), ["a.zip", "one.txt"]);
+    assert_eq!(outcome.done.len(), 1);
+}
+
+#[test]
+fn the_mark_of_the_web_travels_to_what_is_extracted() {
+    let sandbox = Sandbox::new();
+    let archive = sandbox.path(r"here\a.zip");
+    fs::create_dir_all(archive.parent().unwrap()).unwrap();
+    zip_of(&archive, &[("deep/a.txt", b"a")]);
+    let zone = b"[ZoneTransfer]\r\nZoneId=3\r\n";
+    sys::write_zone(&archive, zone).unwrap();
+
+    go(unzip(&archive, false));
+
+    assert_eq!(sys::read_zone(&sandbox.path(r"here\deep\a.txt")).as_deref(), Some(zone.as_slice()));
+}
+
+#[test]
+fn a_damaged_entry_leaves_nothing_and_a_password_is_refused() {
+    let sandbox = Sandbox::new();
+    let archive = sandbox.path(r"here\a.zip");
+    fs::create_dir_all(archive.parent().unwrap()).unwrap();
+    zip_of(&archive, &[("damaged.txt", b"plain text kept as it is"), ("locked.txt", b"secret"), ("ok.txt", b"ok")]);
+    let mut bytes = fs::read(&archive).unwrap();
+    let at = |bytes: &[u8], word: &[u8]| bytes.windows(word.len()).position(|part| part == word).unwrap();
+    let damaged = at(&bytes, b"plain text");
+    bytes[damaged] ^= 0xff;
+    // The second central record, with its "encrypted" flag on.
+    let first = at(&bytes, b"PK\x01\x02");
+    let second = first + 1 + at(&bytes[first + 1..], b"PK\x01\x02");
+    bytes[second + 8] |= 1;
+    fs::write(&archive, bytes).unwrap();
+    let script = Script::default();
+
+    run_with(unzip(&archive, false), &script);
+
+    assert_eq!(sandbox.names("here"), ["a.zip", "ok.txt"]);
+    let questions = script.questions.borrow();
+    assert_eq!(questions.len(), 2, "{questions:?}");
+    assert!(matches!(&questions[1], Question::Problem { message, .. } if message.contains("password")), "{questions:?}");
+}
+
+#[test]
+fn something_that_is_no_archive_is_a_plain_problem() {
+    let sandbox = Sandbox::new();
+    let file = sandbox.file(r"here\not.zip", "nothing like an archive");
+    let script = Script::default();
+
+    let outcome = run_with(unzip(&file, true), &script);
+
+    assert_eq!(script.asked(), 1);
+    assert!(outcome.done.is_empty());
+    assert_eq!(sandbox.names("here"), ["not.zip"]);
+}
+
+// Dragged files with no paths.
+
+struct Virtual {
+    name: &'static str,
+    /// `None` for a folder.
+    bytes: Option<&'static [u8]>,
+    as_stream: bool,
+}
+
+#[implement(IDataObject, IDataObjectAsyncCapability)]
+struct Source(Vec<Virtual>);
+
+thread_local! {
+    /// What each source on this thread heard at the end of its operation.
+    static ENDED: RefCell<Vec<HRESULT>> = const { RefCell::new(Vec::new()) };
+}
+
+#[allow(non_snake_case)]
+impl IDataObjectAsyncCapability_Impl for Source_Impl {
+    fn SetAsyncMode(&self, _: BOOL) -> windows::core::Result<()> {
+        Ok(())
+    }
+
+    fn GetAsyncMode(&self) -> windows::core::Result<BOOL> {
+        Ok(true.into())
+    }
+
+    fn StartOperation(&self, _: Ref<IBindCtx>) -> windows::core::Result<()> {
+        Ok(())
+    }
+
+    fn InOperation(&self) -> windows::core::Result<BOOL> {
+        Ok(false.into())
+    }
+
+    fn EndOperation(&self, outcome: HRESULT, _: Ref<IBindCtx>, _: u32) -> windows::core::Result<()> {
+        ENDED.with_borrow_mut(|ended| ended.push(outcome));
+        Ok(())
+    }
+}
+
+fn global(bytes: &[u8]) -> HGLOBAL {
+    unsafe {
+        let memory = GlobalAlloc(GMEM_MOVEABLE, bytes.len()).unwrap();
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), GlobalLock(memory).cast(), bytes.len());
+        let _ = GlobalUnlock(memory);
+        memory
+    }
+}
+
+impl Source {
+    fn descriptors(&self) -> Vec<u8> {
+        let mut bytes = (self.0.len() as u32).to_le_bytes().to_vec();
+        for item in &self.0 {
+            let mut name = [0u16; 260];
+            for (slot, unit) in name.iter_mut().zip(item.name.encode_utf16()) {
+                *slot = unit;
+            }
+            let entry = FILEDESCRIPTORW {
+                dwFlags: (FD_ATTRIBUTES.0 | FD_FILESIZE.0) as u32,
+                sizel: SIZE::default(),
+                dwFileAttributes: if item.bytes.is_none() { FILE_ATTRIBUTE_DIRECTORY.0 } else { 0 },
+                nFileSizeLow: item.bytes.map_or(0, |bytes| bytes.len() as u32),
+                cFileName: name,
+                ..Default::default()
+            };
+            let raw = (&raw const entry).cast::<u8>();
+            bytes.extend_from_slice(unsafe { std::slice::from_raw_parts(raw, size_of::<FILEDESCRIPTORW>()) });
+        }
+        bytes
+    }
+}
+
+fn medium(tymed: i32, u: STGMEDIUM_0) -> STGMEDIUM {
+    STGMEDIUM {
+        tymed: tymed as u32,
+        u,
+        pUnkForRelease: std::mem::ManuallyDrop::new(None),
+    }
+}
+
+#[allow(non_snake_case)]
+impl IDataObject_Impl for Source_Impl {
+    fn GetData(&self, format: *const FORMATETC) -> windows::core::Result<STGMEDIUM> {
+        let format = unsafe { &*format };
+        let descriptors = unsafe { RegisterClipboardFormatW(CFSTR_FILEDESCRIPTORW) };
+        if u32::from(format.cfFormat) == descriptors {
+            return Ok(medium(TYMED_HGLOBAL.0, STGMEDIUM_0 { hGlobal: global(&self.descriptors()) }));
+        }
+        let contents = unsafe { RegisterClipboardFormatW(CFSTR_FILECONTENTS) };
+        let item = usize::try_from(format.lindex).ok().and_then(|index| self.0.get(index));
+        let (Some(item), true) = (item, u32::from(format.cfFormat) == contents) else {
+            return Err(DV_E_FORMATETC.into());
+        };
+        let bytes = item.bytes.ok_or(DV_E_FORMATETC)?;
+        Ok(if item.as_stream {
+            let stream = std::mem::ManuallyDrop::new(unsafe { SHCreateMemStream(Some(bytes)) });
+            medium(TYMED_ISTREAM.0, STGMEDIUM_0 { pstm: stream })
+        } else {
+            medium(TYMED_HGLOBAL.0, STGMEDIUM_0 { hGlobal: global(bytes) })
+        })
+    }
+
+    fn GetDataHere(&self, _: *const FORMATETC, _: *mut STGMEDIUM) -> windows::core::Result<()> {
+        Err(E_NOTIMPL.into())
+    }
+
+    fn QueryGetData(&self, format: *const FORMATETC) -> HRESULT {
+        let descriptors = unsafe { RegisterClipboardFormatW(CFSTR_FILEDESCRIPTORW) };
+        if u32::from(unsafe { &*format }.cfFormat) == descriptors { S_OK } else { DV_E_FORMATETC }
+    }
+
+    fn GetCanonicalFormatEtc(&self, _: *const FORMATETC, _: *mut FORMATETC) -> HRESULT {
+        E_NOTIMPL
+    }
+
+    fn SetData(&self, _: *const FORMATETC, _: *const STGMEDIUM, _: BOOL) -> windows::core::Result<()> {
+        Err(E_NOTIMPL.into())
+    }
+
+    fn EnumFormatEtc(&self, _: u32) -> windows::core::Result<IEnumFORMATETC> {
+        Err(E_NOTIMPL.into())
+    }
+
+    fn DAdvise(&self, _: *const FORMATETC, _: u32, _: Ref<IAdviseSink>) -> windows::core::Result<u32> {
+        Err(E_NOTIMPL.into())
+    }
+
+    fn DUnadvise(&self, _: u32) -> windows::core::Result<()> {
+        Err(E_NOTIMPL.into())
+    }
+
+    fn EnumDAdvise(&self) -> windows::core::Result<IEnumSTATDATA> {
+        Err(E_NOTIMPL.into())
+    }
+}
+
+fn receive(sandbox: &Sandbox, items: Vec<Virtual>, script: &Script) -> Outcome {
+    let _com = Com::enter();
+    let data: IDataObject = Source(items).into();
+    assert!(offers_files(&data));
+    let folder = sandbox.path("into");
+    fs::create_dir_all(&folder).unwrap();
+    let incoming = Incoming::take_over(&data).unwrap();
+    run_with(Job::Receive { incoming, folder }, script)
+}
+
+#[test]
+fn dragged_files_land_with_their_folders_and_a_warning() {
+    let sandbox = Sandbox::new();
+    let items = vec![
+        Virtual { name: "sub", bytes: None, as_stream: false },
+        Virtual { name: r"sub\in stream.txt", bytes: Some(b"from a stream"), as_stream: true },
+        Virtual { name: "from memory.txt", bytes: Some(b"from memory"), as_stream: false },
+    ];
+
+    let outcome = receive(&sandbox, items, &Script::default());
+
+    assert_eq!(read(&sandbox.path(r"into\sub\in stream.txt")), "from a stream");
+    let file = sandbox.path(r"into\from memory.txt");
+    assert_eq!(read(&file), "from memory");
+    assert_eq!(sys::read_zone(&file).as_deref(), Some(b"[ZoneTransfer]\r\nZoneId=3\r\n".as_slice()));
+    assert_eq!(
+        outcome.done,
+        [Done::Created { path: sandbox.path(r"into\sub") }, Done::Created { path: file }]
+    );
+}
+
+#[test]
+fn a_drop_that_never_runs_still_frees_its_source() {
+    let _com = Com::enter();
+    let data: IDataObject = Source(Vec::new()).into();
+    ENDED.with_borrow_mut(Vec::clear);
+
+    drop(Incoming::take_over(&data).unwrap());
+
+    assert_eq!(ENDED.with_borrow(Clone::clone), [E_ABORT]);
+}
+
+#[test]
+fn a_finished_drop_tells_its_source_once() {
+    let sandbox = Sandbox::new();
+    ENDED.with_borrow_mut(Vec::clear);
+    let items = vec![Virtual { name: "a.txt", bytes: Some(b"a"), as_stream: false }];
+
+    receive(&sandbox, items, &Script::default());
+
+    assert_eq!(ENDED.with_borrow(Clone::clone), [S_OK]);
+}
+
+#[test]
+fn dragged_names_cannot_land_outside_and_conflicts_ask() {
+    let sandbox = Sandbox::new();
+    sandbox.file(r"into\taken.txt", "old");
+    let items = vec![
+        Virtual { name: r"..\evil.txt", bytes: Some(b"x"), as_stream: false },
+        Virtual { name: "taken.txt", bytes: Some(b"new"), as_stream: false },
+    ];
+    let script = Script::answering(&[Answer::Skip, Answer::KeepBoth]);
+
+    receive(&sandbox, items, &script);
+
+    assert_eq!(sandbox.names("into"), ["taken (2).txt", "taken.txt"]);
+    assert_eq!(read(&sandbox.path(r"into\taken (2).txt")), "new");
+    assert_eq!(sandbox.names(""), ["into"]);
+    assert!(matches!(&script.questions.borrow()[1], Question::Conflict { .. }));
+}
+
 // Rename and new items.
 
 #[test]
@@ -967,6 +1516,135 @@ fn rename_that_only_changes_case_and_its_undo() {
     assert_eq!(sandbox.names("here"), ["A.txt"]);
     undo(outcome);
     assert_eq!(sandbox.names("here"), ["a.txt"]);
+}
+
+fn rename_all(sandbox: &Sandbox, renames: &[(&str, &str)]) -> Job {
+    let path = |(from, to): &(&str, &str)| (sandbox.path(&format!(r"here\{from}")), to.to_string());
+    Job::RenameAll {
+        renames: renames.iter().map(path).collect(),
+    }
+}
+
+/// Files that each hold their own name.
+fn lettered(sandbox: &Sandbox, names: &[&str]) {
+    for name in names {
+        sandbox.file(&format!(r"here\{name}"), name);
+    }
+}
+
+fn holds(sandbox: &Sandbox, names: &[&str]) -> Vec<String> {
+    names.iter().map(|name| read(&sandbox.path(&format!(r"here\{name}")))).collect()
+}
+
+const RING: [(&str, &str); 3] = [("a", "b"), ("b", "c"), ("c", "a")];
+
+#[test]
+fn many_renames_land_and_undo_together() {
+    let sandbox = Sandbox::new();
+    lettered(&sandbox, &["a", "b", "same"]);
+
+    let outcome = go(rename_all(&sandbox, &[("a", "1"), ("b", "2"), ("same", "same")]));
+
+    assert_eq!(sandbox.names("here"), ["1", "2", "same"]);
+    assert_eq!(outcome.done.len(), 2);
+    undo(outcome);
+    assert_eq!(sandbox.names("here"), ["a", "b", "same"]);
+}
+
+#[test]
+fn a_chain_of_renames_waits_for_each_name_to_come_free() {
+    let sandbox = Sandbox::new();
+    lettered(&sandbox, &["a", "b", "c"]);
+
+    let outcome = go(rename_all(&sandbox, &[("a", "b"), ("b", "c"), ("c", "d")]));
+
+    assert_eq!(holds(&sandbox, &["b", "c", "d"]), ["a", "b", "c"]);
+    assert_eq!(sandbox.names("here"), ["b", "c", "d"]);
+    undo(outcome);
+    assert_eq!(holds(&sandbox, &["a", "b", "c"]), ["a", "b", "c"]);
+}
+
+#[test]
+fn a_ring_of_renames_swaps_and_undoes() {
+    let sandbox = Sandbox::new();
+    lettered(&sandbox, &["a", "b", "c"]);
+
+    let outcome = go(rename_all(&sandbox, &RING));
+    assert_eq!(holds(&sandbox, &["a", "b", "c"]), ["c", "a", "b"]);
+    assert_eq!(sandbox.names("here"), ["a", "b", "c"]);
+
+    undo(outcome);
+    assert_eq!(holds(&sandbox, &["a", "b", "c"]), ["a", "b", "c"]);
+    assert_eq!(sandbox.names("here"), ["a", "b", "c"]);
+}
+
+#[test]
+fn a_ring_and_a_new_case_work_on_folders_too() {
+    let sandbox = Sandbox::new();
+    sandbox.file(r"here\a\inside-a", "a");
+    sandbox.file(r"here\b\inside-b", "b");
+    sandbox.file(r"here\low", "low");
+
+    let outcome = go(rename_all(&sandbox, &[("a", "b"), ("b", "a"), ("low", "LOW")]));
+
+    assert_eq!(sandbox.names(r"here\a"), ["inside-b"]);
+    assert_eq!(sandbox.names(r"here\b"), ["inside-a"]);
+    assert_eq!(sandbox.names("here"), ["LOW", "a", "b"]);
+    undo(outcome);
+    assert_eq!(sandbox.names(r"here\a"), ["inside-a"]);
+    assert_eq!(sandbox.names("here"), ["a", "b", "low"]);
+}
+
+#[test]
+fn a_ring_stays_whole_when_one_item_is_skipped() {
+    for locked in ["a", "b", "c"] {
+        let sandbox = Sandbox::new();
+        lettered(&sandbox, &["a", "b", "c"]);
+        let held = lock(&sandbox.path(&format!(r"here\{locked}")));
+
+        let outcome = go(rename_all(&sandbox, &RING));
+
+        drop(held);
+        assert_eq!(sandbox.names("here"), ["a", "b", "c"], "{locked}");
+        assert_eq!(holds(&sandbox, &["a", "b", "c"]), ["a", "b", "c"], "{locked}");
+        assert!(outcome.done.is_empty(), "{locked}: {:?}", outcome.done);
+    }
+}
+
+#[test]
+fn a_ring_cancelled_half_way_goes_back() {
+    let sandbox = Sandbox::new();
+    lettered(&sandbox, &["a", "b", "c"]);
+    let control = Arc::new(Control::default());
+    let cancel = control.clone();
+    let script = Script {
+        during: Some(Box::new(move |_: &Progress| cancel.cancel())),
+        ..Script::default()
+    };
+
+    let outcome = run(rename_all(&sandbox, &RING), &script, &control);
+
+    assert!(outcome.cancelled);
+    assert!(outcome.done.is_empty(), "{:?}", outcome.done);
+    assert_eq!(sandbox.names("here"), ["a", "b", "c"]);
+    assert_eq!(holds(&sandbox, &["a", "b", "c"]), ["a", "b", "c"]);
+}
+
+#[test]
+fn batch_checks_know_which_names_come_free() {
+    let sandbox = Sandbox::new();
+    lettered(&sandbox, &["a", "b", "stays"]);
+    let check = |renames: &[(&str, &str)]| {
+        let Job::RenameAll { renames } = rename_all(&sandbox, renames) else { unreachable!() };
+        check_renames(&renames)
+    };
+
+    assert_eq!(check(&[("a", "b"), ("b", "a"), ("stays", "stays")]), [None, None, None]);
+    assert_eq!(check(&[("a", "A")]), [None]);
+    assert!(check(&[("a", "stays")])[0].is_some_and(|problem| problem.contains("taken")));
+    assert!(check(&[("a", "x"), ("b", "X")]).iter().all(|problem| problem.is_some_and(|text| text.contains("same"))));
+    assert!(check(&[("a", "bad?")])[0].is_some());
+    assert!(check(&[("a", "b"), ("b", "b")])[0].is_some());
 }
 
 #[test]

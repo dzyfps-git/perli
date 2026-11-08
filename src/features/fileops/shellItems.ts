@@ -5,10 +5,13 @@ import {
   newTypes,
   openTerminal,
   openWith,
+  ownTemplates,
+  rowFacts,
   sendTargets,
   sendTo,
   showProperties,
   showShellMenu,
+  type Row,
   type Selection,
   type ShellTarget,
 } from "../../api";
@@ -25,6 +28,9 @@ interface Point {
 
 /** Keys have no pointer, so what they open goes by the window instead. */
 const WINDOW_CORNER: Point = { x: 0, y: 0 };
+const ZIP = ".zip";
+
+const isZip = (name: string, isDir: boolean) => !isDir && name.toLowerCase().endsWith(ZIP);
 
 /**
  * The parts of a right click that come from Windows. Rows are read when an item runs, so a
@@ -103,13 +109,46 @@ export function createShellItems(jobs: Jobs, actions: FileActions) {
         { label: "Folder", action: () => actions.newItem(view, true) },
         { label: "File", action: () => actions.newItem(view, false) },
       ],
-      load: async () =>
-        (await newTypes()).map(({ extension, name }, index) => ({
-          label: name,
-          divider: index === 0,
-          action: () => actions.newFrom(view, extension),
-        })),
+      async load() {
+        const [own, types] = await Promise.all([ownTemplates(), newTypes()]);
+        return [
+          ...own.map((name, index) => ({
+            label: name,
+            divider: index === 0,
+            action: () => actions.newFromOwn(view, name),
+          })),
+          ...types.map(({ extension, name }, index) => ({
+            label: name,
+            divider: index === 0,
+            action: () => actions.newFrom(view, extension),
+          })),
+          { label: "Open templates folder", divider: true, action: () => actions.openTemplates(view) },
+        ];
+      },
     }),
+
+    /** `row` is the row the menu opened on. Extracting only fits when all the rows are ZIPs. */
+    async fileToolItems(view: FolderView, row: Row): Promise<MenuItem[]> {
+      const selection = actions.selected(view);
+      const facts = selection && isZip(row.name, row.isDir) ? await rowFacts(selection).catch(report) : undefined;
+      const zips = !!facts?.every(([name, isDir]) => isZip(name, isDir));
+      const stem = row.name.slice(0, -ZIP.length);
+      return [
+        { label: "Compress to ZIP", divider: true, action: () => actions.compress(view) },
+        ...(zips
+          ? [
+              { label: "Extract here", action: () => actions.extract(view, false) },
+              {
+                label: facts?.length === 1 ? `Extract to ${stem}` : "Extract to own folders",
+                action: () => actions.extract(view, true),
+              },
+            ]
+          : []),
+        ...(selection?.rows.length === 1 && !row.isDir
+          ? [{ label: "Save as template", action: () => actions.saveTemplate(view) }]
+          : []),
+      ];
+    },
 
     /** `folder` is the row's path when it is a folder. */
     rowItems(view: FolderView, at: Point, folder: string | undefined, openRow: () => void): MenuItem[] {

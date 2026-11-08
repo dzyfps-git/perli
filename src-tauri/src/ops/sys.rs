@@ -13,13 +13,13 @@ use windows::Win32::Foundation::{
     ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_LOCK_VIOLATION,
     ERROR_MORE_DATA, ERROR_NOT_SAME_DEVICE, ERROR_NO_MORE_FILES, ERROR_PATH_NOT_FOUND,
     ERROR_SHARING_VIOLATION, ERROR_SUCCESS, E_UNEXPECTED, FILETIME, GENERIC_WRITE, HANDLE,
-    STILL_ACTIVE,
+    STILL_ACTIVE, SYSTEMTIME,
 };
 use windows::Win32::Storage::FileSystem::{
-    CopyFile2, CreateDirectoryW, CreateFileW, DeleteFileW, FindClose, FindExInfoBasic,
-    FindExSearchNameMatch, FindFirstFileExW, FindNextFileW, FlushFileBuffers,
+    CopyFile2, CreateDirectoryW, CreateFileW, DeleteFileW, FileTimeToLocalFileTime, FindClose,
+    FindExInfoBasic, FindExSearchNameMatch, FindFirstFileExW, FindNextFileW, FlushFileBuffers,
     GetFileInformationByHandle, GetFileInformationByHandleEx, GetFinalPathNameByHandleW,
-    MoveFileExW, RemoveDirectoryW, SetFileAttributesW, SetFileInformationByHandle, SetFileTime,
+    LocalFileTimeToFileTime, MoveFileExW, RemoveDirectoryW, SetFileAttributesW, SetFileInformationByHandle, SetFileTime,
     BY_HANDLE_FILE_INFORMATION, COPYFILE2_CALLBACK_CHUNK_FINISHED,
     COPYFILE2_CALLBACK_STREAM_FINISHED, COPYFILE2_EXTENDED_PARAMETERS, COPYFILE2_MESSAGE,
     COPYFILE2_MESSAGE_ACTION, COPYFILE2_PROGRESS_CANCEL, COPYFILE2_PROGRESS_CONTINUE,
@@ -41,6 +41,7 @@ use windows::Win32::System::RestartManager::{
 use windows::Win32::System::Threading::{
     GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
 };
+use windows::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToFileTime};
 use windows::Win32::System::IO::DeviceIoControl;
 use windows::Win32::UI::Shell::{
     SHEmptyRecycleBinW, SHERB_NOCONFIRMATION, SHERB_NOPROGRESSUI, SHERB_NOSOUND,
@@ -56,6 +57,9 @@ const USERS_FILE_LIMIT: usize = 1000;
 /// Attributes a new folder takes from the folder it copies.
 const FOLDER_ATTRIBUTES: u32 = FILE_ATTRIBUTE_HIDDEN.0 | FILE_ATTRIBUTE_SYSTEM.0 | FILE_ATTRIBUTE_READONLY.0;
 
+/// The hidden stream where Windows notes that a file came from the internet.
+const ZONE_STREAM: &str = ":Zone.Identifier";
+
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Stat {
     attributes: u32,
@@ -68,6 +72,15 @@ pub struct Stat {
 }
 
 impl Stat {
+    /// A file that is not on the disk yet, to compare with one that is.
+    pub fn of_file(size: u64, modified: u64) -> Self {
+        Self {
+            size,
+            modified,
+            ..Self::default()
+        }
+    }
+
     pub fn from_find_data(data: &WIN32_FIND_DATAW) -> Self {
         let ticks = |time: FILETIME| (u64::from(time.dwHighDateTime) << 32) | u64::from(time.dwLowDateTime);
         let reparse = data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0;
@@ -502,14 +515,59 @@ pub fn remove_dir(path: &Path) -> Result<()> {
     remove().or_else(|error| retry_writable(path, error, remove))
 }
 
-pub fn set_times(path: &Path, created: u64, modified: u64) -> Result<()> {
-    guard(path);
-    let time = |ticks: u64| FILETIME {
+fn file_time(ticks: u64) -> FILETIME {
+    FILETIME {
         dwLowDateTime: ticks as u32,
         dwHighDateTime: (ticks >> 32) as u32,
-    };
+    }
+}
+
+pub fn set_times(path: &Path, created: u64, modified: u64) -> Result<()> {
+    guard(path);
     let file = open_object(path, FILE_WRITE_ATTRIBUTES.0)?;
-    unsafe { SetFileTime(*file, Some(&time(created)), None, Some(&time(modified))) }
+    unsafe { SetFileTime(*file, Some(&file_time(created)), None, Some(&file_time(modified))) }
+}
+
+pub fn set_modified(path: &Path, modified: u64) -> Result<()> {
+    guard(path);
+    let file = open_object(path, FILE_WRITE_ATTRIBUTES.0)?;
+    unsafe { SetFileTime(*file, None, None, Some(&file_time(modified))) }
+}
+
+/// FILETIME ticks on this PC's calendar and clock.
+pub fn local_time(ticks: u64) -> Option<SYSTEMTIME> {
+    let (mut local, mut time) = (FILETIME::default(), SYSTEMTIME::default());
+    unsafe {
+        FileTimeToLocalFileTime(&file_time(ticks), &mut local).ok()?;
+        FileTimeToSystemTime(&local, &mut time).ok()?;
+    }
+    Some(time)
+}
+
+/// The reverse of `local_time`.
+pub fn local_ticks(time: &SYSTEMTIME) -> Option<u64> {
+    let (mut local, mut real) = (FILETIME::default(), FILETIME::default());
+    unsafe {
+        SystemTimeToFileTime(time, &mut local).ok()?;
+        LocalFileTimeToFileTime(&local, &mut real).ok()?;
+    }
+    Some((u64::from(real.dwHighDateTime) << 32) | u64::from(real.dwLowDateTime))
+}
+
+fn zone_path(path: &Path) -> PathBuf {
+    let mut name = extended(path).to_os_string();
+    name.push(ZONE_STREAM);
+    name.into()
+}
+
+/// What `path` says about where it came from, if anything.
+pub fn read_zone(path: &Path) -> Option<Vec<u8>> {
+    std::fs::read(zone_path(path)).ok()
+}
+
+pub fn write_zone(path: &Path, zone: &[u8]) -> Result<()> {
+    guard(path);
+    Ok(std::fs::write(zone_path(path), zone)?)
 }
 
 pub fn read_link(path: &Path) -> Result<Vec<u8>> {
