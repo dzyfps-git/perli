@@ -477,6 +477,8 @@ export type Preview =
   | { kind: "archive"; entries: ArchiveEntry[]; more: boolean }
   | { kind: "comic"; pages: string[] }
   | { kind: "book"; title: string; chapters: string[] }
+  | { kind: "model" }
+  | { kind: "song" }
   | { kind: "picture" };
 
 /** One file or folder inside a ZIP. `modified` is as the archive wrote it. */
@@ -512,6 +514,14 @@ export const fetchArchivePicture = (view: number, request: number, row: number, 
 /** One chapter of a book as safe HTML, by its name inside the archive. */
 export const bookChapter = (view: number, request: number, row: number, entry: string) =>
   invoke<string>("book_chapter", { view, request, row, entry });
+
+/** A 3D model's bytes or, with `part`, those of a file beside it that the model points to. */
+export const modelFile = (view: number, request: number, row: number, part?: string) =>
+  invoke<ArrayBuffer>("model_file", { view, request, row, part: part ?? null });
+
+/** A MIDI file played through the bundled SoundFont, as one WAV. */
+export const songAudio = (view: number, request: number, row: number) =>
+  invoke<ArrayBuffer>("song_audio", { view, request, row });
 
 /** A picture on this PC that a Markdown file points to. */
 export const fetchPictureFile = (path: string, edge: number) =>

@@ -1,12 +1,14 @@
-import { createEffect, createSignal, For, on, onMount, Show } from "solid-js";
+import { createEffect, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
 import {
   bookChapter,
   fetchArchivePicture,
   fetchBigPicture,
   fetchPictureFile,
   fetchRows,
+  modelFile,
   openLink,
   previewRow,
+  songAudio,
   type ArchiveEntry,
   type Preview,
   type Row,
@@ -35,6 +37,11 @@ const MARKDOWN_PICTURE_EDGE = 1200;
 const SLIDE_PX = 24;
 const SLIDE_MS = 180;
 const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
+const ICON_PLAY = "";
+const ICON_PAUSE = "";
+const ICON_SONG = "";
+/** Kept from one song to the next. */
+const [songVolume, setSongVolume] = createSignal(1);
 const dates = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" });
 
 export function draw(canvas: HTMLCanvasElement, picture: Thumb) {
@@ -171,6 +178,23 @@ export function QuickPreview(props: {
     fillPictures(article, (name) => fetchPictureFile(resolveRelative(folderOf(item), name), MARKDOWN_PICTURE_EDGE));
   }
 
+  /** three.js loads with the first model, and lets go of it when the preview moves on. */
+  function drawModel(canvas: HTMLCanvasElement) {
+    const mine = ticket;
+    const { view } = props.at;
+    const at = index();
+    let release: (() => void) | undefined;
+    let gone = false;
+    onCleanup(() => {
+      gone = true;
+      release?.();
+    });
+    import("./model")
+      .then(({ showModel }) => showModel(canvas, row()!.name, (part) => modelFile(view, snapshot, at, part)))
+      .then((done) => (gone ? done() : (release = done)))
+      .catch((reason) => mine === ticket && setFailure(`This model can't show. ${reason}`));
+  }
+
   const edgeOfBody = () => {
     const box = body.getBoundingClientRect();
     return Math.ceil(Math.max(box.width, box.height) * devicePixelRatio);
@@ -239,6 +263,8 @@ export function QuickPreview(props: {
 
   function onKeyDown(event: KeyboardEvent) {
     const key = event.key;
+    // A slider takes its own arrow keys.
+    if (key.startsWith("Arrow") && (event.target as HTMLElement).matches("input")) return;
     const paged = pageCount() > 0;
     if (paged && key === "ArrowLeft") turn(-1);
     else if (paged && key === "ArrowRight") turn(1);
@@ -315,6 +341,14 @@ export function QuickPreview(props: {
                 <article ref={(article) => (chapterArticle = article)} class="preview-markdown preview-book" />
               )}
               {preview.kind === "archive" && <ArchiveList entries={preview.entries} more={preview.more} />}
+              {preview.kind === "model" && (
+                <div class="preview-model">
+                  <canvas ref={drawModel} aria-label="3D model. Drag to turn it, right-drag to move it, scroll to zoom." />
+                </div>
+              )}
+              {preview.kind === "song" && (
+                <SongPlayer load={() => songAudio(props.at.view, snapshot, index())} />
+              )}
             </>
           )}
         </Show>
@@ -335,6 +369,88 @@ export function QuickPreview(props: {
         </Show>
       </footer>
     </dialog>
+  );
+}
+
+/** A MIDI file, rendered whole before it plays. It plays at once and stops when the preview moves on. */
+function SongPlayer(props: { load: () => Promise<ArrayBuffer> }) {
+  const [url, setUrl] = createSignal<string>();
+  const [problem, setProblem] = createSignal<string>();
+  const [playing, setPlaying] = createSignal(false);
+  const [time, setTime] = createSignal(0);
+  const [length, setLength] = createSignal(0);
+  let audio!: HTMLAudioElement;
+  let gone = false;
+  props
+    .load()
+    .then((bytes) => gone || setUrl(URL.createObjectURL(new Blob([bytes], { type: "audio/wav" }))))
+    .catch((reason) => gone || setProblem(String(reason)));
+  onCleanup(() => {
+    gone = true;
+    audio.pause();
+    const made = url();
+    if (made) URL.revokeObjectURL(made);
+  });
+  const clock = (seconds: number) =>
+    `${Math.floor(seconds / 60)}:${String(Math.floor(seconds % 60)).padStart(2, "0")}`;
+  return (
+    <div class="preview-song">
+      <span class="song-icon" aria-hidden="true">
+        {ICON_SONG}
+      </span>
+      <audio
+        ref={(element) => {
+          audio = element;
+          createEffect(() => (element.volume = songVolume()));
+        }}
+        src={url()}
+        autoplay
+        onPlay={() => setPlaying(true)}
+        onPause={() => setPlaying(false)}
+        onLoadedMetadata={() => setLength(audio.duration)}
+        onTimeUpdate={() => setTime(audio.currentTime)}
+      />
+      <Show
+        when={url()}
+        fallback={
+          <p class="preview-note" role={problem() ? "alert" : undefined}>
+            {problem() ?? "Getting the song ready"}
+          </p>
+        }
+      >
+        <div class="song-bar">
+          <button
+            class="strip-icon song-play"
+            aria-label={playing() ? "Pause" : "Play"}
+            onClick={() => (audio.paused ? void audio.play() : audio.pause())}
+          >
+            {playing() ? ICON_PAUSE : ICON_PLAY}
+          </button>
+          <span class="song-time">{clock(time())}</span>
+          <input
+            class="song-seek"
+            type="range"
+            aria-label="Position"
+            min="0"
+            max={length()}
+            step="0.1"
+            value={time()}
+            onInput={(event) => (audio.currentTime = event.currentTarget.valueAsNumber)}
+          />
+          <span class="song-time">{clock(length())}</span>
+          <input
+            class="song-volume"
+            type="range"
+            aria-label="Volume"
+            min="0"
+            max="1"
+            step="0.05"
+            value={songVolume()}
+            onInput={(event) => setSongVolume(event.currentTarget.valueAsNumber)}
+          />
+        </div>
+      </Show>
+    </div>
   );
 }
 

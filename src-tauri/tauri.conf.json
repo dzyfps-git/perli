@@ -21,7 +21,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; style-src 'self' 'unsafe-inline'"
+      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost blob: data:; img-src 'self' blob: data:; media-src blob:; style-src 'self' 'unsafe-inline'"
     }
   },
   "plugins": {
@@ -35,6 +35,10 @@
     "active": true,
     "targets": ["nsis"],
     "icon": ["icons/icon.ico"],
+    "resources": {
+      "resources/TimGM6mb.sf2": "TimGM6mb.sf2",
+      "resources/TimGM6mb-LICENSE.txt": "TimGM6mb-LICENSE.txt"
+    },
     "windows": {
       "nsis": {
         "installerHooks": "nsis-hooks.nsh"

@@ -30,6 +30,8 @@ const PIECE_BYTES: usize = 256 * 1024;
 const MARKDOWN_BYTES: u64 = 4 * 1024 * 1024;
 const HASH_BYTES: usize = 1024 * 1024;
 const SHA256_BYTES: usize = 32;
+/// The most a 3D model, or one file it points to, may take.
+const MODEL_BYTES: u64 = 256 * 1024 * 1024;
 
 #[derive(Debug, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
@@ -44,6 +46,10 @@ pub enum Preview {
     Comic { pages: Vec<String> },
     /// A book's title and its chapters, by their names inside it.
     Book { title: String, chapters: Vec<String> },
+    /// A 3D model, drawn by the window from the file's bytes.
+    Model,
+    /// A MIDI file, played through the bundled SoundFont.
+    Song,
     /// Anything else shows Windows' own picture of it.
     Picture,
 }
@@ -98,8 +104,27 @@ fn inside_of(path: &Path) -> Option<Preview> {
             Ok(book) if !book.chapters.is_empty() => Some(Preview::Book { title: book.title, chapters: book.chapters }),
             _ => listed(),
         },
+        "glb" | "gltf" | "obj" | "stl" => Some(Preview::Model),
+        "mid" | "midi" => Some(Preview::Song),
         _ => None,
     }
+}
+
+/// A 3D model's file or, with `part`, a file it points to. Like Markdown pictures, parts come
+/// only from this PC, by a path relative to the model's folder, never from the web.
+pub fn model_file(path: &Path, part: Option<&str>) -> Result<Vec<u8>, String> {
+    let path = match part {
+        None => path.to_path_buf(),
+        Some(part) if !part.is_empty() && !part.contains(':') && !part.starts_with(['/', '\\']) => {
+            path.parent().ok_or("The model has no folder")?.join(part)
+        }
+        Some(_) => return Err("Only files beside the model can load".into()),
+    };
+    let size = path.metadata().map_err(|error| error.to_string())?.len();
+    if size > MODEL_BYTES {
+        return Err(format!("Files over {} MB don't show", MODEL_BYTES / 1024 / 1024));
+    }
+    std::fs::read(&path).map_err(|error| error.to_string())
 }
 
 fn strip_bom(bytes: &[u8]) -> &[u8] {
@@ -318,6 +343,22 @@ mod tests {
         assert_eq!(read(&folder.join("empty.txt"), 0), Preview::Picture);
         assert_eq!(read(&folder, 0), Preview::Picture);
         fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
+    fn model_parts_load_only_from_beside_the_model() {
+        let folder = folder("model");
+        std::fs::create_dir_all(folder.join("textures")).unwrap();
+        let model = folder.join("ship.gltf");
+        std::fs::write(&model, "{}").unwrap();
+        std::fs::write(folder.join("textures").join("hull.png"), "png").unwrap();
+
+        assert_eq!(read(&model, 0), Preview::Model);
+        assert_eq!(model_file(&model, None).unwrap(), b"{}");
+        assert_eq!(model_file(&model, Some("textures/hull.png")).unwrap(), b"png");
+        for outside in ["https://example.com/hull.png", "C:/Windows/win.ini", "//server/share/x", r"\\server\x", "/x", ""] {
+            assert!(model_file(&model, Some(outside)).is_err(), "{outside}");
+        }
     }
 
     #[test]
