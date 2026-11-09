@@ -1,14 +1,18 @@
-import { createEffect, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
+import { convertFileSrc } from "@tauri-apps/api/core";
+import { createEffect, createSignal, For, lazy, on, onMount, Show } from "solid-js";
 import {
   bookChapter,
+  fetchCover,
   fetchArchivePicture,
   fetchBigPicture,
   fetchPictureFile,
   fetchRows,
   modelFile,
+  openAudio,
   openLink,
   previewRow,
   songAudio,
+  songInfo,
   type ArchiveEntry,
   type Preview,
   type Row,
@@ -18,6 +22,7 @@ import { formatSize } from "../../ui/format";
 import { typeText } from "../filelist/typeNames";
 import { join, parentOf, resolveRelative } from "../navigation/path";
 import { highlight, languageOf } from "./highlight";
+import type { PlayerProps } from "./Player";
 import "./preview.css";
 
 /** Which row the preview starts on. A reload while it is open moves it on to the new rows. */
@@ -37,11 +42,14 @@ const MARKDOWN_PICTURE_EDGE = 1200;
 const SLIDE_PX = 24;
 const SLIDE_MS = 180;
 const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
-const ICON_PLAY = "";
-const ICON_PAUSE = "";
-const ICON_SONG = "";
-/** Kept from one song to the next. */
-const [songVolume, setSongVolume] = createSignal(1);
+// Both come with the first file that needs them.
+const ModelStage = lazy(() => import("./ModelStage").then((module) => ({ default: module.ModelStage })));
+const Player = lazy(() => import("./Player").then((module) => ({ default: module.Player })));
+
+/** Files the player plays, for Play next to skip to. */
+const AUDIO = /\.(mid|midi|mp3|m4a|aac|wav|flac|ogg|oga|opus|weba)$/i;
+const NEXT_BATCH = 50;
+const NO_TAGS = { title: null, artist: null, album: null };
 const dates = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" });
 
 export function draw(canvas: HTMLCanvasElement, picture: Thumb) {
@@ -79,6 +87,8 @@ export function QuickPreview(props: {
   let snapshot = 0;
   /** Bumped by each step, so answers for a row already left behind are dropped. */
   let ticket = 0;
+  /** The keys the player or the model view takes first, while one shows. */
+  let playerKeys: ((event: KeyboardEvent) => boolean) | undefined;
 
   const folderOf = (item: Row) => item.location || props.at.folder;
   const pathOf = (item: Row) => join(folderOf(item), item.name);
@@ -178,21 +188,43 @@ export function QuickPreview(props: {
     fillPictures(article, (name) => fetchPictureFile(resolveRelative(folderOf(item), name), MARKDOWN_PICTURE_EDGE));
   }
 
-  /** three.js loads with the first model, and lets go of it when the preview moves on. */
-  function drawModel(canvas: HTMLCanvasElement) {
+  /** Play next: on to the next sound file in the list, if there is one. */
+  async function nextAudio() {
     const mine = ticket;
+    for (let at = index() + 1; at < props.at.count(); at += NEXT_BATCH) {
+      const rows = await fetchRows(props.at.view, snapshot, at, NEXT_BATCH);
+      if (mine !== ticket) return;
+      const found = rows.findIndex((item) => !item.isDir && AUDIO.test(item.name));
+      if (found >= 0) return step(at + found - index());
+      if (!rows.length) return;
+    }
+  }
+
+  const reader = (at: number, shot: number) => (part?: string) => modelFile(props.at.view, shot, at, part);
+
+  function player(item: Row, midi: boolean): PlayerProps {
     const { view } = props.at;
     const at = index();
-    let release: (() => void) | undefined;
-    let gone = false;
-    onCleanup(() => {
-      gone = true;
-      release?.();
-    });
-    import("./model")
-      .then(({ showModel }) => showModel(canvas, row()!.name, (part) => modelFile(view, snapshot, at, part)))
-      .then((done) => (gone ? done() : (release = done)))
-      .catch((reason) => mine === ticket && setFailure(`This model can't show. ${reason}`));
+    const shot = snapshot;
+    return {
+      path: pathOf(item),
+      name: item.name,
+      size: item.size,
+      load: midi
+        ? async () => {
+            const wav = await songAudio(view, shot, at);
+            return { url: URL.createObjectURL(new Blob([wav], { type: "audio/wav" })), made: true, tags: NO_TAGS };
+          }
+        : async () => {
+            const [path, tags] = await openAudio(view, shot, at);
+            return { url: convertFileSrc(path), made: false, tags };
+          },
+      info: midi ? () => songInfo(view, shot, at) : undefined,
+      cover: midi ? undefined : (edge) => fetchCover(view, shot, at, edge),
+      keys: (handler) => (playerKeys = handler),
+      tint: (color) => body.style.setProperty("--player-tint", color ?? "transparent"),
+      onNext: () => void nextAudio(),
+    };
   }
 
   const edgeOfBody = () => {
@@ -265,6 +297,10 @@ export function QuickPreview(props: {
     const key = event.key;
     // A slider takes its own arrow keys.
     if (key.startsWith("Arrow") && (event.target as HTMLElement).matches("input")) return;
+    if (!event.ctrlKey && !event.altKey && playerKeys?.(event)) {
+      event.preventDefault();
+      return;
+    }
     const paged = pageCount() > 0;
     if (paged && key === "ArrowLeft") turn(-1);
     else if (paged && key === "ArrowRight") turn(1);
@@ -342,12 +378,15 @@ export function QuickPreview(props: {
               )}
               {preview.kind === "archive" && <ArchiveList entries={preview.entries} more={preview.more} />}
               {preview.kind === "model" && (
-                <div class="preview-model">
-                  <canvas ref={drawModel} aria-label="3D model. Drag to turn it, right-drag to move it, scroll to zoom." />
-                </div>
+                <ModelStage
+                  name={row()!.name}
+                  read={reader(index(), snapshot)}
+                  keys={(handler) => (playerKeys = handler)}
+                  onFailure={setFailure}
+                />
               )}
-              {preview.kind === "song" && (
-                <SongPlayer load={() => songAudio(props.at.view, snapshot, index())} />
+              {(preview.kind === "song" || preview.kind === "audio") && (
+                <Player {...player(row()!, preview.kind === "song")} />
               )}
             </>
           )}
@@ -369,88 +408,6 @@ export function QuickPreview(props: {
         </Show>
       </footer>
     </dialog>
-  );
-}
-
-/** A MIDI file, rendered whole before it plays. It plays at once and stops when the preview moves on. */
-function SongPlayer(props: { load: () => Promise<ArrayBuffer> }) {
-  const [url, setUrl] = createSignal<string>();
-  const [problem, setProblem] = createSignal<string>();
-  const [playing, setPlaying] = createSignal(false);
-  const [time, setTime] = createSignal(0);
-  const [length, setLength] = createSignal(0);
-  let audio!: HTMLAudioElement;
-  let gone = false;
-  props
-    .load()
-    .then((bytes) => gone || setUrl(URL.createObjectURL(new Blob([bytes], { type: "audio/wav" }))))
-    .catch((reason) => gone || setProblem(String(reason)));
-  onCleanup(() => {
-    gone = true;
-    audio.pause();
-    const made = url();
-    if (made) URL.revokeObjectURL(made);
-  });
-  const clock = (seconds: number) =>
-    `${Math.floor(seconds / 60)}:${String(Math.floor(seconds % 60)).padStart(2, "0")}`;
-  return (
-    <div class="preview-song">
-      <span class="song-icon" aria-hidden="true">
-        {ICON_SONG}
-      </span>
-      <audio
-        ref={(element) => {
-          audio = element;
-          createEffect(() => (element.volume = songVolume()));
-        }}
-        src={url()}
-        autoplay
-        onPlay={() => setPlaying(true)}
-        onPause={() => setPlaying(false)}
-        onLoadedMetadata={() => setLength(audio.duration)}
-        onTimeUpdate={() => setTime(audio.currentTime)}
-      />
-      <Show
-        when={url()}
-        fallback={
-          <p class="preview-note" role={problem() ? "alert" : undefined}>
-            {problem() ?? "Getting the song ready"}
-          </p>
-        }
-      >
-        <div class="song-bar">
-          <button
-            class="strip-icon song-play"
-            aria-label={playing() ? "Pause" : "Play"}
-            onClick={() => (audio.paused ? void audio.play() : audio.pause())}
-          >
-            {playing() ? ICON_PAUSE : ICON_PLAY}
-          </button>
-          <span class="song-time">{clock(time())}</span>
-          <input
-            class="song-seek"
-            type="range"
-            aria-label="Position"
-            min="0"
-            max={length()}
-            step="0.1"
-            value={time()}
-            onInput={(event) => (audio.currentTime = event.currentTarget.valueAsNumber)}
-          />
-          <span class="song-time">{clock(length())}</span>
-          <input
-            class="song-volume"
-            type="range"
-            aria-label="Volume"
-            min="0"
-            max="1"
-            step="0.05"
-            value={songVolume()}
-            onInput={(event) => setSongVolume(event.currentTarget.valueAsNumber)}
-          />
-        </div>
-      </Show>
-    </div>
   );
 }
 

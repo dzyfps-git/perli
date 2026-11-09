@@ -17,7 +17,7 @@ use windows::Win32::Graphics::Gdi::{
     BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HBITMAP,
 };
 use windows::Win32::UI::Shell::{
-    IShellItemImageFactory, SIIGBF_ICONONLY, SIIGBF_INCACHEONLY, SIIGBF_RESIZETOFIT,
+    IShellItemImageFactory, SIIGBF_ICONONLY, SIIGBF_INCACHEONLY, SIIGBF_RESIZETOFIT, SIIGBF_THUMBNAILONLY,
 };
 
 use crate::folder::ONLINE_ONLY;
@@ -62,10 +62,19 @@ fn queue() -> &'static Mutex<Sender<Work>> {
 /// Width and height (u32, little-endian), then RGBA pixels with plain alpha, or nothing if there
 /// is no picture. `src/api/index.ts` decodes this.
 pub async fn read(path: PathBuf, edge: u32) -> Vec<u8> {
+    load(path, edge, false).await
+}
+
+/// Like `read`, but only the file's own picture, such as a song's album cover, never an icon.
+pub async fn cover(path: PathBuf, edge: u32) -> Vec<u8> {
+    load(path, edge, true).await
+}
+
+async fn load(path: PathBuf, edge: u32, own: bool) -> Vec<u8> {
     let (sender, mut result) = async_runtime::channel(1);
     let edge = edge.clamp(1, MAX_EDGE) as i32;
     let work = Box::new(move || {
-        let _ = sender.blocking_send(picture(&path, edge).unwrap_or_default());
+        let _ = sender.blocking_send(picture(&path, edge, own).unwrap_or_default());
     });
     let _ = queue().lock().unwrap_or_else(PoisonError::into_inner).send(work);
     result.recv().await.unwrap_or_default()
@@ -92,13 +101,19 @@ pub fn is_online_only(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok_and(|data| data.file_attributes() & ONLINE_ONLY != 0)
 }
 
-/// Its own picture if it has one, or the icon of its type. A file in the cloud stays there, so
-/// it only gets a picture Windows already has.
-fn picture(path: &Path, edge: i32) -> Result<Vec<u8>> {
+/// Its own picture if it has one, or else the icon of its type, unless `own` asks for its own
+/// picture only. A file in the cloud stays there, so it only gets a picture Windows already has.
+fn picture(path: &Path, edge: i32, own: bool) -> Result<Vec<u8>> {
     let factory: IShellItemImageFactory = shell_item(path)?.cast()?;
     let size = SIZE { cx: edge, cy: edge };
-    let first = if is_online_only(path) { SIIGBF_INCACHEONLY } else { SIIGBF_RESIZETOFIT };
-    let bitmap = unsafe { factory.GetImage(size, first).or_else(|_| factory.GetImage(size, SIIGBF_ICONONLY)) }?;
+    let first = match (is_online_only(path), own) {
+        (true, _) => SIIGBF_INCACHEONLY,
+        (false, true) => SIIGBF_THUMBNAILONLY,
+        (false, false) => SIIGBF_RESIZETOFIT,
+    };
+    let bitmap = unsafe {
+        factory.GetImage(size, first).or_else(|error| if own { Err(error) } else { factory.GetImage(size, SIIGBF_ICONONLY) })
+    }?;
     let bytes = encode(bitmap);
     let _ = unsafe { DeleteObject(bitmap.into()) };
     bytes
@@ -215,7 +230,7 @@ mod tests {
         fs::write(&text, "words").unwrap();
 
         for path in [image, text] {
-            let bytes = picture(&path, EDGE as i32).unwrap();
+            let bytes = picture(&path, EDGE as i32, false).unwrap();
             let (width, height) = shape(&bytes);
             assert!((1..=EDGE as usize).contains(&width), "{path:?} is {width} wide");
             assert_eq!(bytes.len(), HEADER_BYTES + width * height * 4);
@@ -254,7 +269,7 @@ mod tests {
     #[test]
     fn a_missing_file_has_no_picture() {
         let _com = Com::enter();
-        assert!(picture(&std::env::temp_dir().join("perli-no-such-file"), EDGE as i32).is_err());
+        assert!(picture(&std::env::temp_dir().join("perli-no-such-file"), EDGE as i32, false).is_err());
     }
 
     #[test]

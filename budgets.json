@@ -1,5 +1,5 @@
 {
-  "installerMB": 5,
+  "installerMB": 10,
   "startMs": 550,
   "slowedStartMs": 3000,
   "idleRamMB": 125,

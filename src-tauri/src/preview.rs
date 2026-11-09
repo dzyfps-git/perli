@@ -16,7 +16,7 @@ use windows::Win32::Security::Cryptography::{
 };
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::UI::Shell::PropertiesSystem::{
-    IPropertyDescription, IPropertyStore, PSFormatPropertyValue, PSGetPropertyDescription,
+    IPropertyDescription, IPropertyStore, PSFormatPropertyValue, PSGetPropertyDescription, PSGetPropertyKeyFromName,
     SHGetPropertyStoreFromParsingName, GPS_DEFAULT, GPS_FASTPROPERTIESONLY, PDFF_DEFAULT, PDTF_ISVIEWABLE,
 };
 
@@ -50,6 +50,8 @@ pub enum Preview {
     Model,
     /// A MIDI file, played through the bundled SoundFont.
     Song,
+    /// A sound file the window plays itself, streamed from disk.
+    Audio,
     /// Anything else shows Windows' own picture of it.
     Picture,
 }
@@ -106,6 +108,7 @@ fn inside_of(path: &Path) -> Option<Preview> {
         },
         "glb" | "gltf" | "obj" | "stl" => Some(Preview::Model),
         "mid" | "midi" => Some(Preview::Song),
+        "mp3" | "m4a" | "aac" | "wav" | "flac" | "ogg" | "oga" | "opus" | "weba" => Some(Preview::Audio),
         _ => None,
     }
 }
@@ -204,6 +207,34 @@ fn picture_html(dest: &str, alt: &str) -> String {
         let label = if alt.is_empty() { "Picture from the web" } else { alt };
         format!(r#"<span class="md-blocked">{}</span>"#, escape(label))
     }
+}
+
+/// A song's own name, artist and album, from its tags, where it has them.
+#[derive(Debug, Default, Serialize)]
+pub struct Tags {
+    title: Option<String>,
+    artist: Option<String>,
+    album: Option<String>,
+}
+
+pub fn tags(path: &Path) -> Tags {
+    let _com = Com::enter();
+    let flags = if thumbs::is_online_only(path) { GPS_FASTPROPERTIESONLY } else { GPS_DEFAULT };
+    let Ok(store) = (unsafe { SHGetPropertyStoreFromParsingName::<_, _, IPropertyStore>(&HSTRING::from(path.as_os_str()), None, flags) })
+    else {
+        return Tags::default();
+    };
+    let read = |name: &str| -> Option<String> {
+        let mut key = PROPERTYKEY::default();
+        unsafe { PSGetPropertyKeyFromName(&HSTRING::from(name), &raw mut key) }.ok()?;
+        let mut raw = std::ptr::null_mut();
+        unsafe { PSGetPropertyDescription(&raw const key, &IPropertyDescription::IID, &raw mut raw) }.ok()?;
+        let description = unsafe { IPropertyDescription::from_raw(raw) };
+        let value = owned(unsafe { PSFormatPropertyValue(&store, &description, PDFF_DEFAULT) }.ok()?);
+        let value = value.trim();
+        (!value.is_empty()).then(|| value.to_string())
+    };
+    Tags { title: read("System.Title"), artist: read("System.Music.Artist"), album: read("System.Music.AlbumTitle") }
 }
 
 /// Takes a string Windows allocated.
