@@ -10,6 +10,7 @@ mod network;
 mod ops;
 mod parts;
 mod places;
+mod inside;
 mod preview;
 mod recent;
 mod registry;
@@ -161,6 +162,10 @@ async fn off_main<T: Send + 'static>(
         .await
         .map_err(|error| error.to_string())?
         .map_err(|error| error.message())
+}
+
+async fn blocking<T: Send + 'static>(work: impl FnOnce() -> Result<T, String> + Send + 'static) -> Result<T, String> {
+    async_runtime::spawn_blocking(work).await.map_err(|error| error.to_string())?
 }
 
 /// Rows of one snapshot.
@@ -1004,6 +1009,21 @@ async fn preview_row(view: u32, request: u64, row: u32, offset: u64, views: Stat
         .map_err(|error| error.to_string())
 }
 
+/// A picture inside a comic or a book, `edge` device pixels on its longest side at most.
+#[tauri::command]
+async fn archive_picture(view: u32, request: u64, row: u32, entry: String, edge: u32, views: State<'_, Views>) -> Result<Response, String> {
+    let path = row_path(&views, view, request, row)?;
+    let bytes = blocking(move || inside::picture(&path, &entry, edge)).await?;
+    Ok(Response::new(bytes))
+}
+
+/// One chapter of a book, made safe to show.
+#[tauri::command]
+async fn book_chapter(view: u32, request: u64, row: u32, entry: String, views: State<'_, Views>) -> Result<String, String> {
+    let path = row_path(&views, view, request, row)?;
+    blocking(move || inside::chapter(&path, &entry)).await
+}
+
 /// Every property Windows shows for one row, as label and value.
 #[tauri::command]
 async fn row_properties(view: u32, request: u64, row: u32, views: State<'_, Views>) -> Result<Vec<(String, String)>, String> {
@@ -1308,6 +1328,8 @@ fn main() {
             big_picture,
             picture_file,
             preview_row,
+            archive_picture,
+            book_chapter,
             open_link,
             row_properties,
             checksum,

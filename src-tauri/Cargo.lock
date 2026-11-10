@@ -2355,6 +2355,7 @@ version = "0.1.0"
 dependencies = [
  "flate2",
  "pulldown-cmark",
+ "quick-xml",
  "rusqlite",
  "serde",
  "serde_json",
