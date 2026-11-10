@@ -21,6 +21,8 @@ export interface PreviewAt {
   snapshot: () => number;
   index: number;
   count: () => number;
+  /** Where the list's selection is after a reload. The preview selects its row, so this is it. */
+  selected: () => number | undefined;
   /** The folder shown, where rows with no location of their own are. */
   folder: string;
 }
@@ -207,8 +209,13 @@ export function QuickPreview(props: {
   });
 
   // A reload of the folder replaces the snapshot, so the row is fetched again from the new one.
+  let shot = props.at.snapshot();
   createEffect(
-    on([index, props.at.snapshot], ([at]) => {
+    on([index, props.at.snapshot], ([at, now]) => {
+      // The same file after a reload, even when rows above it came or went.
+      const moved = now !== shot ? props.at.selected() : undefined;
+      shot = now;
+      if (moved !== undefined && moved !== at) return void setIndex(moved);
       const kept = Math.max(0, Math.min(at, props.at.count() - 1));
       if (kept !== at) setIndex(kept);
       else void show(at);
