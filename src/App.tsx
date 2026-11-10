@@ -286,7 +286,8 @@ export function App() {
     if (!folder) return;
     const snapshot = () => view.folder()?.request ?? at.snapshot;
     const count = () => view.folder()?.count ?? folder.count;
-    setPreviewing({ view, at: { view: view.id, snapshot, index: at.index, count, folder: folder.path } });
+    const selected = () => view.folder()?.selected?.[0];
+    setPreviewing({ view, at: { view: view.id, snapshot, index: at.index, count, selected, folder: folder.path } });
   }
 
   /** The focused row, which the list's selection gives first. */
