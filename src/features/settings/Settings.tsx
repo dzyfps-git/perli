@@ -2,7 +2,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { createEffect, createSignal, For, on, Show } from "solid-js";
 import { isDefaultApp, setDefaultApp } from "../../api";
 import type { Tag } from "../../api";
-import { folderSizes, hoverCards, setHoverCards } from "../filelist/prefs";
+import { folderSizes, hoverCards, openInWindow, setHoverCards, setOpenInWindow } from "../filelist/prefs";
 import { TagSettings } from "../tags/TagSettings";
 import {
   accent,
@@ -310,7 +310,7 @@ export function Settings(props: {
         </Show>
       </section>
 
-      <section class="settings-section" data-words="explorer default app windows">
+      <section class="settings-section" data-words="explorer default app windows tab window show in folder">
         <h3>Default file manager</h3>
         <button
           class="settings-theme settings-default"
@@ -320,7 +320,21 @@ export function Settings(props: {
         >
           Open folders in Perli
         </button>
-        <p class="settings-note">The taskbar, Start and Open dialogs in other apps stay with Windows.</p>
+        <p class="settings-note">
+          This PC, Control Panel and other places without a path still open in File Explorer, and so do the taskbar,
+          Start and the Open dialogs of other apps.
+        </p>
+        <button
+          class="settings-theme settings-default"
+          role="switch"
+          aria-checked={openInWindow()}
+          onClick={() => setOpenInWindow(!openInWindow())}
+        >
+          Give each folder opened from outside a window of its own
+        </button>
+        <p class="settings-note">
+          Off, a folder opened from the desktop or another app becomes a tab in the Perli that is running.
+        </p>
         <Show when={defaultFailure()}>
           <p class="settings-note" role="alert">
             {defaultFailure()}

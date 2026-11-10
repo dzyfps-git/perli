@@ -255,3 +255,31 @@
   outline: 2px solid var(--accent);
   outline-offset: -2px;
 }
+
+/* Crumbs cut off on the left fade out there, so it reads as "there is more this way". */
+.crumbs[data-clipped] {
+  mask-image: linear-gradient(to right, transparent, #000 24px);
+}
+
+/*
+ * A narrow pane, as in split view, has no room for the path beside the tools. The path keeps the
+ * first row next to Back, Forward and Up, and the tools take a second row. A container can't
+ * restyle itself, so the bar always wraps and the query only widens the path.
+ */
+.pathbar {
+  flex-wrap: wrap;
+  row-gap: var(--space-1);
+  container-type: inline-size;
+}
+
+@container (max-width: 640px) {
+  .crumbs,
+  .path-input {
+    flex: 1 1 calc(100% - 124px);
+  }
+
+  .search-input {
+    flex: 1 1 80px;
+    margin-left: 0;
+  }
+}

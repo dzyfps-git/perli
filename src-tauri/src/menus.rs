@@ -289,10 +289,17 @@ pub fn apps_for(paths: Vec<PathBuf>) -> Result<Vec<App>> {
         let Some(extension) = shared_extension(&paths) else {
             return Ok(Vec::new());
         };
-        let mut apps: Vec<App> = handlers(&extension)?.iter().filter_map(|handler| app_of(handler).ok()).collect();
-        apps.sort_by_key(|app| app.name.to_lowercase());
-        Ok(apps)
+        Ok(listed(handlers(&extension)?.iter().filter_map(|handler| app_of(handler).ok()).collect()))
     })
+}
+
+/// The apps by name, each name once. An app can register twice, such as by its path and by its
+/// class, and the user can't tell those apart, so the one Windows lists first stays.
+fn listed(mut apps: Vec<App>) -> Vec<App> {
+    let mut seen = std::collections::HashSet::new();
+    apps.retain(|app| seen.insert(app.name.to_lowercase()));
+    apps.sort_by_key(|app| app.name.to_lowercase());
+    apps
 }
 
 /// Opens `paths` with the app called `id`. Asking again means no shell object has to wait
@@ -547,6 +554,13 @@ mod tests {
         assert_eq!(shared_extension(&[a.clone(), c]), None);
         assert_eq!(shared_extension(&[a, sub]), None);
         assert_eq!(shared_extension(&[]), None);
+    }
+
+    #[test]
+    fn an_app_registered_twice_is_listed_once() {
+        let app = |id: &str, name: &str| App { id: id.into(), name: name.into() };
+        let apps = listed(vec![app("b.exe", "Notepad++"), app("x", "Paint"), app("Applications/b.exe", "notepad++")]);
+        assert_eq!(apps, [app("b.exe", "Notepad++"), app("x", "Paint")]);
     }
 
     #[test]

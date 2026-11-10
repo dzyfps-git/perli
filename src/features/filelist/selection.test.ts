@@ -62,3 +62,15 @@ test("selectAll on an empty list selects nothing", () => {
   selection.selectAll(0);
   assert.equal(selection.size(), 0);
 });
+
+test("Ctrl+click after Ctrl+A takes only that row out", () => {
+  const selection = createSelection();
+  selection.selectAll(5);
+  selection.toggle(2);
+  assert.equal(selection.size(), 4);
+  assert.equal(selection.has(2), false);
+  assert.deepEqual(selection.rows().sort(), [0, 1, 3, 4]);
+  // And the same click again puts it back.
+  selection.toggle(2);
+  assert.equal(selection.size(), 5);
+});

@@ -80,6 +80,8 @@ export interface Order extends Sort {
 export interface Start {
   /** The folder from the command line. It replaces the saved session for this run. */
   folder: string | null;
+  /** Names to select in `folder`. */
+  select: string[];
   session: string | null;
   home: string | null;
 }
@@ -450,6 +452,21 @@ export const fileUsers = (selection: Selection) => invoke<string[]>("file_users"
 export const onFolderChanged = (handler: (view: number) => void) =>
   listen<number>("folder-changed", (event) => handler(event.payload));
 
+/** A folder another start of Perli was asked to open, with the names to select in it. */
+export interface OpenAsk {
+  folder: string | null;
+  select: string[];
+}
+
+export const onOpenAsked = (handler: (ask: OpenAsk) => void) =>
+  listen<OpenAsk>("open-asked", (event) => handler(event.payload));
+
+/** Brings the window to the front. */
+export const comeForward = () => invoke<void>("come_forward");
+
+/** Starts one more Perli with a window of its own. */
+export const openWindow = (folder: string, select: string[]) => invoke<void>("open_window", { folder, select });
+
 export const onDrivesChanged = (handler: () => void) => listen("drives-changed", handler);
 
 export const onFileDrag = (handler: (event: FileDrag) => void) =>
@@ -505,7 +522,7 @@ export const previewRow = (view: number, request: number, row: number, offset = 
 
 /** Label and value pairs, in Windows' own order. */
 export const rowProperties = (view: number, request: number, row: number) =>
-  invoke<[string, string][]>("row_properties", { view, request, row });
+  invoke<[group: string, label: string, value: string][]>("row_properties", { view, request, row });
 
 export type HashKind = "md5" | "sha1" | "sha256" | "sha512";
 

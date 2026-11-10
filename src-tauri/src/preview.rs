@@ -250,8 +250,26 @@ fn owned(text: PWSTR) -> String {
     value
 }
 
-/// Every property Windows can show for the item, by its display name, in Windows' own order.
-pub fn properties(path: &Path) -> windows::core::Result<Vec<(String, String)>> {
+/// The heading a property goes under, from Windows' own name for it, such as `System.Image.Dimensions`.
+fn group_of(canonical: &str) -> &'static str {
+    let name = canonical.strip_prefix("System.").unwrap_or(canonical);
+    let area = name.split('.').next().unwrap_or_default();
+    match area {
+        "Image" | "Photo" | "GPS" => "Picture",
+        "Audio" | "Music" | "Media" | "Video" | "DRM" => "Media",
+        "Document" | "Author" | "Title" | "Subject" | "Comment" | "Keywords" | "Category" | "Company" => "Document",
+        _ if area.starts_with("Date") => "Dates",
+        _ if canonical.starts_with("System.") && !name.contains('.') => "File",
+        _ => "More",
+    }
+}
+
+/// The order the headings show in.
+const GROUPS: [&str; 6] = ["File", "Dates", "Picture", "Media", "Document", "More"];
+
+/// Every property Windows can show for the item, as heading, display name and value. Headings
+/// come in `GROUPS` order, and each keeps Windows' own order inside.
+pub fn properties(path: &Path) -> windows::core::Result<Vec<(&'static str, String, String)>> {
     let _com = Com::enter();
     // Reading a file in the cloud for its properties would download it.
     let flags = if thumbs::is_online_only(path) { GPS_FASTPROPERTIESONLY } else { GPS_DEFAULT };
@@ -269,15 +287,18 @@ pub fn properties(path: &Path) -> windows::core::Result<Vec<(String, String)>> {
         let description = unsafe { IPropertyDescription::from_raw(raw) };
         let viewable = unsafe { description.GetTypeFlags(PDTF_ISVIEWABLE) }.is_ok_and(|flags| flags == PDTF_ISVIEWABLE);
         let Ok(label) = (unsafe { description.GetDisplayName() }).map(owned) else { continue };
+        let group = group_of(&unsafe { description.GetCanonicalName() }.map(owned).unwrap_or_default());
         let Ok(value) = (unsafe { PSFormatPropertyValue(&store, &description, PDFF_DEFAULT) }).map(owned) else {
             continue;
         };
         // Windows marks some text with direction marks, which only get in the way here.
         let value: String = value.chars().filter(|c| !matches!(c, '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}')).collect();
-        if viewable && !label.is_empty() && !value.trim().is_empty() && !found.iter().any(|(known, _)| known == &label) {
-            found.push((label, value));
+        if viewable && !label.is_empty() && !value.trim().is_empty() && !found.iter().any(|(_, known, _)| known == &label) {
+            found.push((group, label, value));
         }
     }
+    // Stable, so each heading keeps Windows' order.
+    found.sort_by_key(|(group, ..)| GROUPS.iter().position(|known| known == group));
     Ok(found)
 }
 
@@ -440,9 +461,31 @@ mod tests {
         let file = folder.join("a.txt");
         fs::write(&file, "hello").unwrap();
         let found = properties(&file).unwrap();
-        let names: Vec<_> = found.iter().map(|(label, _)| label.as_str()).collect();
-        assert!(names.len() >= 3, "{found:?}");
-        assert!(found.iter().any(|(_, value)| value.contains("a.txt")), "{found:?}");
+        assert!(found.len() >= 3, "{found:?}");
+        assert!(found.iter().any(|(_, _, value)| value.contains("a.txt")), "{found:?}");
+        // Headings never go back to one already left.
+        let places: Vec<_> = found.iter().map(|(group, ..)| GROUPS.iter().position(|known| known == group).unwrap()).collect();
+        assert!(places.is_sorted(), "{found:?}");
+        assert!(found.iter().any(|(group, ..)| *group == "Dates"), "{found:?}");
         fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
+    fn properties_go_under_the_heading_their_name_says() {
+        for (name, group) in [
+            ("System.Size", "File"),
+            ("System.ItemTypeText", "File"),
+            ("System.DateModified", "Dates"),
+            ("System.Image.Dimensions", "Picture"),
+            ("System.Photo.CameraModel", "Picture"),
+            ("System.Music.Artist", "Media"),
+            ("System.Video.FrameRate", "Media"),
+            ("System.Document.PageCount", "Document"),
+            ("System.Title", "Document"),
+            ("System.Link.TargetParsingPath", "More"),
+            ("Vendor.Thing", "More"),
+        ] {
+            assert_eq!(group_of(name), group, "{name}");
+        }
     }
 }

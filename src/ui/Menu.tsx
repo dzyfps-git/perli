@@ -16,7 +16,8 @@ export interface MenuItem {
   load?: () => Promise<MenuItem[]>;
 }
 
-const EDGE_GAP = 4;
+/** Room kept to every window edge, which `max-height` in menu.css leaves twice. */
+const EDGE_GAP = 8;
 const SIDE_GAP = 2;
 /** Lines a side menu's first item up with the item that opened it. */
 const SIDE_INSET = 5;

@@ -38,7 +38,10 @@ export function PathBar(props: {
   let searchTimer: number | undefined;
 
   // Narrow panes clip the crumbs, and the current folder must stay visible.
-  const revealCurrent = () => list.querySelector("[aria-current]")?.scrollIntoView({ block: "nearest", inline: "end" });
+  function revealCurrent() {
+    list.querySelector("[aria-current]")?.scrollIntoView({ block: "nearest", inline: "end" });
+    list.toggleAttribute("data-clipped", list.scrollLeft > 0);
+  }
 
   function focusInput(input: HTMLInputElement) {
     queueMicrotask(() => {

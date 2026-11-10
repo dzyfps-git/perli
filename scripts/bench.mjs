@@ -75,7 +75,8 @@ async function launch(folder, capped) {
     return { startedAt, pid };
   }
   const startedAt = Date.now();
-  const child = spawn(exe, [folder], { stdio: "ignore", detached: true });
+  // Its own window, so a Perli already running on this machine never takes the folder instead.
+  const child = spawn(exe, ["--new-window", folder], { stdio: "ignore", detached: true });
   child.unref();
   return { startedAt, pid: child.pid };
 }
@@ -282,8 +283,10 @@ async function measureRunning(folder) {
 
 function installerMB() {
   const nsisDir = join(metadata.target_directory, "release", "bundle", "nsis");
-  const installer = readdirSync(nsisDir).find((name) => name.endsWith(".exe"));
-  return statSync(join(nsisDir, installer)).size / 1024 / 1024;
+  // Older versions' installers stay in the folder, so the one built last is the one to weigh.
+  const installers = readdirSync(nsisDir).filter((name) => name.endsWith(".exe"));
+  const stats = installers.map((name) => statSync(join(nsisDir, name)));
+  return stats.reduce((newest, stat) => (stat.mtimeMs > newest.mtimeMs ? stat : newest)).size / 1024 / 1024;
 }
 
 const hddIndex = process.argv.indexOf("--hdd");

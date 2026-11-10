@@ -47,6 +47,7 @@ export function createTabs() {
     for (const view of active().panes()) view.openSaved();
   });
 
+  /** Answers with the new tab's first pane, or nothing when no folder opened. */
   async function add(paths: string[], after = active()) {
     const views = paths.map(() => newView());
     const results = await Promise.all(views.map((view, index) => view.open(paths[index])));
@@ -62,6 +63,7 @@ export function createTabs() {
       setTabs(result);
       setActive(tab);
     }, "tabs");
+    return opened[0];
   }
 
   function close(tab: Tab) {
