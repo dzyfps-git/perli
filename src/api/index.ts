@@ -470,9 +470,40 @@ export async function fetchRows(
   return decodeRows(await invoke<ArrayBuffer>("rows", { view, request, start, count }));
 }
 
+/** What the quick preview shows. `next` is where the following piece of a text starts. */
+export type Preview =
+  | { kind: "text"; text: string; next: number | null }
+  | { kind: "markdown"; html: string }
+  | { kind: "picture" };
+
+export const previewRow = (view: number, request: number, row: number, offset = 0) =>
+  invoke<Preview>("preview_row", { view, request, row, offset });
+
+/** Label and value pairs, in Windows' own order. */
+export const rowProperties = (view: number, request: number, row: number) =>
+  invoke<[string, string][]>("row_properties", { view, request, row });
+
+/** `null` once a newer checksum took its place. */
+export const checksum = (view: number, request: number, row: number) =>
+  invoke<string | null>("checksum", { view, request, row });
+
+/** Web and mail links only. */
+export const openLink = (url: string) => invoke<void>("open_link", { url });
+
+/** A picture of a row, `edge` device pixels on its longest side. */
+export const fetchBigPicture = (view: number, request: number, row: number, edge: number) =>
+  invoke<ArrayBuffer>("big_picture", { view, request, row, edge }).then(decodeThumb);
+
+/** A picture on this PC that a Markdown file points to. */
+export const fetchPictureFile = (path: string, edge: number) =>
+  invoke<ArrayBuffer>("picture_file", { path, edge }).then(decodeThumb);
+
 /** Decodes the format written by `read` in `src-tauri/src/thumbs.rs`. */
 export async function fetchThumb(view: number, request: number, row: number): Promise<Thumb | null> {
-  const buffer = await invoke<ArrayBuffer>("thumbnail", { view, request, row });
+  return decodeThumb(await invoke<ArrayBuffer>("thumbnail", { view, request, row }));
+}
+
+function decodeThumb(buffer: ArrayBuffer): Thumb | null {
   if (buffer.byteLength === 0) return null;
   const head = new DataView(buffer);
   return {

@@ -3,7 +3,7 @@ import { fetchRows, fetchThumb, findRow, type Row, type Selection, type Sort, ty
 import { ColumnHeader, SortStrip } from "./ColumnHeader";
 import { formatSize } from "../../ui/format";
 import { tagColor, tagNames, tags } from "../tags/tags";
-import type { ListHandle } from "../navigation/folderView";
+import type { ListHandle, RowAt } from "../navigation/folderView";
 import { join, relativeTo } from "../navigation/path";
 import { allLooks, lookOf } from "../sidebar/saved";
 import { HoverCard, type CardAsk } from "./HoverCard";
@@ -119,6 +119,10 @@ function createRow(cells: SortKey[], withThumb: boolean): PooledRow {
   };
 }
 
+/** What F2 selects in the name editor, in turn. */
+type NamePart = "stem" | "whole" | "extension";
+const NEXT_PART: Record<NamePart, NamePart> = { stem: "whole", whole: "extension", extension: "stem" };
+
 export function FileList(props: {
   view: number;
   /** The folder shown, where rows with no location of their own are. */
@@ -160,6 +164,10 @@ export function FileList(props: {
   onFirstPaint: () => void;
   onSwapped: (snapshot: number) => void;
   onEscape: () => void;
+  /** Space on a row, outside a type-to-find. */
+  onPreview: (at: RowAt) => void;
+  /** The one row selected, or nothing when none or many are. */
+  onCursor: (at: RowAt | undefined) => void;
   connect: (list: ListHandle) => void;
 }) {
   const pages = new Map<number, Row[]>();
@@ -182,6 +190,9 @@ export function FileList(props: {
   let pointer = { x: 0, y: 0 };
   let editInput!: HTMLInputElement;
   let committing = false;
+  let namePart: NamePart = "stem";
+  /** The row Tab moves the name editor to once the list shows the new name. */
+  let renameNext: { name: string; location: string } | undefined;
   /** The snapshot whose rows are on screen, which a reload changes once its rows are in. */
   let shown = props.snapshot;
   let pool: PooledRow[] = [];
@@ -404,6 +415,8 @@ export function FileList(props: {
     pool.forEach(decorate);
     moveMarker(instant);
     const focused = selection.focused();
+    const lone = selection.size() === 1 && selection.has(focused);
+    props.onCursor(lone ? { snapshot: shown, index: focused } : undefined);
     if (focused < 0) return grid.removeAttribute("aria-activedescendant");
 
     grid.setAttribute("aria-activedescendant", `file-row-${props.view}-${focused}`);
@@ -481,9 +494,16 @@ export function FileList(props: {
     if (header) header.scrollLeft = grid.scrollLeft;
   }
 
-  function jumpTo(key: string) {
+  function jumpTo(key: string, repeat: boolean) {
     const jump = typed(key);
-    if (!jump) return;
+    if (!jump) {
+      const focused = selection.focused();
+      // A held Space would open and close the preview over and over.
+      if (key === " " && !repeat && focused >= 0 && focused < props.count) {
+        props.onPreview({ snapshot: shown, index: focused });
+      }
+      return;
+    }
     const ticket = ++latestJump;
     const start = Math.max(0, selection.focused() + jump.offset);
     findRow(props.view, props.snapshot, jump.prefix, start)
@@ -532,7 +552,26 @@ export function FileList(props: {
     builtFor = "";
     resize();
     selectionChanged(true, props.reveal);
+    const next = renameNext;
+    renameNext = undefined;
     if (props.rename) startRename(selection.focused());
+    else if (next) moveRename(loadedIndex(next));
+  }
+
+  function loadedIndex({ name, location }: { name: string; location: string }) {
+    for (const [page, rows] of pages) {
+      const at = rows.findIndex((row) => row.name === name && row.location === location);
+      if (at >= 0) return page * PAGE_SIZE + at;
+    }
+    return -1;
+  }
+
+  /** Tab in the name editor goes on to the next row's name, the way Explorer does. */
+  function moveRename(index: number) {
+    if (index < 0 || index >= props.count) return;
+    selection.select(index);
+    selectionChanged(true);
+    startRename(index);
   }
 
   function startRename(index: number) {
@@ -553,12 +592,20 @@ export function FileList(props: {
 
   function focusEditor(input: HTMLInputElement) {
     editInput = input;
+    namePart = "stem";
     queueMicrotask(() => {
-      const { name, isDir } = editor()!;
-      const dot = name.lastIndexOf(".");
       input.focus();
-      input.setSelectionRange(0, !isDir && dot > 0 ? dot : name.length);
+      selectPart();
     });
+  }
+
+  function selectPart() {
+    const name = editInput.value;
+    const dot = name.lastIndexOf(".");
+    const extension = !editor()!.isDir && dot > 0;
+    if (!extension || namePart === "whole") editInput.setSelectionRange(0, name.length);
+    else if (namePart === "stem") editInput.setSelectionRange(0, dot);
+    else editInput.setSelectionRange(dot + 1, name.length);
   }
 
   function endRename() {
@@ -568,16 +615,25 @@ export function FileList(props: {
     props.onEditEnd();
   }
 
-  async function commitRename() {
+  /** `step` moves the editor on to the row before or after once the name is saved. */
+  async function commitRename(step = 0) {
     const current = editor();
     if (!current || committing) return;
     const name = editInput.value;
-    if (name === current.name) return endRename();
+    const target = step ? current.index + step : -1;
+    if (name === current.name) {
+      endRename();
+      return moveRename(target);
+    }
     committing = true;
+    // The new name can move rows around, so the next row is found again by its name.
+    const next = target >= 0 && target < props.count ? rowAt(target) : undefined;
+    renameNext = next && { name: next.name, location: next.location };
     try {
       await props.onRename({ view: props.view, request: shown, rows: [current.index] }, name);
       endRename();
     } catch (failure) {
+      renameNext = undefined;
       setEditError(String(failure));
       editInput.focus();
     } finally {
@@ -588,7 +644,11 @@ export function FileList(props: {
   function onEditorKey(event: KeyboardEvent) {
     if (event.key === "Enter") commitRename();
     else if (event.key === "Escape") endRename();
-    else return;
+    else if (event.key === "Tab") commitRename(event.shiftKey ? -1 : 1);
+    else if (event.key === "F2") {
+      namePart = NEXT_PART[namePart];
+      selectPart();
+    } else return;
     event.preventDefault();
     event.stopPropagation();
   }
@@ -626,7 +686,7 @@ export function FileList(props: {
       props.onEscape();
     } else if (event.key.length === 1 && !event.ctrlKey && !event.metaKey) {
       event.preventDefault();
-      return jumpTo(event.key);
+      return jumpTo(event.key, event.repeat);
     } else {
       return;
     }
@@ -661,7 +721,10 @@ export function FileList(props: {
 
     const observer = new ResizeObserver(resize);
     observer.observe(grid);
-    onCleanup(() => observer.disconnect());
+    onCleanup(() => {
+      observer.disconnect();
+      props.onCursor(undefined);
+    });
   });
 
   createEffect(

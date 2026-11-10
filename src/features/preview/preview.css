@@ -1,0 +1,332 @@
+.quick-preview {
+  display: flex;
+  flex-direction: column;
+  width: min(1000px, 86vw);
+  height: min(760px, 84vh);
+  padding: 0;
+  color: var(--text);
+  background: var(--overlay-tint);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-large);
+  box-shadow: var(--shadow);
+  backdrop-filter: var(--blur);
+  overflow: hidden;
+}
+
+.quick-preview:not([open]) {
+  display: none;
+}
+
+.quick-preview::backdrop {
+  background: rgb(0 0 0 / 28%);
+}
+
+.quick-preview[open] {
+  animation: preview-in var(--motion-slide);
+}
+
+@keyframes preview-in {
+  from {
+    opacity: 0;
+    translate: 0 12px;
+    scale: 0.98;
+  }
+}
+
+.preview-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  outline: none;
+}
+
+.preview-text {
+  margin: 0;
+  padding: var(--space-4);
+  font:
+    12.5px/1.55 "Cascadia Mono",
+    Consolas,
+    monospace;
+  white-space: pre;
+  tab-size: 4;
+}
+
+.preview-picture {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  margin: auto;
+  object-fit: contain;
+}
+
+.preview-body:has(.preview-picture) {
+  display: flex;
+  padding: var(--space-3);
+  overflow: hidden;
+}
+
+.preview-markdown {
+  max-width: 760px;
+  margin: 0 auto;
+  padding: var(--space-4) var(--space-4) 48px;
+  line-height: 1.6;
+  font-size: 14px;
+}
+
+.preview-markdown :is(h1, h2, h3, h4) {
+  margin: 1.4em 0 0.5em;
+  line-height: 1.25;
+}
+
+.preview-markdown h1 {
+  font-size: 1.8em;
+}
+
+.preview-markdown h2 {
+  padding-bottom: 0.2em;
+  border-bottom: 1px solid var(--border);
+  font-size: 1.4em;
+}
+
+.preview-markdown a {
+  color: var(--accent);
+}
+
+.preview-markdown a:not([href]),
+.preview-markdown a[href=""] {
+  color: inherit;
+  cursor: default;
+}
+
+.preview-markdown :is(code, pre) {
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 0.9em;
+}
+
+.preview-markdown :not(pre) > code {
+  padding: 0.1em 0.35em;
+  border-radius: 4px;
+  background: var(--surface-hover);
+}
+
+.preview-markdown pre {
+  padding: var(--space-3);
+  border-radius: var(--radius);
+  background: var(--surface-hover);
+  overflow-x: auto;
+}
+
+.preview-markdown blockquote {
+  margin: 0;
+  padding-left: var(--space-3);
+  border-left: 3px solid var(--accent);
+  color: var(--text-muted);
+}
+
+.preview-markdown table {
+  border-collapse: collapse;
+}
+
+.preview-markdown :is(th, td) {
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--border);
+}
+
+.preview-markdown hr {
+  border: 0;
+  border-top: 1px solid var(--border);
+}
+
+.md-picture {
+  max-width: 100%;
+  height: auto;
+  border-radius: var(--radius);
+}
+
+.md-blocked {
+  display: inline-block;
+  padding: 0.1em 0.5em;
+  border: 1px dashed var(--border);
+  border-radius: 4px;
+  color: var(--text-muted);
+  font-size: 0.9em;
+}
+
+.preview-note {
+  margin: var(--space-4);
+  color: var(--text-muted);
+}
+
+.preview-footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-1) var(--space-3);
+  padding: var(--space-2) var(--space-4);
+  border-top: 1px solid var(--border);
+}
+
+.preview-name {
+  min-width: 0;
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.preview-facts {
+  color: var(--text-muted);
+}
+
+/* Code colors come from the theme's own accent and tag colors, not a highlight.js theme. */
+.hljs-comment,
+.hljs-quote,
+.hljs-meta {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-built_in,
+.hljs-doctag {
+  color: var(--accent);
+}
+
+.hljs-string,
+.hljs-regexp,
+.hljs-addition,
+.hljs-template-tag {
+  color: light-dark(color-mix(in srgb, var(--tag-3) 80%, black), var(--tag-3));
+}
+
+.hljs-number,
+.hljs-literal,
+.hljs-symbol,
+.hljs-bullet {
+  color: light-dark(color-mix(in srgb, var(--tag-1) 85%, black), var(--tag-1));
+}
+
+.hljs-title,
+.hljs-section,
+.hljs-function .hljs-title {
+  color: var(--accent-start);
+}
+
+.hljs-type,
+.hljs-class .hljs-title,
+.hljs-attr,
+.hljs-attribute,
+.hljs-variable,
+.hljs-template-variable,
+.hljs-selector-class,
+.hljs-selector-id {
+  color: var(--accent-end);
+}
+
+.hljs-name,
+.hljs-tag {
+  color: light-dark(color-mix(in srgb, var(--tag-4) 80%, black), var(--tag-4));
+}
+
+.hljs-deletion {
+  color: var(--danger);
+}
+
+.hljs-emphasis {
+  font-style: italic;
+}
+
+.hljs-strong {
+  font-weight: 600;
+}
+
+.details-panel {
+  flex: none;
+  width: 280px;
+  padding: var(--space-3);
+  overflow-y: auto;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  animation: details-in var(--motion-slide);
+}
+
+.panes-swapped .details-panel {
+  order: -1;
+}
+
+@keyframes details-in {
+  from {
+    opacity: 0;
+    translate: 12px 0;
+  }
+}
+
+.details-empty {
+  color: var(--text-muted);
+}
+
+.details-picture {
+  display: block;
+  max-width: 100%;
+  max-height: 200px;
+  margin: 0 auto var(--space-2);
+  border-radius: var(--radius);
+}
+
+.details-name {
+  margin: 0 0 var(--space-3);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.details-facts {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: var(--space-1) var(--space-3);
+  margin: 0;
+}
+
+.details-facts dt {
+  color: var(--text-muted);
+}
+
+.details-facts dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.details-hash {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-2);
+}
+
+.details-hash code {
+  font:
+    11.5px "Cascadia Mono",
+    Consolas,
+    monospace;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.details-muted {
+  color: var(--text-muted);
+}
+
+.details-button {
+  padding: 2px var(--space-2);
+  color: var(--text);
+  background: var(--surface-hover);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font: inherit;
+  transition: background var(--motion);
+}
+
+.details-button:hover {
+  background: var(--surface-selected);
+}

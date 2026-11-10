@@ -23,8 +23,10 @@ use windows::Win32::UI::Shell::{
 use crate::folder::ONLINE_ONLY;
 use crate::ops::{shell_item, Com};
 
-/// The longest edge. Windows caches pictures at this size, so most cost no decoding.
-const EDGE: i32 = 256;
+/// The longest edge in the grid. Windows caches pictures at this size, so most cost no decoding.
+pub const EDGE: u32 = 256;
+/// The quick preview asks for no more than this.
+const MAX_EDGE: u32 = 4096;
 // ponytail: no timeout, so a stuck handler keeps its thread and four of them end the pictures
 // until a restart. The list itself is never affected. A process of its own could be killed.
 const WORKERS: usize = 4;
@@ -59,10 +61,11 @@ fn queue() -> &'static Mutex<Sender<Work>> {
 
 /// Width and height (u32, little-endian), then RGBA pixels with plain alpha, or nothing if there
 /// is no picture. `src/api/index.ts` decodes this.
-pub async fn read(path: PathBuf) -> Vec<u8> {
+pub async fn read(path: PathBuf, edge: u32) -> Vec<u8> {
     let (sender, mut result) = async_runtime::channel(1);
+    let edge = edge.clamp(1, MAX_EDGE) as i32;
     let work = Box::new(move || {
-        let _ = sender.blocking_send(picture(&path).unwrap_or_default());
+        let _ = sender.blocking_send(picture(&path, edge).unwrap_or_default());
     });
     let _ = queue().lock().unwrap_or_else(PoisonError::into_inner).send(work);
     result.recv().await.unwrap_or_default()
@@ -79,27 +82,21 @@ pub fn text_start(path: &Path) -> Option<String> {
     let mut bytes = Vec::with_capacity(PEEK_BYTES);
     fs::File::open(path).ok()?.take(PEEK_BYTES as u64).read_to_end(&mut bytes).ok()?;
     let body = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&bytes);
-    let text = match std::str::from_utf8(body) {
-        Ok(text) => text,
-        // The cut landed inside a character, which is fine.
-        Err(cut) if cut.error_len().is_none() => std::str::from_utf8(&body[..cut.valid_up_to()]).ok()?,
-        Err(_) => return None,
-    };
-    let plain = |c: char| !c.is_control() || matches!(c, '\n' | '\r' | '\t' | '\x0c');
-    (!text.is_empty() && text.chars().all(plain))
-        .then(|| text.lines().take(PEEK_LINES).collect::<Vec<_>>().join("\n"))
+    // The cut can land inside a character, which is fine.
+    let text = crate::preview::as_text(body, true)?;
+    (!text.is_empty()).then(|| text.lines().take(PEEK_LINES).collect::<Vec<_>>().join("\n"))
 }
 
 /// True if opening the file would fetch it from the cloud.
-fn is_online_only(path: &Path) -> bool {
+pub fn is_online_only(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok_and(|data| data.file_attributes() & ONLINE_ONLY != 0)
 }
 
 /// Its own picture if it has one, or the icon of its type. A file in the cloud stays there, so
 /// it only gets a picture Windows already has.
-fn picture(path: &Path) -> Result<Vec<u8>> {
+fn picture(path: &Path, edge: i32) -> Result<Vec<u8>> {
     let factory: IShellItemImageFactory = shell_item(path)?.cast()?;
-    let size = SIZE { cx: EDGE, cy: EDGE };
+    let size = SIZE { cx: edge, cy: edge };
     let first = if is_online_only(path) { SIIGBF_INCACHEONLY } else { SIIGBF_RESIZETOFIT };
     let bitmap = unsafe { factory.GetImage(size, first).or_else(|_| factory.GetImage(size, SIIGBF_ICONONLY)) }?;
     let bytes = encode(bitmap);
@@ -218,7 +215,7 @@ mod tests {
         fs::write(&text, "words").unwrap();
 
         for path in [image, text] {
-            let bytes = picture(&path).unwrap();
+            let bytes = picture(&path, EDGE as i32).unwrap();
             let (width, height) = shape(&bytes);
             assert!((1..=EDGE as usize).contains(&width), "{path:?} is {width} wide");
             assert_eq!(bytes.len(), HEADER_BYTES + width * height * 4);
@@ -257,7 +254,7 @@ mod tests {
     #[test]
     fn a_missing_file_has_no_picture() {
         let _com = Com::enter();
-        assert!(picture(&std::env::temp_dir().join("perli-no-such-file")).is_err());
+        assert!(picture(&std::env::temp_dir().join("perli-no-such-file"), EDGE as i32).is_err());
     }
 
     #[test]
@@ -266,7 +263,7 @@ mod tests {
         let image = folder.join("a.bmp");
         write_bmp(&image);
 
-        let bytes = async_runtime::block_on(read(image));
+        let bytes = async_runtime::block_on(read(image, EDGE));
 
         assert!(bytes.len() > HEADER_BYTES);
         fs::remove_dir_all(folder).unwrap();

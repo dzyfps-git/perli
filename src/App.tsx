@@ -40,9 +40,11 @@ import { FilterDialog } from "./features/filelist/FilterDialog";
 import { clampTile, isLargestTile, isSmallestTile, TILE_STEP, type Layout } from "./features/filelist/layout";
 import {
   columns,
+  detailsPanel,
   folderSizes,
   forgetSorts,
   grouping,
+  setDetailsPanel,
   setFolderSizes,
   setGrouping,
   setLastLayout,
@@ -54,10 +56,12 @@ import {
   toggleColumn,
 } from "./features/filelist/prefs";
 import { SelectPattern } from "./features/filelist/SelectPattern";
-import { FLAT_QUERY, type FolderView } from "./features/navigation/folderView";
+import { FLAT_QUERY, type FolderView, type RowAt } from "./features/navigation/folderView";
 import { BIN_PATH, isBin, isDriveRoot, join, parentOf, baseName } from "./features/navigation/path";
 import { Palette, type Command } from "./features/palette/Palette";
 import { PathBar } from "./features/pathbar/PathBar";
+import { DetailsPanel } from "./features/preview/DetailsPanel";
+import { QuickPreview, type PreviewAt } from "./features/preview/QuickPreview";
 import { Settings } from "./features/settings/Settings";
 import { startUpdates, updateState } from "./features/settings/updates";
 import { BookmarksBar } from "./features/sidebar/BookmarksBar";
@@ -196,9 +200,16 @@ export function App() {
   const [filtering, setFiltering] = createSignal<FolderView>();
   const [selectingPattern, setSelectingPattern] = createSignal<FolderView>();
   const [namingTag, setNamingTag] = createSignal<FolderView>();
+  const [previewing, setPreviewing] = createSignal<{ view: FolderView; at: PreviewAt }>();
   /** The dialog covers the tabs, so nothing behind it may change. */
   const dialogOpen = () =>
-    settingsOpen() || !!deleting() || !!renaming() || !!filtering() || !!selectingPattern() || !!namingTag();
+    settingsOpen() ||
+    !!deleting() ||
+    !!renaming() ||
+    !!filtering() ||
+    !!selectingPattern() ||
+    !!namingTag() ||
+    !!previewing();
   const jobs = createJobs(tabs.allViews);
   const actions = createFileActions(jobs, setDeleting, () => tabs.active().other(), setRenaming);
   const shell = createShellItems(jobs, actions);
@@ -269,6 +280,29 @@ export function App() {
     else if (toSide) tabs.openToSide(path);
     else view.open(path);
   }
+
+  function preview(view: FolderView, at: RowAt) {
+    const folder = view.folder();
+    if (!folder) return;
+    const snapshot = () => view.folder()?.request ?? at.snapshot;
+    const count = () => view.folder()?.count ?? folder.count;
+    const selected = () => view.folder()?.selected?.[0];
+    setPreviewing({ view, at: { view: view.id, snapshot, index: at.index, count, selected, folder: folder.path } });
+  }
+
+  /** The focused row, which the list's selection gives first. */
+  function previewSelected(view: FolderView) {
+    const selection = view.list()?.selection();
+    if (selection?.rows.length) preview(view, { snapshot: selection.request, index: selection.rows[0] });
+  }
+
+  function closePreview() {
+    const shown = previewing();
+    setPreviewing(undefined);
+    shown?.view.list()?.focus();
+  }
+
+  const toggleDetails = () => setDetailsPanel(!detailsPanel());
 
   const networkItems = (): MenuItem[] => [
     { label: "Map network drive", divider: true, action: () => mapDrive().catch(jobs.report) },
@@ -350,6 +384,7 @@ export function App() {
     const [canPaste, toolItems] = await Promise.all([clipboardCanPaste(), shell.fileToolItems(view, row)]);
     const items: MenuItem[] = [
       { label: "Open", action: () => openRow(view, row, false) },
+      { label: "Quick preview", action: () => previewSelected(view) },
       row.isDir
         ? { label: "Open to side", action: () => openRow(view, row, true) }
         : shell.openWithItem(view),
@@ -487,6 +522,7 @@ export function App() {
           layoutItem("List", "list"),
           layoutItem("Grid", "grid"),
           ...(view.layout() === "grid" ? tileItems : []),
+          { label: "Details panel", divider: true, checked: detailsPanel(), action: toggleDetails },
         ],
       },
       {
@@ -630,6 +666,8 @@ export function App() {
       { label: "Show hidden files", keys: "Ctrl+H", run: toggleHidden },
       { label: "List view", keys: "Ctrl+Shift+1", run: () => view.setLayout("list") },
       { label: "Grid view", keys: "Ctrl+Shift+2", run: () => view.setLayout("grid") },
+      { label: "Quick preview", keys: "Space", run: () => previewSelected(view) },
+      { label: "Details panel", keys: "Alt+Shift+P", run: toggleDetails },
       { label: "Select by pattern", keys: "Ctrl+Shift+A", run: () => setSelectingPattern(view) },
       { label: "Filter", keys: "Ctrl+Shift+F", run: () => setFiltering(view) },
       ...(view.filtered() ? [{ label: "Clear filter", run: () => view.setFilterForm(NO_FILTER) }] : []),
@@ -694,6 +732,7 @@ export function App() {
     else if (event.altKey && key === "arrowleft") view.back();
     else if (event.altKey && key === "arrowright") view.forward();
     else if (event.altKey && key === "arrowup") view.up();
+    else if (event.altKey && event.shiftKey && key === "p") toggleDetails();
     else if (key === "backspace" && !isTyping(event)) view.up();
     else if ((event.ctrlKey && key === "l") || (event.altKey && key === "d")) view.setEditingPath(true);
     else if (event.ctrlKey && event.shiftKey && key === "f") setFiltering(view);
@@ -817,6 +856,8 @@ export function App() {
                 onFirstPaint={markReady}
                 onSwapped={view.swapped}
                 onEscape={() => view.search("")}
+                onPreview={(at) => preview(view, at)}
+                onCursor={view.setCursor}
                 connect={view.connectList}
               />
             )}
@@ -862,6 +903,9 @@ export function App() {
           {(tab) => (
             <div class="panes" classList={{ "panes-swapped": tab.swapped() }} hidden={tab !== tabs.active()}>
               <For each={tab.panes()}>{(view) => <Pane tab={tab} view={view} />}</For>
+              <Show when={detailsPanel() && tab === tabs.active()}>
+                <DetailsPanel view={tab.active()} />
+              </Show>
             </div>
           )}
         </For>
@@ -888,6 +932,16 @@ export function App() {
             selection={() => actions.selected(view)}
             onDone={showTagChange}
             onClose={() => setNamingTag(undefined)}
+          />
+        )}
+      </Show>
+      <Show when={previewing()} keyed>
+        {({ view, at }) => (
+          <QuickPreview
+            at={at}
+            onStep={(index) => view.list()?.select([index])}
+            onOpen={(row) => openRow(view, row, false)}
+            onClose={closePreview}
           />
         )}
       </Show>

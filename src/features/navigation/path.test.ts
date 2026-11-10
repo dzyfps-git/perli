@@ -8,6 +8,7 @@ import {
   nextTrail,
   parentOf,
   relativeTo,
+  resolveRelative,
   samePath,
   toCrumbs,
   typedPath,
@@ -104,4 +105,14 @@ test("the Recycle Bin is one crumb with no parent, and typing its name opens it"
 
 test("baseName is the last part of a path", () => {
   assert.equal(baseName("C:\\a\\b.txt"), "b.txt");
+});
+
+test("resolveRelative follows a document's own links to files beside it", () => {
+  const folder = "C:\\docs";
+  assert.equal(resolveRelative(folder, "pics/cat%20one.png"), "C:\\docs\\pics\\cat one.png");
+  assert.equal(resolveRelative(folder, "./a.png#top"), "C:\\docs\\a.png");
+  assert.equal(resolveRelative(folder, "../../../x.png"), "C:\\x.png");
+  assert.equal(resolveRelative("C:\\", ".."), "C:\\");
+  assert.equal(resolveRelative("\\\\server\\share\\docs", "../../a.png"), "\\\\server\\share\\a.png");
+  assert.equal(resolveRelative(folder, "100%.png"), "C:\\docs\\100%.png");
 });

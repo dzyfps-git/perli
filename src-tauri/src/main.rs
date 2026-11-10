@@ -10,6 +10,7 @@ mod network;
 mod ops;
 mod parts;
 mod places;
+mod preview;
 mod recent;
 mod registry;
 mod search;
@@ -863,6 +864,11 @@ async fn open_file(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+async fn open_link(url: String) -> Result<(), String> {
+    off_main(move || shell::open_link(&url)).await
+}
+
+#[tauri::command]
 async fn apps_for(
     selection: Selection,
     views: State<'_, Views>,
@@ -963,13 +969,56 @@ async fn file_users(selection: Selection, views: State<'_, Views>) -> Result<Vec
     off_main(move || Ok(ops::sys::users_of(&paths))).await
 }
 
+fn row_path(views: &Views, view: u32, request: u64, row: u32) -> Result<PathBuf, String> {
+    let selection = Selection { view, request, rows: vec![row] };
+    let path = views.read(&selection, folder::Listing::paths)?.pop();
+    path.ok_or_else(|| "That row is gone".into())
+}
+
 /// The picture of one row, in the format `thumbs::read` describes.
 #[tauri::command]
 async fn thumbnail(view: u32, request: u64, row: u32, views: State<'_, Views>) -> Result<Response, String> {
-    let selection = Selection { view, request, rows: vec![row] };
-    let path = views.read(&selection, folder::Listing::paths)?.pop();
-    let path = path.ok_or("That row is gone")?;
-    Ok(Response::new(thumbs::read(path).await))
+    let path = row_path(&views, view, request, row)?;
+    Ok(Response::new(thumbs::read(path, thumbs::EDGE).await))
+}
+
+/// A bigger picture of one row, for the quick preview. `edge` is in device pixels.
+#[tauri::command]
+async fn big_picture(view: u32, request: u64, row: u32, edge: u32, views: State<'_, Views>) -> Result<Response, String> {
+    let path = row_path(&views, view, request, row)?;
+    Ok(Response::new(thumbs::read(path, edge).await))
+}
+
+/// A picture a Markdown file points to, beside it on this PC.
+#[tauri::command]
+async fn picture_file(path: PathBuf, edge: u32) -> Response {
+    Response::new(thumbs::read(path, edge).await)
+}
+
+/// What the quick preview shows for one row, from `offset` for the later pieces of a text.
+#[tauri::command]
+async fn preview_row(view: u32, request: u64, row: u32, offset: u64, views: State<'_, Views>) -> Result<preview::Preview, String> {
+    let path = row_path(&views, view, request, row)?;
+    async_runtime::spawn_blocking(move || preview::read(&path, offset))
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// Every property Windows shows for one row, as label and value.
+#[tauri::command]
+async fn row_properties(view: u32, request: u64, row: u32, views: State<'_, Views>) -> Result<Vec<(String, String)>, String> {
+    let path = row_path(&views, view, request, row)?;
+    off_main(move || preview::properties(&path)).await
+}
+
+/// One row's SHA-256, or nothing if a newer checksum took its place.
+#[tauri::command]
+async fn checksum(view: u32, request: u64, row: u32, views: State<'_, Views>) -> Result<Option<String>, String> {
+    let path = row_path(&views, view, request, row)?;
+    async_runtime::spawn_blocking(move || preview::sha256(&path))
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())
 }
 
 /// The first lines of a text file, for its hover card.
@@ -1256,6 +1305,12 @@ fn main() {
             new_types,
             file_users,
             thumbnail,
+            big_picture,
+            picture_file,
+            preview_row,
+            open_link,
+            row_properties,
+            checksum,
             peek_text,
             recent_files,
             check_update,

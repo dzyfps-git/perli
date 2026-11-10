@@ -59,6 +59,12 @@ const combined = (a: ReadAgain, b: ReadAgain): ReadAgain => ({
   top: a.top || b.top,
 });
 
+/** One row of one snapshot. */
+export interface RowAt {
+  snapshot: number;
+  index: number;
+}
+
 /** What the file list on screen tells its view. */
 export interface ListHandle {
   /** The rows selected on screen, with the focused one first. */
@@ -102,6 +108,10 @@ export function createFolderView(id: number, saved?: SavedPane) {
   const [searchAsked, setSearchAsked] = createSignal(0);
   /** Stays with the folder until the view goes to another one. */
   const [filterForm, setFilterFormValue] = createSignal(NO_FILTER);
+  /** The one row selected in the list, for the details panel. */
+  const [cursor, setCursor] = createSignal<RowAt | undefined>(undefined, {
+    equals: (a, b) => a?.snapshot === b?.snapshot && a?.index === b?.index,
+  });
   let latestRequest = 0;
   let opening = false;
   let rearrangeAfterOpen = false;
@@ -413,6 +423,8 @@ export function createFolderView(id: number, saved?: SavedPane) {
       list = handle;
     },
     list: () => list,
+    cursor,
+    setCursor,
     /** A reload that waited for an edit of a name can go ahead. */
     editEnded: runReloadLater,
     /** The list took the rows of `snapshot`, or gave up on them. */

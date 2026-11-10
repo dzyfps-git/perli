@@ -128,6 +128,21 @@ pub fn open_terminal(folder: &str) -> std::io::Result<()> {
 }
 
 /// Opens a file with its default app. Blocks, so call it off the main thread.
+/// Opens a web or mail link from a preview in the user's own browser or mail app. Nothing else
+/// is let through, so a document can't start a program.
+pub fn open_link(url: &str) -> Result<()> {
+    let lower = url.to_ascii_lowercase();
+    if !["https://", "http://", "mailto:"].iter().any(|scheme| lower.starts_with(scheme)) {
+        return Err(Error::new(E_FAIL, "Only web and mail links open from a preview."));
+    }
+    let result = unsafe { ShellExecuteW(None, w!("open"), &HSTRING::from(url), None, None, SW_SHOWNORMAL) };
+    if result.0 as isize > SHELL_EXECUTE_ERROR_MAX {
+        Ok(())
+    } else {
+        Err(Error::new(E_FAIL, format!("Windows could not open {url}")))
+    }
+}
+
 pub fn open(path: &str) -> Result<()> {
     unsafe {
         // Shell extensions that handle the open may need COM on this thread.
@@ -156,6 +171,13 @@ pub fn open(path: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_preview_link_can_never_start_a_program() {
+        for url in [r"C:\Windows\notepad.exe", "file:///C:/Windows/notepad.exe", "calc", "ms-settings:", ""] {
+            assert!(open_link(url).is_err(), "{url}");
+        }
+    }
 
     #[test]
     fn expands_home_and_environment_names() {
