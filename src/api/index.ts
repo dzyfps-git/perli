@@ -477,6 +477,9 @@ export type Preview =
   | { kind: "archive"; entries: ArchiveEntry[]; more: boolean }
   | { kind: "comic"; pages: string[] }
   | { kind: "book"; title: string; chapters: string[] }
+  | { kind: "model" }
+  | { kind: "song" }
+  | { kind: "audio" }
   | { kind: "picture" };
 
 /** One file or folder inside a ZIP. `modified` is as the archive wrote it. */
@@ -512,6 +515,39 @@ export const fetchArchivePicture = (view: number, request: number, row: number, 
 /** One chapter of a book as safe HTML, by its name inside the archive. */
 export const bookChapter = (view: number, request: number, row: number, entry: string) =>
   invoke<string>("book_chapter", { view, request, row, entry });
+
+/** A 3D model's bytes or, with `part`, those of a file beside it that the model points to. */
+export const modelFile = (view: number, request: number, row: number, part?: string) =>
+  invoke<ArrayBuffer>("model_file", { view, request, row, part: part ?? null });
+
+/** A MIDI file's name, instruments and notes. Notes are start and length in seconds, key, channel. */
+export interface SongInfo {
+  title: string | null;
+  /** General MIDI programs in the order they first play. 128 is the drums. */
+  instruments: number[];
+  notes: [number, number, number, number][];
+}
+
+export const songInfo = (view: number, request: number, row: number) =>
+  invoke<SongInfo>("song_info", { view, request, row });
+
+export interface Tags {
+  title: string | null;
+  artist: string | null;
+  album: string | null;
+}
+
+/** Opens one sound file to the window, giving its path to stream and its tags. */
+export const openAudio = (view: number, request: number, row: number) =>
+  invoke<[string, Tags]>("open_audio", { view, request, row });
+
+/** A song's own album cover, or null if it has none. */
+export const fetchCover = (view: number, request: number, row: number, edge: number) =>
+  invoke<ArrayBuffer>("cover", { view, request, row, edge }).then(decodeThumb);
+
+/** A MIDI file played through the bundled SoundFont, as one WAV. */
+export const songAudio = (view: number, request: number, row: number) =>
+  invoke<ArrayBuffer>("song_audio", { view, request, row });
 
 /** A picture on this PC that a Markdown file points to. */
 export const fetchPictureFile = (path: string, edge: number) =>

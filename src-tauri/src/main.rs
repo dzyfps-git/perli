@@ -11,6 +11,7 @@ mod ops;
 mod parts;
 mod places;
 mod inside;
+mod midi;
 mod preview;
 mod recent;
 mod registry;
@@ -1024,6 +1025,55 @@ async fn book_chapter(view: u32, request: u64, row: u32, entry: String, views: S
     blocking(move || inside::chapter(&path, &entry)).await
 }
 
+/// A 3D model's bytes or, with `part`, those of a file beside it that the model points to.
+#[tauri::command]
+async fn model_file(view: u32, request: u64, row: u32, part: Option<String>, views: State<'_, Views>) -> Result<Response, String> {
+    let path = row_path(&views, view, request, row)?;
+    let bytes = blocking(move || preview::model_file(&path, part.as_deref())).await?;
+    Ok(Response::new(bytes))
+}
+
+/// A MIDI file played through the bundled SoundFont, as one WAV.
+#[tauri::command]
+async fn song_audio(view: u32, request: u64, row: u32, app: AppHandle, views: State<'_, Views>) -> Result<Response, String> {
+    let path = row_path(&views, view, request, row)?;
+    let font = app
+        .path()
+        .resolve(midi::SOUND_FONT, tauri::path::BaseDirectory::Resource)
+        .map_err(|error| error.to_string())?;
+    // A broken file can trip the synthesizer's own checks.
+    let render = move || std::panic::catch_unwind(|| midi::render(&font, &path));
+    let wav = blocking(move || render().unwrap_or_else(|_| Err("This MIDI file can't be read".into()))).await?;
+    Ok(Response::new(wav))
+}
+
+/// A MIDI file's name, instruments and notes, for the piano roll.
+#[tauri::command]
+async fn song_info(view: u32, request: u64, row: u32, views: State<'_, Views>) -> Result<midi::SongInfo, String> {
+    let path = row_path(&views, view, request, row)?;
+    blocking(move || midi::info(&path)).await
+}
+
+/// A sound file's tags, and its path for the window to stream it. Only this file opens to the
+/// window, and only once the user previews it.
+#[tauri::command]
+async fn open_audio(view: u32, request: u64, row: u32, app: AppHandle, views: State<'_, Views>) -> Result<(String, preview::Tags), String> {
+    let path = row_path(&views, view, request, row)?;
+    // ponytail: files stay open to the window for the session, as a scope can't take one back
+    // and allow it again later. Fine while only the window's own code asks for them.
+    app.asset_protocol_scope().allow_file(&path).map_err(|error| error.to_string())?;
+    let shown = path.to_string_lossy().into_owned();
+    let tags = blocking(move || Ok(preview::tags(&path))).await?;
+    Ok((shown, tags))
+}
+
+/// A song's album cover, or nothing if it has none of its own.
+#[tauri::command]
+async fn cover(view: u32, request: u64, row: u32, edge: u32, views: State<'_, Views>) -> Result<Response, String> {
+    let path = row_path(&views, view, request, row)?;
+    Ok(Response::new(thumbs::cover(path, edge).await))
+}
+
 /// Every property Windows shows for one row, as label and value.
 #[tauri::command]
 async fn row_properties(view: u32, request: u64, row: u32, views: State<'_, Views>) -> Result<Vec<(String, String)>, String> {
@@ -1330,6 +1380,11 @@ fn main() {
             preview_row,
             archive_picture,
             book_chapter,
+            model_file,
+            song_audio,
+            song_info,
+            open_audio,
+            cover,
             open_link,
             row_properties,
             checksum,

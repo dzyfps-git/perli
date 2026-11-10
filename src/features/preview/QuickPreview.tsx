@@ -1,12 +1,18 @@
-import { createEffect, createSignal, For, on, onMount, Show } from "solid-js";
+import { convertFileSrc } from "@tauri-apps/api/core";
+import { createEffect, createSignal, For, lazy, on, onMount, Show } from "solid-js";
 import {
   bookChapter,
+  fetchCover,
   fetchArchivePicture,
   fetchBigPicture,
   fetchPictureFile,
   fetchRows,
+  modelFile,
+  openAudio,
   openLink,
   previewRow,
+  songAudio,
+  songInfo,
   type ArchiveEntry,
   type Preview,
   type Row,
@@ -16,6 +22,7 @@ import { formatSize } from "../../ui/format";
 import { typeText } from "../filelist/typeNames";
 import { join, parentOf, resolveRelative } from "../navigation/path";
 import { highlight, languageOf } from "./highlight";
+import type { PlayerProps } from "./Player";
 import "./preview.css";
 
 /** Which row the preview starts on. A reload while it is open moves it on to the new rows. */
@@ -37,6 +44,14 @@ const MARKDOWN_PICTURE_EDGE = 1200;
 const SLIDE_PX = 24;
 const SLIDE_MS = 180;
 const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
+// Both come with the first file that needs them.
+const ModelStage = lazy(() => import("./ModelStage").then((module) => ({ default: module.ModelStage })));
+const Player = lazy(() => import("./Player").then((module) => ({ default: module.Player })));
+
+/** Files the player plays, for Play next to skip to. */
+const AUDIO = /\.(mid|midi|mp3|m4a|aac|wav|flac|ogg|oga|opus|weba)$/i;
+const NEXT_BATCH = 50;
+const NO_TAGS = { title: null, artist: null, album: null };
 const dates = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" });
 
 export function draw(canvas: HTMLCanvasElement, picture: Thumb) {
@@ -74,6 +89,8 @@ export function QuickPreview(props: {
   let snapshot = 0;
   /** Bumped by each step, so answers for a row already left behind are dropped. */
   let ticket = 0;
+  /** The keys the player or the model view takes first, while one shows. */
+  let playerKeys: ((event: KeyboardEvent) => boolean) | undefined;
 
   const folderOf = (item: Row) => item.location || props.at.folder;
   const pathOf = (item: Row) => join(folderOf(item), item.name);
@@ -176,6 +193,45 @@ export function QuickPreview(props: {
     fillPictures(article, (name) => fetchPictureFile(resolveRelative(folderOf(item), name), MARKDOWN_PICTURE_EDGE));
   }
 
+  /** Play next: on to the next sound file in the list, if there is one. */
+  async function nextAudio() {
+    const mine = ticket;
+    for (let at = index() + 1; at < props.at.count(); at += NEXT_BATCH) {
+      const rows = await fetchRows(props.at.view, snapshot, at, NEXT_BATCH);
+      if (mine !== ticket) return;
+      const found = rows.findIndex((item) => !item.isDir && AUDIO.test(item.name));
+      if (found >= 0) return step(at + found - index());
+      if (!rows.length) return;
+    }
+  }
+
+  const reader = (at: number, shot: number) => (part?: string) => modelFile(props.at.view, shot, at, part);
+
+  function player(item: Row, midi: boolean): PlayerProps {
+    const { view } = props.at;
+    const at = index();
+    const shot = snapshot;
+    return {
+      path: pathOf(item),
+      name: item.name,
+      size: item.size,
+      load: midi
+        ? async () => {
+            const wav = await songAudio(view, shot, at);
+            return { url: URL.createObjectURL(new Blob([wav], { type: "audio/wav" })), made: true, tags: NO_TAGS };
+          }
+        : async () => {
+            const [path, tags] = await openAudio(view, shot, at);
+            return { url: convertFileSrc(path), made: false, tags };
+          },
+      info: midi ? () => songInfo(view, shot, at) : undefined,
+      cover: midi ? undefined : (edge) => fetchCover(view, shot, at, edge),
+      keys: (handler) => (playerKeys = handler),
+      tint: (color) => body.style.setProperty("--player-tint", color ?? "transparent"),
+      onNext: () => void nextAudio(),
+    };
+  }
+
   const edgeOfBody = () => {
     const box = body.getBoundingClientRect();
     return Math.ceil(Math.max(box.width, box.height) * devicePixelRatio);
@@ -245,6 +301,12 @@ export function QuickPreview(props: {
 
   function onKeyDown(event: KeyboardEvent) {
     const key = event.key;
+    // A slider takes its own arrow keys.
+    if (key.startsWith("Arrow") && (event.target as HTMLElement).matches("input")) return;
+    if (!event.ctrlKey && !event.altKey && playerKeys?.(event)) {
+      event.preventDefault();
+      return;
+    }
     const paged = pageCount() > 0;
     if (paged && key === "ArrowLeft") turn(-1);
     else if (paged && key === "ArrowRight") turn(1);
@@ -336,6 +398,17 @@ export function QuickPreview(props: {
                 <article ref={(article) => (chapterArticle = article)} class="preview-markdown preview-book" />
               )}
               {preview.kind === "archive" && <ArchiveList entries={preview.entries} more={preview.more} />}
+              {preview.kind === "model" && (
+                <ModelStage
+                  name={row()!.name}
+                  read={reader(index(), snapshot)}
+                  keys={(handler) => (playerKeys = handler)}
+                  onFailure={setFailure}
+                />
+              )}
+              {(preview.kind === "song" || preview.kind === "audio") && (
+                <Player {...player(row()!, preview.kind === "song")} />
+              )}
             </>
           )}
         </Show>

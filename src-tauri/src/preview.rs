@@ -16,7 +16,7 @@ use windows::Win32::Security::Cryptography::{
 };
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::UI::Shell::PropertiesSystem::{
-    IPropertyDescription, IPropertyStore, PSFormatPropertyValue, PSGetPropertyDescription,
+    IPropertyDescription, IPropertyStore, PSFormatPropertyValue, PSGetPropertyDescription, PSGetPropertyKeyFromName,
     SHGetPropertyStoreFromParsingName, GPS_DEFAULT, GPS_FASTPROPERTIESONLY, PDFF_DEFAULT, PDTF_ISVIEWABLE,
 };
 
@@ -30,6 +30,8 @@ const PIECE_BYTES: usize = 256 * 1024;
 const MARKDOWN_BYTES: u64 = 4 * 1024 * 1024;
 const HASH_BYTES: usize = 1024 * 1024;
 const SHA256_BYTES: usize = 32;
+/// The most a 3D model, or one file it points to, may take.
+const MODEL_BYTES: u64 = 256 * 1024 * 1024;
 
 #[derive(Debug, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
@@ -44,6 +46,12 @@ pub enum Preview {
     Comic { pages: Vec<String> },
     /// A book's title and its chapters, by their names inside it.
     Book { title: String, chapters: Vec<String> },
+    /// A 3D model, drawn by the window from the file's bytes.
+    Model,
+    /// A MIDI file, played through the bundled SoundFont.
+    Song,
+    /// A sound file the window plays itself, streamed from disk.
+    Audio,
     /// Anything else shows Windows' own picture of it.
     Picture,
 }
@@ -98,8 +106,35 @@ fn inside_of(path: &Path) -> Option<Preview> {
             Ok(book) if !book.chapters.is_empty() => Some(Preview::Book { title: book.title, chapters: book.chapters }),
             _ => listed(),
         },
+        "glb" | "gltf" | "obj" | "stl" => Some(Preview::Model),
+        "mid" | "midi" => Some(Preview::Song),
+        "mp3" | "m4a" | "aac" | "wav" | "flac" | "ogg" | "oga" | "opus" | "weba" => Some(Preview::Audio),
         _ => None,
     }
+}
+
+/// A 3D model's file or, with `part`, a file it points to. Like Markdown pictures, parts come
+/// only from this PC, by a path relative to the model's folder, never from the web, and never
+/// from outside that folder, even through `..` or a link.
+pub fn model_file(path: &Path, part: Option<&str>) -> Result<Vec<u8>, String> {
+    let path = match part {
+        None => path.to_path_buf(),
+        Some(part) if !part.is_empty() && !part.contains(':') && !part.starts_with(['/', '\\']) => {
+            let folder = path.parent().ok_or("The model has no folder")?;
+            let folder = folder.canonicalize().map_err(|error| error.to_string())?;
+            let found = folder.join(part).canonicalize().map_err(|error| error.to_string())?;
+            if !found.starts_with(&folder) {
+                return Err("Only files beside the model can load".into());
+            }
+            found
+        }
+        Some(_) => return Err("Only files beside the model can load".into()),
+    };
+    let size = path.metadata().map_err(|error| error.to_string())?.len();
+    if size > MODEL_BYTES {
+        return Err(format!("Files over {} MB don't show", MODEL_BYTES / 1024 / 1024));
+    }
+    std::fs::read(&path).map_err(|error| error.to_string())
 }
 
 fn strip_bom(bytes: &[u8]) -> &[u8] {
@@ -179,6 +214,34 @@ fn picture_html(dest: &str, alt: &str) -> String {
         let label = if alt.is_empty() { "Picture from the web" } else { alt };
         format!(r#"<span class="md-blocked">{}</span>"#, escape(label))
     }
+}
+
+/// A song's own name, artist and album, from its tags, where it has them.
+#[derive(Debug, Default, Serialize)]
+pub struct Tags {
+    title: Option<String>,
+    artist: Option<String>,
+    album: Option<String>,
+}
+
+pub fn tags(path: &Path) -> Tags {
+    let _com = Com::enter();
+    let flags = if thumbs::is_online_only(path) { GPS_FASTPROPERTIESONLY } else { GPS_DEFAULT };
+    let Ok(store) = (unsafe { SHGetPropertyStoreFromParsingName::<_, _, IPropertyStore>(&HSTRING::from(path.as_os_str()), None, flags) })
+    else {
+        return Tags::default();
+    };
+    let read = |name: &str| -> Option<String> {
+        let mut key = PROPERTYKEY::default();
+        unsafe { PSGetPropertyKeyFromName(&HSTRING::from(name), &raw mut key) }.ok()?;
+        let mut raw = std::ptr::null_mut();
+        unsafe { PSGetPropertyDescription(&raw const key, &IPropertyDescription::IID, &raw mut raw) }.ok()?;
+        let description = unsafe { IPropertyDescription::from_raw(raw) };
+        let value = owned(unsafe { PSFormatPropertyValue(&store, &description, PDFF_DEFAULT) }.ok()?);
+        let value = value.trim();
+        (!value.is_empty()).then(|| value.to_string())
+    };
+    Tags { title: read("System.Title"), artist: read("System.Music.Artist"), album: read("System.Music.AlbumTitle") }
 }
 
 /// Takes a string Windows allocated.
@@ -318,6 +381,30 @@ mod tests {
         assert_eq!(read(&folder.join("empty.txt"), 0), Preview::Picture);
         assert_eq!(read(&folder, 0), Preview::Picture);
         fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
+    fn model_parts_load_only_from_beside_the_model() {
+        let folder = folder("model");
+        std::fs::create_dir_all(folder.join("textures")).unwrap();
+        let model = folder.join("ship.gltf");
+        std::fs::write(&model, "{}").unwrap();
+        std::fs::write(folder.join("textures").join("hull.png"), "png").unwrap();
+
+        assert_eq!(read(&model, 0), Preview::Model);
+        assert_eq!(model_file(&model, None).unwrap(), b"{}");
+        assert_eq!(model_file(&model, Some("textures/hull.png")).unwrap(), b"png");
+        assert_eq!(model_file(&model, Some("textures/../textures/hull.png")).unwrap(), b"png");
+        let inner = folder.join("inner");
+        std::fs::create_dir_all(&inner).unwrap();
+        let inner_model = inner.join("cube.gltf");
+        std::fs::write(&inner_model, "{}").unwrap();
+        for outside in ["../ship.gltf", r"..\ship.gltf", r"..\textures\hull.png", "../textures/hull.png"] {
+            assert!(model_file(&inner_model, Some(outside)).is_err(), "{outside}");
+        }
+        for outside in ["https://example.com/hull.png", "C:/Windows/win.ini", "//server/share/x", r"\\server\x", "/x", ""] {
+            assert!(model_file(&model, Some(outside)).is_err(), "{outside}");
+        }
     }
 
     #[test]
