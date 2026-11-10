@@ -1,6 +1,6 @@
 import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { checkRenames, rowFacts, type Selection } from "../../api";
-import { finder, renamed, START_RULES, type LetterCase, type RenameRules } from "./renameRules";
+import { changedPart, finder, renamed, START_RULES, type LetterCase, type RenameRules } from "./renameRules";
 import "../settings/settings.css";
 import "./fileops.css";
 
@@ -175,12 +175,24 @@ export function BatchRename(props: { request: RenameRequest; onClose: () => void
       </Show>
       <ul class="rename-preview">
         <For each={rows().slice(0, PREVIEW_ROWS)}>
-          {([name], index) => (
-            <li>
-              <span class="rename-old">{name}</span>
-              <span classList={{ "rename-bad": !!problems()[index()] }}>{names()?.[index()] ?? name}</span>
-            </li>
-          )}
+          {([name], index) => {
+            const next = () => names()?.[index()] ?? name;
+            const part = () => changedPart(name, next());
+            return (
+              <li>
+                <span class="rename-old">
+                  {name.slice(0, part().start)}
+                  <del class="rename-gone">{name.slice(part().start, part().oldEnd)}</del>
+                  {name.slice(part().oldEnd)}
+                </span>
+                <span classList={{ "rename-bad": !!problems()[index()] }}>
+                  {next().slice(0, part().start)}
+                  <ins class="rename-new">{next().slice(part().start, part().newEnd)}</ins>
+                  {next().slice(part().newEnd)}
+                </span>
+              </li>
+            );
+          }}
         </For>
       </ul>
       <p class="confirm-summary">{summary()}</p>

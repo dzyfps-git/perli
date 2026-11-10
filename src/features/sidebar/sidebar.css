@@ -30,6 +30,24 @@
   margin-top: var(--space-2);
 }
 
+.place-fold {
+  display: grid;
+  grid-template-rows: 1fr;
+  transition:
+    grid-template-rows var(--motion-glide),
+    opacity var(--motion);
+}
+
+.place-fold > ul {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.place-folded {
+  grid-template-rows: 0fr;
+  opacity: 0;
+}
+
 /* Quiet until hovered, so the places stay what the eye finds first. */
 .place-heading {
   display: flex;
@@ -64,7 +82,7 @@
   opacity: 0;
   transition:
     opacity var(--motion),
-    rotate var(--motion-slide);
+    rotate var(--motion-spring);
 }
 
 .place-heading:hover .place-chevron,
@@ -176,11 +194,37 @@
 }
 
 .place-used {
+  /* How close the drive is to full: nothing until 60% used, all of it at 90%. */
+  --heat: clamp(0, (var(--used, 0) - 0.6) / 0.3, 1);
+  position: relative;
   display: block;
   height: 100%;
   background: var(--accent-line);
   transform-origin: left;
   transition: transform var(--motion-glide);
+  /* Each bar fills up as the sidebar arrives. */
+  animation: place-fill 900ms var(--spring) backwards;
+}
+
+/* A filling drive shades from the accent through amber to red. */
+.place-used::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: color-mix(in oklch, #e0a000, var(--danger) calc(var(--heat) * 100%));
+  opacity: clamp(0, var(--heat) * 2, 1);
+}
+
+@keyframes place-fill {
+  from {
+    transform: scaleX(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .place-used {
+    animation: none;
+  }
 }
 
 .place-used-full {

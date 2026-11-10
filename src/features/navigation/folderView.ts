@@ -26,6 +26,7 @@ import {
 } from "../filelist/prefs";
 import type { SavedPane } from "../tabs/session";
 import { isBin, nextTrail, parentOf, samePath } from "./path";
+import { morph } from "../../ui/morph";
 
 export type FolderView = ReturnType<typeof createFolderView>;
 
@@ -253,7 +254,7 @@ export function createFolderView(id: number, saved?: SavedPane) {
       if (request === latestRequest) {
         setError(undefined);
         const rename = !search && wanted.rename;
-        setFolder({ ...current, request, ...reloaded, reveal: select.length > 0, rename, top });
+        setFolder({ ...current, request, ...reloaded, reveal: select.length > 0, rename, top, rearranged: false });
         return;
       }
     } catch (failure) {
@@ -324,7 +325,7 @@ export function createFolderView(id: number, saved?: SavedPane) {
   }
 
   function setLayout(next: Layout) {
-    setLayoutValue(next);
+    if (next !== layout()) morph(() => setLayoutValue(next), "layout");
     setLastLayout(next);
   }
 

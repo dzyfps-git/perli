@@ -1,9 +1,9 @@
-import { createEffect, For, on, onCleanup, onMount, Show } from "solid-js";
+import { createEffect, Index, on, onCleanup, onMount, Show } from "solid-js";
 import { expandPath, isFile, openFile } from "../../api";
 import type { Layout } from "../filelist/layout";
 import { showHidden } from "../filelist/prefs";
 import type { FolderView } from "../navigation/folderView";
-import { toCrumbs, typedPath } from "../navigation/path";
+import { isBin, toCrumbs, typedPath } from "../navigation/path";
 import "./pathbar.css";
 
 const ICON_BACK = "";
@@ -15,6 +15,7 @@ const ICON_GRID = "\uF0E2";
 const ICON_SHOWN = "\uE7B3";
 const ICON_HIDDEN = "\uED1A";
 const ICON_FILTER = "\uE71C";
+const ICON_CHEVRON = "\uE76C";
 
 /** Long enough that typing a word starts one search, not one per letter. */
 const SEARCH_WAIT_MS = 120;
@@ -24,6 +25,11 @@ export function PathBar(props: {
   onToggleHidden: () => void;
   onFilter: () => void;
   onInputMenu: (event: MouseEvent) => void;
+  /** A crumb's chevron asks for the folders inside it, in a menu at `x`, `y`. */
+  onCrumbMenu: (path: string, x: number, y: number) => void;
+  /** The crumb whose menu is open. */
+  menuFor?: string;
+  onNewTab: (path: string) => void;
 }) {
   const crumbs = () => toCrumbs(props.view.trail());
   const depth = () => toCrumbs(props.view.folder()?.path ?? "").length;
@@ -166,21 +172,38 @@ export function PathBar(props: {
           if (!(event.target as HTMLElement).closest("button")) props.view.setEditingPath(true);
         }}
       >
-        <For each={crumbs()}>
+        <Index each={crumbs()}>
           {(crumb, index) => (
             <li>
               <button
                 class="crumb"
-                classList={{ "crumb-left": index() >= depth() }}
-                data-drop={crumb.path}
-                aria-current={index() === depth() - 1 ? "location" : undefined}
-                onClick={() => props.view.open(crumb.path)}
+                classList={{ "crumb-left": index >= depth() }}
+                data-drop={crumb().path}
+                aria-current={index === depth() - 1 ? "location" : undefined}
+                onClick={() => props.view.open(crumb().path)}
+                onAuxClick={(event) => event.button === 1 && props.onNewTab(crumb().path)}
+                onMouseDown={(event) => event.button === 1 && event.preventDefault()}
               >
-                {crumb.label}
+                {crumb().label}
               </button>
+              <Show when={!isBin(crumb().path)}>
+                <button
+                  class="crumb-chevron"
+                  classList={{ "crumb-left": index >= depth() }}
+                  aria-label={`Folders in ${crumb().label}`}
+                  aria-haspopup="menu"
+                  aria-expanded={props.menuFor === crumb().path}
+                  onClick={(event) => {
+                    const { left, bottom } = event.currentTarget.getBoundingClientRect();
+                    props.onCrumbMenu(crumb().path, left, bottom + 2);
+                  }}
+                >
+                  {ICON_CHEVRON}
+                </button>
+              </Show>
             </li>
           )}
-        </For>
+        </Index>
       </ol>
       <Show when={props.view.folder()?.hiddenCount}>
         {(count) => (

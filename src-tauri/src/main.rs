@@ -191,7 +191,13 @@ enum Task {
     OwnTemplate { folder: String, name: String },
     SaveTemplate { selection: Selection },
     Zip { selection: Selection },
-    Unzip { selection: Selection, own_folder: bool },
+    /// `only` names one entry to take out, rather than all of them.
+    Unzip {
+        selection: Selection,
+        own_folder: bool,
+        #[serde(default)]
+        only: Option<String>,
+    },
     Paste { folder: String },
     /// The last files dropped on the window landed on `folder`.
     Drop { folder: String, action: Option<DropAction> },
@@ -250,9 +256,10 @@ impl Task {
             Self::Zip { selection } => Job::Zip {
                 sources: paths(&selection)?,
             },
-            Self::Unzip { selection, own_folder } => Job::Unzip {
+            Self::Unzip { selection, own_folder, only } => Job::Unzip {
                 archives: paths(&selection)?,
                 own_folder,
+                only,
             },
             Self::Paste { folder } => return paste(target(folder)?),
             Self::Drop { folder, action } => {
@@ -995,6 +1002,13 @@ async fn big_picture(view: u32, request: u64, row: u32, edge: u32, views: State<
     Ok(Response::new(thumbs::read(path, edge).await))
 }
 
+/// A picture's own width and height in pixels, if Windows' imaging can read them.
+#[tauri::command]
+async fn picture_size(view: u32, request: u64, row: u32, views: State<'_, Views>) -> Result<Option<(u32, u32)>, String> {
+    let path = row_path(&views, view, request, row)?;
+    blocking(move || Ok(inside::pixel_size(&path))).await
+}
+
 /// A picture a Markdown file points to, beside it on this PC.
 #[tauri::command]
 async fn picture_file(path: PathBuf, edge: u32) -> Response {
@@ -1016,6 +1030,13 @@ async fn archive_picture(view: u32, request: u64, row: u32, entry: String, edge:
     let path = row_path(&views, view, request, row)?;
     let bytes = blocking(move || inside::picture(&path, &entry, edge)).await?;
     Ok(Response::new(bytes))
+}
+
+/// The start of a text file inside a ZIP, or nothing if it is not text.
+#[tauri::command]
+async fn archive_text(view: u32, request: u64, row: u32, entry: String, views: State<'_, Views>) -> Result<Option<String>, String> {
+    let path = row_path(&views, view, request, row)?;
+    blocking(move || inside::text(&path, &entry)).await
 }
 
 /// One chapter of a book, made safe to show.
@@ -1081,11 +1102,17 @@ async fn row_properties(view: u32, request: u64, row: u32, views: State<'_, View
     off_main(move || preview::properties(&path)).await
 }
 
-/// One row's SHA-256, or nothing if a newer checksum took its place.
+/// One row's checksum by `algorithm`, or nothing if a newer checksum took its place.
 #[tauri::command]
-async fn checksum(view: u32, request: u64, row: u32, views: State<'_, Views>) -> Result<Option<String>, String> {
+async fn checksum(
+    view: u32,
+    request: u64,
+    row: u32,
+    algorithm: String,
+    views: State<'_, Views>,
+) -> Result<Option<String>, String> {
     let path = row_path(&views, view, request, row)?;
-    async_runtime::spawn_blocking(move || preview::sha256(&path))
+    async_runtime::spawn_blocking(move || preview::hash(&path, &algorithm))
         .await
         .map_err(|error| error.to_string())?
         .map_err(|error| error.to_string())
@@ -1215,6 +1242,12 @@ fn drop_choices(folder: PathBuf, drags: State<'_, Arc<Drags>>) -> Vec<DropAction
 #[tauri::command]
 async fn own_templates() -> Vec<String> {
     templates::own_names()
+}
+
+/// The folders inside one, for a path crumb's menu.
+#[tauri::command]
+async fn subfolders(path: PathBuf, show_hidden: bool) -> Result<Vec<String>, String> {
+    blocking(move || folder::subfolders(&path, show_hidden).map_err(|error| error.to_string())).await
 }
 
 #[tauri::command]
@@ -1376,6 +1409,8 @@ fn main() {
             file_users,
             thumbnail,
             big_picture,
+            picture_size,
+            archive_text,
             picture_file,
             preview_row,
             archive_picture,
@@ -1405,6 +1440,7 @@ fn main() {
             drop_choices,
             own_templates,
             templates_folder,
+            subfolders,
             start_drag,
             clipboard_text,
             map_drive,

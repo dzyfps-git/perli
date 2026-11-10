@@ -18,6 +18,7 @@ import {
   saveSession,
   startState,
   stopSizes,
+  subfolders,
   type Grouping,
   type Places,
   type Recent,
@@ -109,6 +110,10 @@ const isTyping = (event: Event) => event.target instanceof HTMLInputElement;
 // A job's Delete key must only ever mean the files, never a focused button.
 const isInList = (event: Event) => (event.target as HTMLElement).classList?.contains("file-grid");
 const hideBrowserMenu = (event: MouseEvent) => event.preventDefault();
+/** A menu longer than this would only be scrolled past. */
+const MOST_CRUMB_FOLDERS = 300;
+/** Longer than any press and release of one click. */
+const CLICK_MS = 400;
 const blockBrowserZoom = (event: WheelEvent) => event.ctrlKey && event.preventDefault();
 const trackWindowFocus = (event: FocusEvent) =>
   document.documentElement.toggleAttribute("data-blurred", event.type === "blur");
@@ -191,7 +196,8 @@ function keepItems(path: string): MenuItem[] {
 // The main layout. Moving parts of the app around should only change this file.
 export function App() {
   const tabs = createTabs();
-  const [menu, setMenu] = createSignal<{ x: number; y: number; items: MenuItem[] }>();
+  /** `from` is the path crumb whose menu this is. */
+  const [menu, setMenu] = createSignal<{ x: number; y: number; items: MenuItem[]; from?: string }>();
   const [settingsOpen, setSettingsOpen] = createSignal(false);
   const [paletteOpen, setPaletteOpen] = createSignal(false);
   const [places, setPlaces] = createSignal<Places>();
@@ -308,6 +314,29 @@ export function App() {
     { label: "Map network drive", divider: true, action: () => mapDrive().catch(jobs.report) },
     { label: "Disconnect network drive", action: () => disconnectDrive().catch(jobs.report) },
   ];
+
+  /** Pressing a chevron closes its own menu before the click arrives, which must not reopen it. */
+  let crumbClosed = { path: "", at: 0 };
+  function closeMenu() {
+    const from = menu()?.from;
+    if (from) crumbClosed = { path: from, at: performance.now() };
+    setMenu(undefined);
+  }
+
+  async function showCrumbMenu(view: FolderView, path: string, x: number, y: number) {
+    if (crumbClosed.path === path && performance.now() - crumbClosed.at < CLICK_MS) return;
+    let items: MenuItem[];
+    try {
+      const names = await subfolders(path, showHidden());
+      items = names.slice(0, MOST_CRUMB_FOLDERS).map((name) => ({ label: name, action: () => view.open(join(path, name)) }));
+      if (names.length > MOST_CRUMB_FOLDERS) {
+        items.push({ label: `${names.length - MOST_CRUMB_FOLDERS} more, open the folder to see them`, disabled: true });
+      }
+    } catch {
+      items = [];
+    }
+    setMenu({ x, y, items: items.length > 0 ? items : [{ label: "No folders inside", disabled: true }], from: path });
+  }
 
   function showFolderMenu(event: MouseEvent, view: FolderView, path: string) {
     event.preventDefault();
@@ -806,6 +835,7 @@ export function App() {
       <section
         class="pane"
         data-view={view.id}
+        style={{ "--pane-name": `pane-${view.id}` }}
         classList={{ "pane-active": tab.panes().length > 1 && view === tab.active() }}
         onPointerDown={activate}
         onFocusIn={activate}
@@ -815,6 +845,9 @@ export function App() {
           onToggleHidden={toggleHidden}
           onFilter={() => setFiltering(view)}
           onInputMenu={showInputMenu}
+          onCrumbMenu={(path, x, y) => showCrumbMenu(view, path, x, y)}
+          menuFor={menu()?.from}
+          onNewTab={(path) => tabs.add([path])}
         />
         <div class="file-area">
           <Show when={view.error()}>
@@ -840,6 +873,7 @@ export function App() {
                 fixedColumns={ownColumns(view) !== undefined}
                 cut={view.query() ? undefined : cutNames(view.folder()!.path)}
                 emptyText={emptyText(view)}
+                match={view.query() === FLAT_QUERY ? undefined : view.query()}
                 active={tab === tabs.active() && view === tab.active()}
                 layout={view.layout()}
                 sort={view.sort()}
@@ -911,7 +945,7 @@ export function App() {
         </For>
       </main>
       <Show when={menu()} keyed>
-        {(open) => <Menu x={open.x} y={open.y} items={open.items} onClose={() => setMenu(undefined)} />}
+        {(open) => <Menu x={open.x} y={open.y} items={open.items} onClose={closeMenu} />}
       </Show>
       <JobsPanel jobs={jobs} />
       <Show when={deleting()} keyed>

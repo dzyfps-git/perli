@@ -1,5 +1,6 @@
-import { createEffect, createSignal, For, on, onCleanup, Show } from "solid-js";
-import { checksum, fetchRows, fetchThumb, rowProperties, type Row, type Thumb } from "../../api";
+import { createEffect, createMemo, createSignal, For, on, onCleanup, Show } from "solid-js";
+import { checksum, fetchRows, fetchThumb, rowProperties, type HashKind, type Row, type Thumb } from "../../api";
+import { saved, stored } from "../filelist/prefs";
 import type { FolderView } from "../navigation/folderView";
 import { draw } from "./QuickPreview";
 
@@ -9,7 +10,27 @@ const SETTLE_MS = 120;
 const HASH_AFTER_MS = 300;
 
 type Hash =
-  { state: "waiting" } | { state: "working" } | { state: "done"; value: string } | { state: "failed"; why: string };
+  | { state: "waiting" }
+  | { state: "working" }
+  | { state: "done"; value: string }
+  | { state: "failed"; why: string };
+
+/** Each kind with its label and how many hex digits its answer has. */
+const KINDS: [HashKind, string, number][] = [
+  ["md5", "MD5", 32],
+  ["sha1", "SHA-1", 40],
+  ["sha256", "SHA-256", 64],
+  ["sha512", "SHA-512", 128],
+];
+const [kind, setKind] = stored<HashKind>(
+  "hash-kind",
+  KINDS.find(([id]) => id === saved("hash-kind"))?.[0] ?? "sha256",
+);
+/** Kept across rows, so stepping through files finds the one that matches. */
+const [pasted, setPasted] = createSignal("");
+
+/** Spaces, colons and case don't matter, as sites print hashes every way. */
+export const plainHash = (text: string) => text.replace(/[\s:]/g, "").toLowerCase();
 
 /** Everything Windows knows about the one selected row, beside the list. */
 export function DetailsPanel(props: { view: FolderView }) {
@@ -25,11 +46,37 @@ export function DetailsPanel(props: { view: FolderView }) {
   function computeHash(mine: number) {
     const at = props.view.cursor();
     if (!at || mine !== ticket) return;
+    const asked = kind();
+    const current = () => mine === ticket && asked === kind();
     setHash({ state: "working" });
-    checksum(props.view.id, at.snapshot, at.index)
-      .then((value) => mine === ticket && value !== null && setHash({ state: "done", value }))
-      .catch((why) => mine === ticket && setHash({ state: "failed", why: String(why) }));
+    setCopied(undefined);
+    checksum(props.view.id, at.snapshot, at.index, asked)
+      .then((value) => current() && value !== null && setHash({ state: "done", value }))
+      .catch((why) => current() && setHash({ state: "failed", why: String(why) }));
   }
+
+  /** A file kept only online waits to be asked again, since hashing downloads it. */
+  function chooseKind(next: HashKind) {
+    if (next === kind()) return;
+    setKind(next);
+    const shown = hash();
+    if (shown && shown.state !== "waiting") computeHash(ticket);
+  }
+
+  /** A pasted hash's length gives away its kind, so the right one is worked out. */
+  function paste(text: string) {
+    setPasted(text);
+    const digits = plainHash(text).length;
+    const fits = KINDS.find(([, , length]) => length === digits);
+    if (fits) chooseKind(fits[0]);
+  }
+
+  const verdict = createMemo(() => {
+    const shown = hash();
+    const wanted = plainHash(pasted());
+    if (!wanted || shown?.state !== "done") return;
+    return wanted === shown.value ? "match" : "mismatch";
+  });
 
   async function load(mine: number) {
     const at = props.view.cursor();
@@ -93,31 +140,70 @@ export function DetailsPanel(props: { view: FolderView }) {
               </>
             )}
           </For>
-          <Show when={hash()} keyed>
+          <Show when={hash()}>
             {(shown) => (
               <>
-                <dt>SHA-256</dt>
+                <dt>Checksum</dt>
                 <dd class="details-hash">
-                  {shown.state === "waiting" && (
+                  <div class="hash-kinds" role="group" aria-label="Checksum kind">
+                    <For each={KINDS}>
+                      {([id, label]) => (
+                        <button aria-pressed={kind() === id} onClick={() => chooseKind(id)}>
+                          {label}
+                        </button>
+                      )}
+                    </For>
+                  </div>
+                  {shown().state === "waiting" && (
                     <button class="details-button" onClick={() => computeHash(ticket)}>
                       Download and work out
                     </button>
                   )}
-                  {shown.state === "working" && <span class="details-muted">Working it out…</span>}
-                  {shown.state === "failed" && <span class="details-muted">{shown.why}</span>}
-                  {shown.state === "done" && (
-                    <>
-                      <code>{shown.value}</code>
-                      <button class="details-button" onClick={() => copy(shown.value)}>
-                        Copy
-                      </button>
-                      <Show when={copied()}>
-                        <span class="details-muted" role="status">
-                          {copied()}
+                  {shown().state === "working" && <span class="details-muted hash-working">Working it out…</span>}
+                  <Show when={((now) => now.state === "failed" && now)(shown())} keyed>
+                    {(failed) => <span class="details-muted">{failed.why}</span>}
+                  </Show>
+                  <Show when={((now) => now.state === "done" && now)(shown())} keyed>
+                    {(done) => (
+                      <>
+                        <code classList={{ "hash-match": verdict() === "match", "hash-mismatch": verdict() === "mismatch" }}>
+                          {done.value}
+                        </code>
+                        <button class="details-button" onClick={() => copy(done.value)}>
+                          Copy
+                        </button>
+                        <Show when={copied()}>
+                          <span class="details-muted" role="status">
+                            {copied()}
+                          </span>
+                        </Show>
+                      </>
+                    )}
+                  </Show>
+                  <Show when={verdict()} keyed>
+                    {(said) => (
+                      <span class={`hash-verdict hash-${said}`} role="status">
+                        <span class="hash-verdict-icon" aria-hidden="true">
+                          {said === "match" ? "" : ""}
                         </span>
-                      </Show>
-                    </>
-                  )}
+                        {said === "match" ? "Matches" : "Doesn't match"}
+                      </span>
+                    )}
+                  </Show>
+                  <input
+                    class="hash-paste"
+                    classList={{ "hash-match": verdict() === "match", "hash-mismatch": verdict() === "mismatch" }}
+                    placeholder="Paste a hash to compare"
+                    aria-label="Hash to compare"
+                    spellcheck={false}
+                    value={pasted()}
+                    onInput={(event) => paste(event.currentTarget.value)}
+                    onKeyDown={(event) => {
+                      if (event.key !== "Escape" || !pasted()) return;
+                      event.stopPropagation();
+                      paste("");
+                    }}
+                  />
                 </dd>
               </>
             )}

@@ -112,15 +112,52 @@
 .crumbs li {
   display: flex;
   align-items: center;
-  gap: var(--space-1);
   flex: none;
+  /* A crumb travels in from the left when a deeper folder opens. */
+  animation: crumb-in var(--motion-spring);
 }
 
-.crumbs li + li::before {
-  content: "\E76C";
+@keyframes crumb-in {
+  from {
+    opacity: 0;
+    translate: -8px;
+  }
+}
+
+/* The separator after each crumb lists the folders inside it, the way Explorer's does. */
+.crumb-chevron {
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
   color: var(--text-muted);
   font-family: var(--font-icons);
   font-size: 8px;
+  cursor: pointer;
+  transition:
+    background var(--motion),
+    color var(--motion),
+    rotate var(--motion-spring);
+}
+
+.crumb-chevron:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.crumb-chevron[aria-expanded="true"] {
+  rotate: 90deg;
+  color: var(--accent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .crumbs li {
+    animation: none;
+  }
 }
 
 .crumb {

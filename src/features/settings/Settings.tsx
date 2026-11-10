@@ -16,6 +16,7 @@ import {
   setTheme,
   theme,
   THEMES,
+  type Theme,
 } from "./appearance";
 import { paletteStyle, type Palette } from "./palettes";
 import { fitsSearch } from "./search";
@@ -29,6 +30,7 @@ import {
   updateOffer,
   updateState,
 } from "./updates";
+import { morph } from "../../ui/morph";
 import "./settings.css";
 
 const COLOR_NAMES = ["First color", "Middle color", "Last color"];
@@ -86,6 +88,15 @@ export function Settings(props: {
     } else if (dialog.open) dialog.close();
   });
 
+  function chooseTheme(next: Theme, from: HTMLElement) {
+    if (next === theme()) return;
+    const { left, top, width, height } = from.getBoundingClientRect();
+    const root = document.documentElement;
+    root.style.setProperty("--reveal-x", `${left + width / 2}px`);
+    root.style.setProperty("--reveal-y", `${top + height / 2}px`);
+    morph(() => setTheme(next), "theme");
+  }
+
   /** Hides the groups that don't have every word typed, in their text or their extra words. */
   function search(query: string) {
     if (searchInput) searchInput.value = query;
@@ -142,7 +153,7 @@ export function Settings(props: {
                 class="settings-theme"
                 role="radio"
                 aria-checked={theme() === choice.id}
-                onClick={() => setTheme(choice.id)}
+                onClick={(event) => chooseTheme(choice.id, event.currentTarget)}
               >
                 {choice.label}
               </button>

@@ -187,3 +187,50 @@ html[data-blurred] .logo {
   padding: var(--space-4);
   color: var(--text-muted);
 }
+
+/* Panes and tabs take part in a View Transition only while their own kind of change plays, so
+   a theme reveal or a layout change stays one picture. */
+[data-morph="panes"] .pane {
+  view-transition-name: var(--pane-name);
+}
+
+[data-morph="tabs"] .tab {
+  view-transition-name: var(--tab-name);
+}
+
+/* A pane's picture keeps its size while its box slides, instead of being stretched. */
+[data-morph="panes"]::view-transition-old(*),
+[data-morph="panes"]::view-transition-new(*) {
+  height: 100%;
+  object-fit: none;
+  object-position: left top;
+  overflow: clip;
+}
+
+[data-morph="tabs"]::view-transition-group(*) {
+  animation-duration: 480ms;
+  animation-timing-function: var(--spring);
+}
+
+/* A tab, or a pane, that only exists on one side comes in or goes out on its own. */
+:is([data-morph="tabs"], [data-morph="panes"])::view-transition-new(*):only-child {
+  animation: morph-arrive 420ms var(--spring) both;
+}
+
+:is([data-morph="tabs"], [data-morph="panes"])::view-transition-old(*):only-child {
+  animation: morph-leave 200ms ease-in both;
+}
+
+@keyframes morph-arrive {
+  from {
+    opacity: 0;
+    scale: 0.85;
+  }
+}
+
+@keyframes morph-leave {
+  to {
+    opacity: 0;
+    scale: 0.85;
+  }
+}

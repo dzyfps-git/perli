@@ -51,8 +51,10 @@ export function Menu(props: {
 
   function openSide(item: MenuItem, button: HTMLElement) {
     if (side()?.item === item) return;
-    const { left, right } = menu.getBoundingClientRect();
-    const y = button.getBoundingClientRect().top - SIDE_INSET;
+    // Offsets ignore the grow-in scale, so a side menu opened mid-animation still lines up.
+    const left = menu.offsetLeft;
+    const right = left + menu.offsetWidth;
+    const y = menu.offsetTop + button.offsetTop - menu.scrollTop - SIDE_INSET;
     const first = item.items ?? [];
     const open = { item, items: first.length > 0 ? first : LOADING, x: right + SIDE_GAP, y, left };
     setSide(open);
@@ -89,11 +91,15 @@ export function Menu(props: {
 
   onMount(() => {
     window.addEventListener("pointerdown", onPointerDown, true);
-    const { width, height } = menu.getBoundingClientRect();
+    const [width, height] = [menu.offsetWidth, menu.offsetHeight];
     const overflows = props.x + width + EDGE_GAP > innerWidth;
     const x = props.parent && overflows ? props.parent.left - SIDE_GAP - width : props.x;
-    menu.style.left = `${Math.max(EDGE_GAP, Math.min(x, innerWidth - width - EDGE_GAP))}px`;
-    menu.style.top = `${Math.max(EDGE_GAP, Math.min(props.y, innerHeight - height - EDGE_GAP))}px`;
+    const left = Math.max(EDGE_GAP, Math.min(x, innerWidth - width - EDGE_GAP));
+    const top = Math.max(EDGE_GAP, Math.min(props.y, innerHeight - height - EDGE_GAP));
+    menu.style.left = `${left}px`;
+    menu.style.top = `${top}px`;
+    // It grows out of where it was asked for, even when the window edge pushed it aside.
+    menu.style.transformOrigin = `${props.x - left}px ${props.y - top}px`;
     menu.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus();
   });
   onCleanup(() => {

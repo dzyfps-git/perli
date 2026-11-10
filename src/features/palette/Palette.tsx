@@ -1,5 +1,6 @@
 import { createEffect, createSignal, For, on, onCleanup, onMount } from "solid-js";
 import { rankNames } from "../../api";
+import { saved, stored } from "../filelist/prefs";
 import "./palette.css";
 
 export interface Command {
@@ -9,6 +10,19 @@ export interface Command {
 }
 
 const optionId = (index: number) => `palette-option-${index}`;
+/** How many commands run lately come first, before anything is typed. */
+const MOST_RECENT = 5;
+
+const [recent, setRecent] = stored<string[]>(
+  "palette-recent",
+  ((saved("palette-recent") as unknown[] | null) ?? []).filter((label): label is string => typeof label === "string"),
+);
+
+/** The commands run lately first, newest at the top, then the rest in their own order. */
+export function recentFirst<T extends { label: string }>(commands: T[], labels: string[]) {
+  const first = labels.flatMap((label) => commands.filter((command) => command.label === label).slice(0, 1));
+  return { first, rest: commands.filter((command) => !first.includes(command)) };
+}
 
 /** Runs anything by name. Names go through the matcher a folder search uses. */
 export function Palette(props: {
@@ -21,9 +35,12 @@ export function Palette(props: {
   const [text, setText] = createSignal("");
   const [shown, setShown] = createSignal<Command[]>([]);
   const [active, setActive] = createSignal(0);
+  /** How many of `shown` are recent ones, marked as such. */
+  const [recentCount, setRecentCount] = createSignal(0);
   let palette!: HTMLDivElement;
   let input!: HTMLInputElement;
   let list!: HTMLUListElement;
+  let marker!: HTMLLIElement;
   let focusedBefore: HTMLElement | undefined;
   let latest = 0;
 
@@ -32,12 +49,16 @@ export function Palette(props: {
     const commands = props.commands();
     const query = text();
     const turn = ++latest;
-    const show = (found: Command[]) => {
+    const show = (found: Command[], recents = 0) => {
       if (turn !== latest) return;
       setShown(found);
+      setRecentCount(recents);
       setActive(0);
     };
-    if (!query) return show(commands);
+    if (!query) {
+      const { first, rest } = recentFirst(commands, recent());
+      return show([...first, ...rest], first.length);
+    }
     const names = commands.map((command) => command.label);
     rankNames(query, names)
       .then((order) => show(order.map((index) => commands[index])))
@@ -73,12 +94,26 @@ export function Palette(props: {
     if (!count) return;
     const next = (active() + step + count) % count;
     setActive(next);
-    list.children[next].scrollIntoView({ block: "nearest" });
+    options()[next]?.scrollIntoView({ block: "nearest" });
   }
+
+  const options = () => list.querySelectorAll<HTMLElement>(".palette-option");
+
+  // One highlight glides from row to row, instead of each row lighting up on its own.
+  createEffect(() => {
+    const at = active();
+    shown();
+    queueMicrotask(() => {
+      const option = options()[at];
+      marker.hidden = !option;
+      if (option) marker.style.transform = `translateY(${option.offsetTop}px)`;
+    });
+  });
 
   /** Closing first gives the focus back, so a command can move it on from there. */
   function choose(command: Command | undefined) {
     if (!command) return;
+    setRecent([command.label, ...recent().filter((label) => label !== command.label)].slice(0, MOST_RECENT));
     props.onClose();
     command.run();
   }
@@ -116,6 +151,7 @@ export function Palette(props: {
         onBlur={() => setTimeout(() => props.open && input.focus())}
       />
       <ul ref={list} id="palette-list" class="palette-list" role="listbox" aria-label="Commands">
+        <li ref={marker} class="palette-marker" role="presentation" hidden />
         <For each={shown()} fallback={<li class="palette-empty">No matches.</li>}>
           {(command, index) => (
             <li
@@ -127,7 +163,10 @@ export function Palette(props: {
               onMouseDown={(event) => event.preventDefault()}
               onClick={() => choose(command)}
             >
-              {command.label}
+              <span class="palette-label">
+                {command.label}
+                {index() < recentCount() && <span class="palette-recent">Recent</span>}
+              </span>
               <span class="palette-keys">{command.keys}</span>
             </li>
           )}

@@ -78,6 +78,7 @@ export function ModelStage(live: {
   };
 
   props.keys((event) => {
+    if (event.ctrlKey || event.altKey || event.target instanceof HTMLInputElement && event.target.type !== "range") return false;
     const tool = tools[event.key.toLowerCase()];
     if (!tool || event.shiftKey) return false;
     tool();
@@ -113,7 +114,7 @@ export function ModelStage(live: {
     <div class="preview-model" data-light={light() || undefined}>
       <canvas ref={start} aria-label="3D model. Drag to turn it, right-drag to move it, scroll to zoom." />
       <Show when={view()}>
-        <div class="model-tools" role="toolbar" aria-label="Model">
+        <div class="preview-tools" role="toolbar" aria-label="Model">
           <button class="strip-icon" aria-label="Reset view" aria-keyshortcuts="R" onClick={tools.r}>
             {ICON_RESET}
           </button>

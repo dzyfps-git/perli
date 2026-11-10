@@ -23,6 +23,9 @@ const SHOW_AFTER_MS = 300;
 const LINGER_MS = 3000;
 /** Long enough to notice a slip and reach for Undo. */
 const UNDO_TOAST_MS = 6000;
+/** How long a card takes to fold away. */
+const LEAVE_MS = 280;
+const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
 
 export interface JobCard {
   id: number;
@@ -37,9 +40,13 @@ export interface JobCard {
   question?: Question;
   progress?: Progress;
   rate: Rate;
+  /** Folding away, just before it goes. */
+  leaving?: boolean;
   /** Set once the job is over. */
   ended?: {
     note: string;
+    /** It ran to the end, rather than being cancelled or only telling something. */
+    done: boolean;
     kept: string[];
     /** The undo step this job added. */
     step: number | null;
@@ -59,7 +66,14 @@ export function createJobs(views: () => FolderView[]) {
 
   const find = (id: number) => cards.find((card) => card.id === id);
   const patch = (id: number, change: Partial<JobCard>) => setCards((card) => card.id === id, change);
-  const remove = (id: number) => setCards((list) => list.filter((card) => card.id !== id));
+  const drop = (id: number) => setCards((list) => list.filter((card) => card.id !== id));
+  /** A card on screen folds away first. */
+  function remove(id: number) {
+    const card = find(id);
+    if (!card?.shown || card.leaving || reducedMotion.matches) return drop(id);
+    patch(id, { leaving: true });
+    setTimeout(() => drop(id), LEAVE_MS);
+  }
 
   function undoable(state: Undoable) {
     setLatestStep(state.latestStep);
@@ -98,11 +112,11 @@ export function createJobs(views: () => FolderView[]) {
     const { kept } = event;
     // A delete asks nothing, so even a quick one leaves a way back.
     const toast = card.recycle && event.step !== null;
-    if (!card.shown && kept.length === 0 && !toast) return remove(event.id);
+    if (!card.shown && kept.length === 0 && !toast) return drop(event.id);
     // Only the newest delete keeps its card, so pressing Delete again and again stacks nothing.
     if (toast) setCards((list) => list.filter((other) => !(other.recycle && other.ended)));
     const done = toast ? "In the Recycle Bin" : "Done";
-    const ended = { note: event.cancelled ? "Cancelled" : done, kept, step: event.step };
+    const ended = { note: event.cancelled ? "Cancelled" : done, done: !event.cancelled, kept, step: event.step };
     patch(event.id, { shown: true, question: undefined, ended });
     // What a move left behind stays on screen until the user has seen it.
     if (kept.length === 0) setTimeout(() => remove(event.id), toast ? UNDO_TOAST_MS : LINGER_MS);
@@ -130,7 +144,7 @@ export function createJobs(views: () => FolderView[]) {
       shown: true,
       paused: false,
       rate: startRate(0),
-      ended: { note, kept: [], step: null },
+      ended: { note, done: false, kept: [], step: null },
     });
   }
 

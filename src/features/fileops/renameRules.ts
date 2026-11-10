@@ -66,3 +66,27 @@ export function renamed(
   const number = rules.numbered ? String(rules.start + index).padStart(rules.digits, "0") : "";
   return recased(rules.prefix + changed + rules.suffix, rules.letterCase) + number + extension;
 }
+
+/** What a rename changes: the names agree before `start`, and again after `oldEnd` and `newEnd`. */
+export function changedPart(before: string, after: string) {
+  let start = 0;
+  while (start < before.length && start < after.length && before[start] === after[start]) start++;
+  let tail = 0;
+  while (
+    tail < before.length - start &&
+    tail < after.length - start &&
+    before[before.length - 1 - tail] === after[after.length - 1 - tail]
+  ) {
+    tail++;
+  }
+  const oldEnd = before.length - tail;
+  let newEnd = after.length - tail;
+  // "new " before "notes" agrees on its first n, but reads as added in front, so slide it there.
+  if (oldEnd === start && newEnd > start) {
+    let at = start;
+    while (at > 0 && after[at - 1] === after[newEnd - 1]) at--, newEnd--;
+    if (at === 0) return { start: 0, oldEnd: 0, newEnd };
+    newEnd = after.length - tail;
+  }
+  return { start, oldEnd, newEnd };
+}

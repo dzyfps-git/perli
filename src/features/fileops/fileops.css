@@ -26,13 +26,48 @@
   box-shadow: var(--shadow);
   backdrop-filter: var(--blur);
   pointer-events: auto;
-  animation: job-in var(--motion-slide);
+  animation: job-in var(--motion-spring);
 }
 
 @keyframes job-in {
   from {
     opacity: 0;
-    translate: 0 8px;
+    translate: 0 16px;
+    scale: 0.94;
+  }
+}
+
+/* Slides aside and closes up, so the cards below move into its place. */
+.job-leaving {
+  overflow: hidden;
+  pointer-events: none;
+  animation: job-out 280ms ease-in forwards;
+}
+
+@keyframes job-out {
+  from {
+    max-height: 400px;
+  }
+  to {
+    max-height: 0;
+    margin-bottom: calc(-1 * var(--space-2));
+    padding-block: 0;
+    border-width: 0;
+    opacity: 0;
+    translate: 32px 0;
+  }
+}
+
+.job-fill.job-fill-done {
+  transform: none;
+  background: var(--success);
+  animation: job-done 600ms var(--spring);
+}
+
+@keyframes job-done {
+  from {
+    filter: brightness(1.6);
+    transform: scaleX(0.85);
   }
 }
 
@@ -269,6 +304,29 @@
   color: var(--danger);
 }
 
+/* The part of each name a rename changes. */
+.rename-gone {
+  color: var(--danger);
+  text-decoration: line-through color-mix(in srgb, var(--danger) 60%, transparent);
+}
+
+.rename-new {
+  color: var(--accent);
+  text-decoration: none;
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  border-radius: 3px;
+  transition: background var(--motion);
+}
+
+.rename-bad .rename-new {
+  color: inherit;
+}
+
+.rename-gone:empty,
+.rename-new:empty {
+  display: none;
+}
+
 .filter-one {
   grid-template-columns: 1fr;
 }
@@ -279,4 +337,10 @@
 
 .filter-buttons button:first-child {
   margin-right: auto;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .job-fill-done {
+    animation: none;
+  }
 }

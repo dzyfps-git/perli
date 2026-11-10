@@ -241,16 +241,16 @@ impl Run<'_> {
         }
     }
 
-    pub(super) fn unzip(&mut self, archives: Vec<PathBuf>, own_folder: bool) -> Flow {
+    pub(super) fn unzip(&mut self, archives: Vec<PathBuf>, own_folder: bool, only: Option<&str>) -> Flow {
         self.add_total(archives.len() as u64, 0);
         for archive in archives {
-            self.unzip_one(&archive, own_folder)?;
+            self.unzip_one(&archive, own_folder, only)?;
             self.step(1, 0);
         }
         Ok(())
     }
 
-    fn unzip_one(&mut self, archive: &Path, own_folder: bool) -> Flow {
+    fn unzip_one(&mut self, archive: &Path, own_folder: bool, only: Option<&str>) -> Flow {
         let Some(mut zip) = self.attempt(archive, None, |_| open_archive(archive))? else {
             return Ok(());
         };
@@ -268,13 +268,20 @@ impl Run<'_> {
             landing = landing.in_new_root();
         }
 
-        let sizes = (0..zip.len()).filter_map(|index| zip.by_index_data(index).ok().map(|entry| entry.size()));
+        // One entry lands as if its own folder were the top of the archive.
+        let only = only.map(|name| name.trim_end_matches('/'));
+        let above = only.and_then(|name| name.rfind('/').map(|at| PathBuf::from(&name[..at])));
+        let wanted: Vec<usize> = (0..zip.len()).filter(|&index| only.is_none_or(|name| is_under(&zip, index, name))).collect();
+        let sizes = wanted.iter().filter_map(|&index| zip.by_index_data(index).ok().map(|entry| entry.size()));
         let bytes = sizes.sum();
-        self.add_total(zip.len() as u64, bytes);
-        for index in 0..zip.len() {
+        self.add_total(wanted.len() as u64, bytes);
+        for index in wanted {
             self.check()?;
             let facts = zip.by_index_data(index).map(|entry| {
-                let relative = entry.enclosed_name().and_then(safe);
+                let relative = entry.enclosed_name().and_then(safe).and_then(|path| match &above {
+                    Some(above) => path.strip_prefix(above).ok().map(Path::to_path_buf),
+                    None => Some(path),
+                });
                 let time = entry.last_modified().map_or(0, ticks_of);
                 (relative, entry.is_dir(), entry.encrypted(), Stat::of_file(entry.size(), time))
             });
@@ -393,6 +400,14 @@ impl Run<'_> {
 }
 
 /// What an entry calls itself, for telling the user about it. Only ever shown.
+/// True if entry `index` is `name` itself or lies inside the folder `name`.
+fn is_under(zip: &ZipArchive<BufReader<File>>, index: usize, name: &str) -> bool {
+    let Ok(entry) = zip.by_index_data(index) else { return false };
+    let Ok(own) = entry.name() else { return false };
+    let own = own.trim_end_matches('/');
+    own == name || own.strip_prefix(name).is_some_and(|rest| rest.starts_with('/'))
+}
+
 fn entry_name(zip: &ZipArchive<BufReader<File>>, index: usize) -> String {
     let entry = zip.by_index_data(index);
     entry.ok().and_then(|entry| entry.name().ok().map(|name| name.replace(['/', '\\'], " "))).unwrap_or_default()

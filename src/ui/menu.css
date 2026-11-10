@@ -1,7 +1,7 @@
 @keyframes menu-in {
   from {
     opacity: 0;
-    transform: translateY(-4px);
+    scale: 0.9;
   }
 }
 
@@ -19,7 +19,13 @@
   border-radius: var(--radius-large);
   box-shadow: var(--shadow);
   backdrop-filter: var(--blur);
-  animation: menu-in var(--motion);
+  animation: menu-in 420ms var(--spring);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .menu {
+    animation-name: none;
+  }
 }
 
 .menu-still {

@@ -81,7 +81,7 @@ function Place(props: {
                 <span
                   class="place-used"
                   classList={{ "place-used-full": used() >= FULL_SHARE }}
-                  style={{ transform: `scaleX(${used()})` }}
+                  style={{ transform: `scaleX(${used()})`, "--used": used() }}
                 />
               </span>
             </>
@@ -108,9 +108,10 @@ function Section(props: { id: SectionId; label: string; children: JSX.Element })
             {ICON_CHEVRON}
           </span>
         </button>
-        <Show when={!folded()}>
+        {/* Kept in place while folded, so it can spring open and shut. */}
+        <div class="place-fold" classList={{ "place-folded": folded() }} inert={folded() || undefined}>
           <ul>{props.children}</ul>
-        </Show>
+        </div>
       </section>
     </Show>
   );

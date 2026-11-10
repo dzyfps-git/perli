@@ -11,6 +11,7 @@ use quick_xml::events::{BytesStart, Event};
 use quick_xml::{Reader, XmlVersion};
 use serde::Serialize;
 use windows::core::HSTRING;
+use windows::Win32::Foundation::GENERIC_READ;
 use windows::Win32::Graphics::Imaging::{
     CLSID_WICImagingFactory, GUID_WICPixelFormat32bppRGBA, IWICImagingFactory, WICBitmapInterpolationModeFant,
     WICConvertBitmapSource, WICDecodeMetadataCacheOnDemand,
@@ -30,6 +31,8 @@ const MOST_ENTRIES: usize = 10_000;
 const MOST_PICTURE_BYTES: u64 = 128 * 1024 * 1024;
 const MOST_CHAPTER_BYTES: u64 = 16 * 1024 * 1024;
 const MOST_EDGE: u32 = 4096;
+/// A look at a text file inside shows this much of its start.
+const MOST_TEXT_BYTES: u64 = 256 * 1024;
 const PICTURES: [&str; 7] = ["jpg", "jpeg", "png", "gif", "webp", "bmp", "tif"];
 
 #[derive(Debug, PartialEq, Serialize)]
@@ -47,6 +50,18 @@ pub struct Book {
     pub title: String,
     /// Each chapter's name inside the archive, in reading order.
     pub chapters: Vec<String>,
+    /// The book's own table of contents, or empty if it has none.
+    pub contents: Vec<Heading>,
+}
+
+/// One line of a book's table of contents.
+#[derive(Debug, PartialEq, Serialize)]
+pub struct Heading {
+    pub title: String,
+    /// Which chapter it opens, by its place in `Book::chapters`.
+    pub chapter: usize,
+    /// 0 for the top level.
+    pub depth: usize,
 }
 
 fn open(path: &Path) -> Result<Zip, String> {
@@ -93,6 +108,17 @@ pub fn pages(path: &Path) -> Result<Vec<String>, String> {
     Ok(names)
 }
 
+/// The start of a text file inside the archive, for a look without taking it out. `None` if it
+/// is not text.
+pub fn text(path: &Path, name: &str) -> Result<Option<String>, String> {
+    let mut zip = open(path)?;
+    let entry = zip.by_name(name).map_err(|error| error.to_string())?;
+    let mut bytes = Vec::new();
+    entry.take(MOST_TEXT_BYTES).read_to_end(&mut bytes).map_err(|error| error.to_string())?;
+    let body = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&bytes);
+    Ok(crate::preview::as_text(body, true).map(str::to_string))
+}
+
 fn read_entry(zip: &mut Zip, name: &str, most: u64) -> Result<Vec<u8>, String> {
     let entry = zip.by_name(name).map_err(|error| error.to_string())?;
     if entry.size() > most {
@@ -133,6 +159,24 @@ fn decode(bytes: &[u8], edge: u32) -> windows::core::Result<Vec<u8>> {
         out[4..8].copy_from_slice(&height.to_le_bytes());
         pixels.CopyPixels(std::ptr::null(), width * 4, &mut out[8..])?;
         Ok(out)
+    }
+}
+
+/// A picture file's own width and height, read from its header by Windows' imaging, or `None`
+/// for a format only the shell can draw. A file in the cloud stays there.
+pub fn pixel_size(path: &Path) -> Option<(u32, u32)> {
+    if crate::thumbs::is_online_only(path) {
+        return None;
+    }
+    let _com = Com::enter();
+    unsafe {
+        let factory: IWICImagingFactory = CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER).ok()?;
+        let decoder = factory
+            .CreateDecoderFromFilename(&HSTRING::from(path), None, GENERIC_READ, WICDecodeMetadataCacheOnDemand)
+            .ok()?;
+        let (mut width, mut height) = (0, 0);
+        decoder.GetFrame(0).ok()?.GetSize(&raw mut width, &raw mut height).ok()?;
+        Some((width, height))
     }
 }
 
@@ -237,6 +281,8 @@ pub fn book(path: &Path) -> Result<Book, String> {
     let (mut title, mut in_title) = (String::new(), false);
     let mut items = Vec::new();
     let mut order = Vec::new();
+    // EPUB 3 marks its contents page. EPUB 2 names an NCX file from the spine.
+    let (mut nav, mut ncx_id) = (None, None);
     loop {
         match reader.read_event().map_err(|error| error.to_string())? {
             Event::Start(start) if start.local_name().as_ref() == "title" && title.is_empty() => in_title = true,
@@ -245,9 +291,13 @@ pub fn book(path: &Path) -> Result<Book, String> {
             Event::Start(start) | Event::Empty(start) => match start.local_name().as_ref() {
                 "item" => {
                     if let (Some(id), Some(href)) = (attribute(&start, "id"), attribute(&start, "href")) {
+                        if attribute(&start, "properties").is_some_and(|properties| properties.split(' ').any(|one| one == "nav")) {
+                            nav = Some(resolve(&package, &href));
+                        }
                         items.push((id, href));
                     }
                 }
+                "spine" => ncx_id = attribute(&start, "toc"),
                 "itemref" => order.extend(attribute(&start, "idref")),
                 _ => {}
             },
@@ -258,13 +308,94 @@ pub fn book(path: &Path) -> Result<Book, String> {
     // Only chapters that can be read count: there, small enough, and not locked. A book with none
     // shows as the archive it is.
     let locked = locked(&mut zip);
-    let chapters = order
+    let chapters: Vec<String> = order
         .iter()
         .filter_map(|id| items.iter().find(|(item, _)| item == id))
         .map(|(_, href)| resolve(&package, href))
         .filter(|name| !locked.contains(name) && zip.by_name(name).is_ok_and(|entry| entry.size() <= MOST_CHAPTER_BYTES))
         .collect();
-    Ok(Book { title: title.trim().to_string(), chapters })
+    let ncx = ncx_id.and_then(|id| items.iter().find(|(item, _)| *item == id)).map(|(_, href)| resolve(&package, href));
+    // A book with a broken contents page still reads, just without it.
+    let contents = match nav.or(ncx) {
+        Some(file) => read_entry(&mut zip, &file, MOST_CHAPTER_BYTES)
+            .map(|source| contents_of(&file, &String::from_utf8_lossy(&source), &chapters))
+            .unwrap_or_default(),
+        None => Vec::new(),
+    };
+    Ok(Book { title: title.trim().to_string(), chapters, contents })
+}
+
+/// The lines of an EPUB 3 contents page (`<nav epub:type="toc">`) or an EPUB 2 NCX file, each
+/// with the chapter it opens. Lines that point outside the reading order are left out.
+fn contents_of(file: &str, source: &str, chapters: &[String]) -> Vec<Heading> {
+    let mut reader = Reader::from_str(source);
+    let mut found = Vec::new();
+    // In a nav page: inside the contents nav, how deep its lists go, and the link being read.
+    let (mut in_toc, mut depth, mut link): (bool, usize, Option<(String, String)>) = (false, 0, None);
+    // In an NCX: how deep its points go, and the label read so far.
+    let (mut points, mut label, mut in_label) = (0, String::new(), false);
+    let mut push = |title: &str, href: &str, depth: usize| {
+        let title = title.split_whitespace().collect::<Vec<_>>().join(" ");
+        if let Some(chapter) = chapters.iter().position(|name| *name == resolve(file, href)) {
+            if !title.is_empty() {
+                found.push(Heading { title, chapter, depth });
+            }
+        }
+    };
+    loop {
+        let Ok(event) = reader.read_event() else { break };
+        match event {
+            Event::Start(start) => match start.local_name().as_ref() {
+                "nav" if !in_toc => in_toc = attribute(&start, "type").is_some_and(|kind| kind.split(' ').any(|one| one == "toc")),
+                "ol" if in_toc => depth += 1,
+                "a" if in_toc => link = attribute(&start, "href").map(|href| (href, String::new())),
+                "navPoint" => {
+                    points += 1;
+                    label.clear();
+                }
+                "text" => in_label = true,
+                _ => {}
+            },
+            Event::Empty(start) if start.local_name().as_ref() == "content" => {
+                if let Some(src) = attribute(&start, "src") {
+                    push(&label, &src, points.max(1) - 1);
+                }
+            }
+            Event::Text(text) => {
+                let text = text.xml10_content();
+                if let Some((_, title)) = link.as_mut() {
+                    title.push_str(&text);
+                } else if in_label {
+                    label.push_str(&text);
+                }
+            }
+            Event::GeneralRef(reference) => {
+                let character = reference.resolve_char_ref().ok().flatten().map(String::from);
+                if let Some(text) = character.as_deref().or_else(|| entity(&reference)) {
+                    if let Some((_, title)) = link.as_mut() {
+                        title.push_str(text);
+                    } else if in_label {
+                        label.push_str(text);
+                    }
+                }
+            }
+            Event::End(end) => match end.local_name().as_ref() {
+                "nav" if in_toc => break,
+                "ol" if in_toc => depth = depth.saturating_sub(1),
+                "a" => {
+                    if let Some((href, title)) = link.take() {
+                        push(&title, &href, depth.max(1) - 1);
+                    }
+                }
+                "navPoint" => points -= 1,
+                "text" => in_label = false,
+                _ => {}
+            },
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    found
 }
 
 /// The parts a book's DRM encrypts, which would read as noise.
@@ -420,6 +551,15 @@ mod tests {
     }
 
     #[test]
+    fn a_text_file_inside_reads_without_its_mark_and_anything_else_does_not() {
+        let path = archive("look.zip", &[("notes/a.txt", b"\xEF\xBB\xBFhello"), ("b.bin", b"\x00\x01\x02")]);
+        assert_eq!(text(&path, "notes/a.txt").unwrap().as_deref(), Some("hello"));
+        assert_eq!(text(&path, "b.bin").unwrap(), None);
+        assert!(text(&path, "gone.txt").is_err());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn a_chapter_keeps_its_text_and_loses_everything_that_could_act() {
         let source = r#"<?xml version="1.0"?><html xmlns="http://www.w3.org/1999/xhtml"><head><title>T</title>
             <style>p{}</style><script>alert(1)</script></head><body onload="x()">
@@ -460,8 +600,25 @@ mod tests {
         ];
         let path = archive("book.epub", &files);
         let book = book(&path).unwrap();
-        assert_eq!(book, Book { title: "A Book".into(), chapters: vec!["OEBPS/text/one.xhtml".into(), "OEBPS/two.xhtml".into()] });
+        let chapters = vec!["OEBPS/text/one.xhtml".to_string(), "OEBPS/two.xhtml".to_string()];
+        assert_eq!(book, Book { title: "A Book".into(), chapters, contents: vec![] });
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn a_book_lists_its_contents_from_its_nav_page_or_ncx() {
+        let chapters = ["OEBPS/text/one.xhtml".to_string(), "OEBPS/two.xhtml".to_string()];
+        let heading = |title: &str, chapter, depth| Heading { title: title.into(), chapter, depth };
+        let nav = r#"<html><body><nav epub:type="landmarks"><ol><li><a href="two.xhtml">Skip me</a></li></ol></nav>
+            <nav epub:type="toc"><ol><li><a href="one.xhtml#top">Part   <b>One</b></a>
+            <ol><li><a href="../two.xhtml">Tom &amp; Jerry</a></li><li><a href="gone.xhtml">Gone</a></li></ol></li></ol></nav></body></html>"#;
+        assert_eq!(
+            contents_of("OEBPS/text/nav.xhtml", nav, &chapters),
+            [heading("Part One", 0, 0), heading("Tom & Jerry", 1, 1)]
+        );
+        let ncx = r#"<ncx><navMap><navPoint><navLabel><text>One</text></navLabel><content src="text/one.xhtml"/>
+            <navPoint><navLabel><text>Two</text></navLabel><content src="two.xhtml"/></navPoint></navPoint></navMap></ncx>"#;
+        assert_eq!(contents_of("OEBPS/toc.ncx", ncx, &chapters), [heading("One", 0, 0), heading("Two", 1, 1)]);
     }
 
     #[test]
