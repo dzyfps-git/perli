@@ -108,11 +108,12 @@ export function createFind(root: () => HTMLElement | undefined, scroller: () => 
     else paint("find-current", ranges[current()] ? [ranges[current()]] : []);
   }
 
+  /** With nothing found yet, the rest of the file loads first, so a match far down is found too. */
   async function step(by: number) {
-    if (!ranges.length) return;
-    let next = current() + by;
-    while (next >= ranges.length && more && (await more())) run(true);
-    select((next + ranges.length) % ranges.length);
+    if (!query()) return;
+    const next = current() < 0 && by < 0 ? -1 : current() + by;
+    while ((!ranges.length || next >= ranges.length) && more && (await more())) run(true);
+    if (ranges.length) select((next + ranges.length) % ranges.length);
   }
 
   function show() {

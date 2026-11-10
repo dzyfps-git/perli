@@ -247,7 +247,10 @@ export function BookView(live: BookViewProps) {
           );
         }
       })
-      .catch((reason) => props.onFailure(String(reason)));
+      .catch((reason) => {
+        // A chapter left behind, or a book closed, says nothing.
+        if (!gone && at === chapter()) props.onFailure(String(reason));
+      });
   });
 
   createEffect(() =>

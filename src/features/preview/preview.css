@@ -85,6 +85,10 @@
   min-width: max-content;
 }
 
+.text-sheet[hidden] {
+  display: none;
+}
+
 .text-scroll[data-wrap] .text-sheet {
   min-width: 0;
 }

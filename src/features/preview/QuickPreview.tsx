@@ -277,6 +277,7 @@ export function QuickPreview(props: {
       { translate: [`${stepped * SLIDE_PX}px 0`, "0 0"], opacity: [0, 1] },
       { duration: SLIDE_MS, easing: "cubic-bezier(0.3, 1.1, 0.5, 1)" },
     );
+    stepped = 0;
   }
 
   function step(by: number) {
@@ -314,7 +315,14 @@ export function QuickPreview(props: {
     body.focus();
   });
 
-  createEffect(on(index, (at) => void show(at)));
+  // A reload of the folder replaces the snapshot, so the row is fetched again from the new one.
+  createEffect(
+    on([index, props.at.snapshot], ([at]) => {
+      const kept = Math.max(0, Math.min(at, props.at.count() - 1));
+      if (kept !== at) setIndex(kept);
+      else void show(at);
+    }),
+  );
 
   const facts = () => {
     const item = row();

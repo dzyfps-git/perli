@@ -35,6 +35,7 @@ export function ModelStage(live: {
   const [wire, setWire] = createSignal(false);
   const [upright, setUpright] = createSignal(stl);
   const [clip, setClip] = createSignal(0);
+  const [paused, setPaused] = createSignal(false);
   let gone = false;
 
   function start(canvas: HTMLCanvasElement) {
@@ -70,10 +71,9 @@ export function ModelStage(live: {
     a: () => {
       const clips = view()?.clips.length ?? 0;
       if (!clips) return;
-      // Plays, pauses, then plays the next animation.
-      const next = clip() >= 0 ? -1 : 0;
-      setClip(next);
-      view()?.play(next);
+      // Pauses and goes on from the same place in the same animation.
+      setPaused(!paused());
+      view()?.pause(paused());
     },
   };
 
@@ -106,6 +106,7 @@ export function ModelStage(live: {
 
   const pickClip = (at: number) => {
     setClip(at);
+    setPaused(false);
     view()?.play(at);
   };
 
@@ -138,16 +139,16 @@ export function ModelStage(live: {
           <div class="model-clips" role="group" aria-label="Animations">
             <button
               class="strip-icon"
-              aria-label={clip() >= 0 ? "Pause animation" : "Play animation"}
+              aria-label={paused() ? "Play animation" : "Pause animation"}
               aria-keyshortcuts="A"
               onClick={tools.a}
             >
-              {clip() >= 0 ? ICON_PAUSE : ICON_PLAY}
+              {paused() ? ICON_PLAY : ICON_PAUSE}
             </button>
             <Show when={view()!.clips.length > 1} fallback={<span>{view()!.clips[0]}</span>}>
               <select
                 aria-label="Animation"
-                value={Math.max(clip(), 0)}
+                value={clip()}
                 onChange={(event) => pickClip(Number(event.currentTarget.value))}
               >
                 {view()!.clips.map((name, at) => (

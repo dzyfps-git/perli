@@ -305,10 +305,14 @@ pub fn book(path: &Path) -> Result<Book, String> {
             _ => {}
         }
     }
+    // Only chapters that can be read count: there, small enough, and not locked. A book with none
+    // shows as the archive it is.
+    let locked = locked(&mut zip);
     let chapters: Vec<String> = order
         .iter()
         .filter_map(|id| items.iter().find(|(item, _)| item == id))
         .map(|(_, href)| resolve(&package, href))
+        .filter(|name| !locked.contains(name) && zip.by_name(name).is_ok_and(|entry| entry.size() <= MOST_CHAPTER_BYTES))
         .collect();
     let ncx = ncx_id.and_then(|id| items.iter().find(|(item, _)| *item == id)).map(|(_, href)| resolve(&package, href));
     // A book with a broken contents page still reads, just without it.
@@ -392,6 +396,26 @@ fn contents_of(file: &str, source: &str, chapters: &[String]) -> Vec<Heading> {
         }
     }
     found
+}
+
+/// The parts a book's DRM encrypts, which would read as noise.
+fn locked(zip: &mut Zip) -> Vec<String> {
+    let Ok(bytes) = read_entry(zip, "META-INF/encryption.xml", MOST_CHAPTER_BYTES) else {
+        return Vec::new();
+    };
+    let text = String::from_utf8_lossy(&bytes);
+    let mut reader = Reader::from_str(&text);
+    let mut names = Vec::new();
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(start) | Event::Empty(start)) if start.local_name().as_ref() == "CipherReference" => {
+                names.extend(attribute(&start, "URI").map(|uri| resolve("", &uri)));
+            }
+            Ok(Event::Eof) | Err(_) => break,
+            _ => {}
+        }
+    }
+    names
 }
 
 /// Tags a chapter keeps. Anything else is dropped and its text kept, and a few tags are dropped
@@ -568,7 +592,13 @@ mod tests {
         let package = br#"<package><metadata><dc:title xmlns:dc="x"> A Book </dc:title></metadata>
             <manifest><item id="b" href="two.xhtml"/><item id="a" href="text/one.xhtml"/></manifest>
             <spine><itemref idref="a"/><itemref idref="b"/><itemref idref="gone"/></spine></package>"#;
-        let path = archive("book.epub", &[("META-INF/container.xml", container), ("OEBPS/content.opf", package)]);
+        let files: [(&str, &[u8]); 4] = [
+            ("META-INF/container.xml", container),
+            ("OEBPS/content.opf", package),
+            ("OEBPS/text/one.xhtml", b"<p>1</p>"),
+            ("OEBPS/two.xhtml", b"<p>2</p>"),
+        ];
+        let path = archive("book.epub", &files);
         let book = book(&path).unwrap();
         let chapters = vec!["OEBPS/text/one.xhtml".to_string(), "OEBPS/two.xhtml".to_string()];
         assert_eq!(book, Book { title: "A Book".into(), chapters, contents: vec![] });
@@ -589,6 +619,24 @@ mod tests {
         let ncx = r#"<ncx><navMap><navPoint><navLabel><text>One</text></navLabel><content src="text/one.xhtml"/>
             <navPoint><navLabel><text>Two</text></navLabel><content src="two.xhtml"/></navPoint></navPoint></navMap></ncx>"#;
         assert_eq!(contents_of("OEBPS/toc.ncx", ncx, &chapters), [heading("One", 0, 0), heading("Two", 1, 1)]);
+    }
+
+    #[test]
+    fn a_book_drops_chapters_that_are_missing_or_locked() {
+        let container = br#"<container><rootfiles><rootfile full-path="OEBPS/content.opf"/></rootfiles></container>"#;
+        let package = br#"<package><manifest><item id="a" href="one.xhtml"/><item id="b" href="two.xhtml"/></manifest>
+            <spine><itemref idref="a"/><itemref idref="b"/></spine></package>"#;
+        let lock = br#"<encryption xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><EncryptedData>
+            <CipherData><CipherReference URI="OEBPS/one.xhtml"/></CipherData></EncryptedData></encryption>"#;
+        let files: [(&str, &[u8]); 4] = [
+            ("META-INF/container.xml", container),
+            ("META-INF/encryption.xml", lock),
+            ("OEBPS/content.opf", package),
+            ("OEBPS/one.xhtml", b"noise"),
+        ];
+        let path = archive("locked.epub", &files);
+        assert!(book(&path).unwrap().chapters.is_empty());
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

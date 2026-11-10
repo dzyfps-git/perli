@@ -86,15 +86,18 @@ export function TextView(live: TextViewProps) {
         return true;
       })
       .catch((reason) => {
-        props.onFailure(String(reason));
+        if (!gone) props.onFailure(String(reason));
         return false;
       })
       .finally(() => (loading = undefined));
     return loading;
   }
 
-  function onScroll() {
-    if (scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - MORE_TEXT_PX) void more().then(find.refresh);
+  const nearEnd = () => scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - MORE_TEXT_PX;
+
+  /** Loads pieces while the end is in sight, so a first piece too short to scroll never stalls. */
+  async function fill() {
+    while (!gone && nearEnd() && (await more())) find.refresh();
   }
 
   const find = createFind(() => (table() ? tableBody : code), () => scroller, async () => {
@@ -145,7 +148,7 @@ export function TextView(live: TextViewProps) {
   });
 
   onMount(() => {
-    void add(props.first.text);
+    void add(props.first.text).then(fill);
     scroller.focus({ preventScroll: true });
   });
 
@@ -205,7 +208,7 @@ export function TextView(live: TextViewProps) {
           </button>
         </Show>
       </div>
-      <div ref={scroller} class="text-scroll" tabindex="-1" data-wrap={wrap() || undefined} onScroll={onScroll}>
+      <div ref={scroller} class="text-scroll" tabindex="-1" data-wrap={wrap() || undefined} onScroll={() => void fill()}>
         <div class="text-sheet" hidden={table()}>
           <Show when={numbers()}>
             <pre class="text-gutter" aria-hidden="true">
