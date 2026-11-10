@@ -962,6 +962,7 @@ fn unzip(archive: &Path, own_folder: bool) -> Job {
     Job::Unzip {
         archives: vec![archive.to_path_buf()],
         own_folder,
+        only: None,
     }
 }
 
@@ -999,6 +1000,25 @@ fn a_zip_holds_a_tree_and_extracts_to_the_same_tree() {
     let landed = sys::stat(&sandbox.path(r"out\tree\top.txt")).unwrap().unwrap().modified;
     let seconds = landed.abs_diff(long_ago) / 10_000_000;
     assert!(seconds <= 2, "ZIP keeps times to two seconds, this is {seconds} off");
+}
+
+#[test]
+fn one_entry_extracts_beside_the_archive_on_its_own() {
+    let sandbox = Sandbox::new();
+    let archive = sandbox.path(r"out\pack.zip");
+    fs::create_dir(sandbox.path("out")).unwrap();
+    let entries: [(&str, &[u8]); 4] =
+        [("docs/a.txt", b"a"), ("docs/img/b.png", b"b"), ("docs/img/c.png", b"c"), ("docs/imgs.txt", b"not inside img")];
+    zip_of(&archive, &entries);
+    let only = |name: &str| Job::Unzip { archives: vec![archive.clone()], own_folder: false, only: Some(name.into()) };
+
+    let file = go(only("docs/a.txt"));
+    assert_eq!(read(&sandbox.path(r"out\a.txt")), "a");
+    assert_eq!(file.done, [Done::Created { path: sandbox.path(r"out\a.txt") }]);
+
+    go(only("docs/img/"));
+    assert_eq!(sandbox.names(r"out\img"), ["b.png", "c.png"]);
+    assert_eq!(sandbox.names("out"), ["a.txt", "img", "pack.zip"], "a folder brings only what is inside it");
 }
 
 #[test]

@@ -93,7 +93,7 @@ function Card(props: { card: JobCard; jobs: Jobs }) {
   const shownKept = () => card.ended?.kept.slice(0, KEPT_SHOWN) ?? [];
   const keptCount = () => card.ended?.kept.length ?? 0;
   return (
-    <section class="job" aria-label={card.title}>
+    <section class="job" classList={{ "job-leaving": card.leaving }} aria-label={card.title}>
       <header class="job-header">
         <span class="job-title">{card.title}</span>
         <Show
@@ -140,6 +140,12 @@ function Card(props: { card: JobCard; jobs: Jobs }) {
       >
         {(ended) => (
           <>
+            <Show when={ended().done}>
+              {/* The bar stays a moment, full and green, so a finished job reads at a glance. */}
+              <span class="job-bar" role="presentation">
+                <span class="job-fill job-fill-done" />
+              </span>
+            </Show>
             <p class="job-facts">{ended().note}</p>
             <Show when={keptCount() > 0}>
               <p class="job-facts">

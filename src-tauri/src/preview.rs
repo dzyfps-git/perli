@@ -12,7 +12,7 @@ use windows::core::{Interface, HSTRING, PWSTR};
 use windows::Win32::Foundation::PROPERTYKEY;
 use windows::Win32::Security::Cryptography::{
     BCryptCreateHash, BCryptDestroyHash, BCryptFinishHash, BCryptHashData, BCRYPT_HASH_HANDLE,
-    BCRYPT_SHA256_ALG_HANDLE,
+    BCRYPT_MD5_ALG_HANDLE, BCRYPT_SHA1_ALG_HANDLE, BCRYPT_SHA256_ALG_HANDLE, BCRYPT_SHA512_ALG_HANDLE,
 };
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::UI::Shell::PropertiesSystem::{
@@ -29,7 +29,6 @@ const PIECE_BYTES: usize = 256 * 1024;
 /// Bigger Markdown shows as plain text, since rendering needs all of it at once.
 const MARKDOWN_BYTES: u64 = 4 * 1024 * 1024;
 const HASH_BYTES: usize = 1024 * 1024;
-const SHA256_BYTES: usize = 32;
 /// The most a 3D model, or one file it points to, may take.
 const MODEL_BYTES: u64 = 256 * 1024 * 1024;
 
@@ -44,8 +43,8 @@ pub enum Preview {
     Archive { entries: Vec<inside::Entry>, more: bool },
     /// A comic's pages, by their names inside it.
     Comic { pages: Vec<String> },
-    /// A book's title and its chapters, by their names inside it.
-    Book { title: String, chapters: Vec<String> },
+    /// A book's title, its chapters by their names inside it, and its table of contents.
+    Book { title: String, chapters: Vec<String>, contents: Vec<inside::Heading> },
     /// A 3D model, drawn by the window from the file's bytes.
     Model,
     /// A MIDI file, played through the bundled SoundFont.
@@ -103,7 +102,7 @@ fn inside_of(path: &Path) -> Option<Preview> {
             _ => listed(),
         },
         "epub" => match inside::book(path) {
-            Ok(book) if !book.chapters.is_empty() => Some(Preview::Book { title: book.title, chapters: book.chapters }),
+            Ok(book) if !book.chapters.is_empty() => Some(Preview::Book { title: book.title, chapters: book.chapters, contents: book.contents }),
             _ => listed(),
         },
         "glb" | "gltf" | "obj" | "stl" => Some(Preview::Model),
@@ -277,15 +276,22 @@ pub fn properties(path: &Path) -> windows::core::Result<Vec<(String, String)>> {
 
 static LATEST_HASH: AtomicU64 = AtomicU64::new(0);
 
-/// The file's SHA-256 in lowercase hex, through Windows' own crypto. `None` once a newer
-/// checksum was asked for, because only one is ever shown.
+/// The file's checksum by `algorithm` (md5, sha1, sha256 or sha512) in lowercase hex, through
+/// Windows' own crypto. `None` once a newer checksum was asked for, because only one is ever shown.
 // ponytail: one checksum at a time for the whole app, which fits one details panel. A ticket per
 // view would let two panels hash side by side.
-pub fn sha256(path: &Path) -> std::io::Result<Option<String>> {
+pub fn hash(path: &Path, algorithm: &str) -> std::io::Result<Option<String>> {
+    let (handle, length) = match algorithm {
+        "md5" => (BCRYPT_MD5_ALG_HANDLE, 16),
+        "sha1" => (BCRYPT_SHA1_ALG_HANDLE, 20),
+        "sha256" => (BCRYPT_SHA256_ALG_HANDLE, 32),
+        "sha512" => (BCRYPT_SHA512_ALG_HANDLE, 64),
+        _ => return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Unknown checksum kind")),
+    };
     let ticket = LATEST_HASH.fetch_add(1, Ordering::SeqCst) + 1;
     let mut file = File::open(path)?;
     let mut hash = BCRYPT_HASH_HANDLE::default();
-    unsafe { BCryptCreateHash(BCRYPT_SHA256_ALG_HANDLE, &raw mut hash, None, None, 0) }.ok()?;
+    unsafe { BCryptCreateHash(handle, &raw mut hash, None, None, 0) }.ok()?;
     let digest = (|| {
         let mut buffer = vec![0; HASH_BYTES];
         loop {
@@ -298,7 +304,7 @@ pub fn sha256(path: &Path) -> std::io::Result<Option<String>> {
             }
             unsafe { BCryptHashData(hash, &buffer[..count], 0) }.ok()?;
         }
-        let mut digest = [0u8; SHA256_BYTES];
+        let mut digest = vec![0u8; length];
         unsafe { BCryptFinishHash(hash, &mut digest, 0) }.ok()?;
         Ok(Some(digest.iter().map(|byte| format!("{byte:02x}")).collect()))
     })();
@@ -393,14 +399,23 @@ mod tests {
     }
 
     #[test]
-    fn sha256_matches_the_known_answer() {
+    fn every_checksum_kind_matches_its_known_answer() {
         let folder = folder("hash");
         let file = folder.join("abc.txt");
         fs::write(&file, "abc").unwrap();
-        assert_eq!(
-            sha256(&file).unwrap().unwrap(),
-            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-        );
+        for (kind, known) in [
+            ("md5", "900150983cd24fb0d6963f7d28e17f72"),
+            ("sha1", "a9993e364706816aba3e25717850c26c9cd0d89d"),
+            ("sha256", "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"),
+            (
+                "sha512",
+                "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a\
+                 2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f",
+            ),
+        ] {
+            assert_eq!(hash(&file, kind).unwrap().unwrap(), known, "{kind}");
+        }
+        assert!(hash(&file, "crc").is_err());
         fs::remove_dir_all(folder).unwrap();
     }
 

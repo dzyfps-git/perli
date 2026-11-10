@@ -12,6 +12,8 @@ import { clampTile, moveTarget, TILE_STEP, type Layout } from "./layout";
 import { hoverCards, setTileSize, tileSize } from "./prefs";
 import { createSelection } from "./selection";
 import { cachedThumb, createThumbLoader } from "./thumbs";
+import { matchSpans } from "./nameMatch";
+import { playMoves, seen } from "./rowMotion";
 import { createTypeJump } from "./typeJump";
 import { typesLearned, typeText } from "./typeNames";
 import "./filelist.css";
@@ -32,6 +34,8 @@ const DRAG_DISTANCE = 6;
 const CARD_DELAY_MS = 700;
 /** With a card already up, the next row's comes quicker. */
 const CARD_SWITCH_MS = 150;
+/** What one notch of a mouse wheel reports. */
+const WHEEL_NOTCH = 100;
 const ICON_FOLDER = "\uE8B7";
 const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
 let lastFolderOpen = 0;
@@ -45,7 +49,13 @@ interface PooledRow {
   thumb?: HTMLCanvasElement;
   /** What `thumb` is for. */
   thumbKey?: string;
+  /** The lit letters of a search in its name. */
+  matches?: Range[];
 }
+
+/** Every list's lit search letters, drawn by CSS without touching the rows' text. */
+const nameMatches = new Highlight();
+CSS.highlights.set("name-match", nameMatches);
 
 const dates = new Intl.DateTimeFormat(undefined, { dateStyle: "short", timeStyle: "short" });
 
@@ -144,6 +154,8 @@ export function FileList(props: {
   /** Names waiting to move, which fade. */
   cut?: Set<string>;
   emptyText: string;
+  /** What a search typed, whose letters light up in each name. */
+  match?: string;
   active: boolean;
   layout: Layout;
   sort: Sort;
@@ -195,6 +207,8 @@ export function FileList(props: {
   let renameNext: { name: string; location: string } | undefined;
   /** The snapshot whose rows are on screen, which a reload changes once its rows are in. */
   let shown = props.snapshot;
+  /** How many rows the last snapshot had, to tell when some are gone. */
+  let lastCount = props.count;
   let pool: PooledRow[] = [];
   let rowHeight = 0;
   let itemHeight = 0;
@@ -310,8 +324,28 @@ export function FileList(props: {
       if (cell.id === "name" && row) cell.element.prepend(...row.tags.flatMap(tagDot));
       if (cell.id === "name" && look && props.layout === "list") cell.element.prepend(lookMark(look.icon, look.color));
     }
+    lightMatch(pooled, row);
     // Windows' picture of a folder would hide the look it was given.
     showThumb(pooled, row && !look ? thumbKey(row) : undefined);
+  }
+
+  /** A pool being thrown away takes its lit letters with it, since the highlight is shared. */
+  function forgetMatches() {
+    for (const pooled of pool) for (const range of pooled.matches ?? []) nameMatches.delete(range);
+  }
+
+  function lightMatch(pooled: PooledRow, row: Row | undefined) {
+    for (const range of pooled.matches ?? []) nameMatches.delete(range);
+    pooled.matches = undefined;
+    const text = pooled.cells.find((cell) => cell.id === "name")?.element.lastChild;
+    if (!row || !props.match || !(text instanceof Text)) return;
+    pooled.matches = matchSpans(row.name, props.match).map(([start, end]) => {
+      const range = new Range();
+      range.setStart(text, start);
+      range.setEnd(text, end);
+      nameMatches.add(range);
+      return range;
+    });
   }
 
   function hideCard(forget = false) {
@@ -396,6 +430,7 @@ export function FileList(props: {
 
     builtFor = shape;
     const withThumb = props.thumbs && props.layout === "grid";
+    forgetMatches();
     pool = Array.from({ length: size }, () => createRow(cells(), withThumb));
     spacer.replaceChildren(...pool.map((pooled) => pooled.element));
     paint();
@@ -533,6 +568,13 @@ export function FileList(props: {
     );
     if (snapshot !== props.snapshot) return;
 
+    // Rows changing in place play their change. Opening, sorting, searching and scrolling don't.
+    // ponytail: rows past the screen's edge just appear, and a reveal that scrolls plays nothing.
+    const scrolled = grid.scrollTop;
+    const moving = !props.top && !props.rearranged && !props.match && firstPaintDone && !reducedMotion.matches;
+    const before = moving ? seen(rowsShown(), props.count < lastCount) : undefined;
+    lastCount = props.count;
+
     pages.clear();
     for (const [page, rows] of fresh) pages.set(page, rows);
     shown = snapshot;
@@ -552,10 +594,19 @@ export function FileList(props: {
     builtFor = "";
     resize();
     selectionChanged(true, props.reveal);
+    if (before && grid.scrollTop === scrolled) playMoves(before, rowsShown(), spacer);
     const next = renameNext;
     renameNext = undefined;
     if (props.rename) startRename(selection.focused());
     else if (next) moveRename(loadedIndex(next));
+  }
+
+  /** Each filled row element by what it shows, so the same file is found again after a reload. */
+  function rowsShown(): [string, HTMLElement][] {
+    return pool.flatMap((pooled) => {
+      const row = pooled.filled ? rowAt(pooled.index) : undefined;
+      return row ? [[`${row.location}|${row.name}`, pooled.element] as [string, HTMLElement]] : [];
+    });
   }
 
   function loadedIndex({ name, location }: { name: string; location: string }) {
@@ -695,9 +746,14 @@ export function FileList(props: {
     selectionChanged(event.repeat);
   }
 
+  /** A touchpad pinch sends many small wheel events, so they add up to one wheel notch a step. */
+  let pinch = 0;
   function onWheel(event: WheelEvent) {
     if (!event.ctrlKey || props.layout !== "grid") return;
-    setTileSize(clampTile(tileSize() + Math.sign(-event.deltaY) * TILE_STEP));
+    pinch -= event.deltaY;
+    if (Math.abs(pinch) < WHEEL_NOTCH / 2) return;
+    setTileSize(clampTile(tileSize() + Math.sign(pinch) * TILE_STEP));
+    pinch = 0;
   }
 
   onMount(() => {
@@ -722,6 +778,7 @@ export function FileList(props: {
     const observer = new ResizeObserver(resize);
     observer.observe(grid);
     onCleanup(() => {
+      forgetMatches();
       observer.disconnect();
       props.onCursor(undefined);
     });
@@ -740,7 +797,7 @@ export function FileList(props: {
 
   createEffect(
     on(
-      [typesLearned, () => props.cut, tags, allLooks],
+      [typesLearned, () => props.cut, () => props.match, tags, allLooks],
       () => {
         for (const pooled of pool) pooled.filled = false;
         paint();

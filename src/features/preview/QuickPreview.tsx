@@ -1,6 +1,7 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { createEffect, createSignal, For, lazy, on, onMount, Show } from "solid-js";
+import { createEffect, createSignal, lazy, on, onMount, Show } from "solid-js";
 import {
+  archiveText,
   bookChapter,
   fetchCover,
   fetchArchivePicture,
@@ -10,9 +11,11 @@ import {
   modelFile,
   openAudio,
   openLink,
+  pictureSize,
   previewRow,
   songAudio,
   songInfo,
+  startJob,
   type ArchiveEntry,
   type Preview,
   type Row,
@@ -21,7 +24,12 @@ import {
 import { formatSize } from "../../ui/format";
 import { typeText } from "../filelist/typeNames";
 import { join, parentOf, resolveRelative } from "../navigation/path";
-import { highlight, languageOf } from "./highlight";
+import { languageOf } from "./highlight";
+import { tableDelimiter } from "./table";
+import type { TextPiece, TextViewProps } from "./TextView";
+import type { BookViewProps } from "./DocView";
+import type { ComicViewProps } from "./ComicView";
+import type { ArchiveViewProps } from "./ArchiveView";
 import type { PlayerProps } from "./Player";
 import "./preview.css";
 
@@ -35,8 +43,6 @@ export interface PreviewAt {
   folder: string;
 }
 
-/** How close to the end of the text the next piece starts to load. */
-const MORE_TEXT_PX = 800;
 /** Pictures in Markdown don't need the full size. */
 const MARKDOWN_PICTURE_EDGE = 1200;
 const SLIDE_PX = 24;
@@ -45,6 +51,12 @@ const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
 // Both come with the first file that needs them.
 const ModelStage = lazy(() => import("./ModelStage").then((module) => ({ default: module.ModelStage })));
 const Player = lazy(() => import("./Player").then((module) => ({ default: module.Player })));
+const TextView = lazy(() => import("./TextView").then((module) => ({ default: module.TextView })));
+const MarkdownView = lazy(() => import("./DocView").then((module) => ({ default: module.MarkdownView })));
+const BookView = lazy(() => import("./DocView").then((module) => ({ default: module.BookView })));
+const ArchiveView = lazy(() => import("./ArchiveView").then((module) => ({ default: module.ArchiveView })));
+const ComicView = lazy(() => import("./ComicView").then((module) => ({ default: module.ComicView })));
+const PictureView = lazy(() => import("./PictureView").then((module) => ({ default: module.PictureView })));
 
 /** Files the player plays, for Play next to skip to. */
 const AUDIO = /\.(mid|midi|mp3|m4a|aac|wav|flac|ogg|oga|opus|weba)$/i;
@@ -73,38 +85,21 @@ export function QuickPreview(props: {
   const [row, setRow] = createSignal<Row>();
   const [shown, setShown] = createSignal<Preview>();
   const [failure, setFailure] = createSignal<string>();
-  /** The page of a comic or the chapter of a book. */
-  const [page, setPage] = createSignal(0);
+  /** What the view shown adds to the footer, such as a picture's size. */
+  const [note, setNote] = createSignal<string>();
   let dialog!: HTMLDialogElement;
-  let pageCanvas: HTMLCanvasElement | undefined;
-  let chapterArticle: HTMLElement | undefined;
   let body!: HTMLDivElement;
-  let next: number | null = null;
-  let loadingMore = false;
   /** Which way the last step went, for the slide. */
   let stepped = 0;
   /** The snapshot the row shown came from, so its later pieces are of the same file. */
   let snapshot = 0;
   /** Bumped by each step, so answers for a row already left behind are dropped. */
   let ticket = 0;
-  /** The keys the player or the model view takes first, while one shows. */
-  let playerKeys: ((event: KeyboardEvent) => boolean) | undefined;
+  /** The keys the view shown takes first, such as the player's or the model's. */
+  let viewKeys: ((event: KeyboardEvent) => boolean) | undefined;
 
   const folderOf = (item: Row) => item.location || props.at.folder;
   const pathOf = (item: Row) => join(folderOf(item), item.name);
-  const language = () => (row() ? languageOf(row()!.name) : undefined);
-
-  async function colored(text: string) {
-    const name = language();
-    return name ? highlight(text, name) : undefined;
-  }
-
-  async function addText(code: HTMLElement, text: string) {
-    const html = await colored(text).catch(() => undefined);
-    if (html === undefined) code.append(text);
-    else code.insertAdjacentHTML("beforeend", html);
-  }
-
   async function show(at: number) {
     const mine = ++ticket;
     setFailure(undefined);
@@ -115,51 +110,43 @@ export function QuickPreview(props: {
       if (mine !== ticket) return;
       setRow(found);
       setShown(undefined);
-      next = null;
       if (!found) return;
       const preview = await previewRow(view, snapshot, at);
       if (mine !== ticket) return;
-      setPage(0);
       setShown(preview);
-      if (preview.kind === "text") next = preview.next;
       slideIn();
     } catch (reason) {
       if (mine === ticket) setFailure(String(reason));
     }
   }
 
-  function fillText(code: HTMLElement) {
-    const preview = shown();
-    if (preview?.kind === "text") void addText(code, preview.text);
+  function text(item: Row, first: TextPiece): TextViewProps {
+    const { view } = props.at;
+    const at = index();
+    const shot = snapshot;
+    return {
+      first,
+      more: async (offset) => {
+        const piece = await previewRow(view, shot, at, offset);
+        return piece.kind === "text" ? piece : null;
+      },
+      language: languageOf(item.name),
+      table: tableDelimiter(item.name),
+      keys: (handler) => (viewKeys = handler),
+      onFailure: setFailure,
+    };
   }
 
-  async function moreText() {
-    const code = body.querySelector("code");
-    if (next === null || loadingMore || !code) return;
-    if (body.scrollTop + body.clientHeight < body.scrollHeight - MORE_TEXT_PX) return;
-    loadingMore = true;
-    const mine = ticket;
-    try {
-      const piece = await previewRow(props.at.view, snapshot, index(), next);
-      if (mine !== ticket || piece.kind !== "text") return;
-      next = piece.next;
-      await addText(code, piece.text);
-    } catch (reason) {
-      setFailure(String(reason));
-    } finally {
-      loadingMore = false;
-    }
-  }
-
-  function drawPicture(canvas: HTMLCanvasElement) {
-    const mine = ticket;
-    const box = body.getBoundingClientRect();
-    const edge = Math.ceil(Math.max(box.width, box.height) * devicePixelRatio);
-    fetchBigPicture(props.at.view, snapshot, index(), edge)
-      .then((picture) => {
-        if (picture && mine === ticket) draw(canvas, picture);
-      })
-      .catch(console.error);
+  function picture() {
+    const { view } = props.at;
+    const at = index();
+    const shot = snapshot;
+    return {
+      load: (edge: number) => fetchBigPicture(view, shot, at, edge),
+      size: () => pictureSize(view, shot, at),
+      keys: (handler: typeof viewKeys) => (viewKeys = handler),
+      note: setNote,
+    };
   }
 
   /** Fills each picture placeholder in `root` with what `load` gives for its name. */
@@ -180,12 +167,30 @@ export function QuickPreview(props: {
   }
 
   /** Pictures beside the file draw from this PC, and links go to the browser, never in here. */
-  function fillMarkdown(article: HTMLElement) {
-    const preview = shown();
-    const item = row();
-    if (preview?.kind !== "markdown" || !item) return;
-    article.innerHTML = preview.html;
-    fillPictures(article, (name) => fetchPictureFile(resolveRelative(folderOf(item), name), MARKDOWN_PICTURE_EDGE));
+  function markdown(item: Row, html: string) {
+    return {
+      html,
+      fill: (article: HTMLElement) =>
+        fillPictures(article, (name) => fetchPictureFile(resolveRelative(folderOf(item), name), MARKDOWN_PICTURE_EDGE)),
+      keys: (handler: typeof viewKeys) => (viewKeys = handler),
+    };
+  }
+
+  function book(item: Row, preview: Extract<Preview, { kind: "book" }>): BookViewProps {
+    const { view } = props.at;
+    const at = index();
+    const shot = snapshot;
+    return {
+      path: pathOf(item),
+      title: preview.title,
+      chapters: preview.chapters,
+      contents: preview.contents,
+      load: (chapter) => bookChapter(view, shot, at, chapter),
+      fill: (article) => fillPictures(article, (name) => fetchArchivePicture(view, shot, at, name, MARKDOWN_PICTURE_EDGE)),
+      keys: (handler) => (viewKeys = handler),
+      note: setNote,
+      onFailure: setFailure,
+    };
   }
 
   /** Play next: on to the next sound file in the list, if there is one. */
@@ -221,57 +226,46 @@ export function QuickPreview(props: {
           },
       info: midi ? () => songInfo(view, shot, at) : undefined,
       cover: midi ? undefined : (edge) => fetchCover(view, shot, at, edge),
-      keys: (handler) => (playerKeys = handler),
+      keys: (handler) => (viewKeys = handler),
       tint: (color) => body.style.setProperty("--player-tint", color ?? "transparent"),
       onNext: () => void nextAudio(),
     };
   }
 
-  const edgeOfBody = () => {
-    const box = body.getBoundingClientRect();
-    return Math.ceil(Math.max(box.width, box.height) * devicePixelRatio);
-  };
-
-  /** A comic's page, or a book's chapter with its pictures, read from inside the file. */
-  async function showPage(preview: Preview | undefined, at: number) {
-    const mine = ticket;
+  function archive(entries: ArchiveEntry[], more: boolean): ArchiveViewProps {
     const { view } = props.at;
-    const row = index();
-    if (preview?.kind === "comic" && pageCanvas) {
-      const picture = await fetchArchivePicture(view, snapshot, row, preview.pages[at], edgeOfBody());
-      if (mine === ticket && page() === at && picture) draw(pageCanvas, picture);
-    } else if (preview?.kind === "book" && chapterArticle) {
-      const html = await bookChapter(view, snapshot, row, preview.chapters[at]);
-      if (mine !== ticket || page() !== at) return;
-      chapterArticle.innerHTML = html;
-      body.scrollTop = 0;
-      fillPictures(chapterArticle, (name) => fetchArchivePicture(view, snapshot, row, name, MARKDOWN_PICTURE_EDGE));
-    }
+    const at = index();
+    const shot = snapshot;
+    return {
+      entries,
+      more,
+      picture: (entry, edge) => fetchArchivePicture(view, shot, at, entry, edge),
+      text: (entry) => archiveText(view, shot, at, entry),
+      extract: (only) =>
+        startJob({ kind: "unzip", selection: { view, request: shot, rows: [at] }, ownFolder: false, only }, view).catch(
+          (reason) => void setFailure(String(reason)),
+        ),
+      keys: (handler) => (viewKeys = handler),
+    };
   }
 
-  const pageCount = () => {
-    const preview = shown();
-    if (preview?.kind === "comic") return preview.pages.length;
-    return preview?.kind === "book" ? preview.chapters.length : 0;
-  };
-
-  /** Left and Right turn pages in a comic or a book. Up and Down still step through the rows. */
-  function turn(by: number) {
-    const target = page() + by;
-    if (target >= 0 && target < pageCount()) setPage(target);
+  function comic(item: Row, pages: string[]): ComicViewProps {
+    const { view } = props.at;
+    const at = index();
+    const shot = snapshot;
+    return {
+      path: pathOf(item),
+      pages,
+      load: (page, edge) => fetchArchivePicture(view, shot, at, page, edge),
+      keys: (handler) => (viewKeys = handler),
+      note: setNote,
+    };
   }
 
   function onBodyClick(event: MouseEvent) {
     const link = (event.target as HTMLElement).closest("a");
     if (!link) return;
     event.preventDefault();
-    const preview = shown();
-    const chapter = link.dataset.chapter;
-    if (chapter !== undefined && preview?.kind === "book") {
-      const at = preview.chapters.indexOf(chapter);
-      if (at >= 0) setPage(at);
-      return;
-    }
     const href = link.getAttribute("href");
     if (href) openLink(href).catch((reason) => setFailure(String(reason)));
   }
@@ -295,16 +289,16 @@ export function QuickPreview(props: {
 
   function onKeyDown(event: KeyboardEvent) {
     const key = event.key;
+    const target = event.target as HTMLElement;
     // A slider takes its own arrow keys.
-    if (key.startsWith("Arrow") && (event.target as HTMLElement).matches("input")) return;
-    if (!event.ctrlKey && !event.altKey && playerKeys?.(event)) {
+    if (key.startsWith("Arrow") && target.matches("input")) return;
+    if (viewKeys?.(event)) {
       event.preventDefault();
       return;
     }
-    const paged = pageCount() > 0;
-    if (paged && key === "ArrowLeft") turn(-1);
-    else if (paged && key === "ArrowRight") turn(1);
-    else if (key === "ArrowLeft" || key === "ArrowUp") step(-1);
+    // Typing in a view's box, such as Find, is left alone.
+    if (target.matches("input:not([type=range]), textarea")) return;
+    if (key === "ArrowLeft" || key === "ArrowUp") step(-1);
     else if (key === "ArrowRight" || key === "ArrowDown") step(1);
     else if (key === " ") {
       if (!event.repeat) props.onClose();
@@ -321,11 +315,6 @@ export function QuickPreview(props: {
   });
 
   createEffect(on(index, (at) => void show(at)));
-  createEffect(
-    on([shown, page], ([preview, at]) => {
-      showPage(preview, at).catch((reason) => setFailure(String(reason)));
-    }),
-  );
 
   const facts = () => {
     const item = row();
@@ -336,14 +325,6 @@ export function QuickPreview(props: {
       item.modified > 0 ? dates.format(item.modified) : "",
       `${index() + 1} of ${props.at.count().toLocaleString()}`,
     ].filter(Boolean);
-  };
-
-  const pageText = () => {
-    const preview = shown();
-    const where = `${page() + 1} of ${pageCount()}`;
-    if (preview?.kind === "comic") return `Page ${where}`;
-    if (preview?.kind === "book") return [preview.title, `Chapter ${where}`].filter(Boolean).join("  ·  ");
-    return "";
   };
 
   return (
@@ -359,29 +340,22 @@ export function QuickPreview(props: {
         ref={body}
         class="preview-body"
         tabindex="0"
-        onScroll={() => void moreText()}
         onClick={onBodyClick}
       >
         <Show when={shown()} keyed>
           {(preview) => (
             <>
-              {preview.kind === "text" && (
-                <pre class="preview-text">
-                  <code ref={fillText} class="hljs" />
-                </pre>
-              )}
-              {preview.kind === "markdown" && <article ref={fillMarkdown} class="preview-markdown" />}
-              {preview.kind === "picture" && <canvas ref={drawPicture} class="preview-picture" />}
-              {preview.kind === "comic" && <canvas ref={(canvas) => (pageCanvas = canvas)} class="preview-picture" />}
-              {preview.kind === "book" && (
-                <article ref={(article) => (chapterArticle = article)} class="preview-markdown preview-book" />
-              )}
-              {preview.kind === "archive" && <ArchiveList entries={preview.entries} more={preview.more} />}
+              {preview.kind === "text" && <TextView {...text(row()!, preview)} />}
+              {preview.kind === "markdown" && <MarkdownView {...markdown(row()!, preview.html)} />}
+              {preview.kind === "picture" && <PictureView {...picture()} />}
+              {preview.kind === "comic" && <ComicView {...comic(row()!, preview.pages)} />}
+              {preview.kind === "book" && <BookView {...book(row()!, preview)} />}
+              {preview.kind === "archive" && <ArchiveView {...archive(preview.entries, preview.more)} />}
               {preview.kind === "model" && (
                 <ModelStage
                   name={row()!.name}
                   read={reader(index(), snapshot)}
-                  keys={(handler) => (playerKeys = handler)}
+                  keys={(handler) => (viewKeys = handler)}
                   onFailure={setFailure}
                 />
               )}
@@ -400,53 +374,13 @@ export function QuickPreview(props: {
       <footer class="preview-footer">
         <span class="preview-name">{row()?.name}</span>
         <span class="preview-facts">{facts().join("  ·  ")}</span>
-        <Show when={pageText()}>
-          <span class="preview-facts preview-page">{pageText()}</span>
+        <Show when={note()}>
+          <span class="preview-facts preview-page">{note()}</span>
         </Show>
         <Show when={row() && parentOf(pathOf(row()!)) !== props.at.folder && row()!.location}>
           <span class="preview-facts">{row()!.location}</span>
         </Show>
       </footer>
     </dialog>
-  );
-}
-
-/** What a ZIP holds, as one list of paths inside it. */
-function ArchiveList(props: { entries: ArchiveEntry[]; more: boolean }) {
-  const files = props.entries.filter((entry) => !entry.folder);
-  const unpacked = files.reduce((sum, entry) => sum + entry.size, 0);
-  const count = (amount: number, one: string) => `${amount.toLocaleString()} ${one}${amount === 1 ? "" : "s"}`;
-  const summary = [
-    count(files.length, "file"),
-    count(props.entries.length - files.length, "folder"),
-    `${formatSize(unpacked)} unpacked`,
-  ].join("  \u00b7  ");
-  return (
-    <div class="preview-archive">
-      <p class="preview-archive-sum">
-        {summary}
-        {props.more && ". Only the first ones are listed."}
-      </p>
-      <table>
-        <thead>
-          <tr>
-            <th>Name</th>
-            <th>Size</th>
-            <th>Modified</th>
-          </tr>
-        </thead>
-        <tbody>
-          <For each={props.entries}>
-            {(entry) => (
-              <tr data-folder={entry.folder || undefined}>
-                <td>{entry.name}</td>
-                <td>{entry.folder ? "" : formatSize(entry.size)}</td>
-                <td>{entry.modified ?? ""}</td>
-              </tr>
-            )}
-          </For>
-        </tbody>
-      </table>
-    </div>
   );
 }

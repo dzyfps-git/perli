@@ -44,8 +44,9 @@ pub enum Job {
     Shortcut { sources: Vec<PathBuf>, folder: PathBuf },
     /// A new archive beside the first source.
     Zip { sources: Vec<PathBuf> },
-    /// Each archive beside itself, loose or in a new folder of its own.
-    Unzip { archives: Vec<PathBuf>, own_folder: bool },
+    /// Each archive beside itself, loose or in a new folder of its own. With `only`, just that
+    /// entry of each, a file or a folder with all it holds, lands beside the archive.
+    Unzip { archives: Vec<PathBuf>, own_folder: bool, only: Option<String> },
     /// Files dragged in with no paths of their own.
     Receive { incoming: Incoming, folder: PathBuf },
     Recycle { paths: Vec<PathBuf> },
@@ -287,7 +288,7 @@ impl<'a> Run<'a> {
             Job::Template { folder, template } => self.new_from(&folder, &template),
             Job::Shortcut { sources, folder } => self.shortcuts(&sources, &folder),
             Job::Zip { sources } => self.zip(sources),
-            Job::Unzip { archives, own_folder } => self.unzip(archives, own_folder),
+            Job::Unzip { archives, own_folder, only } => self.unzip(archives, own_folder, only.as_deref()),
             Job::Receive { incoming, folder } => self.receive(incoming, &folder),
             Job::Recycle { paths } => {
                 self.add_total(paths.len() as u64, 0);

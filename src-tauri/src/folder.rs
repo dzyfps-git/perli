@@ -668,6 +668,27 @@ fn natural(a: &[u16], b: &[u16]) -> Ordering {
     unsafe { StrCmpLogicalW(PCWSTR(a.as_ptr()), PCWSTR(b.as_ptr())) }.cmp(&0)
 }
 
+/// The names of the folders right inside `path`, in Explorer's order, for a path crumb's menu.
+pub fn subfolders(path: &Path, show_hidden: bool) -> std::io::Result<Vec<String>> {
+    use std::os::windows::fs::MetadataExt;
+
+    let mut names: Vec<Box<[u16]>> = std::fs::read_dir(path)?
+        .flatten()
+        .filter(|entry| {
+            entry.metadata().is_ok_and(|facts| {
+                let attributes = facts.file_attributes();
+                attributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0 && (show_hidden || attributes & FILE_ATTRIBUTE_HIDDEN.0 == 0)
+            })
+        })
+        .map(|entry| null_terminated(Path::new(&entry.file_name())))
+        .collect();
+    names.sort_by(|a, b| natural(a, b));
+    Ok(names
+        .iter()
+        .map(|name| String::from_utf16_lossy(&name[..name.len() - 1]))
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -828,6 +849,19 @@ mod tests {
 
         assert_eq!(sorted(&folder, Order::default()), ["seen"]);
         assert_eq!(sorted(&folder, order), ["secret", "seen"]);
+    }
+
+    #[test]
+    fn a_crumb_lists_its_folders_in_natural_order_without_files_or_hidden_ones() {
+        let folder = TempFolder::new("subfolders");
+        for name in ["photos 10", "photos 2", "Apps", "secret"] {
+            fs::create_dir(folder.0.join(name)).unwrap();
+        }
+        fs::write(folder.0.join("notes.txt"), "").unwrap();
+        hide(&folder.0.join("secret"));
+
+        assert_eq!(subfolders(&folder.0, false).unwrap(), ["Apps", "photos 2", "photos 10"]);
+        assert_eq!(subfolders(&folder.0, true).unwrap(), ["Apps", "photos 2", "photos 10", "secret"]);
     }
 
     #[test]

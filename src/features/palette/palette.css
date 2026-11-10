@@ -42,6 +42,7 @@
 }
 
 .palette-list {
+  position: relative;
   max-height: min(340px, 60vh);
   margin: var(--space-1) 0 0;
   padding: 0;
@@ -59,8 +60,38 @@
   border-radius: var(--radius);
 }
 
-.palette-option[aria-selected="true"] {
+.palette-option {
+  position: relative;
+}
+
+/* The one highlight, gliding to whichever row is active. */
+.palette-marker {
+  position: absolute;
+  inset: 0 0 auto;
+  height: var(--row-height);
+  border-radius: var(--radius);
   background: var(--surface-selected);
+  transition: transform var(--motion-glide);
+  pointer-events: none;
+}
+
+.palette-marker[hidden] {
+  display: none;
+}
+
+.palette-label {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.palette-recent {
+  padding: 0 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--accent);
+  font-size: 11px;
 }
 
 .palette-keys,

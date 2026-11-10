@@ -487,3 +487,10 @@
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
 }
+
+/* The letters a search matched. Highlights take only color, so the accent tints the text itself. */
+::highlight(name-match) {
+  color: var(--accent);
+  text-decoration: underline 2px color-mix(in srgb, var(--accent) 45%, transparent);
+  text-underline-offset: 3px;
+}

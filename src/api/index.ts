@@ -125,7 +125,7 @@ export type Task =
   | { kind: "template"; folder: string; extension: string }
   | { kind: "ownTemplate"; folder: string; name: string }
   | { kind: "saveTemplate" | "zip"; selection: Selection }
-  | { kind: "unzip"; selection: Selection; ownFolder: boolean }
+  | { kind: "unzip"; selection: Selection; ownFolder: boolean; only?: string }
   | { kind: "paste"; folder: string }
   | { kind: "drop"; folder: string; action?: DropAction }
   | { kind: "recycle" | "delete" | "restore" | "purge"; selection: Selection }
@@ -440,6 +440,9 @@ export const ownTemplates = () => invoke<string[]>("own_templates");
 
 export const templatesFolder = () => invoke<string>("templates_folder");
 
+/** The names of the folders right inside `path`, in Explorer's order. */
+export const subfolders = (path: string, showHidden: boolean) => invoke<string[]>("subfolders", { path, showHidden });
+
 /** The apps holding the selected files. */
 export const fileUsers = (selection: Selection) => invoke<string[]>("file_users", { selection });
 
@@ -476,11 +479,18 @@ export type Preview =
   | { kind: "markdown"; html: string }
   | { kind: "archive"; entries: ArchiveEntry[]; more: boolean }
   | { kind: "comic"; pages: string[] }
-  | { kind: "book"; title: string; chapters: string[] }
+  | { kind: "book"; title: string; chapters: string[]; contents: BookHeading[] }
   | { kind: "model" }
   | { kind: "song" }
   | { kind: "audio" }
   | { kind: "picture" };
+
+/** A line of a book's own table of contents, and which chapter it opens. */
+export interface BookHeading {
+  title: string;
+  chapter: number;
+  depth: number;
+}
 
 /** One file or folder inside a ZIP. `modified` is as the archive wrote it. */
 export interface ArchiveEntry {
@@ -497,9 +507,11 @@ export const previewRow = (view: number, request: number, row: number, offset = 
 export const rowProperties = (view: number, request: number, row: number) =>
   invoke<[string, string][]>("row_properties", { view, request, row });
 
+export type HashKind = "md5" | "sha1" | "sha256" | "sha512";
+
 /** `null` once a newer checksum took its place. */
-export const checksum = (view: number, request: number, row: number) =>
-  invoke<string | null>("checksum", { view, request, row });
+export const checksum = (view: number, request: number, row: number, algorithm: HashKind) =>
+  invoke<string | null>("checksum", { view, request, row, algorithm });
 
 /** Web and mail links only. */
 export const openLink = (url: string) => invoke<void>("open_link", { url });
@@ -508,9 +520,17 @@ export const openLink = (url: string) => invoke<void>("open_link", { url });
 export const fetchBigPicture = (view: number, request: number, row: number, edge: number) =>
   invoke<ArrayBuffer>("big_picture", { view, request, row, edge }).then(decodeThumb);
 
+/** A picture's own width and height, or null for a format only the shell can draw. */
+export const pictureSize = (view: number, request: number, row: number) =>
+  invoke<[number, number] | null>("picture_size", { view, request, row });
+
 /** A comic page or a book's picture, by its name inside the archive. */
 export const fetchArchivePicture = (view: number, request: number, row: number, entry: string, edge: number) =>
   invoke<ArrayBuffer>("archive_picture", { view, request, row, entry, edge }).then(decodeThumb);
+
+/** The start of a text file inside a ZIP, or null if it is not text. */
+export const archiveText = (view: number, request: number, row: number, entry: string) =>
+  invoke<string | null>("archive_text", { view, request, row, entry });
 
 /** One chapter of a book as safe HTML, by its name inside the archive. */
 export const bookChapter = (view: number, request: number, row: number, entry: string) =>

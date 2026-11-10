@@ -1,5 +1,6 @@
 import { createEffect, createSignal } from "solid-js";
 import { closeView } from "../../api";
+import { morph } from "../../ui/morph";
 import { createFolderView, type FolderView } from "../navigation/folderView";
 import type { SavedPane, Session } from "./session";
 import { cycled, moved, nextActive, otherPane } from "./tabList";
@@ -7,18 +8,23 @@ import { cycled, moved, nextActive, otherPane } from "./tabList";
 export type Tabs = ReturnType<typeof createTabs>;
 export type Tab = ReturnType<typeof createTab>;
 
+let tabCount = 0;
+
 /** One title bar tab: 1 or 2 folder views side by side. */
-function createTab(views: FolderView[]) {
+function createTab(views: FolderView[], startSwapped = false) {
   const [panes, setPanes] = createSignal(views);
   const [active, setActive] = createSignal(views[0]);
-  const [swapped, setSwapped] = createSignal(false);
+  const [swapped, setSwapped] = createSignal(startSwapped);
   return {
+    /** Tells this tab apart while it moves along the strip. */
+    id: tabCount++,
     panes,
-    setPanes,
+    /** Panes slide to their new widths, and one that comes or goes fades. */
+    setPanes: (next: FolderView[]) => morph(() => setPanes(next), "panes"),
     active,
     activate: setActive,
     swapped,
-    swap: () => setSwapped(!swapped()),
+    swap: () => morph(() => setSwapped(!swapped()), "panes"),
     other: () => otherPane(panes(), active()),
     paths: () => panes().flatMap((view) => view.path() ?? []),
   };
@@ -48,8 +54,10 @@ export function createTabs() {
     const list = tabs();
     const result = [...list];
     result.splice(list.indexOf(after) + 1, 0, tab);
-    setTabs(result);
-    setActive(tab);
+    morph(() => {
+      setTabs(result);
+      setActive(tab);
+    }, "tabs");
   }
 
   function close(tab: Tab) {
@@ -57,8 +65,10 @@ export function createTabs() {
     if (list.length === 1) return;
 
     closed.push(tab.paths());
-    setActive(nextActive(list, tab, active()));
-    setTabs(list.filter((other) => other !== tab));
+    morph(() => {
+      setActive(nextActive(list, tab, active()));
+      setTabs(list.filter((other) => other !== tab));
+    }, "tabs");
     for (const view of tab.panes()) closeView(view.id).catch(console.error);
   }
 
@@ -75,20 +85,21 @@ export function createTabs() {
 
   /** Opens `path` in the other pane, adding that pane if the tab has only one. */
   function openToSide(path: string, tab = active()) {
-    let view = tab.other();
-    if (!view) {
-      view = newView();
-      tab.setPanes([...tab.panes(), view]);
-    }
+    const view = tab.other() ?? newView();
+    // ponytail: the new pane lands a frame later, once the old look is captured, so a second
+    // open to the side inside that frame would add another pane. Nothing does that today.
+    if (!tab.panes().includes(view)) tab.setPanes([...tab.panes(), view]);
     tab.activate(view);
     return view.open(path);
   }
 
   function restore(session: Omit<Session, "start">) {
     const restored = session.tabs.map((saved) => {
-      const tab = createTab(saved.panes.map((pane) => newView(pane)));
+      const tab = createTab(
+        saved.panes.map((pane) => newView(pane)),
+        saved.swapped,
+      );
       tab.activate(tab.panes()[saved.active]);
-      if (saved.swapped) tab.swap();
       return tab;
     });
     for (const view of first.panes()) closeView(view.id).catch(console.error);

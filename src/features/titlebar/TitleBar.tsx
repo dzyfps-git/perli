@@ -93,6 +93,7 @@ export function TitleBar(props: { tabs: Tabs; onNewTab: () => void }) {
             <div
               class="tab"
               classList={{ "tab-active": tab === props.tabs.active() }}
+              style={{ "--tab-name": `tab-${tab.id}` }}
               data-drop={tab.active().folder()?.path}
               role="tab"
               aria-selected={tab === props.tabs.active()}

@@ -65,6 +65,610 @@
   overflow: hidden;
 }
 
+.preview-body:has(.text-view) {
+  overflow: hidden;
+}
+
+.text-view {
+  position: relative;
+  height: 100%;
+}
+
+.text-scroll {
+  height: 100%;
+  overflow: auto;
+  outline: none;
+}
+
+.text-sheet {
+  display: flex;
+  min-width: max-content;
+}
+
+.text-scroll[data-wrap] .text-sheet {
+  min-width: 0;
+}
+
+.text-scroll[data-wrap] .preview-text {
+  flex: 1;
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Wrapped lines no longer line up with one number each. */
+.text-scroll[data-wrap] .text-gutter {
+  display: none;
+}
+
+.text-gutter {
+  position: sticky;
+  left: 0;
+  margin: 0;
+  padding: var(--space-4) var(--space-2) var(--space-4) var(--space-3);
+  color: var(--text-muted);
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  font:
+    12.5px/1.55 "Cascadia Mono",
+    Consolas,
+    monospace;
+  text-align: right;
+  user-select: none;
+  opacity: 0.7;
+}
+
+.text-tools {
+  top: var(--space-3);
+  right: calc(var(--space-3) + 10px);
+}
+
+.find-bar {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-right: var(--space-1);
+  padding-right: var(--space-1);
+  border-right: 1px solid var(--border);
+  animation: find-in var(--motion-spring);
+}
+
+.find-bar input {
+  width: 180px;
+  height: 26px;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--space-1);
+  background: var(--surface);
+  color: var(--text);
+  font: 12px var(--font);
+  outline: none;
+  transition: border-color var(--motion);
+}
+
+.find-bar input:focus {
+  border-color: var(--accent);
+}
+
+.find-count {
+  min-width: 64px;
+  padding: 0 var(--space-1);
+  color: var(--text-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  white-space: nowrap;
+}
+
+/* The box opens leftward out of the Find button. */
+@keyframes find-in {
+  from {
+    clip-path: inset(0 0 0 100%);
+    translate: 16px 0;
+    opacity: 0;
+  }
+}
+
+::highlight(find) {
+  background-color: color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+::highlight(find-current) {
+  background-color: var(--accent);
+  color: white;
+}
+
+::highlight(text-line) {
+  background-color: var(--surface-selected);
+}
+
+.preview-archive.preview-table :is(th, td),
+.preview-archive.preview-table :is(th, td):not(:first-child) {
+  width: auto;
+  max-width: 36ch;
+  text-align: left;
+  white-space: pre-wrap;
+}
+
+.preview-archive.preview-table .table-number {
+  width: 1%;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.preview-body:has(.doc-view) {
+  overflow: hidden;
+}
+
+.doc-view {
+  position: relative;
+  display: flex;
+  height: 100%;
+}
+
+.doc-scroll {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  overflow: auto;
+}
+
+.doc-tools {
+  top: var(--space-3);
+  right: calc(var(--space-3) + 10px);
+}
+
+/* The contents slide open beside the text, which makes room for them. */
+.doc-contents {
+  position: relative;
+  flex: none;
+  width: 0;
+  padding: var(--space-3) 0;
+  overflow: hidden auto;
+  border-right: 1px solid transparent;
+  opacity: 0;
+  transition:
+    width var(--motion-spring),
+    opacity var(--motion),
+    border-color var(--motion);
+}
+
+.doc-view[data-contents] .doc-contents {
+  width: 240px;
+  border-color: var(--border);
+  opacity: 1;
+}
+
+.contents-line {
+  display: block;
+  width: 240px;
+  padding: 5px var(--space-3) 5px 10px;
+  overflow: hidden;
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font: 12.5px/1.35 var(--font);
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition:
+    color var(--motion),
+    background-color var(--motion);
+}
+
+.contents-line:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.contents-line[aria-current] {
+  color: var(--accent);
+}
+
+/* Travels to the part being read. */
+.contents-marker {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: var(--accent);
+  transition:
+    translate var(--motion-spring),
+    height var(--motion-spring);
+}
+
+.book-progress {
+  position: absolute;
+  z-index: 1;
+  top: 0;
+  right: 0;
+  left: 0;
+  height: 2px;
+  background: linear-gradient(90deg, var(--accent-start), var(--accent-end));
+  transform-origin: left;
+  transition: scale 300ms ease-out;
+  pointer-events: none;
+}
+
+.doc-resumed {
+  position: absolute;
+  bottom: var(--space-3);
+  left: 50%;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 4px 4px 4px 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--overlay-tint);
+  backdrop-filter: var(--blur);
+  font-size: 12px;
+  translate: -50% 0;
+  animation: resume-in var(--motion-spring);
+}
+
+.doc-resumed .details-button {
+  border-radius: 999px;
+}
+
+.preview-body:has(.archive-view) {
+  overflow: hidden;
+}
+
+.archive-view {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.archive-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4) var(--space-2);
+}
+
+.archive-head .preview-archive-sum {
+  flex: 1;
+  margin: 0;
+}
+
+.archive-filter {
+  width: 200px;
+  height: 26px;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--space-1);
+  background: var(--surface);
+  color: var(--text);
+  font: 12px var(--font);
+  outline: none;
+  transition:
+    border-color var(--motion),
+    width var(--motion-spring);
+}
+
+.archive-filter:focus {
+  width: 260px;
+  border-color: var(--accent);
+}
+
+.archive-list {
+  flex: 1;
+  min-height: 0;
+  padding-top: 0;
+  overflow: auto;
+}
+
+.archive-list th button {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  transition: color var(--motion);
+}
+
+.archive-list th button:hover {
+  color: var(--text);
+}
+
+.archive-list tbody tr {
+  transition: background-color var(--motion);
+}
+
+.archive-list tbody tr:hover {
+  background: var(--surface-hover);
+}
+
+.archive-list tbody tr[aria-selected="true"] {
+  background: var(--surface-selected);
+}
+
+.archive-fold {
+  display: inline-block;
+  width: 14px;
+  margin-right: 4px;
+  font: 9px var(--font-icons);
+  transition: rotate var(--motion-spring);
+}
+
+.archive-fold[data-open] {
+  rotate: 90deg;
+}
+
+.preview-archive td.archive-actions {
+  padding-top: 0;
+  padding-bottom: 0;
+  opacity: 0;
+  transition: opacity var(--motion);
+}
+
+.archive-list tr:is(:hover, :focus-within, [aria-selected="true"]) .archive-actions {
+  opacity: 1;
+}
+
+.archive-actions .strip-icon {
+  width: 24px;
+  height: 22px;
+  font-size: 12px;
+}
+
+.archive-actions .strip-icon[data-done] {
+  color: var(--accent);
+  animation: resume-in var(--motion-spring);
+}
+
+/* A file inside slides in over the list, and back out to it. */
+.archive-look {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  animation: look-in var(--motion-spring);
+}
+
+@keyframes look-in {
+  from {
+    translate: 48px 0;
+    opacity: 0;
+  }
+}
+
+.archive-look-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border);
+}
+
+.archive-look-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.archive-look-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.archive-look-picture {
+  max-width: 100%;
+  max-height: 100%;
+  margin: auto;
+  object-fit: contain;
+}
+
+.preview-body:has(.comic-view) {
+  padding: 0;
+}
+
+.comic-view {
+  position: relative;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.comic-stage {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  padding: var(--space-3);
+  overflow: auto;
+}
+
+.comic-sheet {
+  display: flex;
+  justify-content: center;
+  gap: 2px;
+  margin: auto;
+}
+
+.comic-sheet[data-manga] {
+  flex-direction: row-reverse;
+}
+
+.comic-stage .comic-page {
+  min-width: 0;
+  margin: 0;
+  object-fit: contain;
+}
+
+.comic-stage[data-fit="page"] .comic-sheet {
+  width: 100%;
+  height: 100%;
+}
+
+.comic-stage[data-fit="page"] .comic-page {
+  max-width: 100%;
+  max-height: 100%;
+}
+
+.comic-stage[data-fit="width"] .comic-sheet {
+  width: 100%;
+  margin-top: 0;
+}
+
+.comic-stage[data-fit="width"] .comic-page {
+  flex: 1;
+  width: 0;
+  height: auto;
+  max-width: none;
+  max-height: none;
+}
+
+.comic-stage[data-fit="height"] .comic-sheet {
+  height: 100%;
+  margin-left: 0;
+}
+
+.comic-stage[data-fit="height"] .comic-page {
+  width: auto;
+  height: 100%;
+  max-width: none;
+  max-height: none;
+}
+
+.comic-tools {
+  top: var(--space-3);
+  right: var(--space-3);
+}
+
+.comic-fit {
+  min-width: 76px;
+}
+
+.comic-resume {
+  position: absolute;
+  top: var(--space-3);
+  left: 50%;
+  translate: -50% 0;
+}
+
+.comic-strip {
+  display: flex;
+  flex: none;
+  gap: 6px;
+  padding: 6px var(--space-3);
+  overflow-x: auto;
+  border-top: 1px solid var(--border);
+  animation: strip-in var(--motion-spring);
+}
+
+.comic-strip[data-manga] {
+  flex-direction: row-reverse;
+}
+
+@keyframes strip-in {
+  from {
+    translate: 0 24px;
+    opacity: 0;
+  }
+}
+
+.comic-thumb {
+  flex: none;
+  height: 64px;
+  min-width: 40px;
+  padding: 0;
+  border: 0;
+  border-radius: 3px;
+  background: var(--surface-hover);
+  outline: 2px solid transparent;
+  outline-offset: 1px;
+  overflow: hidden;
+  transition:
+    outline-color var(--motion),
+    translate var(--motion-spring),
+    opacity var(--motion);
+  opacity: 0.65;
+}
+
+.comic-thumb:hover {
+  opacity: 1;
+}
+
+.comic-thumb[aria-selected="true"] {
+  outline-color: var(--accent);
+  opacity: 1;
+  translate: 0 -2px;
+}
+
+.comic-thumb canvas {
+  display: block;
+  height: 100%;
+}
+
+.preview-body:has(.picture-stage) {
+  padding: 0;
+}
+
+.picture-stage {
+  position: relative;
+  flex: 1;
+  overflow: hidden;
+  touch-action: none;
+}
+
+.picture-stage[data-zoomed] {
+  cursor: grab;
+}
+
+.picture-stage[data-dragging] {
+  cursor: grabbing;
+}
+
+.picture-stage .preview-picture {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  max-width: none;
+  max-height: none;
+  margin: 0;
+  transition: transform var(--motion-spring);
+  will-change: transform;
+}
+
+.picture-stage[data-dragging] .preview-picture {
+  transition: none;
+}
+
+.zoom-chip {
+  min-width: 52px;
+  padding: 0 var(--space-1);
+  border: 0;
+  border-radius: var(--space-1);
+  background: transparent;
+  color: var(--text);
+  font: 12px/28px var(--font);
+  font-variant-numeric: tabular-nums;
+  transition: background-color var(--motion);
+}
+
+.zoom-chip:hover {
+  background: var(--surface-hover);
+}
+
+.preview-tools .zoom-actual {
+  font-family: var(--font);
+  font-size: 11px;
+  font-weight: 600;
+}
+
 .preview-markdown {
   max-width: 760px;
   margin: 0 auto;
@@ -366,6 +970,150 @@
   color: var(--text-muted);
 }
 
+.hash-kinds {
+  display: flex;
+  flex-basis: 100%;
+  gap: 2px;
+  padding: 2px;
+  background: var(--surface-hover);
+  border-radius: var(--radius);
+  width: fit-content;
+}
+
+.hash-kinds button {
+  padding: 1px var(--space-2);
+  color: var(--text-muted);
+  background: transparent;
+  border: 0;
+  border-radius: calc(var(--radius) - 2px);
+  font: inherit;
+  font-size: 11.5px;
+  transition:
+    background var(--motion),
+    color var(--motion),
+    scale var(--motion-spring);
+}
+
+.hash-kinds button:hover {
+  color: var(--text);
+}
+
+.hash-kinds button[aria-pressed="true"] {
+  color: var(--text);
+  background: var(--surface-selected);
+}
+
+.hash-kinds button:active {
+  scale: 0.94;
+}
+
+.hash-working {
+  animation: hash-breathe 1.2s ease-in-out infinite alternate;
+}
+
+@keyframes hash-breathe {
+  to {
+    opacity: 0.45;
+  }
+}
+
+.details-hash code {
+  transition: color var(--motion);
+}
+
+.details-hash code.hash-match {
+  color: var(--success);
+}
+
+.details-hash code.hash-mismatch {
+  color: var(--danger);
+}
+
+.hash-paste {
+  flex-basis: 100%;
+  min-width: 0;
+  padding: 3px var(--space-2);
+  color: var(--text);
+  background: var(--surface-hover);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  outline: none;
+  font:
+    11.5px "Cascadia Mono",
+    Consolas,
+    monospace;
+  transition:
+    border-color var(--motion),
+    box-shadow var(--motion);
+}
+
+.hash-paste::placeholder {
+  font-family: var(--font);
+  color: var(--text-muted);
+}
+
+.hash-paste:focus {
+  border-color: var(--accent);
+}
+
+.hash-paste.hash-match {
+  border-color: var(--success);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--success) 22%, transparent);
+}
+
+.hash-paste.hash-mismatch {
+  border-color: var(--danger);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger) 22%, transparent);
+  animation: hash-shake 360ms ease-out;
+}
+
+.hash-verdict {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  font-weight: 600;
+  animation: hash-verdict-in var(--motion-spring);
+}
+
+.hash-verdict.hash-match {
+  color: var(--success);
+}
+
+.hash-verdict.hash-mismatch {
+  color: var(--danger);
+}
+
+.hash-verdict-icon {
+  font-family: var(--font-icons);
+  font-size: 11px;
+}
+
+@keyframes hash-verdict-in {
+  from {
+    opacity: 0;
+    scale: 0.6;
+  }
+}
+
+@keyframes hash-shake {
+  20%,
+  60% {
+    translate: -4px;
+  }
+  40%,
+  80% {
+    translate: 4px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hash-paste.hash-mismatch,
+  .hash-working,
+  .hash-verdict {
+    animation: none;
+  }
+}
+
 .details-button {
   padding: 2px var(--space-2);
   color: var(--text);
@@ -396,7 +1144,7 @@
   background: #e9ebef;
 }
 
-.model-tools,
+.preview-tools,
 .model-clips {
   position: absolute;
   display: flex;
@@ -409,13 +1157,13 @@
   cursor: default;
 }
 
-.model-tools {
+.preview-tools {
   top: var(--space-3);
   right: var(--space-3);
   animation: tools-in var(--motion-spring);
 }
 
-.model-tools .strip-icon,
+.preview-tools .strip-icon,
 .model-clips .strip-icon {
   width: 28px;
   height: 28px;
@@ -426,17 +1174,17 @@
     scale var(--motion-slide);
 }
 
-.model-tools .strip-icon:active,
+.preview-tools .strip-icon:active,
 .model-clips .strip-icon:active {
   scale: 0.88;
 }
 
-.model-tools .strip-icon[aria-pressed="true"] {
+.preview-tools .strip-icon[aria-pressed="true"] {
   background: color-mix(in srgb, var(--accent) 22%, transparent);
   color: var(--accent);
 }
 
-.model-tools .strip-icon:focus-visible,
+.preview-tools .strip-icon:focus-visible,
 .model-clips :is(.strip-icon, select):focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: -2px;
@@ -760,4 +1508,10 @@
   height: 16px;
   margin: 0;
   accent-color: var(--accent);
+}
+
+/* They take the focus only so the scrolling keys work, which needs no ring. */
+.text-scroll:focus,
+.doc-scroll:focus {
+  outline: none;
 }

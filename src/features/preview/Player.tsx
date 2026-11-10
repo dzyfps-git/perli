@@ -251,6 +251,7 @@ export function Player(live: PlayerProps) {
   }
 
   props.keys((event) => {
+    if (event.ctrlKey || event.altKey || event.target instanceof HTMLInputElement && event.target.type !== "range") return false;
     const step = event.shiftKey ? BIG_STEP_SECONDS : STEP_SECONDS;
     const key = event.key;
     if (key === "ArrowLeft") seek(audio.currentTime - step);

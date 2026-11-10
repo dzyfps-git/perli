@@ -14,6 +14,7 @@
   --text: light-dark(#1c1b20, #f0eff2);
   --text-muted: light-dark(#66646e, #9a99a3);
   --danger: #c42b1c;
+  --success: #2e9e4f;
 
   --tag-0: #d13438;
   --tag-1: #e8710a;
@@ -97,6 +98,62 @@
   --accent-start: light-dark(#55535c, #d6d5db);
   --accent: light-dark(#77757f, #aeadb5);
   --accent-end: light-dark(#55535c, #d6d5db);
+}
+
+/* Registered as colors, so a new accent or theme blends across the whole app instead of jumping.
+   Everything mixed from them follows along. */
+@property --accent-start {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: #4f6bed;
+}
+
+@property --accent {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: #7a5fe0;
+}
+
+@property --accent-end {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: #d6479f;
+}
+
+:root {
+  transition:
+    --accent-start 450ms ease,
+    --accent 450ms ease,
+    --accent-end 450ms ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    transition: none;
+  }
+}
+
+/* The new theme spreads out in a circle from the button that chose it. */
+[data-morph="theme"]::view-transition-old(root) {
+  animation: none;
+}
+
+[data-morph="theme"]::view-transition-new(root) {
+  animation: theme-reveal 560ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+@keyframes theme-reveal {
+  from {
+    clip-path: circle(0 at var(--reveal-x, 50%) var(--reveal-y, 50%));
+  }
+  to {
+    clip-path: circle(150vmax at var(--reveal-x, 50%) var(--reveal-y, 50%));
+  }
+}
+
+::view-transition-group(*) {
+  animation-duration: 320ms;
+  animation-timing-function: cubic-bezier(0.3, 1.1, 0.5, 1);
 }
 
 :root,

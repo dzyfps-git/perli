@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { finder, renamed, START_RULES, type RenameRules } from "./renameRules.ts";
+import { changedPart, finder, renamed, START_RULES, type RenameRules } from "./renameRules.ts";
 
 function rename(name: string, change: Partial<RenameRules>, { isDir = false, index = 0 } = {}) {
   const rules = { ...START_RULES, ...change };
@@ -48,4 +48,13 @@ test("letter case changes all but the extension", () => {
   assert.equal(rename("Ab cD.TXT", { letterCase: "lower" }), "ab cd.TXT");
   assert.equal(rename("Ab cD.txt", { letterCase: "upper" }), "AB CD.txt");
   assert.equal(rename("heLLo wORLD-it's_élan.txt", { letterCase: "title" }), "Hello World-It's_Élan.txt");
+});
+
+test("the changed part of a rename sits between what both names share", () => {
+  assert.deepEqual(changedPart("IMG_0042.jpg", "Trip 0042.jpg"), { start: 0, oldEnd: 4, newEnd: 5 });
+  assert.deepEqual(changedPart("notes.txt", "notes (2).txt"), { start: 5, oldEnd: 5, newEnd: 9 });
+  assert.deepEqual(changedPart("same.txt", "same.txt"), { start: 8, oldEnd: 8, newEnd: 8 });
+  assert.deepEqual(changedPart("aa", "aaa"), { start: 0, oldEnd: 0, newEnd: 1 });
+  assert.deepEqual(changedPart("notes.txt", "new notes.txt"), { start: 0, oldEnd: 0, newEnd: 4 });
+  assert.deepEqual(changedPart("notes.txt", "notes s.txt"), { start: 5, oldEnd: 5, newEnd: 7 });
 });
