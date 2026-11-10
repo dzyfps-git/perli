@@ -114,12 +114,19 @@ fn inside_of(path: &Path) -> Option<Preview> {
 }
 
 /// A 3D model's file or, with `part`, a file it points to. Like Markdown pictures, parts come
-/// only from this PC, by a path relative to the model's folder, never from the web.
+/// only from this PC, by a path relative to the model's folder, never from the web, and never
+/// from outside that folder, even through `..` or a link.
 pub fn model_file(path: &Path, part: Option<&str>) -> Result<Vec<u8>, String> {
     let path = match part {
         None => path.to_path_buf(),
         Some(part) if !part.is_empty() && !part.contains(':') && !part.starts_with(['/', '\\']) => {
-            path.parent().ok_or("The model has no folder")?.join(part)
+            let folder = path.parent().ok_or("The model has no folder")?;
+            let folder = folder.canonicalize().map_err(|error| error.to_string())?;
+            let found = folder.join(part).canonicalize().map_err(|error| error.to_string())?;
+            if !found.starts_with(&folder) {
+                return Err("Only files beside the model can load".into());
+            }
+            found
         }
         Some(_) => return Err("Only files beside the model can load".into()),
     };
@@ -387,6 +394,14 @@ mod tests {
         assert_eq!(read(&model, 0), Preview::Model);
         assert_eq!(model_file(&model, None).unwrap(), b"{}");
         assert_eq!(model_file(&model, Some("textures/hull.png")).unwrap(), b"png");
+        assert_eq!(model_file(&model, Some("textures/../textures/hull.png")).unwrap(), b"png");
+        let inner = folder.join("inner");
+        std::fs::create_dir_all(&inner).unwrap();
+        let inner_model = inner.join("cube.gltf");
+        std::fs::write(&inner_model, "{}").unwrap();
+        for outside in ["../ship.gltf", r"..\ship.gltf", r"..\textures\hull.png", "../textures/hull.png"] {
+            assert!(model_file(&inner_model, Some(outside)).is_err(), "{outside}");
+        }
         for outside in ["https://example.com/hull.png", "C:/Windows/win.ini", "//server/share/x", r"\\server\x", "/x", ""] {
             assert!(model_file(&model, Some(outside)).is_err(), "{outside}");
         }

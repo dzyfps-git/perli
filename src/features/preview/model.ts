@@ -16,6 +16,7 @@ import {
   Sphere,
   Vector3,
   WebGLRenderer,
+  type AnimationAction,
   type AnimationClip,
   type Material,
   type Object3D,
@@ -43,8 +44,10 @@ export interface ModelView {
   grid: (on: boolean) => void;
   /** Stands a model made with Z up the right way, or back. */
   upright: (on: boolean) => void;
-  /** Plays one animation, or none with -1. */
+  /** Plays one animation from its start. */
   play: (clip: number) => void;
+  /** Holds the animation playing where it is, or goes on from there. */
+  pause: (on: boolean) => void;
   dispose: () => void;
 }
 
@@ -90,7 +93,7 @@ export async function showModel(canvas: HTMLCanvasElement, name: string, read: R
   let showFloor = false;
   let flight: { from: Vector3; fromTarget: Vector3; start: number } | undefined;
   const mixer = clips.length ? new AnimationMixer(model) : undefined;
-  let playing = -1;
+  let action: AnimationAction | undefined;
   const clock = new Clock();
 
   /** Works out the first view, and where the floor goes, for the model as it now stands. */
@@ -130,7 +133,7 @@ export async function showModel(canvas: HTMLCanvasElement, name: string, read: R
   }
 
   const draw = () => renderer.render(scene, camera);
-  const busy = () => !!flight || controls.autoRotate || playing >= 0;
+  const busy = () => !!flight || controls.autoRotate || (!!action && !action.paused);
 
   function frame() {
     const delta = clock.getDelta();
@@ -168,12 +171,18 @@ export async function showModel(canvas: HTMLCanvasElement, name: string, read: R
   }
 
   function play(clip: number) {
-    mixer?.stopAllAction();
-    playing = clip;
-    if (mixer && clip >= 0) {
-      mixer.clipAction(clips[clip]).play();
-      wake();
-    }
+    if (!mixer) return;
+    mixer.stopAllAction();
+    action = mixer.clipAction(clips[clip]);
+    action.paused = false;
+    action.play();
+    wake();
+  }
+
+  function pause(on: boolean) {
+    if (!action) return;
+    action.paused = on;
+    if (!on) wake();
   }
 
   const resize = () => {
@@ -222,6 +231,7 @@ export async function showModel(canvas: HTMLCanvasElement, name: string, read: R
     },
     upright,
     play,
+    pause,
     dispose: () => {
       renderer.setAnimationLoop(null);
       watcher.disconnect();
@@ -254,14 +264,9 @@ async function load(extension: string, read: ReadModel, urls: string[]): Promise
     return { model: new Mesh(geometry, material), clips: [] };
   }
   if (extension === "obj") return { model: await obj(new TextDecoder().decode(bytes), read, urls), clips: [] };
-  const loader = new GLTFLoader();
-  if (extension === "glb") {
-    const found = await loader.parseAsync(bytes, "");
-    return { model: found.scene, clips: found.animations };
-  }
-  const json = JSON.parse(new TextDecoder().decode(bytes));
-  await localParts(json, read, urls);
-  const found = await loader.parseAsync(JSON.stringify(json), "");
+  const json = extension === "glb" ? glbJson(bytes) : JSON.parse(new TextDecoder().decode(bytes));
+  const loader = new GLTFLoader(await localParts(json, read, urls));
+  const found = await loader.parseAsync(bytes, "");
   return { model: found.scene, clips: found.animations };
 }
 
@@ -329,18 +334,36 @@ async function obj(text: string, read: ReadModel, urls: string[]) {
   return group;
 }
 
+type GltfJson = { buffers?: { uri?: string }[]; images?: { uri?: string }[] };
+
+/** The JSON a GLB starts with, which names any files it keeps outside itself. */
+export function glbJson(bytes: ArrayBuffer): GltfJson {
+  try {
+    const length = new DataView(bytes).getUint32(12, true);
+    return JSON.parse(new TextDecoder().decode(new Uint8Array(bytes, 20, length)));
+  } catch {
+    // Not a GLB after all, which the loader says better.
+    return {};
+  }
+}
+
 /**
- * Points a glTF's outside files at copies read from beside it. One on the web, or one that is
- * missing, becomes empty, so nothing ever loads from the web. A missing picture leaves its
- * surface plain, and a missing buffer means the model can't show.
+ * Points a glTF's or GLB's outside files at copies read from beside it. One on the web, or one
+ * that is missing, becomes empty, so nothing ever loads from the web. A missing picture leaves
+ * its surface plain, and a missing buffer means the model can't show.
  */
-async function localParts(json: { buffers?: { uri?: string }[]; images?: { uri?: string }[] }, read: ReadModel, urls: string[]) {
-  const parts = [...(json.buffers ?? []), ...(json.images ?? [])].filter(
-    (part) => part.uri !== undefined && !part.uri.startsWith("data:"),
-  );
+async function localParts(json: GltfJson, read: ReadModel, urls: string[]) {
+  const found = new Map<string, string>();
+  const uris = [...(json.buffers ?? []), ...(json.images ?? [])].map((part) => part.uri);
   await Promise.all(
-    parts.map(async (part) => {
-      part.uri = (await partUrl(part.uri!, read, urls)) ?? "data:,";
+    uris.map(async (uri) => {
+      if (!uri || uri.startsWith("data:")) return;
+      const url = await partUrl(uri, read, urls);
+      if (url) found.set(uri, url);
     }),
   );
+  const manager = new LoadingManager();
+  // Pictures packed inside the file arrive as blob: URLs of the loader's own.
+  manager.setURLModifier((url) => found.get(url) ?? (/^(blob|data):/.test(url) ? url : "data:,"));
+  return manager;
 }
