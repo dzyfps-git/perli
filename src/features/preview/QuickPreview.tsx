@@ -113,9 +113,10 @@ export function QuickPreview(props: {
 
   function fillText(code: HTMLElement) {
     const preview = shown();
-    if (preview?.kind === "text") void addText(code, preview.text);
+    if (preview?.kind === "text") void addText(code, preview.text).then(moreText);
   }
 
+  /** Loads the next piece near the end, and again while the text still doesn't fill the body. */
   async function moreText() {
     const code = body.querySelector("code");
     if (next === null || loadingMore || !code) return;
@@ -128,10 +129,12 @@ export function QuickPreview(props: {
       next = piece.next;
       await addText(code, piece.text);
     } catch (reason) {
-      setFailure(String(reason));
+      if (mine === ticket) setFailure(String(reason));
+      return;
     } finally {
       loadingMore = false;
     }
+    if (mine === ticket) void moreText();
   }
 
   function drawPicture(canvas: HTMLCanvasElement) {
@@ -227,6 +230,7 @@ export function QuickPreview(props: {
       { translate: [`${stepped * SLIDE_PX}px 0`, "0 0"], opacity: [0, 1] },
       { duration: SLIDE_MS, easing: "cubic-bezier(0.3, 1.1, 0.5, 1)" },
     );
+    stepped = 0;
   }
 
   function step(by: number) {
@@ -258,10 +262,20 @@ export function QuickPreview(props: {
     body.focus();
   });
 
-  createEffect(on(index, (at) => void show(at)));
+  // A reload of the folder replaces the snapshot, so the row is fetched again from the new one.
+  createEffect(
+    on([index, props.at.snapshot], ([at]) => {
+      const kept = Math.max(0, Math.min(at, props.at.count() - 1));
+      if (kept !== at) setIndex(kept);
+      else void show(at);
+    }),
+  );
   createEffect(
     on([shown, page], ([preview, at]) => {
-      showPage(preview, at).catch((reason) => setFailure(String(reason)));
+      const mine = ticket;
+      showPage(preview, at).catch((reason) => {
+        if (mine === ticket && page() === at) setFailure(String(reason));
+      });
     }),
   );
 
