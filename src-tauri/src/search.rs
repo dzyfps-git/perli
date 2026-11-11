@@ -301,10 +301,39 @@ pub enum Step {
     Grown,
 }
 
+/// How far from the shown folder a search looks.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum Scope {
+    /// The folder and everything under it.
+    #[default]
+    Below,
+    /// The folder's own entries, and no deeper.
+    Folder,
+    /// The whole drive the folder is on.
+    Drive,
+    /// Every drive, the folder's own first.
+    Drives,
+}
+
 #[derive(Deserialize)]
 pub struct Asked {
     pub step: Step,
     pub query: String,
+    #[serde(default)]
+    pub scope: Scope,
+}
+
+/// The top of the drive or share `folder` is on.
+fn root_of(folder: &Path) -> PathBuf {
+    folder.ancestors().last().unwrap_or(folder).to_path_buf()
+}
+
+/// Every drive with a letter, but for `own`.
+fn other_drives(own: &Path) -> Vec<PathBuf> {
+    let letters = unsafe { windows::Win32::Storage::FileSystem::GetLogicalDrives() };
+    let roots = (0..26u8).filter(|bit| letters & (1 << bit) != 0).map(|bit| PathBuf::from(format!("{}:\\", char::from(b'A' + bit))));
+    roots.filter(|root| !root.as_os_str().eq_ignore_ascii_case(own.as_os_str())).collect()
 }
 
 /// A filter can leave so few rows that scrolling never asks for more.
@@ -359,9 +388,18 @@ impl Searches {
             return Ok(Listing::searched(found, order));
         }
 
-        let folder = PathBuf::from(folder::resolve(path)?);
+        let shown_folder = PathBuf::from(folder::resolve(path)?);
+        let folder = match asked.scope {
+            Scope::Drive | Scope::Drives => root_of(&shown_folder),
+            Scope::Below | Scope::Folder => shown_folder,
+        };
         let query = Query::new(&asked.query);
-        let (first, below) = read_top(&folder, &query, order.show_hidden)?;
+        let (first, mut below) = read_top(&folder, &query, order.show_hidden)?;
+        match asked.scope {
+            Scope::Folder => below.clear(),
+            Scope::Drives => below.extend(other_drives(&folder)),
+            Scope::Below | Scope::Drive => (),
+        }
         let quiet = asked.step == Step::Again;
         let kept = running.filter(|_| quiet);
         let room = match &kept {
@@ -445,12 +483,33 @@ mod tests {
         let report = move |done| {
             let _ = reports.send(done);
         };
-        let asked = Asked { step: Step::Start, query: query.to_string() };
+        let asked = Asked { step: Step::Start, query: query.to_string(), scope: Scope::Below };
         (searches.rows(1, asked, tree.path(), order, report).unwrap(), heard)
     }
 
+    #[test]
+    fn a_search_of_this_folder_only_goes_no_deeper() {
+        let tree = Tree::new("scope");
+        let searches = Searches::default();
+        let (reports, heard) = mpsc::channel();
+        let asked = Asked { step: Step::Start, query: "report".to_string(), scope: Scope::Folder };
+        let report = move |walk| {
+            let _ = reports.send(walk);
+        };
+        searches.rows(1, asked, tree.path(), found_order(), report).unwrap();
+        wait_until_done(&heard);
+        assert_eq!(grown(&searches, &tree, found_order()).len(), 1);
+    }
+
+    #[test]
+    fn a_drive_search_starts_from_the_top_of_the_drive() {
+        assert_eq!(root_of(Path::new(r"C:\Users\me\Docs")), Path::new(r"C:\"));
+        assert_eq!(root_of(Path::new(r"\\server\share\deep\er")), Path::new(r"\\server\share\"));
+        assert!(!other_drives(Path::new(r"c:\")).contains(&PathBuf::from(r"C:\")));
+    }
+
     fn grown(searches: &Searches, tree: &Tree, order: Order) -> Listing {
-        let asked = Asked { step: Step::Grown, query: String::new() };
+        let asked = Asked { step: Step::Grown, query: String::new(), scope: Scope::Below };
         searches.rows(1, asked, tree.path(), order, |_| ()).unwrap()
     }
 
@@ -610,7 +669,7 @@ mod tests {
 
         fs::rename(tree.0.join(r"deep\inner\plain.txt"), tree.0.join(r"deep\inner\plainer.txt")).unwrap();
         let (reports, heard) = mpsc::channel();
-        let asked = Asked { step: Step::Again, query: "plain".to_string() };
+        let asked = Asked { step: Step::Again, query: "plain".to_string(), scope: Scope::Below };
         let report = move |done| {
             let _ = reports.send(done);
         };
@@ -734,7 +793,7 @@ mod tests {
         wait_until_done(&heard);
         searches.reached(1, AHEAD);
 
-        let asked = Asked { step: Step::Again, query: "report".to_string() };
+        let asked = Asked { step: Step::Again, query: "report".to_string(), scope: Scope::Below };
         searches.rows(1, asked, tree.path(), found_order(), |_| ()).unwrap();
 
         assert_eq!(searches.all()[&1].room(), AHEAD * 2);
@@ -774,7 +833,7 @@ mod tests {
         let tree = Tree::new("sort");
         let searches = Searches::default();
         let missing = tree.0.join("nope");
-        let asked = Asked { step: Step::Start, query: "a".to_string() };
+        let asked = Asked { step: Step::Start, query: "a".to_string(), scope: Scope::Below };
         assert!(searches.rows(1, asked, missing.to_str().unwrap(), found_order(), |_| ()).is_err());
 
         let (_, heard) = start(&searches, &tree, "report", found_order());

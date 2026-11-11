@@ -6,6 +6,7 @@ import {
   scanSizes,
   type Opened,
   type Order,
+  type SearchScope,
   type SearchStep,
   type SearchWalk,
   type Selection,
@@ -107,6 +108,8 @@ export function createFolderView(id: number, saved?: SavedPane) {
   const [walk, setWalk] = createSignal<SearchWalk>("done");
   const [searchSort, setSearchSort] = createSignal(SEARCH_SORT);
   const [searchAsked, setSearchAsked] = createSignal(0);
+  /** How far from the folder a search looks. */
+  const [scope, setScopeValue] = createSignal<SearchScope>("below");
   /** Stays with the folder until the view goes to another one. */
   const [filterForm, setFilterFormValue] = createSignal(NO_FILTER);
   /** The one row selected in the list, for the details panel. */
@@ -232,7 +235,7 @@ export function createFolderView(id: number, saved?: SavedPane) {
 
     // Rows of a search have no names to go by, because one name can be in many folders.
     const { top, step } = wanted;
-    const search = query() ? { step, query: query() } : null;
+    const search = query() ? { step, query: query(), scope: scope() } : null;
     const select = search ? [] : wanted.select;
     const request = ++latestRequest;
     opening = true;
@@ -281,6 +284,13 @@ export function createFolderView(id: number, saved?: SavedPane) {
     setQuery(text);
     if (!text) setWalk("done");
     readAgain({ select: [], rename: false, step: "start", top: true });
+  }
+
+  /** A search under way starts over with the new reach. */
+  function setScope(next: SearchScope) {
+    if (next === scope()) return;
+    setScopeValue(next);
+    if (query()) readAgain({ select: [], rename: false, step: "start", top: true });
   }
 
   function searchGrew(walked: SearchWalk) {
@@ -397,6 +407,8 @@ export function createFolderView(id: number, saved?: SavedPane) {
     /** The rows so far aren't all of them, and more come as the user scrolls. */
     moreToFind: () => walk() === "waiting",
     search,
+    scope,
+    setScope,
     searchGrew,
     /** Totals came in. A search would start over, so its rows wait for the next read. */
     sizesGrew() {

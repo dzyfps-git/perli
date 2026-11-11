@@ -111,20 +111,17 @@ fn type_name(extension: &str) -> Option<String> {
     (found != 0 && length > 0).then(|| String::from_utf16_lossy(&name[..length]))
 }
 
-/// Opens a terminal in `folder`: Windows Terminal if there is one, or else PowerShell.
-pub fn open_terminal(folder: &str) -> std::io::Result<()> {
-    let terminal = Command::new("wt.exe")
-        .args(["-d", "."])
-        .current_dir(folder)
-        .spawn();
-    terminal
-        .or_else(|_| {
-            Command::new("powershell.exe")
-                .current_dir(folder)
-                .creation_flags(CREATE_NEW_CONSOLE.0)
-                .spawn()
-        })
-        .map(drop)
+/// Opens a terminal in `folder`: Windows Terminal if there is one, or else PowerShell. `shell`
+/// asks for one by name, and only these names ever start anything.
+pub fn open_terminal(folder: &str, shell: Option<&str>) -> std::io::Result<()> {
+    let console = |program: &str| Command::new(program).current_dir(folder).creation_flags(CREATE_NEW_CONSOLE.0).spawn();
+    let started = match shell {
+        Some("cmd") => console("cmd.exe"),
+        Some("powershell") => console("powershell.exe"),
+        Some("pwsh") => console("pwsh.exe"),
+        _ => Command::new("wt.exe").args(["-d", "."]).current_dir(folder).spawn().or_else(|_| console("powershell.exe")),
+    };
+    started.map(drop)
 }
 
 /// Opens a file with its default app. Blocks, so call it off the main thread.

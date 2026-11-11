@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
@@ -126,6 +126,74 @@ impl Entry {
 struct Step {
     id: u64,
     records: Vec<Done>,
+    /// When it happened, in milliseconds since 1970. Zero for steps saved before this was kept.
+    #[serde(default)]
+    at: u64,
+}
+
+/// One step of the undo log, told the way a person would.
+#[derive(Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Activity {
+    id: u64,
+    at: u64,
+    text: String,
+    /// Where to look for what it left: the item itself, or the folder it was in.
+    path: String,
+    /// It is the newest step, the only one Undo may take.
+    newest: bool,
+}
+
+fn name_of(path: &Path) -> String {
+    path.file_name().unwrap_or(path.as_os_str()).to_string_lossy().into_owned()
+}
+
+/// "Renamed A to B", "Moved 3 items to Photos": what a step did, and where to look for it.
+fn describe(records: &[Done]) -> (String, PathBuf) {
+    let counted = |verb: &str, name: &Path| match records.len() {
+        1 => format!("{verb} {}", name_of(name)),
+        many => format!("{verb} {many} items"),
+    };
+    let moves: Vec<(&PathBuf, &PathBuf)> = records
+        .iter()
+        .filter_map(|record| match record {
+            Done::Moved { from, to } => Some((from, to)),
+            _ => None,
+        })
+        .collect();
+    match records {
+        [] => (String::new(), PathBuf::new()),
+        [Done::Created { path }, rest @ ..] if !rest.is_empty() && moves.len() == rest.len() => {
+            let inside = moves.iter().all(|(_, to)| to.parent() == Some(path));
+            let text = if inside {
+                format!("Made {} with {} inside", name_of(path), rest.len())
+            } else {
+                format!("Changed {} items", records.len())
+            };
+            (text, path.clone())
+        }
+        [Done::Moved { from, to }, ..] if moves.len() == records.len() => {
+            let renamed = moves.iter().all(|(from, to)| from.parent() == to.parent());
+            let text = match (renamed, records.len()) {
+                (true, 1) => format!("Renamed {} to {}", name_of(from), name_of(to)),
+                (true, many) => format!("Renamed {many} items"),
+                (false, _) => format!("{} to {}", counted("Moved", to), name_of(to.parent().unwrap_or(to))),
+            };
+            (text, to.clone())
+        }
+        [Done::Created { path }, ..] if records.iter().all(|record| matches!(record, Done::Created { .. })) => {
+            (format!("{} to {}", counted("Added", path), name_of(path.parent().unwrap_or(path))), path.clone())
+        }
+        [Done::Recycled { original, .. }, ..] if records.iter().all(|record| matches!(record, Done::Recycled { .. })) => {
+            (counted("Recycled", original), original.parent().unwrap_or(original).to_path_buf())
+        }
+        [first, ..] => {
+            let path = match first {
+                Done::Created { path } | Done::Moved { to: path, .. } | Done::Recycled { original: path, .. } => path,
+            };
+            (format!("Changed {} items", records.len()), path.clone())
+        }
+    }
 }
 
 /// What can be undone and redone, oldest first. Ids are never reused, so an old job can't pass
@@ -183,7 +251,8 @@ impl UndoLog {
         }
         let id = self.next;
         self.next += 1;
-        let step = Step { id, records };
+        let at = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_millis() as u64);
+        let step = Step { id, records, at };
         match history {
             History::Undo => {
                 self.redo.push(step);
@@ -215,6 +284,16 @@ impl UndoLog {
 
     fn take_redo(&mut self) -> Option<Vec<Done>> {
         self.redo.pop().map(|step| step.records)
+    }
+
+    /// Every step that can still be undone, newest first.
+    fn activity(&self) -> Vec<Activity> {
+        let newest = self.latest();
+        let told = self.steps.iter().rev().map(|step| {
+            let (text, path) = describe(&step.records);
+            Activity { id: step.id, at: step.at, text, path: text_of(&path), newest: Some(step.id) == newest }
+        });
+        told.collect()
     }
 
     fn undoable(&self) -> Undoable {
@@ -256,6 +335,10 @@ impl Jobs {
 
     pub fn undoable(&self) -> Undoable {
         self.log().undoable()
+    }
+
+    pub fn activity(&self) -> Vec<Activity> {
+        self.log().activity()
     }
 
     pub fn running(&self) -> bool {
@@ -402,7 +485,7 @@ impl Bridge {
                 _ => title(&plan.job),
             },
             origin: plan.origin,
-            new_item: matches!(plan.job, Job::New { .. } | Job::Template { .. } | Job::Zip { .. }),
+            new_item: matches!(plan.job, Job::New { .. } | Job::Gather { .. } | Job::Template { .. } | Job::Zip { .. }),
             recycle: matches!(plan.job, Job::Recycle { .. }),
         });
 
@@ -483,6 +566,10 @@ fn text(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
+fn text_of(path: &Path) -> String {
+    text(path)
+}
+
 fn created(done: &[Done]) -> Vec<String> {
     let made = done.iter().filter_map(|record| match record {
         Done::Created { path } | Done::Moved { to: path, .. } => Some(text(path)),
@@ -508,6 +595,8 @@ fn title(job: &Job) -> String {
         Job::Rename { name, .. } => format!("Renaming to {name}"),
         Job::RenameAll { renames } => format!("Renaming {} items", renames.len()),
         Job::New { directory: true, .. } => "Creating a folder".to_string(),
+        Job::Gather { sources, .. } if sources.is_empty() => "Creating a folder".to_string(),
+        Job::Gather { sources, .. } => listed("Moving into a new folder", sources),
         Job::New { .. } | Job::Template { .. } => "Creating a file".to_string(),
         Job::Shortcut { sources, .. } => listed("Linking to", sources),
         Job::Zip { sources } => listed("Compressing", sources),
@@ -561,6 +650,34 @@ mod tests {
 
         assert_eq!(title(&one), "Copying b.txt");
         assert_eq!(title(&two), "Recycling 2 items");
+    }
+
+    #[test]
+    fn each_step_is_told_the_way_a_person_would() {
+        let path = |text: &str| PathBuf::from(text);
+        let moved = |from: &str, to: &str| Done::Moved { from: path(from), to: path(to) };
+        let told = |records: &[Done]| describe(records).0;
+        assert_eq!(told(&[moved(r"C:\a\old.txt", r"C:\a\new.txt")]), "Renamed old.txt to new.txt");
+        assert_eq!(told(&[moved(r"C:\a\1", r"C:\a\x"), moved(r"C:\a\2", r"C:\a\y")]), "Renamed 2 items");
+        assert_eq!(told(&[moved(r"C:\a\one.txt", r"C:\Photos\one.txt")]), "Moved one.txt to Photos");
+        let three = [moved(r"C:\a\1", r"C:\Photos\1"), moved(r"C:\a\2", r"C:\Photos\2"), moved(r"C:\a\3", r"C:\Photos\3")];
+        assert_eq!(told(&three), "Moved 3 items to Photos");
+        assert_eq!(told(&[Done::Created { path: path(r"C:\a\copy.txt") }]), "Added copy.txt to a");
+        let bin = Done::Recycled { original: path(r"C:\a\gone.txt"), item: path(r"C:\$R\x") };
+        assert_eq!(describe(&[bin]), ("Recycled gone.txt".to_string(), path(r"C:\a")));
+        let gathered = [Done::Created { path: path(r"C:\a\Trip") }, moved(r"C:\a\1", r"C:\a\Trip\1"), moved(r"C:\a\2", r"C:\a\Trip\2")];
+        assert_eq!(describe(&gathered), ("Made Trip with 2 inside".to_string(), path(r"C:\a\Trip")));
+    }
+
+    #[test]
+    fn the_activity_is_newest_first_and_only_the_newest_can_be_undone() {
+        let mut log = UndoLog::default();
+        log.record(History::New, step(1));
+        log.record(History::New, step(2));
+        let told = log.activity();
+        assert_eq!(told.iter().map(|one| (one.id, one.newest)).collect::<Vec<_>>(), [(1, true), (0, false)]);
+        assert!(told[0].at > 0);
+        assert!(UndoLog::parse(r#"{"next":1,"steps":[{"id":0,"records":[]}],"redo":[]}"#).activity()[0].at == 0);
     }
 
     #[test]

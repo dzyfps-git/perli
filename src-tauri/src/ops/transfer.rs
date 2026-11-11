@@ -100,6 +100,7 @@ impl Run<'_> {
         let Some(identity) = self.folder_identity(folder)? else {
             return Ok(());
         };
+        self.count_clashes(&sources, folder);
         let mut nodes = Vec::with_capacity(sources.len());
         for source in sources {
             let Some(stat) = self.check_source(&source, &identity)? else {
@@ -133,6 +134,7 @@ impl Run<'_> {
     }
 
     pub(super) fn move_sources(&mut self, sources: Vec<PathBuf>, folder: &Path) -> Flow {
+        self.count_clashes(&sources, folder);
         let moves = sources
             .into_iter()
             .map(|source| {
@@ -362,6 +364,10 @@ impl Run<'_> {
             name: file_name(target).to_string_lossy().into_owned(),
             source: Facts::from(stat),
             target: Facts::from(existing),
+            source_path: source.map(|source| source.to_string_lossy().into_owned()),
+            target_path: target.to_string_lossy().into_owned(),
+            clashes: self.tally.0,
+            fresh: self.tally.1,
             choices: choices.to_vec(),
         };
         Ok(match self.ask(key, question)? {

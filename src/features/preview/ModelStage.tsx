@@ -1,7 +1,7 @@
-import { createSignal, onCleanup, Show } from "solid-js";
+import { createEffect, createSignal, onCleanup, Show } from "solid-js";
 import { ToolCog } from "../../ui/Controls";
 import type { ModelView, ReadModel } from "./model";
-import { grid, light, setGrid, setLight, VIEWER_SETTINGS } from "./viewerPrefs";
+import { camera, grid, light, setGrid, setLight, setSmooth, smooth, VIEWER_SETTINGS, type CameraStyle } from "./viewerPrefs";
 
 const ICON_RESET = "";
 const ICON_TURN = "";
@@ -11,6 +11,14 @@ const ICON_BACKDROP = "";
 const ICON_UPRIGHT = "";
 const ICON_PLAY = "";
 const ICON_PAUSE = "";
+const ICON_SMOOTH = "\uE706";
+/** Made with Z up, so they start upright. */
+const Z_UP = /\.(stl|3mf)$/i;
+const MOUSE_WORDS: Record<CameraStyle, string> = {
+  perli: "Drag to turn it, right-drag to move it, scroll to zoom.",
+  blender: "Drag with the middle button to turn it, hold Shift to move it, scroll to zoom.",
+  maya: "Drag to turn it, middle-drag to move it, right-drag or scroll to zoom.",
+};
 
 
 const number = (value: number) => Number(value.toPrecision(3)).toLocaleString();
@@ -28,11 +36,10 @@ export function ModelStage(live: {
 }) {
   // The preview's props follow the row it shows. This view stays with the file it opened on.
   const props = { ...live };
-  const stl = props.name.toLowerCase().endsWith(".stl");
   const [view, setView] = createSignal<ModelView>();
   const [turning, setTurning] = createSignal(false);
   const [wire, setWire] = createSignal(false);
-  const [upright, setUpright] = createSignal(stl);
+  const [upright, setUpright] = createSignal(Z_UP.test(props.name));
   const [clip, setClip] = createSignal(0);
   const [paused, setPaused] = createSignal(false);
   let gone = false;
@@ -42,7 +49,6 @@ export function ModelStage(live: {
       .then(({ showModel }) => showModel(canvas, props.name, props.read))
       .then((shown) => {
         if (gone) return shown.dispose();
-        shown.grid(grid());
         setView(shown);
       })
       .catch((reason) => gone || props.onFailure(`This model can't show. ${reason}`));
@@ -58,10 +64,8 @@ export function ModelStage(live: {
       setWire(!wire());
       view()?.wireframe(wire());
     },
-    g: () => {
-      setGrid(!grid());
-      view()?.grid(grid());
-    },
+    g: () => setGrid(!grid()),
+    s: () => setSmooth(!smooth()),
     b: () => setLight(!light()),
     u: () => {
       setUpright(!upright());
@@ -83,6 +87,11 @@ export function ModelStage(live: {
     tool();
     return true;
   });
+
+  // The cog and the settings page change these too, so the model follows them wherever they change.
+  createEffect(() => view()?.grid(grid()));
+  createEffect(() => view()?.smooth(smooth()));
+  createEffect(() => view()?.camera(camera()));
 
   onCleanup(() => {
     gone = true;
@@ -111,7 +120,7 @@ export function ModelStage(live: {
 
   return (
     <div class="preview-model" data-light={light() || undefined}>
-      <canvas ref={start} aria-label="3D model. Drag to turn it, right-drag to move it, scroll to zoom." />
+      <canvas ref={start} aria-label={`3D model. ${MOUSE_WORDS[camera()]}`} />
       <Show when={view()}>
         <div class="preview-tools" role="toolbar" aria-label="Model">
           <button class="strip-icon" aria-label="Reset view" aria-keyshortcuts="R" onClick={tools.r}>
@@ -125,6 +134,9 @@ export function ModelStage(live: {
           </button>
           <button class="strip-icon" aria-label="Floor grid" aria-keyshortcuts="G" aria-pressed={grid()} onClick={tools.g}>
             {ICON_GRID}
+          </button>
+          <button class="strip-icon" aria-label="Smooth shading" aria-keyshortcuts="S" aria-pressed={smooth()} onClick={tools.s}>
+            {ICON_SMOOTH}
           </button>
           <button class="strip-icon" aria-label="Light backdrop" aria-keyshortcuts="B" aria-pressed={light()} onClick={tools.b}>
             {ICON_BACKDROP}

@@ -40,6 +40,8 @@ pub enum Job {
     /// Each path with its new name. One's new name may be another's old name.
     RenameAll { renames: Vec<(PathBuf, String)> },
     New { folder: PathBuf, directory: bool },
+    /// A new folder in `folder`, called `name` if that works, with `sources` moved into it.
+    Gather { sources: Vec<PathBuf>, folder: PathBuf, name: Option<String> },
     Template { folder: PathBuf, template: Template },
     Shortcut { sources: Vec<PathBuf>, folder: PathBuf },
     /// A new archive beside the first source.
@@ -136,10 +138,18 @@ impl From<sys::Stat> for Facts {
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase", tag = "kind")]
 pub enum Question {
+    #[serde(rename_all = "camelCase")]
     Conflict {
         name: String,
         source: Facts,
         target: Facts,
+        /// The file coming in, when it is one on a disk, for its picture.
+        source_path: Option<String>,
+        target_path: String,
+        /// Of everything picked for this job, how many names are taken where they are going,
+        /// and how many are free. Both zero when the job never counted.
+        clashes: u64,
+        fresh: u64,
         choices: Vec<Answer>,
     },
     Problem {
@@ -259,6 +269,8 @@ struct Run<'a> {
     /// An undo only ever moves things back, so it never deletes for good.
     undoing: bool,
     temp_folders: HashSet<PathBuf>,
+    /// Names taken and names free where this job's picks are going.
+    tally: (u64, u64),
 }
 
 impl<'a> Run<'a> {
@@ -275,6 +287,7 @@ impl<'a> Run<'a> {
             elevated: Vec::new(),
             undoing: false,
             temp_folders: HashSet::new(),
+            tally: (0, 0),
         }
     }
 
@@ -285,6 +298,7 @@ impl<'a> Run<'a> {
             Job::Rename { path, name } => self.rename(&path, &name),
             Job::RenameAll { renames } => self.rename_all(renames),
             Job::New { folder, directory } => self.new_item(&folder, directory),
+            Job::Gather { sources, folder, name } => self.gather(sources, &folder, name.as_deref()),
             Job::Template { folder, template } => self.new_from(&folder, &template),
             Job::Shortcut { sources, folder } => self.shortcuts(&sources, &folder),
             Job::Zip { sources } => self.zip(sources),
@@ -350,6 +364,31 @@ impl<'a> Run<'a> {
         }
         self.step(1, 0);
         Ok(())
+    }
+
+    /// One undo step: the moves go back first, then the empty folder goes to the Recycle Bin.
+    fn gather(&mut self, sources: Vec<PathBuf>, folder: &Path, name: Option<&str>) -> Flow {
+        let target = names::new_folder(folder, name);
+        if self.attempt(folder, None, |_| sys::create_dir(&target))?.is_none() {
+            return Ok(());
+        }
+        self.done.push(Done::Created { path: target.clone() });
+        self.touched.insert(folder.to_path_buf());
+        if sources.is_empty() {
+            return Ok(());
+        }
+        self.move_sources(sources, &target)
+    }
+
+    /// Counts, before anything moves, how many of `sources` would meet their own name in
+    /// `folder`. Only the picks themselves, not what is inside them.
+    fn count_clashes(&mut self, sources: &[PathBuf], folder: &Path) {
+        let taken = sources
+            .iter()
+            .filter(|source| source.parent() != Some(folder))
+            .filter(|source| matches!(sys::stat(&folder.join(transfer::file_name(source))), Ok(Some(_))))
+            .count() as u64;
+        self.tally = (taken, sources.len() as u64 - taken);
     }
 
     // ponytail: no admin route for templates, as the shell's new item can't carry their content.

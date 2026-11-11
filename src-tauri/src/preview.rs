@@ -105,7 +105,7 @@ fn inside_of(path: &Path) -> Option<Preview> {
             Ok(book) if !book.chapters.is_empty() => Some(Preview::Book { title: book.title, chapters: book.chapters, contents: book.contents }),
             _ => listed(),
         },
-        "glb" | "gltf" | "obj" | "stl" => Some(Preview::Model),
+        "glb" | "gltf" | "obj" | "stl" | "usdz" | "usd" | "usda" | "usdc" | "fbx" | "ply" | "3mf" => Some(Preview::Model),
         "mid" | "midi" => Some(Preview::Song),
         "mp3" | "m4a" | "aac" | "wav" | "flac" | "ogg" | "oga" | "opus" | "weba" => Some(Preview::Audio),
         _ => None,

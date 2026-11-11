@@ -1,5 +1,6 @@
 import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { Portal } from "solid-js/web";
+import { labelKeys } from "../features/keys/keybinds";
 import { canStar, iconFor, keysFor, opensSide, starredFirst } from "./menuLook";
 import "./menu.css";
 
@@ -52,6 +53,8 @@ function toggleStar(label: string) {
   localStorage.setItem(STARS_KEY, JSON.stringify(next));
 }
 
+/** The key hint of an item: its own, or the keys of the command it runs as they are now. */
+const keysOf = (item: MenuItem) => item.keys ?? labelKeys(item.label, keysFor(item.label));
 const isStarred = (item: MenuItem) => !!stars()?.includes(item.label);
 function drawPicture(canvas: HTMLCanvasElement, picture: NonNullable<MenuItem["picture"]>) {
   canvas.width = picture.width;
@@ -164,7 +167,7 @@ export function Menu(props: {
               aria-checked={item.checked}
               aria-haspopup={opensSide(item) ? "menu" : undefined}
               aria-expanded={opensSide(item) ? side()?.item === item : undefined}
-              aria-keyshortcuts={(item.keys ?? keysFor(item.label))?.replaceAll("Ctrl", "Control")}
+              aria-keyshortcuts={keysOf(item)?.replaceAll("Ctrl", "Control")}
               disabled={item.disabled}
               onPointerEnter={(event) => {
                 const button = event.currentTarget;
@@ -195,7 +198,7 @@ export function Menu(props: {
                   {ICON_STAR}
                 </span>
               </Show>
-              <Show when={item.keys ?? keysFor(item.label)}>
+              <Show when={keysOf(item)}>
                 {(keys) => (
                   <span class="menu-keys">
                     <For each={keys().split("+")}>{(key) => <kbd>{key}</kbd>}</For>

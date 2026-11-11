@@ -7,6 +7,7 @@ import {
   deleteTag,
   disconnectDrive,
   holdClose,
+  isFile,
   listPlaces,
   mapDrive,
   onCloseAsked,
@@ -18,10 +19,15 @@ import {
   onSizesGrew,
   openFile,
   openTerminal,
+  rankNames,
+  redoJob,
   saveSession,
+  selectionPaths,
+  startJob,
   startState,
   stopSizes,
   subfolders,
+  undoJob,
   type Grouping,
   type Places,
   type Recent,
@@ -77,7 +83,25 @@ import { SelectPattern } from "./features/filelist/SelectPattern";
 import { FLAT_QUERY, type FolderView, type RowAt } from "./features/navigation/folderView";
 import { BIN_PATH, isBin, isDriveRoot, join, parentOf, baseName, samePath } from "./features/navigation/path";
 import { Palette, type Command } from "./features/palette/Palette";
-import { PathBar } from "./features/pathbar/PathBar";
+import { PathBar, type Suggested, type Suggestion } from "./features/pathbar/PathBar";
+import { commandFor, keyText } from "./features/keys/keybinds";
+import { comboOf, KEYS } from "./features/keys/keys";
+import { KeySheet } from "./features/keys/KeySheet";
+import { ActivityLog } from "./features/reach/ActivityLog";
+import { DropChips } from "./features/reach/DropChips";
+import { readTyped } from "./features/reach/lists";
+import {
+  forgetNickname,
+  nicknames,
+  noteFolder,
+  recentFolders,
+  setNickname,
+  setShelfOpen,
+  shelfOpen,
+  shelve,
+} from "./features/reach/reach";
+import type { BarItem } from "./features/reach/SelectionBar";
+import { Shelf } from "./features/reach/Shelf";
 import { DetailsPanel } from "./features/preview/DetailsPanel";
 import { QuickPreview, type PreviewAt } from "./features/preview/QuickPreview";
 import { BACKDROPS, SCALES, setBackdrop, setUiScale } from "./features/settings/appearance";
@@ -108,6 +132,7 @@ import { NewTag } from "./features/tags/NewTag";
 import { refreshTags, TAG_COLORS } from "./features/tags/tags";
 import { TitleBar } from "./features/titlebar/TitleBar";
 import { Menu, type MenuItem } from "./ui/Menu";
+import { iconFor } from "./ui/menuLook";
 import { Tooltip } from "./ui/Tooltip";
 import "./ui/controls.css";
 
@@ -140,6 +165,32 @@ const hideBrowserMenu = (event: MouseEvent) => event.preventDefault();
 const MOST_CRUMB_FOLDERS = 300;
 /** Longer than any press and release of one click. */
 const CLICK_MS = 400;
+/** Folders opened behind at once. More would be a slip of the hand. */
+const MOST_TABS_BEHIND = 8;
+/** As many as the path bar offers at once. */
+const MOST_OFFERS = 8;
+const TERMINALS = { cmd: "Command Prompt", wt: "Windows Terminal", powershell: "Windows PowerShell", pwsh: "PowerShell" };
+/** Commands that need a real folder, which the Recycle Bin is not. */
+const FOLDER_ONLY = new Set([
+  "copy",
+  "cut",
+  "paste",
+  "duplicate",
+  "copyPath",
+  "rename",
+  "newFolder",
+  "newFolderWith",
+  "newFile",
+  "properties",
+  "shelve",
+  "copyToOther",
+  "moveToOther",
+  "terminal",
+  "backgroundTab",
+  "openToSide",
+]);
+/** A key with no Ctrl or Alt in it types a letter, so it must not run a command while typing. */
+const typesText = (combo: string) => !/Ctrl|Alt|^F\d+$/.test(combo);
 const blockBrowserZoom = (event: WheelEvent) => event.ctrlKey && event.preventDefault();
 const trackWindowFocus = (event: FocusEvent) =>
   document.documentElement.toggleAttribute("data-blurred", event.type === "blur");
@@ -242,6 +293,8 @@ export function App() {
   const [pickingApp, setPickingApp] = createSignal<string[]>();
   const [drives, setDrives] = createSignal<"map" | "disconnect">();
   const [previewing, setPreviewing] = createSignal<{ view: FolderView; at: PreviewAt }>();
+  const [keysOpen, setKeysOpen] = createSignal(false);
+  const [activityOpen, setActivityOpen] = createSignal(false);
   /** A sheet covers the tabs, so nothing behind it may change. */
   const sheetOpen = () =>
     !!deleting() ||
@@ -252,7 +305,9 @@ export function App() {
     !!showingProperties() ||
     !!pickingApp() ||
     !!drives() ||
-    !!previewing();
+    !!previewing() ||
+    keysOpen() ||
+    activityOpen();
   /** The settings page stands where the files do, so the keys of the files rest too. */
   const dialogOpen = () => settingsShown() || sheetOpen();
   // Going to a folder, by any road, puts the files back in front.
@@ -392,6 +447,18 @@ export function App() {
   }
 
   const toggleDetails = () => setDetailsPanel(!detailsPanel());
+  /** Where files from the shelf can land: a real folder, not the Recycle Bin or a search. */
+  const dropFolder = () => {
+    const view = tabs.activeView();
+    return view.isBin() || view.query() ? undefined : view.folder()?.path;
+  };
+  /** Says what went wrong, and still lets the caller know that it did. */
+  const failed = (failure: unknown) => {
+    jobs.report(failure);
+    throw failure;
+  };
+  // The folders seen lately are places to drop on and to move to.
+  createEffect(() => noteFolder(tabs.activeView().folder()?.path));
   const toggleSidebar = () => setSidebarOpen(!sidebarOpen());
 
   const networkItems = (): MenuItem[] => [
@@ -498,9 +565,12 @@ export function App() {
     const items: MenuItem[] = [
       { label: "Open", action: () => openRow(view, row, false) },
       { label: "Quick preview", action: () => previewSelected(view) },
-      row.isDir
-        ? { label: "Open to side", action: () => openRow(view, row, true) }
-        : shell.openWithItem(view),
+      ...(row.isDir
+        ? [
+            { label: "Open to side", action: () => openRow(view, row, true) },
+            { label: "Open in background tab", action: () => openBehind(view, row) },
+          ]
+        : [shell.openWithItem(view)]),
       ...(row.isDir ? [{ label: "Search here", action: () => searchIn(view, path) }] : []),
       ...(row.isDir ? keepItems(path) : []),
       { label: "Cut", divider: true, action: () => actions.cut(view) },
@@ -512,6 +582,10 @@ export function App() {
       },
       { label: "Rename", action: () => actions.startRename(view) },
       { label: "Delete", action: () => actions.remove(view, false) },
+      { label: "Duplicate", divider: true, keys: keyText("duplicate"), action: () => duplicate(view) },
+      { label: "Copy path", action: () => copyPath(view) },
+      { label: "New folder with selection", action: () => gather(view) },
+      { label: "Put on the shelf", action: () => putOnShelf(view) },
       ...toolItems,
       shell.tagsItem(view, showTagChange, () => setNamingTag(view)),
     ];
@@ -707,6 +781,7 @@ export function App() {
           { label: "Select by pattern…", action: () => setSelectingPattern(view) },
           { label: "Filter…", action: () => setFiltering(view) },
           ...undo,
+          { label: "Activity log", action: () => setActivityOpen(true) },
         ];
     const shellItems = view.isBin() ? [] : shell.backgroundItems(view, { x, y });
     setMenu({ x, y, items: [...fileItems, ...viewItems(view), ...shellItems] });
@@ -721,7 +796,7 @@ export function App() {
         text: "Nothing fits the filter.",
         actions: [
           { label: "Clear filter", run: () => view.setFilterForm(NO_FILTER) },
-          { label: "Change filter", keys: "Ctrl+Shift+F", run: () => setFiltering(view) },
+          { label: "Change filter", keys: keyText("filter"), run: () => setFiltering(view) },
         ],
       };
     }
@@ -738,8 +813,8 @@ export function App() {
       art: "folder",
       text: "This folder is empty.",
       actions: [
-        { label: "New folder", keys: "Ctrl+Shift+N", run: () => actions.newItem(view, true) },
-        { label: "Paste", keys: "Ctrl+V", run: () => actions.paste(view), enabled: clipboardCanPaste },
+        { label: "New folder", keys: keyText("newFolder"), run: () => actions.newItem(view, true) },
+        { label: "Paste", keys: keyText("paste"), run: () => actions.paste(view), enabled: clipboardCanPaste },
       ],
     };
   }
@@ -765,29 +840,285 @@ export function App() {
     setPaletteOpen(!paletteOpen());
   }
 
-  /** What only makes sense on a real folder. The Recycle Bin has its own rules. */
-  function folderCommands(view: FolderView): Command[] {
-    const terminal = () => {
-      const path = view.folder()?.path;
-      if (path) openTerminal(path).catch(jobs.report);
+  /** The rows a command acts on, which the Recycle Bin and an empty selection have none of. */
+  const picked = (view: FolderView) => (view.isBin() ? undefined : actions.selected(view));
+
+  function duplicate(view: FolderView) {
+    const folder = view.folder()?.path;
+    // Search rows live in many folders, and a copy belongs beside its own file.
+    if (folder && !view.query()) actions.copyTo(view, folder);
+  }
+
+  async function copyPath(view: FolderView) {
+    const selection = picked(view);
+    if (!selection) return;
+    const paths = await selectionPaths(selection);
+    await navigator.clipboard.writeText(paths.join("\n"));
+    jobs.notify(paths.length === 1 ? "Path copied" : `${paths.length} paths copied`, paths[0]);
+  }
+
+  function gather(view: FolderView) {
+    const selection = picked(view);
+    const folder = view.folder()?.path;
+    if (selection && folder && !view.query()) {
+      startJob({ kind: "newFolderFrom", selection, folder, moveIn: true }, view.id).catch(jobs.report);
+    }
+  }
+
+  async function putOnShelf(view: FolderView) {
+    const selection = picked(view);
+    if (selection) shelve(await selectionPaths(selection));
+  }
+
+  function sendTo(view: FolderView, kind: "copy" | "move", folder: string) {
+    const selection = picked(view);
+    if (selection) startJob({ kind, selection, folder }, view.id).catch(jobs.report);
+  }
+
+  /** The selected folders, as paths. Files are left out. */
+  async function pickedFolders(view: FolderView) {
+    const selection = picked(view);
+    if (!selection) return [];
+    const paths = (await selectionPaths(selection)).slice(0, MOST_TABS_BEHIND);
+    const files = await Promise.all(paths.map((path) => isFile(path)));
+    return paths.filter((_, at) => !files[at]);
+  }
+
+  /** Each folder gets a tab, in order, and the tab on show stays where it is. */
+  async function openTabsBehind(paths: string[]) {
+    let after = tabs.active();
+    for (const path of paths) {
+      await tabs.add([path], after, true);
+      after = tabs.tabs()[tabs.tabs().indexOf(after) + 1] ?? after;
+    }
+  }
+
+  function openBehind(view: FolderView, row: Row) {
+    if (row.isDir && !view.isBin()) openTabsBehind([rowPath(view, row)]).catch(jobs.report);
+  }
+
+  function terminalHere(view: FolderView, shell?: keyof typeof TERMINALS) {
+    const path = view.folder()?.path;
+    if (path && !view.isBin()) openTerminal(path, shell).catch(jobs.report);
+  }
+
+  async function toggleFullScreen() {
+    const appWindow = getCurrentWindow();
+    await appWindow.setFullscreen(!(await appWindow.isFullscreen()));
+  }
+
+  const here = () => tabs.activeView();
+  const quietly = (work: Promise<unknown>) => work.catch(jobs.report);
+  const numbered = (name: string, run: (place: number) => unknown) =>
+    Object.fromEntries([1, 2, 3, 4, 5, 6, 7, 8, 9].map((place) => [`${name}-${place}`, () => run(place)]));
+
+  /** What each command of `KEYS` does, under its id. The keys, the palette and the path bar all run these. */
+  const RUN: Record<string, () => unknown> = {
+    copy: () => actions.copy(here()),
+    cut: () => actions.cut(here()),
+    paste: () => actions.paste(here()),
+    duplicate: () => duplicate(here()),
+    copyPath: () => quietly(copyPath(here())),
+    rename: () => actions.startRename(here()),
+    delete: () => actions.remove(here(), false),
+    deleteForGood: () => actions.remove(here(), true),
+    newFolder: () => actions.newItem(here(), true),
+    newFolderWith: () => gather(here()),
+    newFile: () => actions.newItem(here(), false),
+    properties: () => shell.properties(here()),
+    shelve: () => quietly(putOnShelf(here())),
+    copyToOther: () => actions.toOtherPane(here(), "copy"),
+    moveToOther: () => actions.toOtherPane(here(), "move"),
+    undo: () => actions.undo(here()),
+    redo: () => actions.redo(here()),
+    activity: () => setActivityOpen(true),
+    back: () => here().back(),
+    forward: () => here().forward(),
+    up: () => here().up(),
+    path: () => here().setEditingPath(true),
+    search: () => here().askSearch(),
+    refresh: () => here().refresh(),
+    terminal: () => terminalHere(here()),
+    ...numbered("pinned", (place) => {
+      const path = pinned()[place - 1];
+      if (path) here().open(path);
+    }),
+    list: () => here().setLayout("list"),
+    grid: () => here().setLayout("grid"),
+    largerTiles: () => resizeTiles(here(), TILE_STEP),
+    smallerTiles: () => resizeTiles(here(), -TILE_STEP),
+    hidden: toggleHidden,
+    filter: () => setFiltering(here()),
+    selectPattern: () => setSelectingPattern(here()),
+    details: toggleDetails,
+    sidebar: toggleSidebar,
+    fullScreen: () => quietly(toggleFullScreen()),
+    shelf: () => setShelfOpen(!shelfOpen()),
+    newTab: () => newTab(),
+    backgroundTab: () => quietly(pickedFolders(here()).then(openTabsBehind)),
+    openToSide: () => quietly(pickedFolders(here()).then(([path]) => (path ? tabs.openToSide(path) : undefined))),
+    close: () => tabs.closePane(tabs.active(), here()),
+    reopen: () => tabs.reopenClosed(),
+    split: splitView,
+    otherPane: () => tabs.active().activate(tabs.active().other() ?? here()),
+    nextTab: () => tabs.cycle(1),
+    previousTab: () => tabs.cycle(-1),
+    ...numbered("tab", (place) => tabs.activateAt(place - 1)),
+    settings: showSettings,
+    keys: () => setKeysOpen(true),
+  };
+
+  /** What the bar over a selection offers. A menu opens under its own button. */
+  function barItems(view: FolderView): BarItem[] {
+    const item = (label: string, run: BarItem["run"], id?: string): BarItem => ({
+      label,
+      icon: iconFor(label) ?? "",
+      keys: id && keyText(id).replace("Ctrl", "Control"),
+      run,
+    });
+    const under = (anchor: HTMLElement, items: MenuItem[]) => {
+      const box = anchor.getBoundingClientRect();
+      setMenu({ x: box.left, y: box.bottom + 4, items });
+    };
+    if (view.isBin()) {
+      return [
+        item("Restore", () => actions.restore(view)),
+        item("Delete permanently", () => actions.remove(view, true), "deleteForGood"),
+      ];
+    }
+    const moveTo = (anchor: HTMLElement) => {
+      const from = view.folder()?.path;
+      const other = tabs.active().other();
+      const seen = new Set([from?.toLowerCase()]);
+      const place = (path: string, divider: boolean): MenuItem[] => {
+        if (seen.has(path.toLowerCase())) return [];
+        seen.add(path.toLowerCase());
+        return [{ label: baseName(path) || path, divider, action: () => sendTo(view, "move", path) }];
+      };
+      const otherPath = other && !other.isBin() ? other.folder()?.path : undefined;
+      const items = [
+        ...(otherPath ? [{ label: "Move to other pane", action: () => actions.toOtherPane(view, "move") }] : []),
+        ...pinned().flatMap((path, at) => place(path, at === 0)),
+        ...recentFolders().flatMap((path, at) => place(path, at === 0)),
+      ];
+      under(anchor, items.length > 0 ? items : [{ label: "Pin a folder to move here in one step", disabled: true }]);
+    };
+    const tag = (anchor: HTMLElement) => {
+      const load = shell.tagsItem(view, showTagChange, () => setNamingTag(view)).load;
+      load?.()
+        .then((items) => under(anchor, items))
+        .catch(jobs.report);
     };
     return [
-      { label: "New folder", keys: "Ctrl+Shift+N", run: () => actions.newItem(view, true) },
-      { label: "New file", keys: "Ctrl+N", run: () => actions.newItem(view, false) },
-      { label: "Paste", keys: "Ctrl+V", run: () => actions.paste(view) },
-      { label: "Copy", keys: "Ctrl+C", run: () => actions.copy(view) },
-      { label: "Cut", keys: "Ctrl+X", run: () => actions.cut(view) },
-      { label: "Rename", keys: "F2", run: () => actions.startRename(view) },
-      { label: "Properties", keys: "Alt+Enter", run: () => shell.properties(view) },
-      { label: "Compress to ZIP", run: () => actions.compress(view) },
-      { label: "Extract here", run: () => actions.extract(view, false) },
-      { label: "Extract to own folder", run: () => actions.extract(view, true) },
-      { label: "Save as template", run: () => actions.saveTemplate(view) },
-      { label: "Open templates folder", run: () => actions.openTemplates(view) },
-      { label: "Open in terminal", run: terminal },
-      { label: "Flat view", run: () => toggleFlat(view) },
-      { label: "Use this view for all folders", run: () => viewForAll(view) },
-      ...keepCommands(view),
+      item("Copy", () => actions.copy(view), "copy"),
+      item("Move to", moveTo),
+      item("Compress to ZIP", () => actions.compress(view)),
+      item("Tags", tag),
+      item("Rename", () => actions.startRename(view), "rename"),
+      item("Put on the shelf", () => quietly(putOnShelf(view)), "shelve"),
+      ...(view.query() ? [] : [item("New folder with selection", () => gather(view), "newFolderWith")]),
+    ];
+  }
+
+  /** Folders whose names start with what is typed, so Tab can finish the path. */
+  async function folderOffers(view: FolderView, text: string): Promise<Suggestion[]> {
+    const from = view.folder()?.path;
+    if (!text || text.includes("%") || !from || view.isBin()) return [];
+    const cut = Math.max(text.lastIndexOf("\\"), text.lastIndexOf("/")) + 1;
+    const typedParent = text.slice(0, cut);
+    const parent = /^([a-z]:[\\/]|\\\\)/i.test(typedParent) ? typedParent : join(from, typedParent);
+    const start = text.slice(cut).toLowerCase();
+    const names = await subfolders(parent, showHidden()).catch((): string[] => []);
+    return names
+      .filter((name) => name.toLowerCase().startsWith(start))
+      .slice(0, MOST_OFFERS)
+      .map((name) => ({
+        label: name,
+        hint: parent,
+        fill: `${join(parent, name)}\\`,
+        run: () => view.open(join(parent, name)),
+      }));
+  }
+
+  /** What the path bar offers: `>` runs a command, `@` is a nickname, `?` searches, and a path completes. */
+  async function suggest(view: FolderView, text: string): Promise<Suggested> {
+    const typed = readTyped(text);
+    const folder = view.isBin() ? undefined : view.folder()?.path;
+    if (typed.kind === "command") {
+      const all = commands();
+      const order = typed.text ? await rankNames(typed.text, all.map((command) => command.label)) : all.map((_, at) => at);
+      const items = order.slice(0, MOST_OFFERS).map((at) => ({ label: all[at].label, hint: all[at].keys, run: all[at].run }));
+      return { first: true, items };
+    }
+    if (typed.kind === "terminal") {
+      const run = () => terminalHere(view, typed.shell);
+      return { first: true, items: folder ? [{ label: `Open ${TERMINALS[typed.shell]} here`, hint: folder, run }] : [] };
+    }
+    if (typed.kind === "search") {
+      const run = () => view.search(typed.text);
+      return { first: true, items: typed.text && folder ? [{ label: `Search for “${typed.text}”`, run }] : [] };
+    }
+    if (typed.kind === "nickname") {
+      const { name } = typed;
+      const save: Suggestion[] =
+        name && folder ? [{ label: `Call this folder @${name}`, hint: folder, run: () => setNickname(name, folder) }] : [];
+      if (typed.save) return { first: true, items: save };
+      const fitting = Object.entries(nicknames()).filter(([known]) => known.startsWith(name));
+      const items: Suggestion[] = fitting.map(([known, path]) => ({
+        label: `@${known}`,
+        hint: path,
+        fill: `@${known}`,
+        run: () => view.open(path),
+      }));
+      if (name in nicknames()) items.push({ label: `Forget @${name}`, run: () => forgetNickname(name) });
+      else items.push(...save);
+      return { first: true, items };
+    }
+    return { first: false, items: await folderOffers(view, typed.text) };
+  }
+
+  function commands(): Command[] {
+    const view = tabs.activeView();
+    const goTo = (label: string, path: string): Command => ({
+      label: `Go to ${label}`,
+      run: () => view.open(path),
+    });
+    const known = places();
+    const keyed = KEYS.filter((command) => !command.fixed && !command.quiet && !(view.isBin() && FOLDER_ONLY.has(command.id)));
+    const inFolder: Command[] = view.isBin()
+      ? []
+      : [
+          { label: "Compress to ZIP", run: () => actions.compress(view) },
+          { label: "Extract here", run: () => actions.extract(view, false) },
+          { label: "Extract to own folder", run: () => actions.extract(view, true) },
+          { label: "Save as template", run: () => actions.saveTemplate(view) },
+          { label: "Open templates folder", run: () => actions.openTemplates(view) },
+          { label: "Flat view", run: () => toggleFlat(view) },
+          { label: "Use this view for all folders", run: () => viewForAll(view) },
+          ...keepCommands(view),
+        ];
+    return [
+      ...keyed.map((command) => ({ label: command.label, keys: keyText(command.id), run: RUN[command.id] })),
+      { label: "Quick preview", keys: "Space", run: () => previewSelected(view) },
+      { label: "Compact rows", run: () => setRowDensity("compact") },
+      { label: "Cozy rows", run: () => setRowDensity("cozy") },
+      { label: "Roomy rows", run: () => setRowDensity("roomy") },
+      { label: windowsIcons() ? "Perli icons" : "Windows icons", run: () => setWindowsIcons(!windowsIcons()) },
+      ...(view.filtered() ? [{ label: "Clear filter", run: () => view.setFilterForm(NO_FILTER) }] : []),
+      ...inFolder,
+      { label: statusBar() ? "Hide status bar" : "Always show status bar", run: () => setStatusBar(!statusBar()) },
+      ...BACKDROPS.map(({ id, label }) => ({ label: `Window backdrop: ${label}`, run: () => setBackdrop(id) })),
+      ...SCALES.map((scale) => ({
+        label: `Text and interface size: ${Math.round(scale * 100)}%`,
+        run: () => setUiScale(scale),
+      })),
+      { label: "Map network drive", run: () => setDrives("map") },
+      { label: "Disconnect network drive", run: () => setDrives("disconnect") },
+      goTo("Recycle Bin", BIN_PATH),
+      ...(known?.folders ?? []).map(({ kind, path }) => goTo(FOLDERS[kind].label, path)),
+      ...(known?.clouds ?? []).map(({ name, path }) => goTo(name, path)),
+      ...(known?.drives ?? []).map(({ name, path }) => goTo(name, path)),
+      ...[...pinned(), ...bookmarks()].map((path) => goTo(baseName(path) || path, path)),
     ];
   }
 
@@ -800,84 +1131,7 @@ export function App() {
     ];
   }
 
-  function commands(): Command[] {
-    const view = tabs.activeView();
-    const tab = tabs.active();
-    const goTo = (label: string, path: string): Command => ({
-      label: `Go to ${label}`,
-      run: () => view.open(path),
-    });
-    const known = places();
-    return [
-      { label: "Search", keys: "Ctrl+F", run: () => view.askSearch() },
-      { label: "Go to path", keys: "Ctrl+L", run: () => view.setEditingPath(true) },
-      { label: "New tab", keys: "Ctrl+T", run: newTab },
-      { label: "Close", keys: "Ctrl+W", run: () => tabs.closePane(tab, view) },
-      { label: "Reopen closed tab", keys: "Ctrl+Shift+T", run: () => tabs.reopenClosed() },
-      { label: "Split view", keys: "Ctrl+\\", run: splitView },
-      { label: "Refresh", keys: "F5", run: () => view.refresh() },
-      { label: "Back", keys: "Alt+Left", run: () => view.back() },
-      { label: "Forward", keys: "Alt+Right", run: () => view.forward() },
-      { label: "Up", keys: "Alt+Up", run: () => view.up() },
-      { label: "Show hidden files", keys: "Ctrl+H", run: toggleHidden },
-      { label: "List view", keys: "Ctrl+Shift+1", run: () => view.setLayout("list") },
-      { label: "Grid view", keys: "Ctrl+Shift+2", run: () => view.setLayout("grid") },
-      { label: "Quick preview", keys: "Space", run: () => previewSelected(view) },
-      { label: "Details panel", keys: "Alt+Shift+P", run: toggleDetails },
-      { label: "Keep sidebar open", keys: "Ctrl+B", run: toggleSidebar },
-      { label: "Compact rows", run: () => setRowDensity("compact") },
-      { label: "Cozy rows", run: () => setRowDensity("cozy") },
-      { label: "Roomy rows", run: () => setRowDensity("roomy") },
-      { label: windowsIcons() ? "Perli icons" : "Windows icons", run: () => setWindowsIcons(!windowsIcons()) },
-      { label: "Select by pattern", keys: "Ctrl+Shift+A", run: () => setSelectingPattern(view) },
-      { label: "Filter", keys: "Ctrl+Shift+F", run: () => setFiltering(view) },
-      ...(view.filtered() ? [{ label: "Clear filter", run: () => view.setFilterForm(NO_FILTER) }] : []),
-      ...(view.isBin() ? [] : folderCommands(view)),
-      { label: "Undo", keys: "Ctrl+Z", run: () => actions.undo(view) },
-      { label: "Redo", keys: "Ctrl+Y", run: () => actions.redo(view) },
-      { label: "Delete", keys: "Delete", run: () => actions.remove(view, false) },
-      { label: statusBar() ? "Hide status bar" : "Always show status bar", run: () => setStatusBar(!statusBar()) },
-      ...BACKDROPS.map(({ id, label }) => ({ label: `Window backdrop: ${label}`, run: () => setBackdrop(id) })),
-      ...SCALES.map((scale) => ({
-        label: `Text and interface size: ${Math.round(scale * 100)}%`,
-        run: () => setUiScale(scale),
-      })),
-      { label: "Settings", keys: "Ctrl+,", run: showSettings },
-      { label: "Map network drive", run: () => setDrives("map") },
-      { label: "Disconnect network drive", run: () => setDrives("disconnect") },
-      goTo("Recycle Bin", BIN_PATH),
-      ...(known?.folders ?? []).map(({ kind, path }) => goTo(FOLDERS[kind].label, path)),
-      ...(known?.clouds ?? []).map(({ name, path }) => goTo(name, path)),
-      ...(known?.drives ?? []).map(({ name, path }) => goTo(name, path)),
-      ...[...pinned(), ...bookmarks()].map((path) => goTo(baseName(path) || path, path)),
-    ];
-  }
-
-  /** Holding a key down must not paste or delete again and again. */
-  function onFileKey(event: KeyboardEvent, view: FolderView, key: string) {
-    if (!isInList(event)) return false;
-    const { ctrlKey: ctrl, shiftKey: shift } = event;
-    const run = (action: () => void) => {
-      if (!event.repeat) action();
-      return true;
-    };
-    if (event.altKey) return key === "enter" && run(() => shell.properties(view));
-    if (ctrl && key === "c") return run(() => actions.copy(view));
-    if (ctrl && key === "x") return run(() => actions.cut(view));
-    if (ctrl && key === "v") return run(() => actions.paste(view));
-    if (ctrl && key === "z") return run(() => actions.undo(view));
-    if (ctrl && key === "y") return run(() => actions.redo(view));
-    if (ctrl && key === "n") return run(() => actions.newItem(view, shift));
-    if (key === "delete") return run(() => actions.remove(view, shift));
-    if (key === "f2") return run(() => actions.startRename(view));
-    if (key === "f7") return run(() => actions.toOtherPane(view, "copy"));
-    if (key === "f8") return run(() => actions.toOtherPane(view, "move"));
-    return false;
-  }
-
   function onKeyDown(event: KeyboardEvent) {
-    const view = tabs.activeView();
-    const tab = tabs.active();
     const key = event.key.toLowerCase();
     // Shift changes what a digit key reports, so read which key it is.
     const digit = Number(event.code.match(/^Digit([1-9])$/)?.[1]);
@@ -906,35 +1160,18 @@ export function App() {
     }
 
     if (key === "escape" && !isTyping(event)) takeBackCut();
-    if (onFileKey(event, view, key)) event.preventDefault();
-    else if (event.altKey && key === "arrowleft") view.back();
-    else if (event.altKey && key === "arrowright") view.forward();
-    else if (event.altKey && key === "arrowup") view.up();
-    else if (event.altKey && event.shiftKey && key === "p") toggleDetails();
-    else if (event.ctrlKey && key === "b" && !isTyping(event)) toggleSidebar();
-    else if (key === "backspace" && !isTyping(event)) view.up();
-    else if ((event.ctrlKey && key === "l") || (event.altKey && key === "d")) view.setEditingPath(true);
-    else if (event.ctrlKey && event.shiftKey && key === "f") setFiltering(view);
-    else if (event.ctrlKey && event.shiftKey && key === "a") setSelectingPattern(view);
-    else if (event.ctrlKey && key === "f") view.askSearch();
-    else if (event.ctrlKey && event.shiftKey && key === "t") tabs.reopenClosed();
-    else if (event.ctrlKey && key === "t") newTab();
-    else if (event.ctrlKey && key === "w") tabs.closePane(tab, view);
-    else if (event.ctrlKey && key === "\\") splitView();
-    else if (key === "f6") tab.activate(tab.other() ?? view);
-    else if (key === "f5") view.refresh();
-    else if (event.ctrlKey && key === "tab") tabs.cycle(event.shiftKey ? -1 : 1);
-    else if (event.ctrlKey && key === "pagedown") tabs.cycle(1);
-    else if (event.ctrlKey && key === "pageup") tabs.cycle(-1);
-    else if (event.ctrlKey && event.shiftKey && digit === 1) view.setLayout("list");
-    else if (event.ctrlKey && event.shiftKey && digit === 2) view.setLayout("grid");
-    else if (event.ctrlKey && !event.shiftKey && digit) tabs.activateAt(digit - 1);
-    else if (event.ctrlKey && key === "h") toggleHidden();
-    else if (event.ctrlKey && key === ",") showSettings();
-    else if (event.ctrlKey && (key === "+" || key === "=")) resizeTiles(view, TILE_STEP);
-    else if (event.ctrlKey && key === "-") resizeTiles(view, -TILE_STEP);
-    else if (key === "backspace" || !isBrowserKey(event, key)) return;
-    event.preventDefault();
+    const combo = comboOf(event);
+    const command = commandFor(combo);
+    const typing = isTyping(event);
+    // A file command must only ever mean the files, never a focused button or a box of text.
+    const fits =
+      command &&
+      (command.where === "list" ? isInList(event) : !typing || (command.where !== "free" && !typesText(combo)));
+    if (fits) {
+      event.preventDefault();
+      // Holding a key down must not paste or delete again and again.
+      if (command.where !== "list" || !event.repeat) RUN[command.id]?.();
+    } else if (isBrowserKey(event, key)) event.preventDefault();
   }
 
   function onMouseButton(event: MouseEvent) {
@@ -1000,6 +1237,7 @@ export function App() {
           onCrumbMenu={(path, x, y) => showCrumbMenu(view, path, x, y)}
           menuFor={menu()?.from}
           onNewTab={(path) => tabs.add([path])}
+          suggest={(text) => suggest(view, text)}
         />
         <div class="file-area">
           <Show when={view.error()}>
@@ -1044,6 +1282,8 @@ export function App() {
                 onEscape={() => view.search("")}
                 onPreview={(at) => preview(view, at)}
                 onCursor={view.setCursor}
+                onOpenBehind={(row) => openBehind(view, row)}
+                barItems={() => barItems(view)}
                 connect={view.connectList}
               />
             )}
@@ -1118,12 +1358,32 @@ export function App() {
           onTagsChanged={showTagChange}
           onDeleteTag={askDeleteTag}
           onBeforeUpdate={flushSession}
+          onKeys={() => setKeysOpen(true)}
         />
       </main>
       <Show when={menu()} keyed>
         {(open) => <Menu x={open.x} y={open.y} items={open.items} onClose={closeMenu} />}
       </Show>
       <JobsPanel jobs={jobs} />
+      <Shelf
+        folder={dropFolder}
+        onJob={(task) => startJob(task, tabs.activeView().id).catch(jobs.report)}
+        onShow={(path) => showInFolder(tabs.activeView(), path)}
+        report={jobs.report}
+      />
+      <DropChips folder={() => tabs.activeView().folder()?.path} other={() => tabs.active().other()?.folder()?.path} />
+      <Show when={activityOpen()}>
+        <ActivityLog
+          canRedo={jobs.canRedo}
+          onShow={(path) => showInFolder(tabs.activeView(), path)}
+          onUndo={(step) => undoJob(tabs.activeView().id, step).catch(failed)}
+          onRedo={() => redoJob(tabs.activeView().id).catch(failed)}
+          onClose={() => setActivityOpen(false)}
+        />
+      </Show>
+      <Show when={keysOpen()}>
+        <KeySheet onClose={() => setKeysOpen(false)} />
+      </Show>
       <Show when={deleting()} keyed>
         {(request) => <ConfirmDelete request={request} onClose={() => setDeleting(undefined)} />}
       </Show>

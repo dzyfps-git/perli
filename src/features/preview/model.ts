@@ -1,6 +1,7 @@
 /**
- * A 3D model in the quick preview: glTF, GLB, OBJ or STL, turned with the mouse. three.js is big,
- * so this file loads only when the first model opens.
+ * A 3D model in the quick preview, turned with the mouse: glTF, GLB, OBJ and STL, and USD, FBX,
+ * PLY and 3MF, whose readers load with the first file of their kind. three.js is big, so this
+ * file loads only when the first model opens.
  */
 import {
   AnimationMixer,
@@ -10,14 +11,18 @@ import {
   LoadingManager,
   Mesh,
   MeshStandardMaterial,
+  MOUSE,
   PerspectiveCamera,
   PMREMGenerator,
+  Points,
+  PointsMaterial,
   Scene,
   Sphere,
   Vector3,
   WebGLRenderer,
   type AnimationAction,
   type AnimationClip,
+  type BufferGeometry,
   type Material,
   type Object3D,
 } from "three";
@@ -27,6 +32,8 @@ import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { MTLLoader } from "three/examples/jsm/loaders/MTLLoader.js";
 import { OBJLoader } from "three/examples/jsm/loaders/OBJLoader.js";
 import { STLLoader } from "three/examples/jsm/loaders/STLLoader.js";
+import { toCreasedNormals } from "three/examples/jsm/utils/BufferGeometryUtils.js";
+import type { CameraStyle } from "./viewerPrefs";
 
 /** The model's bytes, or with `part` those of a file beside it that it points to. */
 export type ReadModel = (part?: string) => Promise<ArrayBuffer>;
@@ -42,6 +49,10 @@ export interface ModelView {
   turn: (on: boolean) => void;
   wireframe: (on: boolean) => void;
   grid: (on: boolean) => void;
+  /** Curved surfaces look curved, or every triangle shows as a flat face. */
+  smooth: (on: boolean) => void;
+  /** Which mouse buttons turn, move and zoom. */
+  camera: (style: CameraStyle) => void;
   /** Stands a model made with Z up the right way, or back. */
   upright: (on: boolean) => void;
   /** Plays one animation from its start. */
@@ -61,6 +72,17 @@ const PLAIN = 0xb8bcc4;
 const GRID_COLOR = 0x8a8f99;
 const GRID_LINES = 20;
 const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
+/** Edges sharper than this stay sharp when a surface is smoothed. */
+const CREASE = Math.PI / 4;
+/** Made with Z up, by their own rules or by habit. */
+const Z_UP = ["stl", "3mf"];
+const USD = ["usdz", "usd", "usda", "usdc"];
+/** Shift with the turning button moves the model, in every style. */
+const MOUSE_BUTTONS: Record<CameraStyle, { LEFT: MOUSE; MIDDLE: MOUSE; RIGHT: MOUSE }> = {
+  perli: { LEFT: MOUSE.ROTATE, MIDDLE: MOUSE.DOLLY, RIGHT: MOUSE.PAN },
+  blender: { LEFT: MOUSE.ROTATE, MIDDLE: MOUSE.ROTATE, RIGHT: MOUSE.PAN },
+  maya: { LEFT: MOUSE.ROTATE, MIDDLE: MOUSE.PAN, RIGHT: MOUSE.DOLLY },
+};
 const MAP_KEYS = ["map_kd", "map_ks", "map_ke", "map_d", "map_bump", "bump", "norm", "disp"];
 
 /** A spring like the CSS one: overshoots a little, then settles at 1. */
@@ -72,7 +94,7 @@ function spring(t: number) {
   return 1 - Math.exp(-zeta * omega * seconds) * (Math.cos(damped * seconds) + (zeta / Math.sqrt(1 - zeta * zeta)) * Math.sin(damped * seconds));
 }
 
-/** Shows the model in `canvas`. STL files start upright, as most are made with Z up. */
+/** Shows the model in `canvas`. STL and 3MF files start upright, as they are made with Z up. */
 export async function showModel(canvas: HTMLCanvasElement, name: string, read: ReadModel): Promise<ModelView> {
   const urls: string[] = [];
   const extension = name.split(".").pop()!.toLowerCase();
@@ -157,7 +179,7 @@ export async function showModel(canvas: HTMLCanvasElement, name: string, read: R
 
   controls.addEventListener("change", () => draw());
   measure();
-  if (extension === "stl") upright(true);
+  if (Z_UP.includes(extension)) upright(true);
   const away = home.position.clone().sub(home.target).multiplyScalar(ARRIVE_FROM).add(home.target);
   camera.position.copy(away);
   controls.target.copy(home.target);
@@ -229,6 +251,15 @@ export async function showModel(canvas: HTMLCanvasElement, name: string, read: R
       if (floor) floor.visible = on;
       draw();
     },
+    smooth: (on) => {
+      for (const mesh of meshes()) {
+        for (const material of [mesh.material].flat()) Object.assign(material, { flatShading: !on, needsUpdate: true });
+      }
+      draw();
+    },
+    camera: (style) => {
+      controls.mouseButtons = MOUSE_BUTTONS[style];
+    },
     upright,
     play,
     pause,
@@ -238,7 +269,7 @@ export async function showModel(canvas: HTMLCanvasElement, name: string, read: R
       controls.dispose();
       mixer?.stopAllAction();
       scene.traverse((part) => {
-        if (!(part instanceof Mesh)) return;
+        if (!(part instanceof Mesh || part instanceof Points)) return;
         part.geometry.dispose();
         for (const material of [part.material].flat() as Material[]) {
           for (const value of Object.values(material)) if (value?.isTexture) value.dispose();
@@ -256,18 +287,52 @@ export async function showModel(canvas: HTMLCanvasElement, name: string, read: R
 
 async function load(extension: string, read: ReadModel, urls: string[]): Promise<{ model: Object3D; clips: AnimationClip[] }> {
   const bytes = await read();
-  if (extension === "stl") {
-    const geometry = new STLLoader().parse(bytes);
-    geometry.computeVertexNormals();
-    const colored = "hasColors" in geometry && !!geometry.hasColors;
-    const material = new MeshStandardMaterial({ color: colored ? 0xffffff : PLAIN, vertexColors: colored });
-    return { model: new Mesh(geometry, material), clips: [] };
+  if (extension === "stl") return { model: surface(new STLLoader().parse(bytes)), clips: [] };
+  if (extension === "ply") {
+    const { PLYLoader } = await import("three/examples/jsm/loaders/PLYLoader.js");
+    const geometry = new PLYLoader().parse(bytes);
+    // A scan with no faces has no index.
+    return { model: surface(geometry, !geometry.index), clips: [] };
+  }
+  if (extension === "3mf") {
+    const { ThreeMFLoader } = await import("three/examples/jsm/loaders/3MFLoader.js");
+    return { model: new ThreeMFLoader(offline()).parse(bytes), clips: [] };
+  }
+  if (extension === "fbx") {
+    const { FBXLoader } = await import("three/examples/jsm/loaders/FBXLoader.js");
+    const model = new FBXLoader(offline()).parse(bytes, "");
+    return { model, clips: model.animations };
+  }
+  if (USD.includes(extension)) {
+    const { USDLoader } = await import("three/examples/jsm/loaders/USDLoader.js");
+    // The pictures inside arrive after the shapes, and the model shows once it has them.
+    const model = await new Promise<Object3D>((done, failed) => new USDLoader(offline()).parse(bytes, "", done, failed));
+    return { model, clips: model.animations };
   }
   if (extension === "obj") return { model: await obj(new TextDecoder().decode(bytes), read, urls), clips: [] };
   const json = extension === "glb" ? glbJson(bytes) : JSON.parse(new TextDecoder().decode(bytes));
   const loader = new GLTFLoader(await localParts(json, read, urls));
   const found = await loader.parseAsync(bytes, "");
   return { model: found.scene, clips: found.animations };
+}
+
+/**
+ * One surface with no materials of its own, in its colors if it has them. Its triangles share no
+ * corners, so the normals are worked out here, and edges sharper than `CREASE` stay sharp. A file
+ * of points with no triangles shows as its points.
+ */
+function surface(geometry: BufferGeometry, points = false) {
+  const colored = geometry.hasAttribute("color");
+  const color = colored ? 0xffffff : PLAIN;
+  if (points) return new Points(geometry, new PointsMaterial({ color, vertexColors: colored, size: 2, sizeAttenuation: false }));
+  return new Mesh(toCreasedNormals(geometry, CREASE), new MeshStandardMaterial({ color, vertexColors: colored }));
+}
+
+/** Lets a reader use what is packed inside the file, and nothing from the web or the disk. */
+function offline() {
+  const manager = new LoadingManager();
+  manager.setURLModifier((url) => (/^(blob|data):/.test(url) ? url : "data:,"));
+  return manager;
 }
 
 /** Reads a file the model points to, as a URL for three.js, or nothing if it isn't there. */

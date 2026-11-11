@@ -1,5 +1,5 @@
-import { createEffect, createSignal, For, on, Show } from "solid-js";
-import { filetimeToMs, type Answer, type Facts, type Question } from "../../api";
+import { createEffect, createResource, createSignal, For, on, Show } from "solid-js";
+import { fetchPictureFile, filetimeToMs, type Answer, type Facts, type Question, type Thumb } from "../../api";
 import { formatSize } from "../../ui/format";
 import { baseName } from "../navigation/path";
 import type { JobCard, Jobs } from "./jobs";
@@ -24,14 +24,49 @@ const LABELS: Record<Answer, string> = {
 
 const dates = new Intl.DateTimeFormat(undefined, { dateStyle: "short", timeStyle: "short" });
 
-/** One side of a conflict, with what makes it stand out against the other side. */
-function describe(facts: Facts, other: Facts) {
-  const size = facts.folder ? "Folder" : formatSize(facts.size);
+/** What makes one side of a conflict stand out against the other. */
+function marksOf(facts: Facts, other: Facts) {
   const marks = [];
-  if (facts.modified > other.modified) marks.push("newer");
-  if (!facts.folder && !other.folder && facts.size > other.size) marks.push("larger");
-  const text = `${size}, ${dates.format(filetimeToMs(facts.modified))}`;
-  return marks.length > 0 ? `${text} (${marks.join(", ")})` : text;
+  if (facts.modified > other.modified) marks.push("Newer");
+  if (!facts.folder && !other.folder && facts.size > other.size) marks.push("Larger");
+  return marks;
+}
+
+const PICTURE_EDGE = 96;
+
+function draw(canvas: HTMLCanvasElement, thumb: Thumb) {
+  canvas.width = thumb.width;
+  canvas.height = thumb.height;
+  canvas.getContext("2d")!.putImageData(new ImageData(thumb.pixels, thumb.width, thumb.height), 0, 0);
+}
+
+/** One side of a conflict: its picture, its size and date, and what it has over the other. */
+function Side(props: { title: string; path: string | null; facts: Facts; other: Facts }) {
+  const [picture] = createResource(
+    () => props.path,
+    (path) => fetchPictureFile(path, PICTURE_EDGE).catch(() => null),
+  );
+  return (
+    <div class="job-side">
+      <Show when={picture()} keyed fallback={<span class="job-picture" />}>
+        {(thumb) => <canvas ref={(canvas) => draw(canvas, thumb)} class="job-picture" />}
+      </Show>
+      <span class="job-side-title">{props.title}</span>
+      <span>{props.facts.folder ? "Folder" : formatSize(props.facts.size)}</span>
+      <span>{dates.format(filetimeToMs(props.facts.modified))}</span>
+      <span class="job-marks">
+        <For each={marksOf(props.facts, props.other)}>{(mark) => <span class="job-mark">{mark}</span>}</For>
+      </span>
+    </div>
+  );
+}
+
+/** "12 of these are already here, 3 are new", for a job with more than one pick. */
+export function tallyText(clashes: number, fresh: number) {
+  if (clashes + fresh < 2) return "";
+  const here = clashes === 1 ? "1 of these is already here" : `${clashes.toLocaleString()} of these are already here`;
+  const rest = fresh === 0 ? "none are new" : fresh === 1 ? "1 is new" : `${fresh.toLocaleString()} are new`;
+  return `${here}, ${rest}.`;
 }
 
 function questionText(question: Question) {
@@ -63,12 +98,13 @@ function Prompt(props: { question: Question; onAnswer: (answer: Answer, all: boo
       <p class="job-question">{questionText(props.question)}</p>
       <Show when={conflict()}>
         {(open) => (
-          <dl class="job-compare">
-            <dt>New</dt>
-            <dd>{describe(open().source, open().target)}</dd>
-            <dt>Existing</dt>
-            <dd>{describe(open().target, open().source)}</dd>
-          </dl>
+          <>
+            <Show when={tallyText(open().clashes, open().fresh)}>{(tally) => <p class="job-tally">{tally()}</p>}</Show>
+            <div class="job-compare">
+              <Side title="New" path={open().sourcePath} facts={open().source} other={open().target} />
+              <Side title="Already here" path={open().targetPath} facts={open().target} other={open().source} />
+            </div>
+          </>
         )}
       </Show>
       <div class="job-choices">

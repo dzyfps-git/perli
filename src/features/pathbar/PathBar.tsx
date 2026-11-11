@@ -1,5 +1,7 @@
-import { createEffect, Index, on, onCleanup, onMount, Show } from "solid-js";
-import { expandPath, isFile, openFile } from "../../api";
+import { createEffect, createSignal, For, Index, on, onCleanup, onMount, Show } from "solid-js";
+import { expandPath, isFile, openFile, type SearchScope } from "../../api";
+import { ariaKeys } from "../keys/keybinds";
+import { looksLikeName, readTyped } from "../reach/lists";
 import type { Layout } from "../filelist/layout";
 import { showHidden } from "../filelist/prefs";
 import type { FolderView } from "../navigation/folderView";
@@ -20,6 +22,29 @@ const ICON_CHEVRON = "\uE76C";
 /** Long enough that typing a word starts one search, not one per letter. */
 const SEARCH_WAIT_MS = 120;
 
+/** One thing the path bar offers for what is typed in it. */
+export interface Suggestion {
+  label: string;
+  /** Said quietly beside the label: a key, or where it goes. */
+  hint?: string;
+  /** What Tab puts in the bar in place of what was typed. */
+  fill?: string;
+  run: () => void;
+}
+
+/** What is offered, and whether Enter takes the first of it or the text as typed. */
+export interface Suggested {
+  items: Suggestion[];
+  first: boolean;
+}
+
+const SCOPES: { id: SearchScope; short: string; label: string }[] = [
+  { id: "folder", short: "Here", label: "Search this folder only" },
+  { id: "below", short: "Below", label: "Search this folder and the ones inside it" },
+  { id: "drive", short: "Drive", label: "Search this whole drive" },
+  { id: "drives", short: "All", label: "Search every drive" },
+];
+
 export function PathBar(props: {
   view: FolderView;
   onToggleHidden: () => void;
@@ -30,7 +55,13 @@ export function PathBar(props: {
   /** The crumb whose menu is open. */
   menuFor?: string;
   onNewTab: (path: string) => void;
+  /** What to offer for the text typed in the path bar. */
+  suggest: (text: string) => Promise<Suggested>;
 }) {
+  const [offered, setOffered] = createSignal<Suggested>({ items: [], first: false });
+  /** The offer the arrow keys are on, or -1 for the text as typed. */
+  const [chosen, setChosen] = createSignal(-1);
+  let asked = 0;
   const crumbs = () => toCrumbs(props.view.trail());
   const depth = () => toCrumbs(props.view.folder()?.path ?? "").length;
   let list!: HTMLOListElement;
@@ -57,27 +88,78 @@ export function PathBar(props: {
     focusList();
   }
 
+  function offer(text: string) {
+    const ticket = ++asked;
+    props
+      .suggest(text)
+      .then((found) => {
+        if (ticket !== asked) return;
+        setOffered(found);
+        setChosen(found.first && found.items.length > 0 ? 0 : -1);
+      })
+      .catch(console.error);
+  }
+
+  function take(suggestion: Suggestion) {
+    closeInput();
+    suggestion.run();
+  }
+
+  // The offers belong to one stretch of typing, and start empty the next time.
+  createEffect(() => {
+    if (!props.view.editingPath()) {
+      asked++;
+      setOffered({ items: [], first: false });
+    }
+  });
+
   function setLayout(layout: Layout) {
     props.view.setLayout(layout);
     focusList();
   }
 
   async function openTyped(text: string) {
+    const typed = readTyped(text);
+    if (typed.kind === "search") {
+      closeInput();
+      return props.view.search(typed.text);
+    }
+    // A command, a nickname or a terminal is only ever taken from the offers.
+    if (typed.kind !== "path") return;
     const path = typedPath(props.view.folder()?.path ?? "", await expandPath(text));
     if (await isFile(path)) {
       closeInput();
       await openFile(path);
     } else if (await props.view.open(path)) {
       props.view.setEditingPath(false);
+    } else if (looksLikeName(text.trim())) {
+      // No folder has that name, so it is something to look for.
+      closeInput();
+      props.view.search(text.trim());
     }
   }
 
   function onInputKey(event: KeyboardEvent) {
+    const input = event.currentTarget as HTMLInputElement;
+    const { items } = offered();
+    const step = event.key === "ArrowDown" ? 1 : event.key === "ArrowUp" ? -1 : 0;
     if (event.key === "Escape") {
       event.stopPropagation();
       closeInput();
+    } else if (step && items.length > 0) {
+      event.preventDefault();
+      // One step past either end is the text as typed.
+      setChosen(((chosen() + 1 + step + items.length + 1) % (items.length + 1)) - 1);
+    } else if (event.key === "Tab" && items.length > 0) {
+      event.preventDefault();
+      const fill = items[Math.max(0, chosen())].fill;
+      if (fill === undefined) return;
+      input.value = fill;
+      offer(fill);
     } else if (event.key === "Enter") {
-      openTyped((event.currentTarget as HTMLInputElement).value).catch(console.error);
+      const picked = items[chosen()];
+      if (picked) take(picked);
+      else openTyped(input.value).catch(console.error);
     }
   }
 
@@ -140,32 +222,60 @@ export function PathBar(props: {
 
   return (
     <nav class="pathbar" aria-label="Folder navigation">
-      <button class="nav-button" aria-label="Back" aria-keyshortcuts="Alt+ArrowLeft" disabled={!props.view.canGoBack()} onClick={() => props.view.back()}>
+      <button class="nav-button" aria-label="Back" aria-keyshortcuts={ariaKeys("back")} disabled={!props.view.canGoBack()} onClick={() => props.view.back()}>
         {ICON_BACK}
       </button>
       <button
         class="nav-button"
         aria-label="Forward"
-        aria-keyshortcuts="Alt+ArrowRight"
+        aria-keyshortcuts={ariaKeys("forward")}
         disabled={!props.view.canGoForward()}
         onClick={() => props.view.forward()}
       >
         {ICON_FORWARD}
       </button>
-      <button class="nav-button" aria-label="Up" aria-keyshortcuts="Alt+ArrowUp" disabled={!props.view.canGoUp()} onClick={() => props.view.up()}>
+      <button class="nav-button" aria-label="Up" aria-keyshortcuts={ariaKeys("up")} disabled={!props.view.canGoUp()} onClick={() => props.view.up()}>
         {ICON_UP}
       </button>
       <Show when={props.view.editingPath()}>
-        <input
-          ref={focusInput}
-          class="path-input"
-          aria-label="Folder path"
-          spellcheck={false}
-          value={props.view.folder()?.path ?? ""}
-          onKeyDown={onInputKey}
-          onContextMenu={props.onInputMenu}
-          onBlur={closeOnBlur}
-        />
+        <div class="path-field">
+          <input
+            ref={focusInput}
+            class="path-input"
+            role="combobox"
+            aria-label="Folder path, a search, > for a command, @ for a nickname"
+            aria-expanded={offered().items.length > 0}
+            aria-controls={`path-offers-${props.view.id}`}
+            aria-activedescendant={chosen() >= 0 ? `path-offer-${props.view.id}-${chosen()}` : undefined}
+            spellcheck={false}
+            value={props.view.folder()?.path ?? ""}
+            onInput={(event) => offer(event.currentTarget.value)}
+            onKeyDown={onInputKey}
+            onContextMenu={props.onInputMenu}
+            onBlur={closeOnBlur}
+          />
+          <Show when={offered().items.length > 0}>
+            <ul id={`path-offers-${props.view.id}`} class="path-offers" role="listbox" aria-label="Offers">
+              <For each={offered().items}>
+                {(item, at) => (
+                  <li
+                    id={`path-offer-${props.view.id}-${at()}`}
+                    class="path-offer"
+                    role="option"
+                    aria-selected={at() === chosen()}
+                    onPointerMove={() => setChosen(at())}
+                    // The input keeps the focus, or its blur would close this first.
+                    onMouseDown={(event) => event.preventDefault()}
+                    onClick={() => take(item)}
+                  >
+                    <span class="path-offer-label">{item.label}</span>
+                    <span class="path-offer-hint">{item.hint}</span>
+                  </li>
+                )}
+              </For>
+            </ul>
+          </Show>
+        </div>
       </Show>
       <ol
         ref={list}
@@ -221,7 +331,7 @@ export function PathBar(props: {
       <button
         class="nav-button filter-button"
         aria-label="Filter"
-        aria-keyshortcuts="Control+Shift+F"
+        aria-keyshortcuts={ariaKeys("filter")}
         aria-pressed={props.view.filtered()}
         onClick={props.onFilter}
       >
@@ -234,7 +344,7 @@ export function PathBar(props: {
         ref={searchBox}
         class="search-input"
         aria-label="Search this folder"
-        aria-keyshortcuts="Control+F"
+        aria-keyshortcuts={ariaKeys("search")}
         placeholder="Search"
         spellcheck={false}
         hidden={props.view.isBin()}
@@ -243,11 +353,27 @@ export function PathBar(props: {
         onKeyDown={onSearchKey}
         onContextMenu={props.onInputMenu}
       />
+      <Show when={props.view.query()}>
+        <div class="scope-pill" role="radiogroup" aria-label="Where to search">
+          <For each={SCOPES}>
+            {(scope) => (
+              <button
+                role="radio"
+                aria-label={scope.label}
+                aria-checked={props.view.scope() === scope.id}
+                onClick={() => props.view.setScope(scope.id)}
+              >
+                {scope.short}
+              </button>
+            )}
+          </For>
+        </div>
+      </Show>
       <div class="layout-pill" role="group" aria-label="Layout" data-layout={props.view.layout()}>
-        <button aria-label="List" aria-keyshortcuts="Control+Shift+1" aria-pressed={props.view.layout() === "list"} onClick={() => setLayout("list")}>
+        <button aria-label="List" aria-keyshortcuts={ariaKeys("list")} aria-pressed={props.view.layout() === "list"} onClick={() => setLayout("list")}>
           {ICON_LIST}
         </button>
-        <button aria-label="Grid" aria-keyshortcuts="Control+Shift+2" aria-pressed={props.view.layout() === "grid"} onClick={() => setLayout("grid")}>
+        <button aria-label="Grid" aria-keyshortcuts={ariaKeys("grid")} aria-pressed={props.view.layout() === "grid"} onClick={() => setLayout("grid")}>
           {ICON_GRID}
         </button>
       </div>

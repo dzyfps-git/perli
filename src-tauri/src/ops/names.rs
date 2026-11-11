@@ -161,6 +161,14 @@ pub fn free(folder: &Path, stem: &str, extension: &str) -> PathBuf {
     free_name(folder, OsStr::new(stem), OsStr::new(extension))
 }
 
+/// A free name for a new folder called `name`, or "New folder" if Windows would refuse that.
+pub fn new_folder(folder: &Path, name: Option<&str>) -> PathBuf {
+    match name.filter(|name| check(name).is_ok()) {
+        Some(name) => free(folder, name, ""),
+        None => new_item(folder, true),
+    }
+}
+
 /// A free name for a new, empty item.
 pub fn new_item(folder: &Path, directory: bool) -> PathBuf {
     if directory {

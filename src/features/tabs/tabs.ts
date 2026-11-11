@@ -47,8 +47,9 @@ export function createTabs() {
     for (const view of active().panes()) view.openSaved();
   });
 
-  /** Answers with the new tab's first pane, or nothing when no folder opened. */
-  async function add(paths: string[], after = active()) {
+  /** Answers with the new tab's first pane, or nothing when no folder opened. `behind` leaves
+   * the tab on show where it is. */
+  async function add(paths: string[], after = active(), behind = false) {
     const views = paths.map(() => newView());
     const results = await Promise.all(views.map((view, index) => view.open(paths[index])));
     const opened = views.filter((_, index) => results[index]);
@@ -61,7 +62,7 @@ export function createTabs() {
       const result = [...tabs()];
       result.splice(result.indexOf(after) + 1, 0, tab);
       setTabs(result);
-      setActive(tab);
+      if (!behind) setActive(tab);
     }, "tabs");
     return opened[0];
   }

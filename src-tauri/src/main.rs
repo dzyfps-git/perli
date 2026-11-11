@@ -191,6 +191,11 @@ enum Task {
     /// `names` line up with the selected rows.
     RenameAll { selection: Selection, names: Vec<String> },
     New { folder: String, directory: bool },
+    /// A new folder named after the first selected row. With `move_in` the rows go into it.
+    NewFolderFrom { selection: Selection, folder: String, move_in: bool },
+    /// Files that wait on the shelf, by path, since their folder may not be on show.
+    CopyPaths { paths: Vec<PathBuf>, folder: String },
+    MovePaths { paths: Vec<PathBuf>, folder: String },
     Template { folder: String, extension: String },
     OwnTemplate { folder: String, name: String },
     SaveTemplate { selection: Selection },
@@ -245,6 +250,19 @@ impl Task {
                 folder: target(folder)?,
                 directory,
             },
+            Self::NewFolderFrom { selection, folder, move_in } => {
+                let sources = paths(&selection)?;
+                let first = sources.first().ok_or("Nothing is selected")?;
+                // A folder's dots are part of its name. A file's last one starts its type.
+                let name = if first.is_dir() { first.file_name() } else { first.file_stem() };
+                Job::Gather {
+                    name: name.map(|name| name.to_string_lossy().into_owned()),
+                    sources: if move_in { sources } else { Vec::new() },
+                    folder: target(folder)?,
+                }
+            }
+            Self::CopyPaths { paths, folder } => Job::Copy { sources: paths, folder: target(folder)? },
+            Self::MovePaths { paths, folder } => Job::Move { sources: paths, folder: target(folder)? },
             Self::Template { folder, extension } => Job::Template {
                 folder: target(folder)?,
                 template: templates::template(&extension)?,
@@ -628,6 +646,14 @@ async fn undo_job(origin: Option<u32>, step: Option<u64>, app: AppHandle) -> Res
 #[tauri::command]
 async fn redo_job(origin: Option<u32>, app: AppHandle) -> Result<(), String> {
     jobs::redo(&app, origin)
+}
+
+/// What can still be undone, newest first, for the activity log.
+#[tauri::command]
+async fn activity(app: AppHandle) -> Result<Vec<jobs::Activity>, String> {
+    async_runtime::spawn_blocking(move || app.state::<Jobs>().activity())
+        .await
+        .map_err(|error| error.to_string())
 }
 
 /// Waits for the saved undo log, which can be slow to read, so it stays off the main thread.
@@ -1075,8 +1101,8 @@ async fn path_users(paths: Vec<PathBuf>) -> Result<Vec<String>, String> {
 }
 
 #[tauri::command]
-async fn open_terminal(path: String) -> Result<(), String> {
-    async_runtime::spawn_blocking(move || shell::open_terminal(&path))
+async fn open_terminal(path: String, shell: Option<String>) -> Result<(), String> {
+    async_runtime::spawn_blocking(move || shell::open_terminal(&path, shell.as_deref()))
         .await
         .map_err(|error| error.to_string())?
         .map_err(|error| error.to_string())
@@ -1373,10 +1399,39 @@ async fn set_drop_target(folder: Option<PathBuf>, drags: State<'_, Arc<Drags>>) 
     Ok(())
 }
 
+/// The files of the last drop, for the shelf to keep. Nothing moves.
+#[tauri::command]
+fn shelve_drop(drags: State<'_, Arc<Drags>>) -> Vec<String> {
+    drags.shelve().iter().map(|path| path.to_string_lossy().into_owned()).collect()
+}
+
+/// Which of `paths` are still there, so the shelf can drop what has gone.
+#[tauri::command]
+async fn paths_exist(paths: Vec<PathBuf>) -> Vec<bool> {
+    paths.iter().map(|path| path.exists()).collect()
+}
+
+/// The paths behind the selected rows, for the shelf and for copying as text.
+#[tauri::command]
+async fn selection_paths(selection: Selection, views: State<'_, Views>) -> Result<Vec<String>, String> {
+    let paths = views.read(&selection, folder::Listing::paths)?;
+    Ok(paths.iter().map(|path| path.to_string_lossy().into_owned()).collect())
+}
+
 /// Windows' drag loop must run on the main thread, and not inside this call from the web view.
 #[tauri::command]
 async fn start_drag(selection: Selection, views: State<'_, Views>, app: AppHandle) -> Result<(), String> {
     let paths = views.read(&selection, folder::Listing::paths)?;
+    drag_out(paths, app).await
+}
+
+/// A drag of files off the shelf, which Windows runs like any other.
+#[tauri::command]
+async fn start_drag_paths(paths: Vec<PathBuf>, app: AppHandle) -> Result<(), String> {
+    drag_out(paths, app).await
+}
+
+async fn drag_out(paths: Vec<PathBuf>, app: AppHandle) -> Result<(), String> {
     let main = jobs::owner(&app);
     let (finished, result) = mpsc::channel();
     app.run_on_main_thread(move || {
@@ -1571,6 +1626,11 @@ fn main() {
             undo_job,
             redo_job,
             undo_state,
+            activity,
+            shelve_drop,
+            selection_paths,
+            paths_exist,
+            start_drag_paths,
             hold_close,
             cancel_jobs_and_close,
             pause_job,
