@@ -1,5 +1,6 @@
 import { createSignal, onMount } from "solid-js";
 import { rowsMatching } from "../../api";
+import { openSheet } from "../../ui/sheet";
 import type { FolderView } from "../navigation/folderView";
 import "../settings/settings.css";
 import "../fileops/fileops.css";
@@ -12,6 +13,7 @@ export function SelectPattern(props: { view: FolderView; onClose: () => void }) 
   let dialog!: HTMLDialogElement;
   let input!: HTMLInputElement;
   let latest = 0;
+  let close!: ReturnType<typeof openSheet>;
 
   /** The rows that fit now. The folder may have reloaded behind the dialog. */
   function rows(text: string) {
@@ -37,16 +39,17 @@ export function SelectPattern(props: { view: FolderView; onClose: () => void }) 
     try {
       const found = await rows(pattern());
       if (found.length === 0) return;
-      dialog.close();
-      props.view.list()?.select(found);
-      props.view.list()?.focus();
+      close(() => {
+        props.view.list()?.select(found);
+        props.view.list()?.focus();
+      });
     } catch (reason) {
       setFailure(String(reason));
     }
   }
 
   onMount(() => {
-    dialog.showModal();
+    close = openSheet(dialog);
     input.focus();
   });
 
@@ -69,7 +72,7 @@ export function SelectPattern(props: { view: FolderView; onClose: () => void }) 
       </div>
       <p class="confirm-summary">{failure() ?? `${count().toLocaleString()} fit.`}</p>
       <div class="confirm-buttons">
-        <button class="job-choice" onClick={() => dialog.close()}>
+        <button class="job-choice" onClick={() => close()}>
           Cancel
         </button>
         <button class="job-choice" disabled={count() === 0} onClick={confirm}>

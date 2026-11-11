@@ -1,5 +1,6 @@
 import { createSignal, onMount, Show } from "solid-js";
 import { createTag, setTag, type Selection } from "../../api";
+import { openSheet } from "../../ui/sheet";
 import { Swatches } from "./Swatches";
 import { refreshTags } from "./tags";
 import "../settings/settings.css";
@@ -17,6 +18,7 @@ export function NewTag(props: {
   const [failure, setFailure] = createSignal<string>();
   let dialog!: HTMLDialogElement;
   let input!: HTMLInputElement;
+  let close!: ReturnType<typeof openSheet>;
 
   async function confirm() {
     try {
@@ -24,7 +26,7 @@ export function NewTag(props: {
       await refreshTags();
       const selection = props.selection();
       if (selection) await setTag(selection, tag.id, true);
-      dialog.close();
+      close();
       props.onDone();
     } catch (reason) {
       setFailure(String(reason));
@@ -32,7 +34,7 @@ export function NewTag(props: {
   }
 
   onMount(() => {
-    dialog.showModal();
+    close = openSheet(dialog);
     input.focus();
   });
 
@@ -62,7 +64,7 @@ export function NewTag(props: {
         </p>
       </Show>
       <div class="confirm-buttons filter-buttons">
-        <button class="job-choice" onClick={() => dialog.close()}>
+        <button class="job-choice" onClick={() => close()}>
           Cancel
         </button>
         <button class="job-choice" disabled={!name().trim()} onClick={confirm}>

@@ -1,16 +1,26 @@
 import { createEffect, createMemo, createSignal, on, onCleanup, onMount, Show } from "solid-js";
-import { fetchRows, fetchThumb, findRow, type Row, type Selection, type Sort, type SortKey } from "../../api";
+import {
+  fetchRows,
+  fetchThumb,
+  findRow,
+  selectionSize,
+  type Row,
+  type Selection,
+  type Sort,
+  type SortKey,
+} from "../../api";
 import { ColumnHeader, SortStrip } from "./ColumnHeader";
 import { formatSize } from "../../ui/format";
 import { tagColor, tagNames, tags } from "../tags/tags";
 import type { ListHandle, RowAt } from "../navigation/folderView";
-import { join, relativeTo } from "../navigation/path";
+import { join, parentOf, relativeTo, samePath } from "../navigation/path";
 import { allLooks, lookOf } from "../sidebar/saved";
+import { EmptyState, type Empty } from "./EmptyState";
 import { HoverCard, type CardAsk } from "./HoverCard";
 import { columnsWidth, gridTemplate, type Column } from "./columns";
 import { clampTile, moveTarget, TILE_STEP, type Layout } from "./layout";
 import { ageShare, hasPicture, iconSheet, kindOf } from "./fileKinds";
-import { hoverCards, ROW_HEIGHTS, rowDensity, setTileSize, tileSize, windowsIcons } from "./prefs";
+import { hoverCards, ROW_HEIGHTS, rowDensity, setTileSize, statusBar, tileSize, windowsIcons } from "./prefs";
 import { createSelection } from "./selection";
 import { cachedThumb, createThumbLoader } from "./thumbs";
 import { matchSpans } from "./nameMatch";
@@ -41,7 +51,25 @@ const WHEEL_NOTCH = 100;
 const ICON_GAP = 8;
 /** The height of the name's own line in a roomy row, as filelist.css sets it. */
 const ROOMY_LINE = 18;
+/** How long the quiet status line stays after it has something new to say. */
+const WHISPER_MS = 2400;
+/** A burst of selection changes is added up once, this long after the last one. */
+const WHISPER_WAIT_MS = 120;
+// ponytail: past this many selected rows the status line names no size, since sending the rows
+// alone would cost more than the answer is worth. Add up on the Rust side from ranges if asked for.
+const MOST_SIZED_ROWS = 20_000;
+/** How far rows start from their place when a folder zooms in or out, as a share of their
+ *  distance from the row that was opened. */
+const ZOOM_IN_SHARE = -0.08;
+const ZOOM_OUT_SHARE = 0.06;
+const ZOOM_MS = 280;
 const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
+
+/** Each view's last folder, and where on screen the row that left it was, for the zoom. */
+const leftFrom = new Map<number, { folder: string; y?: number }>();
+const openedAt = new Map<number, number>();
+
+const counted = (count: number, one: string, many: string) => `${count.toLocaleString()} ${count === 1 ? one : many}`;
 
 const kindStyles = document.createElement("style");
 kindStyles.textContent = iconSheet();
@@ -164,7 +192,8 @@ export function FileList(props: {
   fixedColumns: boolean;
   /** Names waiting to move, which fade. */
   cut?: Set<string>;
-  emptyText: string;
+  /** What stands in for the rows when there are none. */
+  empty: Empty;
   /** What a search typed, whose letters light up in each name. */
   match?: string;
   active: boolean;
@@ -207,6 +236,14 @@ export function FileList(props: {
   }>();
   const [editError, setEditError] = createSignal<string>();
   const [card, setCard] = createSignal<CardAsk>();
+  /** How many rows are selected and their bytes, for the status line. */
+  const [picked, setPicked] = createSignal({ count: 0, bytes: 0 });
+  /** The status line has something new to say. */
+  const [fresh, setFresh] = createSignal(true);
+  let freshTimer: number | undefined;
+  let sizeTimer: number | undefined;
+  let sizeTicket = 0;
+  let whisper: HTMLParagraphElement | undefined;
   let cardTimer: ReturnType<typeof setTimeout> | undefined;
   /** The row under the pointer, so resting on one row asks for its card only once. */
   let hovered = -1;
@@ -416,12 +453,41 @@ export function FileList(props: {
     }
   }
 
+  /**
+   * Which way this folder was reached from the last one: into one of its rows, or back up out of
+   * it. Anything else, such as a jump from the sidebar, is neither.
+   */
+  function zoom() {
+    const from = leftFrom.get(props.view);
+    if (!from || props.rearranged) return undefined;
+    if (samePath(parentOf(props.folder), from.folder)) return { share: ZOOM_IN_SHARE, scale: 0.96, y: from.y };
+    if (samePath(parentOf(from.folder), props.folder)) return { share: ZOOM_OUT_SHARE, scale: 1.04, y: undefined };
+    return undefined;
+  }
+
   function playRowsIn() {
     const now = performance.now();
     // A new order is the user's own request, so it plays however soon it follows the last one.
     const earned = props.rearranged || now - lastFolderOpen > ROWS_IN_PAUSE_MS;
     lastFolderOpen = now;
+    const zoomed = zoom();
     if (!earned || reducedMotion.matches) return;
+
+    if (zoomed) {
+      // Rows spread out from the row that was opened, or close in from further out. Each row
+      // moves on its own, because the spacer they sit in can be far taller than the screen.
+      const box = grid.getBoundingClientRect();
+      const origin = zoomed.y ?? box.top + box.height / 2;
+      for (const { element } of pool) {
+        const { top } = element.getBoundingClientRect();
+        if (top > box.bottom) continue;
+        element.animate(
+          { translate: [`0 ${(top - origin) * zoomed.share}px`, "0 0"], scale: [zoomed.scale, 1], opacity: [0, 1] },
+          { duration: ZOOM_MS, easing: "cubic-bezier(0.2, 0.9, 0.3, 1)", fill: "backwards" },
+        );
+      }
+      return;
+    }
 
     for (const { element, index } of pool) {
       element.animate(
@@ -469,9 +535,44 @@ export function FileList(props: {
     if (lone) marker.style.transform = placeOf(focused);
   }
 
+  /** Tells the status line what is selected. The bytes come a moment later, from the listing. */
+  function noteSelection() {
+    const count = selection.size();
+    window.clearTimeout(sizeTimer);
+    const ticket = ++sizeTicket;
+    if (count === picked().count && count === 0) return;
+    setPicked({ count, bytes: count === 0 ? 0 : picked().bytes });
+    if (count === 0 || count > MOST_SIZED_ROWS) return setPicked({ count, bytes: 0 });
+    sizeTimer = window.setTimeout(() => {
+      selectionSize({ view: props.view, request: shown, rows: selection.rows() })
+        .then((bytes) => ticket === sizeTicket && setPicked({ count, bytes }))
+        // A reload in between forgets the snapshot, and the next change asks again.
+        .catch(() => undefined);
+    }, WHISPER_WAIT_MS);
+  }
+
+  /** The status line shows for a moment. */
+  function speak() {
+    setFresh(true);
+    window.clearTimeout(freshTimer);
+    freshTimer = window.setTimeout(() => setFresh(false), WHISPER_MS);
+  }
+
+  const whisperText = () => {
+    const { count, bytes } = picked();
+    if (count > 0) {
+      const of = count > 1 || props.count > 1 ? ` of ${props.count.toLocaleString()}` : "";
+      return `${count.toLocaleString()}${of} selected${bytes > 0 ? ` · ${formatSize(bytes)}` : ""}`;
+    }
+    return props.match ? counted(props.count, "match", "matches") : counted(props.count, "item", "items");
+  };
+  /** An empty list says so itself, in its middle. */
+  const whisperShown = () => statusBar() || picked().count > 0 || (fresh() && props.count > 0);
+
   function selectionChanged(instant = false, reveal = true) {
     pool.forEach(decorate);
     moveMarker(instant);
+    noteSelection();
     const focused = selection.focused();
     const lone = selection.size() === 1 && selection.has(focused);
     props.onCursor(lone ? { snapshot: shown, index: focused } : undefined);
@@ -523,7 +624,11 @@ export function FileList(props: {
 
   function openIndex(index: number, toSide: boolean) {
     const row = index >= 0 ? rowAt(index) : undefined;
-    if (row) props.onOpen(row, toSide);
+    if (!row) return;
+    // Where the folder zooms out from, if this opens one here.
+    const element = pool[index % pool.length]?.element.getBoundingClientRect();
+    if (row.isDir && !toSide && element) openedAt.set(props.view, element.top + element.height / 2);
+    props.onOpen(row, toSide);
   }
 
   function onContextMenu(event: MouseEvent) {
@@ -591,10 +696,12 @@ export function FileList(props: {
     );
     if (snapshot !== props.snapshot) return;
 
-    // Rows changing in place play their change. Opening, sorting, searching and scrolling don't.
+    // Rows changing in place play their change. Opening, sorting and scrolling don't. A search
+    // plays only from the top of the list, where the rows that stop matching can be seen to go.
     // ponytail: rows past the screen's edge just appear, and a reveal that scrolls plays nothing.
     const scrolled = grid.scrollTop;
-    const moving = !props.top && !props.rearranged && !props.match && firstPaintDone && !reducedMotion.matches;
+    const still = props.match ? scrolled === 0 : !props.top;
+    const moving = still && !props.rearranged && firstPaintDone && !reducedMotion.matches;
     const before = moving ? seen(rowsShown(), props.count < lastCount) : undefined;
     lastCount = props.count;
 
@@ -617,7 +724,10 @@ export function FileList(props: {
     builtFor = "";
     resize();
     selectionChanged(true, props.reveal);
-    if (before && grid.scrollTop === scrolled) playMoves(before, rowsShown(), spacer);
+    if (before && grid.scrollTop === scrolled) {
+      // In a search, rows that no longer match drift off and the rest close ranks without a show.
+      playMoves(before, rowsShown(), spacer, props.match ? "drift" : "shrink", !!props.match);
+    }
     const next = renameNext;
     renameNext = undefined;
     if (props.rename) startRename(selection.focused());
@@ -628,7 +738,9 @@ export function FileList(props: {
   function rowsShown(): [string, HTMLElement][] {
     return pool.flatMap((pooled) => {
       const row = pooled.filled ? rowAt(pooled.index) : undefined;
-      return row ? [[`${row.location}|${row.name}`, pooled.element] as [string, HTMLElement]] : [];
+      // A row is the same file in the folder's own list and in a search of it.
+      const key = `${row?.location || props.folder}|${row?.name}`;
+      return row ? [[key, pooled.element] as [string, HTMLElement]] : [];
     });
   }
 
@@ -803,12 +915,32 @@ export function FileList(props: {
 
     const observer = new ResizeObserver(resize);
     observer.observe(grid);
+    speak();
+    // By the time this list goes, the folder it is told about is already the next one.
+    const folder = props.folder;
     onCleanup(() => {
       forgetMatches();
       observer.disconnect();
       props.onCursor(undefined);
+      window.clearTimeout(freshTimer);
+      window.clearTimeout(sizeTimer);
+      leftFrom.set(props.view, { folder, y: openedAt.get(props.view) });
+      openedAt.delete(props.view);
     });
   });
+
+  createEffect(on(() => props.count, speak, { defer: true }));
+
+  // The words change with a small step up, so a new count is seen without being read.
+  createEffect(
+    on(
+      whisperText,
+      () =>
+        !reducedMotion.matches &&
+        whisper?.animate({ translate: ["0 4px", "0 0"], opacity: [0.4, 1] }, { duration: 180, easing: "ease-out" }),
+      { defer: true },
+    ),
+  );
 
   createEffect(
     on(
@@ -908,7 +1040,7 @@ export function FileList(props: {
       >
         <div ref={marker} class="file-marker" role="presentation" hidden />
         <div ref={spacer} class="file-spacer" role="presentation" />
-        {props.count === 0 && <p class="message">{props.emptyText}</p>}
+        {props.count === 0 && <EmptyState empty={props.empty} />}
         <Show when={editor()} keyed>
           {(open) => (
             <div
@@ -936,6 +1068,14 @@ export function FileList(props: {
           )}
         </Show>
       </div>
+      <p
+        ref={whisper}
+        class="whisper"
+        classList={{ "whisper-bar": statusBar(), "whisper-on": whisperShown() }}
+        role="status"
+      >
+        {whisperText()}
+      </p>
       <Show when={card()} keyed>
         {(ask) => <HoverCard ask={ask} view={props.view} folder={props.folder} sync={syncText(ask.row)} />}
       </Show>

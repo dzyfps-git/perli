@@ -1,5 +1,7 @@
 import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { checkRenames, rowFacts, type Selection } from "../../api";
+import { NumberField } from "../../ui/Controls";
+import { openSheet } from "../../ui/sheet";
 import { changedPart, finder, renamed, START_RULES, type LetterCase, type RenameRules } from "./renameRules";
 import "../settings/settings.css";
 import "./fileops.css";
@@ -28,6 +30,7 @@ export function BatchRename(props: { request: RenameRequest; onClose: () => void
   const [checked, setChecked] = createSignal(false);
   const [failure, setFailure] = createSignal<string>();
   let dialog!: HTMLDialogElement;
+  let close!: ReturnType<typeof openSheet>;
   let find!: HTMLInputElement;
   let timer: number | undefined;
   let latest = 0;
@@ -78,12 +81,12 @@ export function BatchRename(props: { request: RenameRequest; onClose: () => void
   function confirm() {
     const wanted = names();
     if (!ready() || !wanted) return;
-    dialog.close();
+    close();
     props.request.confirm(wanted);
   }
 
   onMount(() => {
-    dialog.showModal();
+    close = openSheet(dialog);
     find.focus();
     rowFacts(props.request.selection)
       .then(setRows)
@@ -106,15 +109,7 @@ export function BatchRename(props: { request: RenameRequest; onClose: () => void
   const Count = (field: { label: string; rule: "start" | "digits"; least: number }) => (
     <label class="rename-field">
       {field.label}
-      <input
-        type="number"
-        min={field.least}
-        value={rules()[field.rule]}
-        onInput={(event) => {
-          const value = event.currentTarget.valueAsNumber;
-          if (Number.isInteger(value) && value >= field.least) change({ [field.rule]: value });
-        }}
-      />
+      <NumberField value={rules()[field.rule]} least={field.least} onChange={(value) => change({ [field.rule]: value })} />
     </label>
   );
 
@@ -197,7 +192,7 @@ export function BatchRename(props: { request: RenameRequest; onClose: () => void
       </ul>
       <p class="confirm-summary">{summary()}</p>
       <div class="confirm-buttons">
-        <button class="job-choice" onClick={() => dialog.close()}>
+        <button class="job-choice" onClick={() => close()}>
           Cancel
         </button>
         <button class="job-choice" disabled={!ready()} onClick={confirm}>

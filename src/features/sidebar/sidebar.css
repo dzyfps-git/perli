@@ -237,3 +237,58 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* The used part of a drive is slow liquid: a soft light drifts along it, over and over. */
+.place-used {
+  overflow: hidden;
+}
+
+.place-used::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  z-index: 1;
+  width: 40%;
+  background: linear-gradient(90deg, transparent, rgb(255 255 255 / 50%), transparent);
+  translate: -100% 0;
+  animation: place-liquid 7s ease-in-out infinite;
+}
+
+@keyframes place-liquid {
+  60%,
+  to {
+    translate: 250% 0;
+  }
+}
+
+/* A copy landed on this drive: the bar swells once and a quick light runs through it. */
+.place-bar[data-wave] {
+  animation: place-wave 1100ms var(--spring);
+}
+
+.place-bar[data-wave] .place-used::before {
+  animation: place-liquid 900ms ease-out;
+}
+
+@keyframes place-wave {
+  25% {
+    scale: 1 3;
+  }
+}
+
+/* On the rail there is no room beside the icon, so the bar sits under it. */
+.shell:not([data-sidebar="open"]) .sidebar:not(:hover, :has(:focus-visible), :has([data-drop-over])) .place-bar {
+  inset: auto auto 2px var(--space-2);
+  width: 14px;
+}
+
+html[data-blurred] .place-used::before {
+  animation-play-state: paused;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .place-used::before,
+  .place-bar[data-wave] {
+    animation: none;
+  }
+}

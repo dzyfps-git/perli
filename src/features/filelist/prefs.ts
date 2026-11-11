@@ -53,6 +53,8 @@ export const [rowDensity, setRowDensity] = stored<Density>(
 );
 /** Windows' icon for every file, in place of Perli's own. */
 export const [windowsIcons, setWindowsIcons] = stored("windows-icons", saved("windows-icons") === true);
+/** The count and the selection, always on show at the bottom of each pane. */
+export const [statusBar, setStatusBar] = stored("status-bar", saved("status-bar") === true);
 export const [detailsPanel, setDetailsPanel] = stored("details-panel", saved("details-panel") === true);
 
 const [sortMemory, setSortMemory] = stored<SortMemory>(

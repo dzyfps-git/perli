@@ -1,5 +1,6 @@
 import { dropChoices, onFileDrag, setDropTarget, startJob, type DropAction } from "../../api";
 import type { MenuItem } from "../../ui/Menu";
+import { kindOf } from "../filelist/fileKinds";
 import type { FolderView } from "../navigation/folderView";
 import { join } from "../navigation/path";
 
@@ -11,6 +12,77 @@ interface Spot {
 }
 
 const OVER = "data-drop-over";
+/** The most the deck leans, in degrees, however fast the pointer goes. */
+const MOST_LEAN = 18;
+/** Degrees of lean for each pixel the pointer moves in a millisecond. */
+const LEAN_PER_SPEED = 14;
+const LAND_MS = 220;
+const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
+
+/**
+ * The files being dragged, as a small tilted deck that follows the pointer over Perli: the first
+ * file's icon on top, and how many there are. It leans the way it is pulled, by how fast.
+ */
+function createDeck() {
+  let deck: HTMLElement | undefined;
+  let last: { x: number; time: number } | undefined;
+  let lean = 0;
+
+  function show(count: number, name: string, folder: boolean) {
+    hide();
+    deck = document.createElement("div");
+    deck.className = "drag-deck";
+    deck.setAttribute("aria-hidden", "true");
+    deck.hidden = true;
+    for (const card of ["drag-card drag-card-3", "drag-card drag-card-2", "drag-card"].slice(count > 2 ? 0 : count > 1 ? 1 : 2)) {
+      const element = document.createElement("span");
+      element.className = card;
+      deck.append(element);
+    }
+    const icon = document.createElement("span");
+    icon.className = "file-icon";
+    icon.dataset.kind = kindOf(name, folder);
+    deck.lastElementChild!.append(icon);
+    if (count > 1) {
+      const badge = document.createElement("span");
+      badge.className = "drag-count";
+      badge.textContent = count > 999 ? "999+" : String(count);
+      deck.append(badge);
+    }
+    document.body.append(deck);
+    last = undefined;
+    lean = 0;
+  }
+
+  /** `x` and `y` are in the page's own units. */
+  function move(x: number, y: number) {
+    if (!deck) return;
+    const time = performance.now();
+    if (last && time > last.time && !reducedMotion.matches) {
+      const wanted = Math.max(-MOST_LEAN, Math.min(MOST_LEAN, ((x - last.x) / (time - last.time)) * LEAN_PER_SPEED));
+      // Eased, so one quick jerk of the pointer does not snap the deck over.
+      lean += (wanted - lean) * 0.25;
+    }
+    last = { x, time };
+    deck.hidden = false;
+    deck.style.translate = `${x}px ${y}px`;
+    deck.style.rotate = `${lean}deg`;
+  }
+
+  function hide(landed = false) {
+    const gone = deck;
+    deck = undefined;
+    if (!gone) return;
+    if (!landed || gone.hidden || reducedMotion.matches) return gone.remove();
+    // The deck drops onto where it was let go, and is gone.
+    gone
+      .animate({ scale: [1, 0.6], opacity: [1, 0], rotate: [gone.style.rotate, "0deg"] }, { duration: LAND_MS, easing: "ease-in" })
+      .finished.catch(() => undefined)
+      .finally(() => gone.remove());
+  }
+
+  return { show, move, hide };
+}
 
 const ACTION_LABELS: Record<DropAction, string> = {
   move: "Move here",
@@ -46,6 +118,7 @@ export function followFileDrag(
   showMenu: (x: number, y: number, items: MenuItem[]) => void,
 ) {
   let shown: Spot | undefined;
+  const deck = createDeck();
 
   const run = (spot: Spot, action?: DropAction) =>
     startJob({ kind: "drop", folder: spot.folder, action }, spot.view?.id).catch(report);
@@ -68,8 +141,13 @@ export function followFileDrag(
   }
 
   return onFileDrag((event) => {
-    if (event.kind === "over") return aim(spotAt(event.x, event.y, views()));
+    if (event.kind === "enter") return deck.show(event.count, event.name, event.folder);
+    if (event.kind === "over") {
+      deck.move(event.x / window.devicePixelRatio, event.y / window.devicePixelRatio);
+      return aim(spotAt(event.x, event.y, views()));
+    }
     aim(undefined);
+    deck.hide(event.kind === "drop");
     if (event.kind === "leave") return;
     const spot = spotAt(event.x, event.y, views());
     if (spot && event.right) ask(spot, event.x, event.y).catch(report);

@@ -1,5 +1,5 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { createEffect, createSignal, lazy, on, onMount, Show } from "solid-js";
+import { createEffect, createSignal, lazy, on, onCleanup, onMount, Show } from "solid-js";
 import {
   archiveText,
   bookChapter,
@@ -49,6 +49,8 @@ export interface PreviewAt {
 const MARKDOWN_PICTURE_EDGE = 1200;
 const SLIDE_PX = 24;
 const SLIDE_MS = 180;
+/** How long the pointer and the keys rest before a viewer's tools step back. */
+const IDLE_MS = 2500;
 const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
 // Both come with the first file that needs them.
 const ModelStage = lazy(() => import("./ModelStage").then((module) => ({ default: module.ModelStage })));
@@ -291,6 +293,7 @@ export function QuickPreview(props: {
   }
 
   function onKeyDown(event: KeyboardEvent) {
+    stir();
     const key = event.key;
     const target = event.target as HTMLElement;
     // A slider takes its own arrow keys.
@@ -312,10 +315,20 @@ export function QuickPreview(props: {
     event.preventDefault();
   }
 
+  let idleTimer: number | undefined;
+  /** The pointer or a key moved, so the tools come back and the wait starts again. */
+  function stir() {
+    body.removeAttribute("data-idle");
+    window.clearTimeout(idleTimer);
+    idleTimer = window.setTimeout(() => body.setAttribute("data-idle", ""), IDLE_MS);
+  }
+
   onMount(() => {
     dialog.showModal();
     body.focus();
+    stir();
   });
+  onCleanup(() => window.clearTimeout(idleTimer));
 
   // A reload of the folder replaces the snapshot, so the row is fetched again from the new one.
   let shot = props.at.snapshot();
@@ -348,6 +361,8 @@ export function QuickPreview(props: {
       class="quick-preview"
       aria-label={row() ? `Preview of ${row()!.name}` : "Preview"}
       onKeyDown={onKeyDown}
+      onPointerMove={stir}
+      onPointerDown={stir}
       onClose={props.onClose}
       onClick={(event) => event.target === dialog && props.onClose()}
     >

@@ -1,5 +1,7 @@
 import { createSignal, For, onMount, Show } from "solid-js";
 import type { Filter } from "../../api";
+import { DateField } from "../../ui/Controls";
+import { openSheet } from "../../ui/sheet";
 import type { FolderView } from "../navigation/folderView";
 import { tagColor, tags } from "../tags/tags";
 import { NO_FILTER, sizesAreGood, type FilterForm } from "./filter";
@@ -17,11 +19,11 @@ export function FilterDialog(props: { view: FolderView; onClose: () => void }) {
   const [form, setForm] = createSignal(props.view.filterForm());
   let dialog!: HTMLDialogElement;
   let name!: HTMLInputElement;
+  let close!: ReturnType<typeof openSheet>;
 
   function finish(wanted: FilterForm) {
-    dialog.close();
     props.view.setFilterForm(wanted);
-    props.view.list()?.focus();
+    close(() => props.view.list()?.focus());
   }
 
   const apply = () => sizesAreGood(form()) && finish(form());
@@ -32,21 +34,19 @@ export function FilterDialog(props: { view: FolderView; onClose: () => void }) {
   }
 
   onMount(() => {
-    dialog.showModal();
+    close = openSheet(dialog);
     name.focus();
   });
 
   const Field = (field: {
     label: string;
     part: Exclude<keyof FilterForm, "kinds" | "tags">;
-    type?: string;
     ref?: HTMLInputElement;
   }) => (
     <label class="rename-field">
       {field.label}
       <input
         ref={field.ref}
-        type={field.type ?? "text"}
         spellcheck={false}
         value={form()[field.part]}
         onInput={(event) => setForm({ ...form(), [field.part]: event.currentTarget.value })}
@@ -70,8 +70,14 @@ export function FilterDialog(props: { view: FolderView; onClose: () => void }) {
         <Field label="Types, such as jpg, png" part="types" />
         <Field label="Size from" part="minSize" />
         <Field label="Size to" part="maxSize" />
-        <Field label="Modified from" part="from" type="date" />
-        <Field label="Modified to" part="to" type="date" />
+        <For each={[["Modified from", "from"], ["Modified to", "to"]] as const}>
+          {([label, part]) => (
+            <div class="rename-field">
+              {label}
+              <DateField label={label} value={form()[part]} onChange={(day) => setForm({ ...form(), [part]: day })} />
+            </div>
+          )}
+        </For>
       </div>
       <div class="rename-options">
         <For each={KINDS}>
@@ -113,7 +119,7 @@ export function FilterDialog(props: { view: FolderView; onClose: () => void }) {
         <button class="job-choice" onClick={() => finish(NO_FILTER)}>
           Clear
         </button>
-        <button class="job-choice" onClick={() => dialog.close()}>
+        <button class="job-choice" onClick={() => close()}>
           Cancel
         </button>
         <button class="job-choice" disabled={!sizesAreGood(form())} onClick={apply}>

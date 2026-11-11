@@ -1,6 +1,7 @@
 import { createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
-import { saved, stored } from "../filelist/prefs";
+import { ToolCog } from "../../ui/Controls";
 import { createFind, lineIn, scrollToRange } from "./FindBar";
+import { asTable, numbers, setAsTable, setNumbers, setWrap, VIEWER_SETTINGS, wrap } from "./viewerPrefs";
 import { highlight } from "./highlight";
 import { guessDelimiter, parseTable } from "./table";
 
@@ -17,9 +18,6 @@ const MOST_LOADED = 64 * 1024 * 1024;
 /** A table this long is plenty to look through, and stays quick to draw. */
 const MOST_ROWS = 5000;
 
-const [wrap, setWrap] = stored("text-wrap", saved("text-wrap") === true);
-const [numbers, setNumbers] = stored("text-lines", saved("text-lines") !== false);
-const [asTable, setAsTable] = stored("text-table", saved("text-table") !== false);
 
 export interface TextPiece {
   text: string;
@@ -207,6 +205,7 @@ export function TextView(live: TextViewProps) {
             {ICON_LINES}
           </button>
         </Show>
+        <ToolCog label="Text settings" items={VIEWER_SETTINGS.Text} />
       </div>
       <div ref={scroller} class="text-scroll" tabindex="-1" data-wrap={wrap() || undefined} onScroll={() => void fill()}>
         <div class="text-sheet" hidden={table()}>

@@ -1,4 +1,4 @@
-import { createSignal, For, Show } from "solid-js";
+import { createEffect, createSignal, For, on, Show } from "solid-js";
 import { filetimeToMs, type Answer, type Facts, type Question } from "../../api";
 import { formatSize } from "../../ui/format";
 import { baseName } from "../navigation/path";
@@ -174,12 +174,47 @@ function Card(props: { card: JobCard; jobs: Jobs }) {
   );
 }
 
+/**
+ * All the jobs on show that are still running, as one thread along the top of the window: as long
+ * as their progress taken together, dim while every one is paused, and one glow as the last ends.
+ */
+function JobThread(props: { cards: JobCard[] }) {
+  const running = () => props.cards.filter((card) => !card.ended);
+  const share = () => {
+    const cards = running();
+    const sum = cards.reduce((total, card) => total + (card.progress ? fraction(card.progress) : 0), 0);
+    return cards.length > 0 ? sum / cards.length : 0;
+  };
+  const [done, setDone] = createSignal(false);
+  createEffect(
+    on(
+      () => running().length,
+      (now, before) => setDone(now === 0 && (before ?? 0) > 0),
+    ),
+  );
+  return (
+    <Show when={running().length > 0 || done()}>
+      <span
+        class="job-thread"
+        role="presentation"
+        data-paused={running().length > 0 && running().every((card) => card.paused) ? "" : undefined}
+        data-done={done() ? "" : undefined}
+        style={{ transform: `scaleX(${done() ? 1 : Math.max(0.02, share())})` }}
+        onAnimationEnd={() => setDone(false)}
+      />
+    </Show>
+  );
+}
+
 export function JobsPanel(props: { jobs: Jobs }) {
   const shown = () => props.jobs.cards.filter((card) => card.shown);
   return (
-    // Pressing a button here leaves the focus in the list, so the keys keep working there.
-    <div class="jobs" aria-live="polite" onPointerDown={(event) => event.preventDefault()}>
-      <For each={shown()}>{(card) => <Card card={card} jobs={props.jobs} />}</For>
-    </div>
+    <>
+      <JobThread cards={shown()} />
+      {/* Pressing a button here leaves the focus in the list, so the keys keep working there. */}
+      <div class="jobs" aria-live="polite" onPointerDown={(event) => event.preventDefault()}>
+        <For each={shown()}>{(card) => <Card card={card} jobs={props.jobs} />}</For>
+      </div>
+    </>
   );
 }

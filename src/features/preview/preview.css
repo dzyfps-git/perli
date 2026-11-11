@@ -1170,10 +1170,17 @@
   gap: 2px;
   padding: 3px;
   border: 1px solid var(--border);
-  border-radius: var(--radius);
+  border-radius: 999px;
   background: var(--overlay-tint);
   backdrop-filter: var(--blur);
   cursor: default;
+  transition: opacity 400ms ease-out;
+}
+
+/* The tools float over what is shown, and step back once the pointer and the keys rest. They
+   stay while the pointer is on them, a key has them, or their cog is open. */
+.preview-body[data-idle] :is(.preview-tools, .model-clips):not(:hover, :focus-within, :has(:popover-open)) {
+  opacity: 0;
 }
 
 .preview-tools {
@@ -1186,6 +1193,7 @@
 .model-clips .strip-icon {
   width: 28px;
   height: 28px;
+  border-radius: 50%;
   font-size: 13px;
   transition:
     background-color var(--motion),
@@ -1228,9 +1236,7 @@
 .model-clips select {
   max-width: 200px;
   border: 0;
-  background: transparent;
-  color: var(--text);
-  font: inherit;
+  border-radius: 999px;
 }
 
 .model-facts {
@@ -1524,9 +1530,6 @@
 
 .song-volume {
   flex: 0 0 80px;
-  height: 16px;
-  margin: 0;
-  accent-color: var(--accent);
 }
 
 /* They take the focus only so the scrolling keys work, which needs no ring. */

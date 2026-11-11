@@ -1,7 +1,9 @@
 import { createEffect, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
 import type { Thumb } from "../../api";
 import { saved, stored } from "../filelist/prefs";
+import { ToolCog } from "../../ui/Controls";
 import { draw } from "./QuickPreview";
+import { manga, setManga, setSpread, setStrip, spread, strip, VIEWER_SETTINGS } from "./viewerPrefs";
 
 const ICON_SPREAD = "";
 const ICON_MANGA = "";
@@ -10,10 +12,7 @@ const ICON_STRIP = "";
 type Fit = "page" | "width" | "height";
 const FITS: Fit[] = ["page", "width", "height"];
 const FIT_NAMES: Record<Fit, string> = { page: "Fit page", width: "Fit width", height: "Fit height" };
-const [spread, setSpread] = stored("comic-spread", saved("comic-spread") === true);
-const [manga, setManga] = stored("comic-manga", saved("comic-manga") === true);
 const [fit, setFit] = stored<Fit>("comic-fit", FITS.includes(saved("comic-fit") as Fit) ? (saved("comic-fit") as Fit) : "page");
-const [strip, setStrip] = stored("comic-strip", saved("comic-strip") !== false);
 
 const THUMB_EDGE = 160;
 const MOST_EDGE = 4096;
@@ -180,6 +179,7 @@ export function ComicView(live: ComicViewProps) {
         <button class="strip-icon" aria-label="Page strip" aria-keyshortcuts="T" aria-pressed={strip()} onClick={() => setStrip(!strip())}>
           {ICON_STRIP}
         </button>
+        <ToolCog label="Comic settings" items={VIEWER_SETTINGS.Comics} />
       </div>
       <Show when={offer()}>
         <button class="player-resume comic-resume" onClick={() => go(offer())}>

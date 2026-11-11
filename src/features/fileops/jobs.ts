@@ -16,7 +16,9 @@ import {
 } from "../../api";
 import type { FolderView } from "../navigation/folderView";
 import { baseName, join, samePath } from "../navigation/path";
+import { markDeleted } from "../filelist/rowMotion";
 import { checkCut } from "./clipboard";
+import { setLanded } from "./landed";
 import { nextRate, startRate, type Rate } from "./progress";
 
 const SHOW_AFTER_MS = 300;
@@ -84,6 +86,7 @@ export function createJobs(views: () => FolderView[]) {
     const { id, title, origin, newItem, recycle } = event;
     const rate = startRate(performance.now());
     setCards(cards.length, { id, title, origin, newItem, recycle, shown: false, paused: false, rate });
+    if (recycle) markDeleted();
     setTimeout(() => patch(id, { shown: true }), SHOW_AFTER_MS);
   }
 
@@ -106,6 +109,7 @@ export function createJobs(views: () => FolderView[]) {
     if (!card) return;
     undoable(event);
     reloadViews(event, card);
+    if (!event.cancelled && event.touched.length > 0) setLanded({ folders: event.touched });
     // A finished cut paste empties the clipboard. A cancelled one leaves the cut standing.
     checkCut().catch(console.error);
 
