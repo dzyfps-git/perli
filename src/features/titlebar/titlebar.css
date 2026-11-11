@@ -13,6 +13,8 @@
   position: relative;
   padding: var(--space-1) var(--space-2);
   overflow: hidden;
+  /* Keeps the glow behind the tabs and in front of the window. */
+  isolation: isolate;
 }
 
 .tab {
@@ -40,14 +42,72 @@
   color: var(--text);
 }
 
-/* One line that glides between tabs. The padding insets it from the tab's edges. */
+/* Registered as an angle, so the comet's place on the edge can be animated. */
+@property --spin {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: 0deg;
+}
+
+/* A small comet of the accent circles the active tab's edge. The mask leaves only the edge. */
+.tab-active::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  padding: 1.5px;
+  border-radius: inherit;
+  background: conic-gradient(
+    from var(--spin),
+    transparent 0 62%,
+    var(--accent-start),
+    var(--accent),
+    var(--accent-end),
+    transparent 96%
+  );
+  mask:
+    linear-gradient(#000 0 0) content-box exclude,
+    linear-gradient(#000 0 0);
+  pointer-events: none;
+  animation:
+    tab-orbit 5s linear infinite,
+    tab-orbit-in 500ms ease-out;
+}
+
+@keyframes tab-orbit {
+  to {
+    --spin: 360deg;
+  }
+}
+
+@keyframes tab-orbit-in {
+  from {
+    opacity: 0;
+  }
+}
+
+/* Repaints every frame, so it only runs while Perli is in use. */
+html[data-blurred] .tab-active::before {
+  animation-play-state: paused;
+}
+
+/* Without motion, the whole edge wears the accent, quietly. */
+@media (prefers-reduced-motion: reduce) {
+  .tab-active::before {
+    background: var(--accent-line);
+    opacity: 0.55;
+    animation: none;
+  }
+}
+
+/* One soft glow under the active tab, which glides to the next one. */
 .tab-ink {
   position: absolute;
-  bottom: calc(var(--space-1) + 2px);
-  left: 0;
-  height: 2px;
+  inset: var(--space-1) auto var(--space-1) 0;
+  z-index: -1;
   padding: 0 var(--space-2);
   background: var(--accent-line) content-box;
+  filter: blur(12px);
+  opacity: 0.22;
   pointer-events: none;
   transition:
     transform var(--motion-glide),

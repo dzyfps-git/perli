@@ -47,6 +47,11 @@ import {
   columns,
   detailsPanel,
   folderSizes,
+  rowDensity,
+  setRowDensity,
+  setWindowsIcons,
+  windowsIcons,
+  type Density,
   forgetSorts,
   grouping,
   setDetailsPanel,
@@ -82,6 +87,8 @@ import {
   SECTIONS,
   setBookmarksBar,
   setLook,
+  setSidebarOpen,
+  sidebarOpen,
   toggleBookmark,
   togglePinned,
   toggleSection,
@@ -351,6 +358,7 @@ export function App() {
   }
 
   const toggleDetails = () => setDetailsPanel(!detailsPanel());
+  const toggleSidebar = () => setSidebarOpen(!sidebarOpen());
 
   const networkItems = (): MenuItem[] => [
     { label: "Map network drive", divider: true, action: () => mapDrive().catch(jobs.report) },
@@ -558,6 +566,13 @@ export function App() {
       checked: view.sort().key === key,
       action: () => view.setSort(nextSort(view.sort(), key)),
     });
+    const rowsItem = (label: string, density: Density) => ({
+      label,
+      divider: density === "compact",
+      checked: rowDensity() === density,
+      action: () => setRowDensity(density),
+    });
+    const rowItems = [rowsItem("Compact rows", "compact"), rowsItem("Cozy rows", "cozy"), rowsItem("Roomy rows", "roomy")];
     const tileItems = [
       {
         label: "Larger tiles",
@@ -592,8 +607,10 @@ export function App() {
         items: [
           layoutItem("List", "list"),
           layoutItem("Grid", "grid"),
-          ...(view.layout() === "grid" ? tileItems : []),
-          { label: "Details panel", divider: true, checked: detailsPanel(), action: toggleDetails },
+          ...(view.layout() === "grid" ? tileItems : rowItems),
+          { label: "Windows icons", divider: true, checked: windowsIcons(), action: () => setWindowsIcons(!windowsIcons()) },
+          { label: "Details panel", checked: detailsPanel(), action: toggleDetails },
+          { label: "Keep sidebar open", checked: sidebarOpen(), action: toggleSidebar },
         ],
       },
       {
@@ -739,6 +756,11 @@ export function App() {
       { label: "Grid view", keys: "Ctrl+Shift+2", run: () => view.setLayout("grid") },
       { label: "Quick preview", keys: "Space", run: () => previewSelected(view) },
       { label: "Details panel", keys: "Alt+Shift+P", run: toggleDetails },
+      { label: "Keep sidebar open", keys: "Ctrl+B", run: toggleSidebar },
+      { label: "Compact rows", run: () => setRowDensity("compact") },
+      { label: "Cozy rows", run: () => setRowDensity("cozy") },
+      { label: "Roomy rows", run: () => setRowDensity("roomy") },
+      { label: windowsIcons() ? "Perli icons" : "Windows icons", run: () => setWindowsIcons(!windowsIcons()) },
       { label: "Select by pattern", keys: "Ctrl+Shift+A", run: () => setSelectingPattern(view) },
       { label: "Filter", keys: "Ctrl+Shift+F", run: () => setFiltering(view) },
       ...(view.filtered() ? [{ label: "Clear filter", run: () => view.setFilterForm(NO_FILTER) }] : []),
@@ -804,6 +826,7 @@ export function App() {
     else if (event.altKey && key === "arrowright") view.forward();
     else if (event.altKey && key === "arrowup") view.up();
     else if (event.altKey && event.shiftKey && key === "p") toggleDetails();
+    else if (event.ctrlKey && key === "b" && !isTyping(event)) toggleSidebar();
     else if (key === "backspace" && !isTyping(event)) view.up();
     else if ((event.ctrlKey && key === "l") || (event.altKey && key === "d")) view.setEditingPath(true);
     else if (event.ctrlKey && event.shiftKey && key === "f") setFiltering(view);
@@ -946,9 +969,10 @@ export function App() {
   };
 
   return (
-    <div class="shell">
+    <div class="shell" data-sidebar={sidebarOpen() ? "open" : "rail"}>
       <TitleBar tabs={tabs} onNewTab={newTab} />
       <aside class="sidebar">
+        <div class="sidebar-panel">
         <span class="logo">Perli</span>
         <Sidebar
           view={tabs.activeView()}
@@ -965,11 +989,12 @@ export function App() {
           <span class="settings-icon" aria-hidden="true">
             {ICON_SETTINGS}
           </span>
-          Settings
+          <span class="settings-label">Settings</span>
           <Show when={updateState() === "ready"}>
             <span class="update-dot" aria-hidden="true" />
           </Show>
         </button>
+        </div>
       </aside>
       <main class="files">
         <BookmarksBar

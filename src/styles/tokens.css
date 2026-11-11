@@ -13,6 +13,8 @@
 
   --text: light-dark(#1c1b20, #f0eff2);
   --text-muted: light-dark(#66646e, #9a99a3);
+  /* What a date changed today wears. Older dates cool down to the muted text. */
+  --date-fresh: light-dark(#b45309, #fbbf77);
   --danger: #c42b1c;
   --success: #2e9e4f;
 
@@ -42,7 +44,8 @@
   --radius-large: 12px;
   --row-height: 28px;
 
-  --sidebar-width: 220px;
+  --sidebar-rail-width: 54px;
+  --sidebar-open-width: 220px;
   --title-bar-height: 40px;
   --blur: blur(24px);
   --motion: 150ms ease-out;

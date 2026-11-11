@@ -258,8 +258,7 @@
 }
 
 .file-row[data-hidden] .file-name,
-.file-row[data-hidden] .file-thumb,
-.file-row[data-hidden]::before {
+.file-row[data-hidden] .file-icon {
   opacity: 55%;
 }
 
@@ -319,38 +318,150 @@
   padding: var(--space-2);
 }
 
-.file-grid[data-layout="grid"] .file-row:not([data-empty])::before {
-  content: "\E8A5";
-  color: var(--text-muted);
-  font-family: var(--font-icons);
-  font-size: calc(var(--tile-size) * 0.4);
-  line-height: 1;
+/* A file's icon: Perli's drawing of its kind, on a soft tile of the kind's color. */
+.file-icon {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  margin-right: var(--space-2);
+  overflow: hidden;
+  vertical-align: middle;
+  border-radius: 6px;
+  background: color-mix(in oklch, var(--kind-color, var(--text-muted)) 14%, transparent);
+  color: var(--kind-color, var(--text-muted));
+  font-weight: normal;
+  transition: background var(--motion);
 }
 
-.file-grid[data-layout="grid"] .file-row[data-folder]::before {
-  content: "\E8B7";
-  color: var(--accent);
+.file-row:hover .file-icon,
+.file-row[aria-selected="true"] .file-icon {
+  background: color-mix(in oklch, var(--kind-color, var(--text-muted)) 26%, transparent);
+}
+
+.file-icon::before {
+  content: "";
+  width: 14px;
+  height: 14px;
+  background: currentColor;
+  mask: var(--kind-icon) center / contain no-repeat;
 }
 
 /* A folder's own look, from its row menu. */
-.file-grid[data-layout="grid"] .file-row[data-glyph]::before {
+.file-icon[data-glyph]::before {
   content: attr(data-glyph);
+  width: auto;
+  height: auto;
+  background: none;
+  font: 13px / 1 var(--font-icons);
+  mask: none;
 }
 
-.file-grid[data-layout="grid"] .file-row[data-look]::before {
-  color: var(--look-color, var(--accent));
+.file-row[data-look] .file-icon {
+  --kind-color: var(--look-color, var(--accent));
 }
 
-.file-look::before {
-  content: attr(data-glyph);
+.file-row[data-empty] .file-icon {
+  visibility: hidden;
 }
 
-.file-look {
-  margin-right: var(--space-1);
-  color: var(--look-color, var(--accent));
-  font-family: var(--font-icons);
+/* A picture takes the icon's place. Its size comes from CSS alone, so changing the tile size
+   asks for no new picture. */
+.file-thumb {
+  position: absolute;
+  inset: 0;
+  display: none;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.file-row[data-thumb] .file-thumb {
+  display: block;
+}
+
+.file-row[data-thumb] .file-icon {
+  background: none;
+}
+
+.file-row[data-thumb] .file-icon::before {
+  display: none;
+}
+
+.file-grid[data-density="compact"] .file-icon {
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+}
+
+.file-grid[data-density="compact"] .file-icon::before {
+  width: 12px;
+  height: 12px;
+}
+
+/* Roomy rows: a larger tile, and the file's kind and size on a line under its name. */
+.file-grid[data-layout="list"][data-density="roomy"] .file-icon {
+  float: left;
+  width: 32px;
+  height: 32px;
+  margin: 2px var(--space-3) 2px 0;
+  border-radius: 9px;
+}
+
+.file-grid[data-layout="list"][data-density="roomy"] .file-icon::before {
+  width: 18px;
+  height: 18px;
+}
+
+.file-grid[data-layout="list"][data-density="roomy"] .file-icon[data-glyph]::before {
+  width: auto;
+  height: auto;
+  font-size: 17px;
+}
+
+.file-grid[data-layout="list"][data-density="roomy"] .file-name {
+  line-height: 18px;
+}
+
+.file-name[data-sub]::after {
+  content: attr(data-sub);
+  display: block;
+  overflow: hidden;
+  color: var(--text-muted);
   font-size: 12px;
   font-weight: normal;
+  text-overflow: ellipsis;
+}
+
+.file-grid[data-layout="grid"] .file-icon {
+  flex: 1;
+  width: 100%;
+  height: auto;
+  min-height: 0;
+  margin: 0;
+  border-radius: var(--radius);
+  background: none;
+}
+
+.file-grid[data-layout="grid"] .file-icon::before {
+  width: calc(var(--tile-size) * 0.4);
+  height: calc(var(--tile-size) * 0.4);
+}
+
+.file-grid[data-layout="grid"] .file-icon[data-glyph]::before {
+  width: auto;
+  height: auto;
+  font-size: calc(var(--tile-size) * 0.4);
+}
+
+.file-grid[data-layout="grid"] .file-thumb {
+  object-fit: contain;
+}
+
+/* A date that changed today is warm, and cools down to the muted text over a year. */
+.file-date {
+  color: color-mix(in oklch, var(--date-fresh) calc((1 - var(--age, 1)) * 100%), var(--text-muted));
 }
 
 .hover-card {
@@ -458,23 +569,6 @@
   left: auto;
   font-size: 12px;
   transform: none;
-}
-
-/* Its size comes from CSS alone, so changing the tile size asks for no new picture. */
-.file-thumb {
-  display: none;
-  flex: 1;
-  min-height: 0;
-  width: 100%;
-  object-fit: contain;
-}
-
-.file-row[data-thumb] .file-thumb {
-  display: block;
-}
-
-.file-grid[data-layout="grid"] .file-row[data-thumb]::before {
-  display: none;
 }
 
 .file-grid[data-layout="grid"] .file-name {

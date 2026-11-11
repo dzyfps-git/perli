@@ -119,7 +119,8 @@ fn picture(path: &Path, edge: i32, own: bool) -> Result<Vec<u8>> {
     bytes
 }
 
-fn encode(bitmap: HBITMAP) -> Result<Vec<u8>> {
+/// The picture as the UI reads it: width, height, then RGBA.
+pub fn encode(bitmap: HBITMAP) -> Result<Vec<u8>> {
     let mut shape = BITMAP::default();
     let wrote = unsafe { GetObjectW(bitmap.into(), size_of::<BITMAP>() as i32, Some((&raw mut shape).cast())) };
     if wrote == 0 {

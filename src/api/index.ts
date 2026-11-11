@@ -30,6 +30,8 @@ export interface Row {
   isCloud: boolean;
   /** The user asked to always keep it on this device. */
   isPinned: boolean;
+  /** A folder Windows gives an icon of its own. */
+  isCustom: boolean;
   /** Where a deleted item came from, or where a search found the row. Otherwise empty. */
   location: string;
   /** Ids of its tags. */
@@ -234,6 +236,7 @@ const FLAG_FOLDER = 1;
 const FLAG_HIDDEN = 2;
 const FLAG_CLOUD = 4;
 const FLAG_PINNED = 8;
+const FLAG_CUSTOM = 16;
 const UINT32_RANGE = 2 ** 32;
 const FILETIME_TICKS_PER_MS = 10_000;
 const FILETIME_TO_UNIX_MS = 11_644_473_600_000;
@@ -428,6 +431,25 @@ export const sendTo = (selection: Selection, target: string) => invoke<void>("se
 /** `x` and `y` are physical pixels inside the window. Gives the verb the UI should run itself. */
 export const showShellMenu = (target: ShellTarget, x: number, y: number) =>
   invoke<string | null>("show_shell_menu", { target, x, y });
+
+/** One item of Windows' own menu. `icon` is a picture in the thumbnail format. */
+export interface ShellEntry {
+  id: number | null;
+  label: string;
+  icon: number[] | null;
+  divider: boolean;
+  disabled: boolean;
+  checked: boolean;
+  items: ShellEntry[];
+}
+
+/** What Windows and other apps add to a right click, for Perli's own menu to show. */
+export const shellMenuItems = (target: ShellTarget) => invoke<ShellEntry[]>("shell_menu_items", { target });
+
+/** Runs an item of the list `shellMenuItems` gave last. `x` and `y` are as for `showShellMenu`. */
+export const runShellItem = (id: number, x: number, y: number) => invoke<void>("run_shell_item", { id, x, y });
+
+export const entryPicture = (icon: number[]) => decodeThumb(new Uint8Array(icon).buffer);
 
 /** `x` and `y` are physical pixels inside the window, and pick the monitor it opens on. */
 export const showProperties = (target: ShellTarget, x: number, y: number) =>
@@ -633,6 +655,7 @@ function decodeRows(buffer: ArrayBuffer): Row[] {
       isHidden: (flags & FLAG_HIDDEN) !== 0,
       isCloud: (flags & FLAG_CLOUD) !== 0,
       isPinned: (flags & FLAG_PINNED) !== 0,
+      isCustom: (flags & FLAG_CUSTOM) !== 0,
     };
     offset = tagStart + tagCount * TAG_BYTES;
   }

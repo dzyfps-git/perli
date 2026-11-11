@@ -12,7 +12,8 @@ use serde::Deserialize;
 use windows::core::{Result, HSTRING, PCWSTR};
 use windows::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_OFFLINE, FILE_ATTRIBUTE_PINNED,
-    FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS, FILE_ATTRIBUTE_RECALL_ON_OPEN, WIN32_FIND_DATAW,
+    FILE_ATTRIBUTE_READONLY, FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS, FILE_ATTRIBUTE_RECALL_ON_OPEN,
+    FILE_ATTRIBUTE_SYSTEM, WIN32_FIND_DATAW,
 };
 use windows::Win32::UI::Shell::{PathMatchSpecW, StrCmpLogicalW};
 
@@ -26,6 +27,9 @@ const FLAG_FOLDER: u8 = 1;
 const FLAG_HIDDEN: u8 = 2;
 const FLAG_CLOUD: u8 = 4;
 const FLAG_PINNED: u8 = 8;
+const FLAG_CUSTOM: u8 = 16;
+/// How Windows marks a folder whose `desktop.ini` gives it an icon of its own.
+const CUSTOMIZED: u32 = FILE_ATTRIBUTE_READONLY.0 | FILE_ATTRIBUTE_SYSTEM.0;
 /// What the row format's one byte can count.
 const MAX_ROW_TAGS: usize = u8::MAX as usize;
 /// Between FILETIME's start in 1601 and the 1970 start of the UI's times.
@@ -147,6 +151,8 @@ pub struct Entry {
     cloud: bool,
     /// The user asked to always keep it on this device.
     pinned: bool,
+    /// A folder with an icon of its own.
+    custom: bool,
 }
 
 impl Entry {
@@ -171,6 +177,7 @@ impl Entry {
             hidden: data.dwFileAttributes & FILE_ATTRIBUTE_HIDDEN.0 != 0,
             cloud: data.dwFileAttributes & ONLINE_ONLY != 0,
             pinned: data.dwFileAttributes & FILE_ATTRIBUTE_PINNED.0 != 0,
+            custom: data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0 && data.dwFileAttributes & CUSTOMIZED != 0,
         })
     }
 
@@ -184,6 +191,7 @@ impl Entry {
             hidden: false,
             cloud: false,
             pinned: false,
+            custom: false,
         }
     }
 
@@ -198,6 +206,7 @@ impl Entry {
             hidden: out_of_sight,
             cloud: false,
             pinned: false,
+            custom: false,
         }
     }
 
@@ -559,13 +568,14 @@ impl Listing {
             let hidden = if row.hidden { FLAG_HIDDEN } else { 0 };
             let cloud = if row.cloud { FLAG_CLOUD } else { 0 };
             let pinned = if row.pinned { FLAG_PINNED } else { 0 };
+            let custom = if row.custom { FLAG_CUSTOM } else { 0 };
             let location = location_of(self.locations(), entry);
             let location = &location[..location.len() - 1];
             bytes.extend((row.name().len() as u32 * 2).to_le_bytes());
             bytes.extend(self.size_of(entry as usize).to_le_bytes());
             bytes.extend(row.modified.to_le_bytes());
             bytes.extend(row.created.to_le_bytes());
-            bytes.push(folder | hidden | cloud | pinned);
+            bytes.push(folder | hidden | cloud | pinned | custom);
             bytes.extend((location.len() as u32 * 2).to_le_bytes());
             let tags = &self.tags_of(entry)[..self.tags_of(entry).len().min(MAX_ROW_TAGS)];
             bytes.push(tags.len() as u8);
@@ -1201,6 +1211,9 @@ mod tests {
             (FILE_ATTRIBUTE_RECALL_ON_OPEN.0, FLAG_CLOUD),
             (FILE_ATTRIBUTE_OFFLINE.0, FLAG_CLOUD),
             (FILE_ATTRIBUTE_PINNED.0, FLAG_PINNED),
+            (FILE_ATTRIBUTE_DIRECTORY.0 | FILE_ATTRIBUTE_READONLY.0, FLAG_FOLDER | FLAG_CUSTOM),
+            (FILE_ATTRIBUTE_DIRECTORY.0 | FILE_ATTRIBUTE_SYSTEM.0, FLAG_FOLDER | FLAG_CUSTOM),
+            (FILE_ATTRIBUTE_READONLY.0, 0),
             (0, 0),
         ];
         for (attributes, flag) in cases {

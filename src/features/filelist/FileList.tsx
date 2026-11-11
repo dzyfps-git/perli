@@ -9,7 +9,8 @@ import { allLooks, lookOf } from "../sidebar/saved";
 import { HoverCard, type CardAsk } from "./HoverCard";
 import { columnsWidth, gridTemplate, type Column } from "./columns";
 import { clampTile, moveTarget, TILE_STEP, type Layout } from "./layout";
-import { hoverCards, setTileSize, tileSize } from "./prefs";
+import { ageShare, hasPicture, iconSheet, kindOf } from "./fileKinds";
+import { hoverCards, ROW_HEIGHTS, rowDensity, setTileSize, tileSize, windowsIcons } from "./prefs";
 import { createSelection } from "./selection";
 import { cachedThumb, createThumbLoader } from "./thumbs";
 import { matchSpans } from "./nameMatch";
@@ -36,8 +37,15 @@ const CARD_DELAY_MS = 700;
 const CARD_SWITCH_MS = 150;
 /** What one notch of a mouse wheel reports. */
 const WHEEL_NOTCH = 100;
-const ICON_FOLDER = "\uE8B7";
+/** Between a row's icon and its name, as `.file-icon` in filelist.css sets it. */
+const ICON_GAP = 8;
+/** The height of the name's own line in a roomy row, as filelist.css sets it. */
+const ROOMY_LINE = 18;
 const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
+
+const kindStyles = document.createElement("style");
+kindStyles.textContent = iconSheet();
+document.head.append(kindStyles);
 let lastFolderOpen = 0;
 
 interface PooledRow {
@@ -45,7 +53,9 @@ interface PooledRow {
   cells: { id: SortKey; element: HTMLSpanElement }[];
   index: number;
   filled: boolean;
-  /** Only rows in the grid have a picture. */
+  /** Lives in the name cell in the list, and above the name in the grid. */
+  icon: HTMLSpanElement;
+  /** Inside `icon`, for rows that may show a picture in its place. */
   thumb?: HTMLCanvasElement;
   /** What `thumb` is for. */
   thumbKey?: string;
@@ -79,6 +89,8 @@ const CELL_TEXT: Record<SortKey, (row: Row, folder: string) => string> = {
 
 const CELL_CLASS: Partial<Record<SortKey, string>> = {
   name: "file-name",
+  modified: "file-meta file-date",
+  created: "file-meta file-date",
   size: "file-meta file-size",
   location: "file-meta file-clipped",
 };
@@ -92,16 +104,9 @@ function tagDot(id: number) {
   return [dot];
 }
 
-/** The glyph a folder wears in the list, which only folders with a look of their own have. */
-function lookMark(icon: string | undefined, color: number | undefined) {
-  const mark = document.createElement("span");
-  mark.className = "file-look";
-  // Drawn by CSS, so the name's text stays only the name.
-  mark.dataset.glyph = icon ?? ICON_FOLDER;
-  mark.setAttribute("aria-hidden", "true");
-  if (color !== undefined) mark.style.color = tagColor(color);
-  return mark;
-}
+/** The second line of a roomy row. */
+const subText = (row: Row) =>
+  [typeText(row.name, row.isDir), row.isDir && !row.size ? "" : formatSize(row.size)].filter(Boolean).join(" \u00b7 ");
 
 function createCell(parent: HTMLElement, id: SortKey) {
   const element = document.createElement("span");
@@ -111,20 +116,26 @@ function createCell(parent: HTMLElement, id: SortKey) {
   return { id, element };
 }
 
-function createRow(cells: SortKey[], withThumb: boolean): PooledRow {
+function createRow(cells: SortKey[], withThumb: boolean, inGrid: boolean): PooledRow {
   const element = document.createElement("div");
   element.className = "file-row";
   element.setAttribute("role", "row");
+  // Drawn by CSS, so the name's text stays only the name.
+  const icon = document.createElement("span");
+  icon.className = "file-icon";
+  icon.setAttribute("aria-hidden", "true");
   const thumb = withThumb ? document.createElement("canvas") : undefined;
   if (thumb) {
     thumb.className = "file-thumb";
-    element.append(thumb);
+    icon.append(thumb);
   }
+  if (inGrid) element.append(icon);
   return {
     element,
     cells: cells.map((id) => createCell(element, id)),
     index: -1,
     filled: false,
+    icon,
     thumb,
   };
 }
@@ -210,7 +221,7 @@ export function FileList(props: {
   /** How many rows the last snapshot had, to tell when some are gone. */
   let lastCount = props.count;
   let pool: PooledRow[] = [];
-  let rowHeight = 0;
+  const rowHeight = () => ROW_HEIGHTS[rowDensity()];
   let itemHeight = 0;
   let perRow = 1;
   let builtFor = "";
@@ -314,19 +325,32 @@ export function FileList(props: {
     if (about) pooled.element.setAttribute("aria-description", about);
     else pooled.element.removeAttribute("aria-description");
     const look = row?.isDir ? lookOf(join(row.location || props.folder, row.name)) : undefined;
-    if (look?.icon) pooled.element.dataset.glyph = look.icon;
-    else delete pooled.element.dataset.glyph;
+    const kind = row && kindOf(row.name, row.isDir);
+    if (kind) pooled.icon.dataset.kind = kind;
+    else delete pooled.icon.dataset.kind;
+    if (look?.icon) pooled.icon.dataset.glyph = look.icon;
+    else delete pooled.icon.dataset.glyph;
     if (look?.color !== undefined) pooled.element.style.setProperty("--look-color", tagColor(look.color));
     else pooled.element.style.removeProperty("--look-color");
     pooled.element.toggleAttribute("data-look", look !== undefined);
+    const now = Date.now();
+    const inList = props.layout === "list";
     for (const cell of pooled.cells) {
       cell.element.textContent = row ? CELL_TEXT[cell.id](row, props.folder) : "";
-      if (cell.id === "name" && row) cell.element.prepend(...row.tags.flatMap(tagDot));
-      if (cell.id === "name" && look && props.layout === "list") cell.element.prepend(lookMark(look.icon, look.color));
+      if (cell.id === "name") {
+        if (row) cell.element.prepend(...row.tags.flatMap(tagDot));
+        if (inList) cell.element.prepend(pooled.icon);
+        if (row && inList && rowDensity() === "roomy") cell.element.dataset.sub = subText(row);
+        else delete cell.element.dataset.sub;
+      } else if (row && (cell.id === "modified" || cell.id === "created")) {
+        cell.element.style.setProperty("--age", String(ageShare(row[cell.id], now)));
+      }
     }
     lightMatch(pooled, row);
-    // Windows' picture of a folder would hide the look it was given.
-    showThumb(pooled, row && !look ? thumbKey(row) : undefined);
+    // Windows' picture of a folder would hide the look it was given. Other files show Perli's
+    // own icon, unless a picture says more or Windows gave the folder an icon of its own.
+    const pictured = row && !look && (windowsIcons() || row.isCustom || hasPicture(kind!));
+    showThumb(pooled, pictured ? thumbKey(row) : undefined);
   }
 
   /** A pool being thrown away takes its lit letters with it, since the highlight is shared. */
@@ -418,20 +442,19 @@ export function FileList(props: {
 
     const tile = props.layout === "grid" ? tileSize() : 0;
     perRow = tile ? Math.max(1, Math.floor(grid.clientWidth / tile)) : 1;
-    itemHeight = tile || rowHeight;
+    itemHeight = tile || rowHeight();
     grid.style.setProperty("--per-row", String(perRow));
     grid.style.setProperty("--item-height", `${itemHeight}px`);
     spacer.style.height = `${Math.ceil(props.count / perRow) * itemHeight}px`;
 
     const needed = (Math.ceil(grid.clientHeight / itemHeight) + OVERSCAN * 2) * perRow;
     const size = Math.min(props.count, needed);
-    const shape = `${cells().join()} ${perRow} ${itemHeight}`;
+    const shape = `${cells().join()} ${props.layout} ${perRow} ${itemHeight}`;
     if (size === pool.length && shape === builtFor) return paint();
 
     builtFor = shape;
-    const withThumb = props.thumbs && props.layout === "grid";
     forgetMatches();
-    pool = Array.from({ length: size }, () => createRow(cells(), withThumb));
+    pool = Array.from({ length: size }, () => createRow(cells(), props.thumbs, props.layout === "grid"));
     spacer.replaceChildren(...pool.map((pooled) => pooled.element));
     paint();
     moveMarker(true);
@@ -520,7 +543,7 @@ export function FileList(props: {
 
     const element = grid.querySelector(".file-row[data-focused]") ?? grid;
     const { left, bottom } = element.getBoundingClientRect();
-    props.onMenu(new MouseEvent("contextmenu", { clientX: left + rowHeight, clientY: bottom }), row);
+    props.onMenu(new MouseEvent("contextmenu", { clientX: left + rowHeight(), clientY: bottom }), row);
   }
 
   function onScroll() {
@@ -631,13 +654,17 @@ export function FileList(props: {
     if (!row || !sample || editor()) return;
     const cell = sample.cells.find(({ id }) => id === "name")!.element;
     const { element } = sample;
+    const inList = props.layout === "list";
+    // In the list the icon shares the name's cell, and the editor starts after it.
+    const iconRoom = inList ? sample.icon.offsetWidth + ICON_GAP : 0;
+    const middle = inList && rowDensity() === "roomy" ? ROOMY_LINE / 2 : cell.offsetHeight / 2;
     setEditor({
       index,
       name: row.name,
       isDir: row.isDir,
-      left: (index % perRow) * element.offsetWidth + element.clientLeft + cell.offsetLeft,
-      top: Math.floor(index / perRow) * itemHeight + element.clientTop + cell.offsetTop + cell.offsetHeight / 2,
-      width: Math.max(cell.offsetWidth, MIN_EDITOR_WIDTH),
+      left: (index % perRow) * element.offsetWidth + element.clientLeft + cell.offsetLeft + iconRoom,
+      top: Math.floor(index / perRow) * itemHeight + element.clientTop + cell.offsetTop + middle,
+      width: Math.max(cell.offsetWidth - iconRoom, MIN_EDITOR_WIDTH),
     });
   }
 
@@ -757,8 +784,7 @@ export function FileList(props: {
   }
 
   onMount(() => {
-    rowHeight = parseFloat(getComputedStyle(grid).getPropertyValue("--row-height"));
-    itemHeight = rowHeight;
+    itemHeight = rowHeight();
     resize();
     props.connect({
       selection: () => ({ view: props.view, request: shown, rows: selection.rows() }),
@@ -786,7 +812,7 @@ export function FileList(props: {
 
   createEffect(
     on(
-      [cells, () => props.layout, tileSize],
+      [cells, () => props.layout, tileSize, rowDensity],
       () => {
         resize();
         selectionChanged(true);
@@ -797,7 +823,7 @@ export function FileList(props: {
 
   createEffect(
     on(
-      [typesLearned, () => props.cut, () => props.match, tags, allLooks],
+      [typesLearned, () => props.cut, () => props.match, tags, allLooks, windowsIcons],
       () => {
         for (const pooled of pool) pooled.filled = false;
         paint();
@@ -861,6 +887,8 @@ export function FileList(props: {
         ref={grid}
         class="file-grid"
         data-layout={props.layout}
+        data-density={rowDensity()}
+        style={{ "--row-height": `${rowHeight()}px` }}
         role="grid"
         aria-multiselectable="true"
         aria-rowcount={props.count}

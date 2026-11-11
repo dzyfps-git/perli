@@ -2,7 +2,25 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { createEffect, createSignal, For, on, Show } from "solid-js";
 import { isDefaultApp, setDefaultApp } from "../../api";
 import type { Tag } from "../../api";
-import { folderSizes, hoverCards, openInWindow, setHoverCards, setOpenInWindow } from "../filelist/prefs";
+import {
+  folderSizes,
+  hoverCards,
+  openInWindow,
+  rowDensity,
+  setHoverCards,
+  setOpenInWindow,
+  setRowDensity,
+  setWindowsIcons,
+  windowsIcons,
+  type Density,
+} from "../filelist/prefs";
+import { setSidebarOpen, sidebarOpen } from "../sidebar/saved";
+
+const DENSITIES: { id: Density; label: string }[] = [
+  { id: "compact", label: "Compact" },
+  { id: "cozy", label: "Cozy" },
+  { id: "roomy", label: "Roomy" },
+];
 import { TagSettings } from "../tags/TagSettings";
 import {
   accent,
@@ -229,6 +247,53 @@ export function Settings(props: {
       <section class="settings-section" data-words="label color">
         <h3>Tags</h3>
         <TagSettings onChanged={props.onTagsChanged} onDelete={props.onDeleteTag} />
+      </section>
+
+      <section class="settings-section" data-words="rows density compact cozy roomy height icons windows list">
+        <h3 id="settings-rows">Rows and icons</h3>
+        <div class="settings-themes" role="radiogroup" aria-labelledby="settings-rows">
+          <For each={DENSITIES}>
+            {(choice) => (
+              <button
+                class="settings-theme"
+                role="radio"
+                aria-checked={rowDensity() === choice.id}
+                onClick={() => setRowDensity(choice.id)}
+              >
+                {choice.label}
+              </button>
+            )}
+          </For>
+        </div>
+        <p class="settings-note">Roomy rows show each file's kind and size under its name.</p>
+        <button
+          class="settings-theme settings-default"
+          role="switch"
+          aria-checked={windowsIcons()}
+          onClick={() => setWindowsIcons(!windowsIcons())}
+        >
+          Use Windows icons
+        </button>
+        <p class="settings-note">
+          When off, files wear Perli's own icons. Pictures and videos still show themselves, and a folder Windows
+          gave its own icon keeps it.
+        </p>
+      </section>
+
+      <section class="settings-section" data-words="sidebar rail places panel narrow wide">
+        <h3>Sidebar</h3>
+        <button
+          class="settings-theme settings-default"
+          role="switch"
+          aria-checked={sidebarOpen()}
+          onClick={() => setSidebarOpen(!sidebarOpen())}
+        >
+          Keep the sidebar open
+        </button>
+        <p class="settings-note">
+          When off, the sidebar is a slim rail of icons. It slides out when the pointer reaches it, and Ctrl+B keeps
+          it open.
+        </p>
       </section>
 
       <section class="settings-section" data-words="preview tooltip picture">

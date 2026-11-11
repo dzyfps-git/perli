@@ -43,6 +43,16 @@ export const [lastLayout, setLastLayout] = stored<Layout>(
 export const [hoverCards, setHoverCards] = stored("hover-cards", saved("hover-cards") !== false);
 /** Where a folder opened from outside Perli goes while Perli runs. */
 export const [openInWindow, setOpenInWindow] = stored("open-in-window", saved("open-in-window") === true);
+/** How tall list rows are. Roomy rows have a second line under the name. */
+export type Density = "compact" | "cozy" | "roomy";
+export const ROW_HEIGHTS: Record<Density, number> = { compact: 28, cozy: 34, roomy: 46 };
+const savedDensity = saved("row-density");
+export const [rowDensity, setRowDensity] = stored<Density>(
+  "row-density",
+  typeof savedDensity === "string" && savedDensity in ROW_HEIGHTS ? (savedDensity as Density) : "cozy",
+);
+/** Windows' icon for every file, in place of Perli's own. */
+export const [windowsIcons, setWindowsIcons] = stored("windows-icons", saved("windows-icons") === true);
 export const [detailsPanel, setDetailsPanel] = stored("details-panel", saved("details-panel") === true);
 
 const [sortMemory, setSortMemory] = stored<SortMemory>(

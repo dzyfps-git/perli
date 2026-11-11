@@ -1,5 +1,6 @@
 import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { Portal } from "solid-js/web";
+import { canStar, iconFor, keysFor, opensSide, starredFirst } from "./menuLook";
 import "./menu.css";
 
 export interface MenuItem {
@@ -14,6 +15,12 @@ export interface MenuItem {
   items?: MenuItem[];
   /** Adds to the side menu what Windows has to look up, so the menu never waits for it. */
   load?: () => Promise<MenuItem[]>;
+  /** A glyph of the icon font. Without one, the label's usual icon is shown, if it has one. */
+  icon?: string;
+  /** A small picture in place of the icon, such as another app's own. */
+  picture?: { width: number; height: number; pixels: Uint8ClampedArray<ArrayBuffer> };
+  /** A key hint. Without one, the label's usual keys are shown, if it has any. */
+  keys?: string;
 }
 
 /** Room kept to every window edge, which `max-height` in menu.css leaves twice. */
@@ -24,8 +31,33 @@ const SIDE_INSET = 5;
 const SIDE_DELAY_MS = 150;
 const LOADING: MenuItem[] = [{ label: "Loading…", disabled: true }];
 const NOTHING: MenuItem[] = [{ label: "Nothing here", disabled: true }];
+const STARS_KEY = "perli-menu-stars";
+const ICON_STAR = "";
 
-const opensSide = (item: MenuItem) => !!(item.items || item.load);
+function savedStars(): string[] | null {
+  try {
+    return JSON.parse(localStorage.getItem(STARS_KEY) ?? "null");
+  } catch {
+    return null;
+  }
+}
+
+/** Labels of the items kept on top of every menu they are in. Null until the first one is starred. */
+const [stars, setStars] = createSignal(savedStars());
+
+function toggleStar(label: string) {
+  const now = stars() ?? [];
+  const next = now.includes(label) ? now.filter((other) => other !== label) : [...now, label];
+  setStars(next);
+  localStorage.setItem(STARS_KEY, JSON.stringify(next));
+}
+
+const isStarred = (item: MenuItem) => !!stars()?.includes(item.label);
+function drawPicture(canvas: HTMLCanvasElement, picture: NonNullable<MenuItem["picture"]>) {
+  canvas.width = picture.width;
+  canvas.height = picture.height;
+  canvas.getContext("2d")?.putImageData(new ImageData(picture.pixels, picture.width, picture.height), 0, 0);
+}
 
 /** A floating glass menu. It closes on outside click, Escape or after choosing an item. */
 export function Menu(props: {
@@ -49,6 +81,9 @@ export function Menu(props: {
     y: number;
     left: number;
   }>();
+  // Side menus keep their own order, because what is in them belongs together.
+  const items = () => (props.parent ? props.items : starredFirst(props.items, isStarred));
+  const showHint = () => !props.parent && stars() === null && props.items.some(canStar);
 
   function openSide(item: MenuItem, button: HTMLElement) {
     if (side()?.item === item) return;
@@ -120,7 +155,7 @@ export function Menu(props: {
         onKeyDown={onKeyDown}
         onPointerLeave={() => clearTimeout(sideTimer)}
       >
-        <For each={props.items}>
+        <For each={items()}>
           {(item) => (
             <button
               role={item.checked === undefined ? "menuitem" : "menuitemcheckbox"}
@@ -129,6 +164,7 @@ export function Menu(props: {
               aria-checked={item.checked}
               aria-haspopup={opensSide(item) ? "menu" : undefined}
               aria-expanded={opensSide(item) ? side()?.item === item : undefined}
+              aria-keyshortcuts={(item.keys ?? keysFor(item.label))?.replaceAll("Ctrl", "Control")}
               disabled={item.disabled}
               onPointerEnter={(event) => {
                 const button = event.currentTarget;
@@ -143,11 +179,35 @@ export function Menu(props: {
                 props.onClose();
                 item.action?.();
               }}
+              onContextMenu={(event) => {
+                event.preventDefault();
+                if (!props.parent && canStar(item)) toggleStar(item.label);
+              }}
             >
-              {item.label}
+              <span class="menu-icon" aria-hidden="true">
+                <Show when={item.picture} fallback={item.icon ?? iconFor(item.label)}>
+                  {(picture) => <canvas ref={(canvas) => drawPicture(canvas, picture())} />}
+                </Show>
+              </span>
+              <span class="menu-label">{item.label}</span>
+              <Show when={!props.parent && canStar(item) && isStarred(item)}>
+                <span class="menu-star" aria-label="Starred">
+                  {ICON_STAR}
+                </span>
+              </Show>
+              <Show when={item.keys ?? keysFor(item.label)}>
+                {(keys) => (
+                  <span class="menu-keys">
+                    <For each={keys().split("+")}>{(key) => <kbd>{key}</kbd>}</For>
+                  </span>
+                )}
+              </Show>
             </button>
           )}
         </For>
+        <Show when={showHint()}>
+          <p class="menu-hint">Right-click an item to keep it on top</p>
+        </Show>
       </div>
       <Show when={side()} keyed>
         {(open) => (

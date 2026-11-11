@@ -51,17 +51,122 @@ body {
 
 .shell {
   display: grid;
+  --sidebar-width: var(--sidebar-rail-width);
   grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
   grid-template-rows: var(--title-bar-height) minmax(0, 1fr);
   height: 100%;
   background: var(--glass-tint);
+  transition: grid-template-columns var(--motion-glide);
 }
 
+.shell[data-sidebar="open"] {
+  --sidebar-width: var(--sidebar-open-width);
+}
+
+/* A slim rail of icons. The whole sidebar is always there, cut down to the rail, so sliding it
+   out over the files moves nothing and lays nothing out again. */
 .sidebar {
+  position: relative;
+  z-index: 5;
+}
+
+.sidebar-panel {
+  position: absolute;
+  inset: 0 auto 0 0;
   display: flex;
   flex-direction: column;
-  padding: var(--space-4);
-  overflow-y: auto;
+  width: var(--sidebar-open-width);
+  padding: var(--space-4) var(--space-3);
+  overflow: hidden auto;
+  border-radius: 0 var(--radius-large) var(--radius-large) 0;
+  clip-path: inset(0 calc(100% - var(--sidebar-rail-width)) 0 0);
+  /* Leaving waits a moment, so a pointer that slips off the edge does not shut it. */
+  transition:
+    clip-path var(--motion-glide) 220ms,
+    background var(--motion) 220ms,
+    box-shadow var(--motion) 220ms;
+
+  .place-label,
+  .place-heading,
+  .settings-label {
+    opacity: 0;
+    transition: opacity var(--motion) 220ms;
+  }
+
+  .place[aria-current] {
+    background: transparent;
+  }
+
+  .place[aria-current] .place-icon {
+    color: var(--accent);
+  }
+
+  /* On the rail, a short line stands where each heading is. */
+  .place-section {
+    position: relative;
+  }
+
+  .place-section::before {
+    content: "";
+    position: absolute;
+    inset: 12px auto auto var(--space-2);
+    width: 14px;
+    height: 1px;
+    background: var(--border);
+    transition: opacity var(--motion) 220ms;
+  }
+
+  .update-dot {
+    position: absolute;
+    inset: 5px auto auto 22px;
+  }
+}
+
+/* The mark of where you are, which the rail shows on its own. */
+.place[aria-current]::before {
+  content: "";
+  position: absolute;
+  inset: 7px auto 7px 0;
+  width: 3px;
+  border-radius: 2px;
+  background: var(--accent-line);
+}
+
+/* Out it comes for the pointer, for a key that walks into it, and for files dragged over it. */
+.sidebar:is(:hover, :has(:focus-visible), :has([data-drop-over])) > .sidebar-panel,
+.shell[data-sidebar="open"] .sidebar-panel {
+  clip-path: inset(0 -32px 0 0);
+  transition-delay: 70ms;
+
+  .place-label,
+  .place-heading,
+  .settings-label {
+    opacity: 1;
+    transition-delay: 70ms;
+  }
+
+  .place[aria-current] {
+    background: var(--surface-selected);
+  }
+
+  .place[aria-current] .place-icon {
+    color: inherit;
+  }
+
+  .place-section::before {
+    opacity: 0;
+    transition-delay: 70ms;
+  }
+
+  .update-dot {
+    position: static;
+  }
+}
+
+.shell:not([data-sidebar="open"]) .sidebar:is(:hover, :has(:focus-visible), :has([data-drop-over])) > .sidebar-panel {
+  background: var(--overlay-tint);
+  box-shadow: var(--shadow);
+  backdrop-filter: var(--blur);
 }
 
 .sidebar .places {
@@ -69,7 +174,9 @@ body {
 }
 
 .settings-button {
+  position: relative;
   display: flex;
+  flex: none;
   align-items: center;
   gap: var(--space-2);
   height: var(--row-height);

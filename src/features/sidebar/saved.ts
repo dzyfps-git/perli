@@ -19,6 +19,8 @@ export const [bookmarks, setBookmarks] = stored("bookmarks", savedPaths(saved("b
 export const [hiddenSections, setHiddenSections] = stored("hidden-sections", savedSections("hidden-sections"));
 export const [foldedSections, setFoldedSections] = stored("folded-sections", savedSections("folded-sections"));
 export const [bookmarksBar, setBookmarksBar] = stored("bookmarks-bar", saved("bookmarks-bar") !== false);
+/** Off shows the sidebar as a slim rail of icons, which slides out when the pointer or a key reaches it. */
+export const [sidebarOpen, setSidebarOpen] = stored("sidebar-open", saved("sidebar-open") === true);
 const [looks, setLooks] = stored<Looks>("folder-looks", (saved("folder-looks") as Looks | null) ?? {});
 
 /** Changes whenever any folder's look does, so lists know to repaint. */
