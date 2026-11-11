@@ -1,4 +1,5 @@
 import { createSignal, For, Show, type JSX } from "solid-js";
+import { hexToHsv, hsvToHex, parseHex, type Hsv } from "./color";
 import { monthAfter, monthGrid, parseDay, toDay } from "./dates";
 import "./controls.css";
 
@@ -146,6 +147,152 @@ export function DateField(props: { value: string; label: string; onChange: (valu
         </div>
       </div>
     </span>
+  );
+}
+
+const ICON_DROPPER = "";
+const HUE_STEP = 1;
+const SHADE_STEP = 0.02;
+
+/** Chromium's screen color picker, which TypeScript's DOM types don't know yet. */
+type EyeDropperWindow = Window & { EyeDropper?: new () => { open(): Promise<{ sRGBHex: string }> } };
+
+/**
+ * A color as `#rrggbb`, shown as a swatch that opens Perli's own picker: a square for how strong
+ * and how bright, a strip for the hue, and a box for the hex. It can also take a color from
+ * anywhere on screen. The picker is a popover, so it shows above the dialog it is in.
+ */
+export function ColorField(props: { value: string; label: string; onChange: (value: string) => void }) {
+  // Kept apart from the hex, so the hue of a gray and the strength of a black aren't lost.
+  const [color, setColor] = createSignal<Hsv>(hexToHsv(props.value));
+  const [typed, setTyped] = createSignal(props.value);
+  let swatch!: HTMLButtonElement;
+  let panel!: HTMLDivElement;
+  let native!: HTMLInputElement;
+  const dropper = (window as EyeDropperWindow).EyeDropper;
+
+  function open() {
+    if (panel.matches(":popover-open")) return panel.hidePopover();
+    setColor(hexToHsv(props.value));
+    setTyped(props.value);
+    panel.showPopover();
+    const { left, bottom } = swatch.getBoundingClientRect();
+    const { width, height } = panel.getBoundingClientRect();
+    panel.style.left = `${Math.max(4, Math.min(left, innerWidth - width - 4))}px`;
+    panel.style.top = `${bottom + 6 + height > innerHeight ? Math.max(4, bottom - 38 - height) : bottom + 6}px`;
+  }
+
+  function change(next: Hsv) {
+    setColor(next);
+    setTyped(hsvToHex(next));
+    props.onChange(hsvToHex(next));
+  }
+
+  function take(hex: string | undefined) {
+    if (hex) change(hexToHsv(hex));
+  }
+
+  const within = (value: number) => Math.max(0, Math.min(1, value));
+
+  function shade(event: PointerEvent & { currentTarget: HTMLDivElement }) {
+    if (event.type === "pointerdown") event.currentTarget.setPointerCapture(event.pointerId);
+    else if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
+    const box = event.currentTarget.getBoundingClientRect();
+    change({
+      h: color().h,
+      s: within((event.clientX - box.left) / box.width),
+      v: within(1 - (event.clientY - box.top) / box.height),
+    });
+  }
+
+  function shadeKey(event: KeyboardEvent) {
+    const by = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, 1], ArrowDown: [0, -1] }[event.key];
+    if (!by) return;
+    event.preventDefault();
+    const { h, s, v } = color();
+    change({ h, s: within(s + by[0] * SHADE_STEP), v: within(v + by[1] * SHADE_STEP) });
+  }
+
+  return (
+    <>
+      <button
+        ref={swatch}
+        type="button"
+        class="color-swatch"
+        aria-label={props.label}
+        aria-haspopup="dialog"
+        style={{ "--color": props.value }}
+        onClick={open}
+      />
+      <div ref={panel} class="color-panel" popover="auto" role="dialog" aria-label={props.label}>
+        <div
+          class="color-shade"
+          role="slider"
+          tabindex="0"
+          aria-label="Strength and brightness"
+          aria-valuetext={`${Math.round(color().s * 100)}% strong, ${Math.round(color().v * 100)}% bright`}
+          style={{ "--hue": color().h, "--x": `${color().s * 100}%`, "--y": `${(1 - color().v) * 100}%`, "--color": typed() }}
+          onPointerDown={shade}
+          onPointerMove={shade}
+          onKeyDown={shadeKey}
+        />
+        <input
+          class="color-hue"
+          type="range"
+          min="0"
+          max="359"
+          step={HUE_STEP}
+          aria-label="Hue"
+          value={color().h}
+          onInput={(event) => change({ ...color(), h: event.currentTarget.valueAsNumber })}
+        />
+        <div class="color-row">
+          <input
+            class="color-hex"
+            spellcheck={false}
+            maxLength={7}
+            aria-label="Hex color"
+            aria-invalid={!parseHex(typed())}
+            value={typed()}
+            onInput={(event) => {
+              setTyped(event.currentTarget.value);
+              const hex = parseHex(event.currentTarget.value);
+              if (!hex) return;
+              setColor(hexToHsv(hex));
+              props.onChange(hex);
+            }}
+          />
+          <Show when={dropper}>
+            <button
+              type="button"
+              class="field-step"
+              aria-label="Pick from the screen"
+              onClick={() =>
+                new dropper!()
+                  .open()
+                  .then((picked) => take(parseHex(picked.sRGBHex)))
+                  // Escape backs out of it, which is no failure.
+                  .catch(() => undefined)
+              }
+            >
+              {ICON_DROPPER}
+            </button>
+          </Show>
+        </div>
+        <button type="button" class="calendar-quick" onClick={() => native.click()}>
+          Windows color picker
+        </button>
+        <input
+          ref={native}
+          class="color-native"
+          type="color"
+          tabindex="-1"
+          aria-hidden="true"
+          value={props.value}
+          onInput={(event) => take(parseHex(event.currentTarget.value))}
+        />
+      </div>
+    </>
   );
 }
 

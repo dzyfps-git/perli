@@ -279,26 +279,6 @@
   font: inherit;
 }
 
-.settings-palette-color {
-  flex: none;
-  width: 32px;
-  height: 32px;
-  padding: 2px;
-  background: transparent;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  cursor: pointer;
-}
-
-.settings-palette-color::-webkit-color-swatch-wrapper {
-  padding: 0;
-}
-
-.settings-palette-color::-webkit-color-swatch {
-  border: 0;
-  border-radius: calc(var(--radius) - 3px);
-}
-
 .settings-update {
   color: var(--text);
 }

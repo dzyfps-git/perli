@@ -3,7 +3,7 @@ import { Effect, getCurrentWindow } from "@tauri-apps/api/window";
 import { createEffect, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
 import { isDefaultApp, setDefaultApp } from "../../api";
 import type { Tag } from "../../api";
-import { Switch } from "../../ui/Controls";
+import { ColorField, Switch } from "../../ui/Controls";
 import { morph } from "../../ui/morph";
 import {
   folderSizes,
@@ -354,34 +354,37 @@ export function Settings(props: {
             <Show when={accent() === WINDOWS_ACCENT}>
               <p class="settings-note">Follows the accent color picked in Windows, and changes when it does.</p>
             </Show>
-            <Show when={ownPalette()} keyed>
-              {(palette) => (
-                <div class="settings-palette">
-                  <input
-                    class="settings-palette-name"
-                    aria-label="Palette name"
-                    spellcheck={false}
-                    value={palette.name}
-                    onChange={(event) =>
-                      changePalette({ ...palette, name: event.currentTarget.value.trim() || palette.name })
-                    }
-                  />
-                  <For each={COLOR_NAMES}>
-                    {(name, at) => (
-                      <input
-                        class="settings-palette-color"
-                        type="color"
-                        aria-label={name}
-                        value={palette.colors[at()]}
-                        onChange={(event) => changePalette(withColor(palette, at(), event.currentTarget.value))}
-                      />
-                    )}
-                  </For>
-                  <button class="settings-chip" onClick={() => deletePalette(palette.id)}>
-                    Delete palette
-                  </button>
-                </div>
-              )}
+            {/* Kept by the palette's id, so a color changing under the open picker doesn't close it. */}
+            <Show when={ownPalette()?.id} keyed>
+              {(_id) => {
+                let kept = ownPalette()!;
+                const palette = () => (kept = ownPalette() ?? kept);
+                return (
+                  <div class="settings-palette">
+                    <input
+                      class="settings-palette-name"
+                      aria-label="Palette name"
+                      spellcheck={false}
+                      value={palette().name}
+                      onChange={(event) =>
+                        changePalette({ ...palette(), name: event.currentTarget.value.trim() || palette().name })
+                      }
+                    />
+                    <For each={COLOR_NAMES}>
+                      {(name, at) => (
+                        <ColorField
+                          label={name}
+                          value={palette().colors[at()]}
+                          onChange={(color) => changePalette(withColor(palette(), at(), color))}
+                        />
+                      )}
+                    </For>
+                    <button class="settings-chip" onClick={() => deletePalette(palette().id)}>
+                      Delete palette
+                    </button>
+                  </div>
+                );
+              }}
             </Show>
 
             <h4 id="settings-backdrop">Window backdrop</h4>

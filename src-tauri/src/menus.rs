@@ -11,20 +11,23 @@ use std::thread;
 
 use serde::Serialize;
 use windows::core::{s, w, Error, Interface, Result, HSTRING, PCSTR, PCWSTR, PSTR, PWSTR};
-use windows::Win32::Foundation::{E_FAIL, HWND, LPARAM, LRESULT, POINT, POINTL, WPARAM};
+use windows::Win32::Foundation::{
+    ERROR_CANCELLED, E_FAIL, HWND, LPARAM, LRESULT, POINT, POINTL, S_OK, WPARAM,
+};
 use windows::Win32::Graphics::Gdi::ClientToScreen;
-use windows::Win32::System::Com::{CoTaskMemFree, IDataObject};
+use windows::Win32::System::Com::{CoCreateInstance, CoTaskMemFree, IDataObject, CLSCTX_INPROC_SERVER};
 use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryW};
 use windows::Win32::System::Ole::{
     IDropTarget, OleInitialize, OleUninitialize, DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_LINK,
     DROPEFFECT_NONE,
 };
 use windows::Win32::System::SystemServices::MK_LBUTTON;
-use windows::Win32::UI::Shell::Common::ITEMIDLIST;
+use windows::Win32::UI::Shell::Common::{COMDLG_FILTERSPEC, ITEMIDLIST};
 use windows::Win32::UI::Shell::{
-    FOLDERID_SendTo, IAssocHandler, IContextMenu, IContextMenu2, IContextMenu3, IShellFolder,
-    IShellItem, IShellItemArray, ILFree, SHAssocEnumHandlers, SHCreateShellItemArrayFromIDLists,
-    SHGetIDListFromObject, SHOpenWithDialog, ASSOC_FILTER_RECOMMENDED,
+    FileOpenDialog, FOLDERID_SendTo, IAssocHandler, IContextMenu, IContextMenu2, IContextMenu3,
+    IFileOpenDialog, IShellFolder, IShellItem, IShellItemArray, ILFree, SHAssocEnumHandlers,
+    SHCreateShellItemArrayFromIDLists, SHGetIDListFromObject, SHOpenWithDialog, ShellExecuteW,
+    ASSOC_FILTER, ASSOC_FILTER_NONE, ASSOC_FILTER_RECOMMENDED, SIGDN_FILESYSPATH,
     BHID_DataObject, BHID_SFObject, BHID_SFUIObject, CMF_CANRENAME, CMF_EXPLORE, CMF_NORMAL,
     CMINVOKECOMMANDINFO,
     CMINVOKECOMMANDINFOEX, CMIC_MASK_PTINVOKE, GCS_VERBW, OAIF_ALLOW_REGISTRATION, OAIF_EXEC,
@@ -243,12 +246,27 @@ pub fn data_object(paths: &[PathBuf]) -> Result<IDataObject> {
     unsafe { shell_items(paths)?.BindToHandler(None, &BHID_DataObject) }
 }
 
-/// An app Windows recommends for a file type.
+/// An app that can open a file type.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct App {
     /// What `open_with` takes.
     id: String,
     name: String,
+    /// Windows suggests it for this type. The rest only say they can open it.
+    recommended: bool,
+    /// A file whose picture stands for the app, when it has one on disk.
+    icon: Option<String>,
+}
+
+/// True for a file Windows can start as a program.
+fn is_program(path: &Path) -> bool {
+    path.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("exe")) && path.is_file()
+}
+
+/// Paths as one command line. No Windows path holds a quote, so wrapping each is enough.
+fn quoted(paths: &[PathBuf]) -> String {
+    let wrapped: Vec<String> = paths.iter().map(|path| format!("\"{}\"", path.display())).collect();
+    wrapped.join(" ")
 }
 
 /// The extension every file shares. Folders and mixed types have no list of apps.
@@ -261,9 +279,9 @@ fn shared_extension(paths: &[PathBuf]) -> Option<String> {
     paths.iter().all(|path| extension(path).as_ref() == Some(&first)).then_some(first)
 }
 
-fn handlers(extension: &str) -> Result<Vec<IAssocHandler>> {
+fn handlers(extension: &str, filter: ASSOC_FILTER) -> Result<Vec<IAssocHandler>> {
     let dotted = HSTRING::from(format!(".{extension}"));
-    let found = unsafe { SHAssocEnumHandlers(&dotted, ASSOC_FILTER_RECOMMENDED) }?;
+    let found = unsafe { SHAssocEnumHandlers(&dotted, filter) }?;
     let mut all = Vec::new();
     loop {
         let (mut slot, mut fetched) = ([None], 0);
@@ -277,20 +295,33 @@ fn handlers(extension: &str) -> Result<Vec<IAssocHandler>> {
 
 fn app_of(handler: &IAssocHandler) -> Result<App> {
     unsafe {
+        let id = take_text(handler.GetName()?);
+        let (mut location, mut index) = (PWSTR::null(), 0);
+        let shown = handler.GetIconLocation(&raw mut location, &raw mut index);
+        let location = shown.is_ok().then(|| take_text(location));
+        // A picture inside a DLL or a Store package is not a file the thumbnailer can read.
+        let icon = [Some(id.clone()), location].into_iter().flatten().find(|file| {
+            let path = Path::new(file);
+            is_program(path) || (file.to_lowercase().ends_with(".ico") && path.is_file())
+        });
         Ok(App {
-            id: take_text(handler.GetName()?),
+            id,
             name: take_text(handler.GetUIName()?),
+            recommended: handler.IsRecommended() == S_OK,
+            icon,
         })
     }
 }
 
-/// The apps Windows recommends for `paths`. Empty when they don't share a file type.
-pub fn apps_for(paths: Vec<PathBuf>) -> Result<Vec<App>> {
+/// The apps Windows recommends for `paths`, or with `all` every app that says it can open
+/// them. Empty when they don't share a file type.
+pub fn apps_for(paths: Vec<PathBuf>, all: bool) -> Result<Vec<App>> {
     on_worker(move |_| {
         let Some(extension) = shared_extension(&paths) else {
             return Ok(Vec::new());
         };
-        Ok(listed(handlers(&extension)?.iter().filter_map(|handler| app_of(handler).ok()).collect()))
+        let filter = if all { ASSOC_FILTER_NONE } else { ASSOC_FILTER_RECOMMENDED };
+        Ok(listed(handlers(&extension, filter)?.iter().filter_map(|handler| app_of(handler).ok()).collect()))
     })
 }
 
@@ -308,12 +339,48 @@ fn listed(mut apps: Vec<App>) -> Vec<App> {
 pub fn open_with(paths: Vec<PathBuf>, id: String) -> Result<()> {
     on_worker(move |_| {
         let extension = shared_extension(&paths).ok_or_else(|| Error::from(E_FAIL))?;
-        let handlers = handlers(&extension)?;
+        let handlers = handlers(&extension, ASSOC_FILTER_NONE)?;
         let chosen = handlers
             .iter()
             .find(|handler| app_of(handler).is_ok_and(|app| app.id == id))
             .ok_or_else(|| Error::new(E_FAIL, "That app is no longer available"))?;
         unsafe { chosen.Invoke(&data_object(&paths)?) }
+    })
+}
+
+/// Opens `paths` with the program at `exe`, for an app Windows doesn't list.
+pub fn open_with_exe(paths: Vec<PathBuf>, exe: PathBuf) -> Result<()> {
+    if !is_program(&exe) {
+        return Err(Error::new(E_FAIL, "That is not an app. Pick a file that ends in .exe."));
+    }
+    if paths.is_empty() || paths.iter().any(|path| !path.is_file()) {
+        return Err(Error::new(E_FAIL, "Only files open with an app"));
+    }
+    // ponytail: one command line, which Windows caps near 32,000 characters. Start the app
+    // once per batch of files if someone opens thousands at once.
+    let (program, files) = (HSTRING::from(exe.as_os_str()), HSTRING::from(quoted(&paths)));
+    on_worker(move |owner| {
+        let started = unsafe { ShellExecuteW(Some(owner), w!("open"), &program, &files, None, SW_SHOWNORMAL) };
+        // Values up to 32 mean it failed.
+        if started.0 as isize > 32 {
+            Ok(())
+        } else {
+            Err(Error::new(E_FAIL, "Windows could not start that app"))
+        }
+    })
+}
+
+/// Windows' file picker, for an app that no list has. Nothing when the user backs out.
+pub fn browse_app(main: isize) -> Result<Option<String>> {
+    on_worker(move |_| unsafe {
+        let dialog: IFileOpenDialog = CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER)?;
+        dialog.SetFileTypes(&[COMDLG_FILTERSPEC { pszName: w!("Apps"), pszSpec: w!("*.exe") }])?;
+        dialog.SetTitle(w!("Choose an app"))?;
+        match dialog.Show(Some(HWND(main as _))) {
+            Ok(()) => Ok(Some(take_text(dialog.GetResult()?.GetDisplayName(SIGDN_FILESYSPATH)?))),
+            Err(closed) if closed.code() == ERROR_CANCELLED.to_hresult() => Ok(None),
+            Err(failure) => Err(failure),
+        }
     })
 }
 
@@ -699,8 +766,22 @@ mod tests {
     }
 
     #[test]
+    fn files_make_one_quoted_command_line_and_only_an_exe_is_a_program() {
+        let paths = vec![PathBuf::from(r"C:\a b\one.txt"), PathBuf::from(r"C:\two.txt")];
+        assert_eq!(quoted(&paths), r#""C:\a b\one.txt" "C:\two.txt""#);
+        let folder = TempFolder::new("program");
+        let text = folder.0.join("note.txt");
+        fs::write(&text, "").unwrap();
+        assert!(!is_program(&text));
+        assert!(!is_program(&folder.0.join("gone.exe")));
+        assert!(is_program(&std::env::current_exe().unwrap()));
+        assert!(open_with_exe(vec![text.clone()], text.clone()).is_err());
+        assert!(open_with_exe(vec![folder.0.clone()], std::env::current_exe().unwrap()).is_err());
+    }
+
+    #[test]
     fn an_app_registered_twice_is_listed_once() {
-        let app = |id: &str, name: &str| App { id: id.into(), name: name.into() };
+        let app = |id: &str, name: &str| App { id: id.into(), name: name.into(), recommended: true, icon: None };
         let apps = listed(vec![app("b.exe", "Notepad++"), app("x", "Paint"), app("Applications/b.exe", "notepad++")]);
         assert_eq!(apps, [app("b.exe", "Notepad++"), app("x", "Paint")]);
     }
@@ -711,8 +792,10 @@ mod tests {
         let file = folder.0.join("a.txt");
         fs::write(&file, "").unwrap();
 
-        assert!(!apps_for(vec![file]).unwrap().is_empty());
-        assert!(apps_for(vec![folder.0.clone()]).unwrap().is_empty());
+        let recommended = apps_for(vec![file.clone()], false).unwrap();
+        assert!(!recommended.is_empty());
+        assert!(apps_for(vec![file], true).unwrap().len() >= recommended.len());
+        assert!(apps_for(vec![folder.0.clone()], false).unwrap().is_empty());
     }
 
     #[test]

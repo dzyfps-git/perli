@@ -26,6 +26,7 @@ import {
   type Places,
   type Recent,
   type Row,
+  type ShellTarget,
   type Sort,
   type OpenAsk,
   type Tag,
@@ -38,6 +39,9 @@ import { ConfirmDelete, type DeleteRequest } from "./features/fileops/ConfirmDel
 import { createJobs } from "./features/fileops/jobs";
 import { JobsPanel } from "./features/fileops/JobsPanel";
 import { createShellItems } from "./features/fileops/shellItems";
+import { AppPicker } from "./features/dialogs/AppPicker";
+import { DisconnectDrive, MapDrive } from "./features/dialogs/NetworkDrives";
+import { Properties } from "./features/dialogs/Properties";
 import { NO_FILTER } from "./features/filelist/filter";
 import { BIN_COLUMNS, nextGrouping, nextSort, SEARCH_COLUMNS } from "./features/filelist/columns";
 import type { Empty } from "./features/filelist/EmptyState";
@@ -234,6 +238,9 @@ export function App() {
   const [filtering, setFiltering] = createSignal<FolderView>();
   const [selectingPattern, setSelectingPattern] = createSignal<FolderView>();
   const [namingTag, setNamingTag] = createSignal<FolderView>();
+  const [showingProperties, setShowingProperties] = createSignal<{ target: ShellTarget; at: { x: number; y: number } }>();
+  const [pickingApp, setPickingApp] = createSignal<string[]>();
+  const [drives, setDrives] = createSignal<"map" | "disconnect">();
   const [previewing, setPreviewing] = createSignal<{ view: FolderView; at: PreviewAt }>();
   /** A sheet covers the tabs, so nothing behind it may change. */
   const sheetOpen = () =>
@@ -242,6 +249,9 @@ export function App() {
     !!filtering() ||
     !!selectingPattern() ||
     !!namingTag() ||
+    !!showingProperties() ||
+    !!pickingApp() ||
+    !!drives() ||
     !!previewing();
   /** The settings page stands where the files do, so the keys of the files rest too. */
   const dialogOpen = () => settingsShown() || sheetOpen();
@@ -251,7 +261,11 @@ export function App() {
   );
   const jobs = createJobs(tabs.allViews);
   const actions = createFileActions(jobs, setDeleting, () => tabs.active().other(), setRenaming);
-  const shell = createShellItems(jobs, actions);
+  const shell = createShellItems(jobs, actions, {
+    properties: (target, at) => setShowingProperties({ target, at }),
+    pickApp: setPickingApp,
+  });
+  const refreshPlaces = () => listPlaces().then(setPlaces).catch(console.error);
   // A run started on one folder is a detour, so it must not replace the saved tabs.
   const [keepSession, setKeepSession] = createSignal(false);
   let saveTimer: number | undefined;
@@ -381,8 +395,8 @@ export function App() {
   const toggleSidebar = () => setSidebarOpen(!sidebarOpen());
 
   const networkItems = (): MenuItem[] => [
-    { label: "Map network drive", divider: true, action: () => mapDrive().catch(jobs.report) },
-    { label: "Disconnect network drive", action: () => disconnectDrive().catch(jobs.report) },
+    { label: "Map network drive", divider: true, action: () => setDrives("map") },
+    { label: "Disconnect network drive", action: () => setDrives("disconnect") },
   ];
 
   /** Pressing a chevron closes its own menu before the click arrives, which must not reopen it. */
@@ -829,8 +843,8 @@ export function App() {
         run: () => setUiScale(scale),
       })),
       { label: "Settings", keys: "Ctrl+,", run: showSettings },
-      { label: "Map network drive", run: () => mapDrive().catch(jobs.report) },
-      { label: "Disconnect network drive", run: () => disconnectDrive().catch(jobs.report) },
+      { label: "Map network drive", run: () => setDrives("map") },
+      { label: "Disconnect network drive", run: () => setDrives("disconnect") },
       goTo("Recycle Bin", BIN_PATH),
       ...(known?.folders ?? []).map(({ kind, path }) => goTo(FOLDERS[kind].label, path)),
       ...(known?.clouds ?? []).map(({ name, path }) => goTo(name, path)),
@@ -1130,6 +1144,37 @@ export function App() {
             onClose={() => setNamingTag(undefined)}
           />
         )}
+      </Show>
+      <Show when={showingProperties()} keyed>
+        {({ target, at }) => (
+          <Properties
+            target={target}
+            onPickApp={setPickingApp}
+            onWindows={() => shell.windowsProperties(target, at)}
+            onChanged={showTagChange}
+            onClose={() => setShowingProperties(undefined)}
+          />
+        )}
+      </Show>
+      <Show when={pickingApp()} keyed>
+        {(paths) => <AppPicker paths={paths} onClose={() => setPickingApp(undefined)} />}
+      </Show>
+      <Show when={drives() === "map"}>
+        <MapDrive
+          onMapped={(letter) => {
+            refreshPlaces();
+            jobs.notify(`Mapped ${letter}`, "It is with the drives in the sidebar.");
+          }}
+          onWindows={() => mapDrive().then(refreshPlaces).catch(jobs.report)}
+          onClose={() => setDrives(undefined)}
+        />
+      </Show>
+      <Show when={drives() === "disconnect"}>
+        <DisconnectDrive
+          onUnmapped={refreshPlaces}
+          onWindows={() => disconnectDrive().then(refreshPlaces).catch(jobs.report)}
+          onClose={() => setDrives(undefined)}
+        />
       </Show>
       <Show when={previewing()} keyed>
         {({ view, at }) => (

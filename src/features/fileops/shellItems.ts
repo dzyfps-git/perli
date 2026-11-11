@@ -1,8 +1,8 @@
 import {
   appsFor,
-  chooseApp,
   commonTags,
   fileUsers,
+  itemFacts,
   newTypes,
   openTerminal,
   openWith,
@@ -43,7 +43,12 @@ const isZip = (name: string, isDir: boolean) => !isDir && name.toLowerCase().end
  * The parts of a right click that come from Windows. Rows are read when an item runs, so a
  * folder reloading behind an open menu can't leave it pointing at old rows.
  */
-export function createShellItems(jobs: Jobs, actions: FileActions) {
+export function createShellItems(
+  jobs: Jobs,
+  actions: FileActions,
+  /** Perli's own sheets, which the app shows. */
+  sheets: { properties: (target: ShellTarget, at: Point) => void; pickApp: (paths: string[]) => void },
+) {
   const report = (failure: unknown) => jobs.report(failure);
 
   function withRows(view: FolderView, run: (selection: Selection) => Promise<unknown>) {
@@ -62,8 +67,12 @@ export function createShellItems(jobs: Jobs, actions: FileActions) {
   }
 
   const propertiesOf = (target: ShellTarget | undefined, at: Point) => {
-    if (target) showProperties(target, ...physical(at)).catch(report);
+    if (target) sheets.properties(target, at);
   };
+
+  /** The paths behind the rows, which the app picker keeps while the folder reloads. */
+  const pickAppFor = (view: FolderView) =>
+    withRows(view, async (selection) => sheets.pickApp((await itemFacts({ kind: "rows", selection })).paths));
 
   const terminalItem = (path: string, divider = false): MenuItem => ({
     label: "Open in terminal",
@@ -110,6 +119,9 @@ export function createShellItems(jobs: Jobs, actions: FileActions) {
   }
 
   return {
+    /** Windows' own Properties window, for what Perli's sheet leaves to it. */
+    windowsProperties: (target: ShellTarget, at: Point) => showProperties(target, ...physical(at)).catch(report),
+
     /** Properties for the selected rows, or the folder when none are. */
     properties(view: FolderView) {
       const path = view.folder()?.path;
@@ -126,11 +138,12 @@ export function createShellItems(jobs: Jobs, actions: FileActions) {
           label: name,
           action: () => withRows(view, (rows) => openWith(rows, id)),
         }));
-        if (selection.rows.length > 1) return appItems;
+        // Mixed types and folders have no app in common to pick.
+        if (selection.rows.length > 1 && apps.length === 0) return appItems;
         const choose = {
           label: "Choose another app…",
           divider: apps.length > 0,
-          action: () => withRows(view, chooseApp),
+          action: () => pickAppFor(view),
         };
         return [...appItems, choose];
       },
