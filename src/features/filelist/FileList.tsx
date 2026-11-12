@@ -26,6 +26,7 @@ import { SelectionBar, type BarItem } from "../reach/SelectionBar";
 import { createSelection } from "./selection";
 import { cachedThumb, createThumbLoader } from "./thumbs";
 import { matchSpans } from "./nameMatch";
+import { readProgress } from "../preview/viewerPrefs";
 import { playMoves, seen } from "./rowMotion";
 import { createTypeJump } from "./typeJump";
 import { typesLearned, typeText } from "./typeNames";
@@ -307,6 +308,9 @@ export function FileList(props: {
     { equals: (a, b) => a.join() === b.join() },
   );
 
+  /** Books and comics whose cover Perli reads itself. */
+  const COVERED = /\.(epub|cbz)$/i;
+
   const thumbKey = (row: Row) => `${row.location || props.folder}\\${row.name}|${row.modified}|${row.size}`;
 
   function rowShowing(index: number, key: string) {
@@ -440,8 +444,17 @@ export function FileList(props: {
     lightMatch(pooled, row);
     // Windows' picture of a folder would hide the look it was given. Other files show Perli's
     // own icon, unless a picture says more or Windows gave the folder an icon of its own.
-    const pictured = row && !look && (windowsIcons() || row.isCustom || hasPicture(kind!));
+    const pictured = row && !look && (windowsIcons() || row.isCustom || hasPicture(kind!) || COVERED.test(row.name));
     showThumb(pooled, pictured ? thumbKey(row) : undefined);
+    // A book or comic part read shows how far, as a thin bar under its icon.
+    const read = row && !row.isDir ? readProgress()[join(row.location || props.folder, row.name)] : undefined;
+    if (read !== undefined) {
+      pooled.icon.dataset.read = "";
+      pooled.icon.style.setProperty("--read", String(read));
+    } else {
+      delete pooled.icon.dataset.read;
+      pooled.icon.style.removeProperty("--read");
+    }
   }
 
   /** A pool being thrown away takes its lit letters with it, since the highlight is shared. */
@@ -1079,7 +1092,7 @@ export function FileList(props: {
 
   createEffect(
     on(
-      [typesLearned, () => props.cut, () => props.match, () => props.synced, tags, allLooks, windowsIcons, dateForm, nests],
+      [typesLearned, () => props.cut, () => props.match, () => props.synced, tags, allLooks, windowsIcons, dateForm, nests, readProgress],
       () => {
         for (const pooled of pool) pooled.filled = false;
         paint();

@@ -114,6 +114,8 @@ import type { BarItem } from "./features/reach/SelectionBar";
 import { Shelf } from "./features/reach/Shelf";
 import { DetailsPanel } from "./features/preview/DetailsPanel";
 import { PreviewDock, QuickPreview, type PreviewAt } from "./features/preview/QuickPreview";
+import { MiniPlayer } from "./features/preview/MiniPlayer";
+import { now } from "./features/preview/nowPlaying";
 import { BACKDROPS, SCALES, setBackdrop, setUiScale } from "./features/settings/appearance";
 import { Settings } from "./features/settings/Settings";
 import { startUpdates, updateState } from "./features/settings/updates";
@@ -680,7 +682,18 @@ export function App() {
   /** Shows the file among its neighbours, the way Explorer's Open file location does. */
   async function showInFolder(view: FolderView, path: string) {
     const folder = parentOf(path);
-    if (folder && (await view.open(folder))) view.reload([baseName(path)]);
+    if (folder && (await view.open(folder))) await view.reload([baseName(path)]);
+  }
+
+  /** From the disc on the sidebar back to the song's full player, among its own folder. */
+  async function backToPlayer() {
+    const song = now();
+    if (!song) return;
+    const view = tabs.activeView();
+    await showInFolder(view, song.path);
+    const folder = view.folder();
+    const index = folder?.selected?.[0];
+    if (folder && index !== undefined) preview(view, { snapshot: folder.request, index });
   }
 
   function showRecentMenu(event: MouseEvent, view: FolderView, recent: Recent) {
@@ -1580,6 +1593,7 @@ export function App() {
           onPlaces={setPlaces}
           report={jobs.report}
         />
+        <MiniPlayer onOpen={() => void backToPlayer().catch(jobs.report)} />
         <button
           class="settings-button"
           aria-label={updateState() === "ready" ? "Settings, update ready" : "Settings"}

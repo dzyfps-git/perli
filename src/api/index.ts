@@ -136,7 +136,7 @@ export type Task =
   | { kind: "template"; folder: string; extension: string }
   | { kind: "ownTemplate"; folder: string; name: string }
   | { kind: "saveTemplate" | "zip"; selection: Selection }
-  | { kind: "unzip"; selection: Selection; ownFolder: boolean; only?: string }
+  | { kind: "unzip"; selection: Selection; ownFolder: boolean; only?: string[]; password?: string }
   | { kind: "paste"; folder: string }
   | { kind: "drop"; folder: string; action?: DropAction }
   | { kind: "recycle" | "delete" | "restore" | "purge"; selection: Selection }
@@ -696,6 +696,7 @@ export type Preview =
   | { kind: "model" }
   | { kind: "song" }
   | { kind: "audio" }
+  | { kind: "video" }
   | { kind: "picture" };
 
 /** A line of a book's own table of contents, and which chapter it opens. */
@@ -711,6 +712,8 @@ export interface ArchiveEntry {
   size: number;
   folder: boolean;
   modified: string | null;
+  /** Protected by a password. */
+  locked: boolean;
 }
 
 export const previewRow = (view: number, request: number, row: number, offset = 0) =>
@@ -741,12 +744,44 @@ export const pictureSize = (view: number, request: number, row: number) =>
   invoke<[number, number] | null>("picture_size", { view, request, row });
 
 /** A comic page or a book's picture, by its name inside the archive. */
-export const fetchArchivePicture = (view: number, request: number, row: number, entry: string, edge: number) =>
-  invoke<ArrayBuffer>("archive_picture", { view, request, row, entry, edge }).then(decodeThumb);
+export const fetchArchivePicture = (view: number, request: number, row: number, entry: string, edge: number, password?: string) =>
+  invoke<ArrayBuffer>("archive_picture", { view, request, row, entry, edge, password: password ?? null }).then(decodeThumb);
 
 /** The start of a text file inside a ZIP, or null if it is not text. */
-export const archiveText = (view: number, request: number, row: number, entry: string) =>
-  invoke<string | null>("archive_text", { view, request, row, entry });
+export const archiveText = (view: number, request: number, row: number, entry: string, password?: string) =>
+  invoke<string | null>("archive_text", { view, request, row, entry, password: password ?? null });
+
+/** What reading every file of a ZIP back found. */
+export interface ArchiveTested {
+  sound: number;
+  damaged: string[];
+  /** Files left unread for want of a password. */
+  locked: number;
+}
+
+export const archiveTest = (view: number, request: number, row: number, password?: string) =>
+  invoke<ArchiveTested>("archive_test", { view, request, row, password: password ?? null });
+
+/** Drags one file out of a ZIP, the way a row is dragged out of the list. */
+export const dragEntry = (view: number, request: number, row: number, entry: string, password?: string) =>
+  invoke<void>("drag_entry", { view, request, row, entry, password: password ?? null });
+
+/** The words beside a file under its own name: lyrics (`lrc`) or subtitles (`srt`, `vtt`). */
+export const besideText = (view: number, request: number, row: number, extension: "lrc" | "srt" | "vtt") =>
+  invoke<string | null>("beside_text", { view, request, row, extension });
+
+/** Saves a frame of a film as a PNG beside it, and gives the new file's name. */
+export function saveFrame(view: number, request: number, row: number, seconds: number, png: ArrayBuffer) {
+  const HEAD = 24;
+  const body = new Uint8Array(HEAD + png.byteLength);
+  const head = new DataView(body.buffer);
+  head.setUint32(0, view, true);
+  head.setUint32(4, row, true);
+  head.setFloat64(8, request, true);
+  head.setFloat64(16, seconds, true);
+  body.set(new Uint8Array(png), HEAD);
+  return invoke<string>("save_frame", body);
+}
 
 /** One chapter of a book as safe HTML, by its name inside the archive. */
 export const bookChapter = (view: number, request: number, row: number, entry: string) =>
@@ -761,7 +796,19 @@ export interface SongInfo {
   title: string | null;
   /** General MIDI programs in the order they first play. 128 is the drums. */
   instruments: number[];
+  /** Each channel that plays and the instrument it starts with. */
+  channels: [channel: number, instrument: number][];
   notes: [number, number, number, number][];
+  /** When each beat falls, in seconds. */
+  beats: number[];
+  perBar: number;
+}
+
+/** How a MIDI file is played: silent channels as bits, keys up or down, and how fast. */
+export interface Playing {
+  muted: number;
+  transpose: number;
+  speed: number;
 }
 
 export const songInfo = (view: number, request: number, row: number) =>
@@ -774,20 +821,27 @@ export interface Tags {
 }
 
 /** Opens one sound file to the window, giving its path to stream and its tags. */
-export const openAudio = (view: number, request: number, row: number) =>
-  invoke<[string, Tags]>("open_audio", { view, request, row });
+export const openAudio = (view: number, request: number, row: number, path?: string) =>
+  invoke<[string, Tags]>("open_audio", { view, request, row, path: path ?? null });
 
 /** A song's own album cover, or null if it has none. */
 export const fetchCover = (view: number, request: number, row: number, edge: number) =>
   invoke<ArrayBuffer>("cover", { view, request, row, edge }).then(decodeThumb);
 
 /** An AIFF file as one WAV, since the window plays no AIFF. */
-export const aiffAudio = (view: number, request: number, row: number) =>
-  invoke<ArrayBuffer>("aiff_audio", { view, request, row });
+export const aiffAudio = (view: number, request: number, row: number, path?: string) =>
+  invoke<ArrayBuffer>("aiff_audio", { view, request, row, path: path ?? null });
 
-/** A MIDI file played through the bundled SoundFont, as one WAV. */
-export const songAudio = (view: number, request: number, row: number) =>
-  invoke<ArrayBuffer>("song_audio", { view, request, row });
+/** A MIDI file as one WAV, through the bundled SoundFont or a `.sf2` file named by `font`. */
+export const songAudio = (view: number, request: number, row: number, how?: { playing?: Playing; font?: string; path?: string }) =>
+  invoke<ArrayBuffer>("song_audio", {
+    view,
+    request,
+    row,
+    path: how?.path ?? null,
+    playing: how?.playing ?? null,
+    font: how?.font ?? null,
+  });
 
 /** A picture on this PC that a Markdown file points to. */
 export const fetchPictureFile = (path: string, edge: number) =>
