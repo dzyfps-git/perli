@@ -46,7 +46,7 @@ const DRAG_DISTANCE = 6;
 /** How long the pointer rests on a row before its card shows. */
 const CARD_DELAY_MS = 700;
 /** With a card already up, the next row's comes quicker. */
-const CARD_SWITCH_MS = 150;
+const CARD_SWITCH_MS = 40;
 /** What one notch of a mouse wheel reports. */
 const WHEEL_NOTCH = 100;
 /** Between a row's icon and its name, as `.file-icon` in filelist.css sets it. */
@@ -463,16 +463,25 @@ export function FileList(props: {
     });
   }
 
+  /** Shift pinned the card, so it stays until it is let go. */
+  let cardPinned = false;
+
   function hideCard(forget = false) {
+    if (cardPinned) return;
     clearTimeout(cardTimer);
     if (forget) hovered = -1;
     setCard(undefined);
   }
 
+  function pinCard(on: boolean) {
+    cardPinned = on;
+    if (!on) hideCard(true);
+  }
+
   /** A card waits for the pointer to rest on a row, and never shows while a button is held. */
   function onHover(event: PointerEvent) {
     pointer = { x: event.clientX, y: event.clientY };
-    if (!hoverCards() || event.buttons !== 0 || editor()) return;
+    if (!hoverCards() || event.buttons !== 0 || editor() || cardPinned) return;
     const index = indexFromEvent(event);
     if (index === hovered) return;
     hovered = index;
@@ -1210,7 +1219,7 @@ export function FileList(props: {
         />
       </Show>
       <Show when={card()} keyed>
-        {(ask) => <HoverCard ask={ask} view={props.view} folder={props.folder} sync={syncText(ask.row, !!props.synced && !ask.row.isCloud && !ask.row.isPinned)} />}
+        {(ask) => <HoverCard ask={ask} view={props.view} folder={props.folder} onPin={pinCard} sync={syncText(ask.row, !!props.synced && !ask.row.isCloud && !ask.row.isPinned)} />}
       </Show>
     </div>
   );

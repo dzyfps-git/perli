@@ -1328,6 +1328,13 @@ async fn peek_text(view: u32, request: u64, row: u32, views: State<'_, Views>) -
         .map_err(|error| error.to_string())
 }
 
+/// What is in a folder, for its hover card.
+#[tauri::command]
+async fn peek_folder(view: u32, request: u64, row: u32, views: State<'_, Views>) -> Result<Option<thumbs::FolderStart>, String> {
+    let path = row_path(&views, view, request, row)?;
+    blocking(move || Ok(thumbs::folder_start(&path))).await
+}
+
 #[tauri::command]
 async fn recent_files(limit: usize) -> Result<Vec<recent::Recent>, String> {
     async_runtime::spawn_blocking(move || recent::read(limit))
@@ -1795,6 +1802,7 @@ fn main() {
             row_properties,
             checksum,
             peek_text,
+            peek_folder,
             recent_files,
             check_update,
             install_update,

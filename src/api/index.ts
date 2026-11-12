@@ -322,6 +322,16 @@ export const recentFiles = (limit: number) => invoke<Recent[]>("recent_files", {
 export const peekText = (view: number, request: number, row: number) =>
   invoke<string | null>("peek_text", { view, request, row });
 
+/** The first few things in a folder (name, is a folder) and how many it holds, for its hover card. */
+export interface FolderStart {
+  names: [name: string, folder: boolean][];
+  count: number;
+  more: boolean;
+}
+
+export const peekFolder = (view: number, request: number, row: number) =>
+  invoke<FolderStart | null>("peek_folder", { view, request, row });
+
 export const driveSpace = (path: string) => invoke<DriveSpace>("drive_space", { path });
 
 export const mapDrive = () => invoke<void>("map_drive");
@@ -678,8 +688,8 @@ export async function fetchRows(
 
 /** What the quick preview shows. `next` is where the following piece of a text starts. */
 export type Preview =
-  | { kind: "text"; text: string; next: number | null }
-  | { kind: "markdown"; html: string }
+  | { kind: "text"; text: string; next: number | null; end: number; bom: boolean }
+  | { kind: "markdown"; html: string; source: string }
   | { kind: "archive"; entries: ArchiveEntry[]; more: boolean }
   | { kind: "comic"; pages: string[] }
   | { kind: "book"; title: string; chapters: string[]; contents: BookHeading[] }

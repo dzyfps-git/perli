@@ -856,3 +856,46 @@ html[data-blurred] :is(.empty-float, .empty-shadow) {
     transition: none;
   }
 }
+
+/* Hover cards: what a folder holds, and a card that Shift pinned. */
+.hover-card-inside {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin: 0;
+  padding: var(--space-2);
+  border-radius: var(--space-1);
+  background: var(--surface);
+  font-size: 12px;
+  list-style: none;
+}
+
+.hover-card-inside li {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hover-card-inside li[data-folder] {
+  font-weight: 600;
+}
+
+.hover-card-rest,
+.hover-card-hint {
+  color: var(--text-muted);
+}
+
+.hover-card-hint {
+  margin: 0;
+  font-size: 11px;
+}
+
+.hover-card[data-pinned] {
+  border-color: var(--accent);
+  pointer-events: auto;
+  user-select: text;
+}
+
+.hover-card[data-pinned] .hover-card-text {
+  overflow: auto;
+}

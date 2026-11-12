@@ -3,12 +3,16 @@ import type { BookHeading } from "../../api";
 import { saved, stored } from "../filelist/prefs";
 import { ToolCog } from "../../ui/Controls";
 import { createFind } from "./FindBar";
-import { contentsOpen, setContentsOpen, VIEWER_SETTINGS } from "./viewerPrefs";
+import { asSource, contentsOpen, setAsSource, setContentsOpen, VIEWER_SETTINGS } from "./viewerPrefs";
 
 const ICON_CONTENTS = "";
 const ICON_FIND = "";
 const ICON_SMALLER = "";
 const ICON_BIGGER = "";
+
+const ICON_SOURCE = "\uE943";
+const ICON_COPY = "\uE8C8";
+const DONE_MS = 1400;
 
 const SIZES = [13, 14, 15, 16, 18, 20, 22, 24];
 const [bookSize, setBookSize] = stored("book-size", (saved("book-size") as number | null) ?? 16);
@@ -86,13 +90,30 @@ function FindButton(props: { find: ReturnType<typeof createFind> }) {
 const plainKey = (event: KeyboardEvent) => !event.ctrlKey && !event.altKey && !(event.target instanceof HTMLInputElement);
 
 /** A Markdown file with its contents beside it and find. */
-export function MarkdownView(live: { html: string; fill: (article: HTMLElement) => void; keys: Keys }) {
+export function MarkdownView(live: { html: string; source: string; fill: (article: HTMLElement) => void; keys: Keys }) {
   const props = { ...live };
   let scroller!: HTMLDivElement;
   let article!: HTMLElement;
+  let written!: HTMLPreElement;
   const [headings, setHeadings] = createSignal<HTMLElement[]>([]);
   const [active, setActive] = createSignal(0);
-  const find = createFind(() => article, () => scroller);
+  const find = createFind(() => (asSource() ? written : article), () => scroller);
+
+  /** Each block of code gets a button that copies it. */
+  function addCopyButtons() {
+    for (const block of article.querySelectorAll("pre")) {
+      const button = document.createElement("button");
+      button.className = "md-copy";
+      button.setAttribute("aria-label", "Copy code");
+      button.textContent = ICON_COPY;
+      button.onclick = () =>
+        navigator.clipboard.writeText(block.querySelector("code")?.textContent ?? "").then(() => {
+          button.dataset.done = "";
+          setTimeout(() => delete button.dataset.done, DONE_MS);
+        }, console.error);
+      block.append(button);
+    }
+  }
 
   function spy() {
     const top = scroller.scrollTop + REACHED_PX;
@@ -107,17 +128,21 @@ export function MarkdownView(live: { html: string; fill: (article: HTMLElement) 
 
   props.keys((event) => {
     if (find.keys(event)) return true;
-    if (!plainKey(event) || event.key.toLowerCase() !== "c" || headings().length < 2) return false;
-    setContentsOpen(!contentsOpen());
+    if (!plainKey(event)) return false;
+    const key = event.key.toLowerCase();
+    if (key === "u") setAsSource(!asSource());
+    else if (key === "c" && headings().length >= 2) setContentsOpen(!contentsOpen());
+    else return false;
     return true;
   });
 
   onMount(() => {
     article.innerHTML = props.html;
     props.fill(article);
+    addCopyButtons();
     setHeadings([...article.querySelectorAll<HTMLElement>("h1, h2, h3")]);
-    // Page Down and the other scrolling keys move the document itself.
-    scroller.focus({ preventScroll: true });
+    // Page Down and the other scrolling keys move the document itself. Beside the list, the list keeps the keys.
+    if (!scroller.closest(".preview-docked")) scroller.focus({ preventScroll: true });
   });
 
   onCleanup(() => {
@@ -128,17 +153,23 @@ export function MarkdownView(live: { html: string; fill: (article: HTMLElement) 
   const lines = () => headings().map((heading) => ({ title: heading.textContent ?? "", depth: Number(heading.tagName[1]) - 1 }));
 
   return (
-    <div class="doc-view" data-contents={(contentsOpen() && headings().length >= 2) || undefined}>
+    <div class="doc-view" data-contents={(contentsOpen() && !asSource() && headings().length >= 2) || undefined}>
       <Show when={headings().length >= 2}>
         <Contents lines={lines()} active={active()} onPick={pick} />
       </Show>
       <div ref={scroller} class="doc-scroll" tabindex="-1" onScroll={spy}>
-        <article ref={article} class="preview-markdown" />
+        <article ref={article} class="preview-markdown" hidden={asSource()} />
+        <pre ref={written} class="preview-text md-source" hidden={!asSource()}>
+          {props.source}
+        </pre>
       </div>
       <div class="preview-tools doc-tools" role="toolbar" aria-label="Document">
         {find.bar()}
         <FindButton find={find} />
-        <Show when={headings().length >= 2}>
+        <button class="strip-icon" aria-label="Show as written" aria-keyshortcuts="U" aria-pressed={asSource()} onClick={() => setAsSource(!asSource())}>
+          {ICON_SOURCE}
+        </button>
+        <Show when={headings().length >= 2 && !asSource()}>
           <ContentsButton />
         </Show>
       </div>

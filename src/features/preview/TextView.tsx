@@ -1,15 +1,27 @@
-import { createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { ToolCog } from "../../ui/Controls";
 import { createFind, lineIn, scrollToRange } from "./FindBar";
-import { asTable, numbers, setAsTable, setNumbers, setWrap, VIEWER_SETTINGS, wrap } from "./viewerPrefs";
+import { asTable, asTree, numbers, setAsTable, setAsTree, setNumbers, setWrap, VIEWER_SETTINGS, wrap } from "./viewerPrefs";
 import { highlight } from "./highlight";
-import { guessDelimiter, parseTable } from "./table";
+import { arrange, guessDelimiter, lineEnding, parseTable, type TableOrder } from "./table";
 
 const ICON_FIND = "";
 const ICON_WRAP = "";
 const ICON_LINES = "";
 const ICON_TABLE = "";
 const ICON_GO = "";
+
+const ICON_COPY = "\uE8C8";
+const ICON_FOLLOW = "\uE74B";
+const ICON_TREE = "\uE8FD";
+const ICON_FILTER = "\uE71C";
+/** How often a file that is followed is looked at for more. */
+const FOLLOW_MS = 1000;
+/** A JSON file bigger than this stays text: the tree would be too much to draw. */
+const MOST_TREE = 2 * 1024 * 1024;
+/** A part of the tree shows this many of its items, and counts the rest. */
+const MOST_ITEMS = 500;
+const DONE_MS = 1400;
 
 /** How close to the end the next piece starts to load. */
 const MORE_TEXT_PX = 800;
@@ -22,6 +34,10 @@ const MOST_ROWS = 5000;
 export interface TextPiece {
   text: string;
   next: number | null;
+  /** Where the piece stops in the file, for reading on when the file grows. */
+  end?: number;
+  /** The file starts with a byte order mark. */
+  bom?: boolean;
 }
 
 export interface TextViewProps {
@@ -49,6 +65,15 @@ export function TextView(live: TextViewProps) {
   let loading: Promise<boolean> | undefined;
   let loaded = props.first.text.length;
   let gone = false;
+  /** Where the text loaded so far stops in the file. Follow reads on from here. */
+  let end = props.first.end;
+  /** Everything is loaded, so the whole file can be looked at as one thing. */
+  const [whole, setWhole] = createSignal(props.first.next === null);
+  const [following, setFollowing] = createSignal(false);
+  const [copied, setCopied] = createSignal(false);
+  const [order, setOrder] = createSignal<TableOrder>();
+  const [filters, setFilters] = createSignal<string[]>([]);
+  const [filtering, setFiltering] = createSignal(false);
   /** Everything loaded so far, for the table and the line count. */
   const [text, setText] = createSignal(props.first.text);
   const [going, setGoing] = createSignal(false);
@@ -62,6 +87,19 @@ export function TextView(live: TextViewProps) {
     return count;
   });
   const gutter = createMemo(() => Array.from({ length: lines() }, (_, at) => at + 1).join("\n"));
+  const shownRows = createMemo(() => arrange(rows().slice(1, MOST_ROWS + 1), order(), filtering() ? filters() : []));
+  const canTree = () => props.language === "json" && whole() && text().length <= MOST_TREE;
+  const tree = () => !table() && canTree() && asTree();
+  /** The file as JSON, or why it is not. */
+  const json = createMemo(() => {
+    if (!tree()) return undefined;
+    try {
+      return { value: JSON.parse(text()) as unknown };
+    } catch (reason) {
+      return { failure: String(reason instanceof Error ? reason.message : reason) };
+    }
+  });
+  const kind = () => `UTF-8${props.first.bom ? " with BOM" : ""} · ${lineEnding(props.first.text)}`;
 
   async function add(piece: string) {
     const html = props.language ? await highlight(piece, props.language).catch(() => undefined) : undefined;
@@ -78,6 +116,8 @@ export function TextView(live: TextViewProps) {
       .then(async (piece) => {
         if (!piece || gone) return false;
         next = piece.next;
+        end = piece.end;
+        setWhole(next === null);
         loaded += piece.text.length;
         setText(text() + piece.text);
         await add(piece.text);
@@ -122,6 +162,42 @@ export function TextView(live: TextViewProps) {
     setTimeout(() => CSS.highlights.delete("text-line"), 1600);
   }
 
+  async function copyAll() {
+    while (await more());
+    await navigator.clipboard.writeText(text());
+    setCopied(true);
+    setTimeout(() => setCopied(false), DONE_MS);
+  }
+
+  /** What was added to the file since the last look, shown at once and scrolled to. */
+  async function follow() {
+    while (await more());
+    if (gone || next !== null || end === undefined) return;
+    const piece = await props.more(end).catch(() => null);
+    if (gone || !piece || !piece.text) return;
+    end = piece.end ?? end;
+    setText(text() + piece.text);
+    await add(piece.text);
+    scroller.scrollTop = scroller.scrollHeight;
+  }
+  createEffect(() => {
+    if (!following()) return;
+    scroller.scrollTop = scroller.scrollHeight;
+    let busy = false;
+    const timer = setInterval(() => {
+      if (busy) return;
+      busy = true;
+      follow().finally(() => (busy = false));
+    }, FOLLOW_MS);
+    onCleanup(() => clearInterval(timer));
+  });
+
+  function sortBy(column: number) {
+    const now = order();
+    // Up, then down, then as the file has them.
+    setOrder(now?.column !== column ? { column, down: false } : now.down ? undefined : { column, down: true });
+  }
+
   function showGoTo() {
     find.close();
     setGoing(true);
@@ -141,6 +217,8 @@ export function TextView(live: TextViewProps) {
     else if (key === "w") setWrap(!wrap());
     else if (key === "n" && !table() && !wrap()) setNumbers(!numbers());
     else if (key === "t" && props.table !== undefined) setAsTable(!asTable());
+    else if (key === "j" && canTree()) setAsTree(!asTree());
+    else if (key === "l" && end !== undefined && !table() && !tree()) setFollowing(!following());
     else return false;
     return true;
   });
@@ -191,7 +269,32 @@ export function TextView(live: TextViewProps) {
             {ICON_TABLE}
           </button>
         </Show>
-        <Show when={!table()}>
+        <Show when={table()}>
+          <button class="strip-icon" aria-label="Filter columns" aria-pressed={filtering()} onClick={() => setFiltering(!filtering())}>
+            {ICON_FILTER}
+          </button>
+        </Show>
+        <Show when={canTree()}>
+          <button class="strip-icon" aria-label="Show as a tree" aria-keyshortcuts="J" aria-pressed={asTree()} onClick={() => setAsTree(!asTree())}>
+            {ICON_TREE}
+          </button>
+        </Show>
+        <Show when={end !== undefined && !table() && !tree()}>
+          <button
+            class="strip-icon"
+            aria-label="Follow the end as the file grows"
+            aria-keyshortcuts="L"
+            aria-pressed={following()}
+            onClick={() => setFollowing(!following())}
+          >
+            {ICON_FOLLOW}
+          </button>
+        </Show>
+        <button class="strip-icon" aria-label={copied() ? "Copied" : "Copy all"} data-done={copied() || undefined} onClick={() => void copyAll().catch(console.error)}>
+          {ICON_COPY}
+        </button>
+        <span class="zoom-chip text-kind">{kind()}</span>
+        <Show when={!table() && !tree()}>
           <button class="strip-icon" aria-label="Wrap lines" aria-keyshortcuts="W" aria-pressed={wrap()} onClick={() => setWrap(!wrap())}>
             {ICON_WRAP}
           </button>
@@ -209,7 +312,7 @@ export function TextView(live: TextViewProps) {
         <ToolCog label="Text settings" items={VIEWER_SETTINGS.Text} />
       </div>
       <div ref={scroller} class="text-scroll" tabindex="-1" data-wrap={wrap() || undefined} onScroll={() => void fill()}>
-        <div class="text-sheet" hidden={table()}>
+        <div class="text-sheet" hidden={table() || tree()}>
           <Show when={numbers()}>
             <pre class="text-gutter" aria-hidden="true">
               {gutter()}
@@ -220,34 +323,124 @@ export function TextView(live: TextViewProps) {
           </pre>
         </div>
         <Show when={table()}>
-          <CsvTable rows={rows()} body={(element) => (tableBody = element)} />
+          <CsvTable
+            head={rows()[0] ?? []}
+            rows={shownRows()}
+            cut={rows().length > MOST_ROWS + 1}
+            order={order()}
+            onSort={sortBy}
+            filters={filtering() ? filters() : undefined}
+            onFilter={(column, value) => setFilters(Object.assign([...filters()], { [column]: value }))}
+            body={(element) => (tableBody = element)}
+          />
+        </Show>
+        <Show when={json()}>
+          {(parsed) => (
+            <div class="json-tree">
+              <Show when={"value" in parsed()} fallback={<p class="preview-note">This is not whole JSON: {(parsed() as { failure: string }).failure}</p>}>
+                <JsonNode value={(parsed() as { value: unknown }).value} depth={0} />
+              </Show>
+            </div>
+          )}
         </Show>
       </div>
     </div>
   );
 }
 
-function CsvTable(props: { rows: string[][]; body: (element: HTMLElement) => void }) {
-  const head = () => props.rows[0] ?? [];
-  const body = () => props.rows.slice(1, MOST_ROWS + 1);
+/** One value of a JSON file. An object or a list folds, and draws what it holds only once open. */
+function JsonNode(props: { name?: string; value: unknown; depth: number }) {
+  const holds = () => props.value !== null && typeof props.value === "object";
+  const items = () => (Array.isArray(props.value) ? props.value.map((value, at) => [String(at), value] as const) : Object.entries(props.value as object));
+  const [open, setOpen] = createSignal(props.depth < 2);
+  const name = () => (props.name === undefined ? null : <span class="json-name">{props.name}</span>);
+  return (
+    <Show
+      when={holds()}
+      fallback={
+        <div class="json-leaf">
+          {name()}
+          <span class="json-value" data-kind={props.value === null ? "null" : typeof props.value}>
+            {typeof props.value === "string" ? JSON.stringify(props.value) : String(props.value)}
+          </span>
+        </div>
+      }
+    >
+      <details class="json-fold" open={open()} onToggle={(event) => setOpen(event.currentTarget.open)}>
+        <summary>
+          {name()}
+          <span class="json-count">
+            {Array.isArray(props.value) ? `[${items().length}]` : `{${items().length}}`}
+          </span>
+        </summary>
+        <Show when={open()}>
+          <For each={items().slice(0, MOST_ITEMS)}>{([key, value]) => <JsonNode name={key} value={value} depth={props.depth + 1} />}</For>
+          <Show when={items().length > MOST_ITEMS}>
+            <div class="json-leaf json-count">and {(items().length - MOST_ITEMS).toLocaleString()} more</div>
+          </Show>
+        </Show>
+      </details>
+    </Show>
+  );
+}
+
+function CsvTable(props: {
+  head: string[];
+  rows: { row: string[]; number: number }[];
+  /** The file has more rows than are shown. */
+  cut: boolean;
+  order: TableOrder | undefined;
+  onSort: (column: number) => void;
+  /** What each column is filtered by, when the filter row shows. */
+  filters: string[] | undefined;
+  onFilter: (column: number, value: string) => void;
+  body: (element: HTMLElement) => void;
+}) {
+  const head = () => props.head;
+  const way = (column: number) => (props.order?.column !== column ? "none" : props.order.down ? "descending" : "ascending");
   return (
     <div class="preview-archive preview-table">
-      <Show when={props.rows.length > MOST_ROWS + 1}>
+      <Show when={props.cut}>
         <p class="preview-archive-sum">The first {MOST_ROWS.toLocaleString()} rows.</p>
       </Show>
       <table>
         <thead>
           <tr>
             <th class="table-number">#</th>
-            <For each={head()}>{(name) => <th>{name}</th>}</For>
+            <For each={head()}>
+              {(name, column) => (
+                <th aria-sort={way(column())}>
+                  <button class="table-sort" onClick={() => props.onSort(column())}>
+                    {name}
+                  </button>
+                </th>
+              )}
+            </For>
           </tr>
+          <Show when={props.filters}>
+            <tr class="table-filters">
+              <th class="table-number">{props.rows.length.toLocaleString()}</th>
+              <For each={head()}>
+                {(name, column) => (
+                  <th>
+                    <input
+                      aria-label={`Filter ${name}`}
+                      placeholder="Filter"
+                      value={props.filters![column()] ?? ""}
+                      onInput={(event) => props.onFilter(column(), event.currentTarget.value)}
+                    />
+                  </th>
+                )}
+              </For>
+            </tr>
+          </Show>
         </thead>
         <tbody ref={props.body}>
-          <For each={body()}>
-            {(row, at) => (
+          <For each={props.rows}>
+            {(item) => (
               <tr>
-                <td class="table-number">{at() + 1}</td>
-                <For each={row}>{(field) => <td>{field}</td>}</For>
+                <td class="table-number">{item.number}</td>
+                <For each={item.row}>{(field) => <td>{field}</td>}</For>
               </tr>
             )}
           </For>
