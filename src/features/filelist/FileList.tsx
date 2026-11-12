@@ -110,9 +110,10 @@ const AGO_REFRESH_MS = 30_000;
 /** The corner of a tile that picks it, in pixels. */
 const PICK_CORNER = 26;
 
-const syncText = (row: Row | undefined) => {
+const syncText = (row: Row | undefined, synced: boolean) => {
   if (row?.isCloud) return "In the cloud";
-  return row?.isPinned ? "Always on this device" : undefined;
+  if (row?.isPinned) return "Always on this device";
+  return row && synced ? "On this device" : undefined;
 };
 
 const CELL_TEXT: Record<SortKey, (row: Row, folder: string) => string> = {
@@ -202,6 +203,8 @@ export function FileList(props: {
   fixedColumns: boolean;
   /** Names waiting to move, which fade. */
   cut?: Set<string>;
+  /** The folder is kept by a sync app, so a row with no cloud mark is here in full. */
+  synced?: boolean;
   /** What stands in for the rows when there are none. */
   empty: Empty;
   /** What a search typed, whose letters light up in each name. */
@@ -372,7 +375,9 @@ export function FileList(props: {
     pooled.element.toggleAttribute("data-cut", !!row && !!props.cut?.has(row.name));
     pooled.element.toggleAttribute("data-cloud", row?.isCloud ?? false);
     pooled.element.toggleAttribute("data-pinned", row?.isPinned ?? false);
-    const about = [syncText(row), tagNames(row?.tags ?? [])].filter(Boolean).join(". ");
+    const synced = !!props.synced && !!row && !row.isCloud && !row.isPinned;
+    pooled.element.toggleAttribute("data-synced", synced);
+    const about = [syncText(row, synced), tagNames(row?.tags ?? [])].filter(Boolean).join(". ");
     if (about) pooled.element.setAttribute("aria-description", about);
     else pooled.element.removeAttribute("aria-description");
     const look = row?.isDir ? lookOf(join(row.location || props.folder, row.name)) : undefined;
@@ -989,7 +994,7 @@ export function FileList(props: {
 
   createEffect(
     on(
-      [typesLearned, () => props.cut, () => props.match, tags, allLooks, windowsIcons, dateForm],
+      [typesLearned, () => props.cut, () => props.match, () => props.synced, tags, allLooks, windowsIcons, dateForm],
       () => {
         for (const pooled of pool) pooled.filled = false;
         paint();
@@ -1126,7 +1131,7 @@ export function FileList(props: {
         />
       </Show>
       <Show when={card()} keyed>
-        {(ask) => <HoverCard ask={ask} view={props.view} folder={props.folder} sync={syncText(ask.row)} />}
+        {(ask) => <HoverCard ask={ask} view={props.view} folder={props.folder} sync={syncText(ask.row, !!props.synced && !ask.row.isCloud && !ask.row.isPinned)} />}
       </Show>
     </div>
   );

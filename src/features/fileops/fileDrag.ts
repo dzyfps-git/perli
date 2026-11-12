@@ -117,6 +117,8 @@ export function followFileDrag(
   views: () => FolderView[],
   report: (failure: unknown) => void,
   showMenu: (x: number, y: number, items: MenuItem[]) => void,
+  /** Files landed on `place`, one of Perli's own that is no folder. Nothing moved. */
+  noted: (place: string, paths: string[]) => void,
 ) {
   let shown: Spot | undefined;
   const deck = createDeck();
@@ -141,8 +143,11 @@ export function followFileDrag(
     setDropTarget(spot?.folder ?? null).catch(console.error);
   }
 
-  /** The shelf keeps the files where they are, and only remembers them. */
-  const park = () => shelveDrop().then(shelve).catch(report);
+  /** The shelf and its like keep the files where they are, and only remember them. */
+  const note = (place: string) =>
+    shelveDrop()
+      .then((paths) => (place === SHELF ? shelve(paths) : noted(place, paths)))
+      .catch(report);
 
   return onFileDrag((event) => {
     setDragging(event.kind === "enter" || event.kind === "over");
@@ -155,7 +160,7 @@ export function followFileDrag(
     deck.hide(event.kind === "drop");
     if (event.kind === "leave") return;
     const spot = spotAt(event.x, event.y, views());
-    if (spot?.folder === SHELF) park();
+    if (spot?.folder.startsWith("perli:")) note(spot.folder);
     else if (spot && event.right) ask(spot, event.x, event.y).catch(report);
     else if (spot) run(spot);
   });

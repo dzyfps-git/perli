@@ -14,7 +14,12 @@ import {
   onFolderChanged,
   onOpenAsked,
   comeForward,
+  ejectDrive,
+  keepOnDevice,
+  fetchRows,
+  setTagPaths,
   openWindow,
+  recentFiles,
   onSearchGrew,
   onSizesGrew,
   openFile,
@@ -108,10 +113,17 @@ import { BACKDROPS, SCALES, setBackdrop, setUiScale } from "./features/settings/
 import { Settings } from "./features/settings/Settings";
 import { startUpdates, updateState } from "./features/settings/updates";
 import { BookmarksBar } from "./features/sidebar/BookmarksBar";
-import { holds } from "./features/sidebar/placeLists";
+import { holds, placeLabel } from "./features/sidebar/placeLists";
 import {
+  addBookmarks,
+  smartFolders,
+  setSmartFolders,
+  bookmarkGroups,
+  BOOKMARKS,
   bookmarks,
   bookmarksBar,
+  groupOf,
+  setGroup,
   hiddenSections,
   lookOf,
   movePinned,
@@ -125,13 +137,15 @@ import {
   togglePinned,
   toggleSection,
 } from "./features/sidebar/saved";
-import { FOLDERS, Sidebar } from "./features/sidebar/Sidebar";
+import { folderGlyph, FOLDERS, Sidebar } from "./features/sidebar/Sidebar";
 import { parseSession } from "./features/tabs/session";
 import { createTabs, type Tab } from "./features/tabs/tabs";
 import { NewTag } from "./features/tags/NewTag";
-import { refreshTags, TAG_COLORS } from "./features/tags/tags";
+import { refreshTags, TAG_COLORS, TAG_DROP, tagQuery, tags as allTags } from "./features/tags/tags";
 import { TitleBar } from "./features/titlebar/TitleBar";
 import { Menu, type MenuItem } from "./ui/Menu";
+import { NameSheet, type NameAsk } from "./ui/NameSheet";
+import { renamedSmart, withoutSmart, withSmart, type SmartFolder } from "./features/smart/smartList";
 import { iconFor } from "./ui/menuLook";
 import { Tooltip } from "./ui/Tooltip";
 import "./ui/controls.css";
@@ -170,6 +184,13 @@ const MOST_TABS_BEHIND = 8;
 /** As many as the path bar offers at once. */
 const MOST_OFFERS = 8;
 const TERMINALS = { cmd: "Command Prompt", wt: "Windows Terminal", powershell: "Windows PowerShell", pwsh: "PowerShell" };
+/** How many files of each kind the palette can find by name. */
+const PALETTE_FILES = 200;
+const ICON_FOLDER = "\uE8B7";
+const ICON_FILE = "\uE7C3";
+const ICON_CLOUD = "\uE753";
+const ICON_SMART = "\uE71C";
+const ICON_DRIVE = "\uEDA2";
 /** Commands that need a real folder, which the Recycle Bin is not. */
 const FOLDER_ONLY = new Set([
   "copy",
@@ -260,8 +281,29 @@ function keepItems(path: string): MenuItem[] {
       label: holds(bookmarks(), path) ? "Remove bookmark" : "Add bookmark",
       action: () => toggleBookmark(path),
     },
+    ...(holds(bookmarks(), path) ? [groupItem(path)] : []),
     lookItem(path),
   ];
+}
+
+/** The one name being asked for, if any. */
+const [naming, setNaming] = createSignal<NameAsk>();
+
+/** Puts a bookmark in a group of the bar, or takes it out. */
+function groupItem(path: string): MenuItem {
+  const now = groupOf(path);
+  return {
+    label: "Bookmark group",
+    items: [
+      { label: "None", checked: !now, action: () => setGroup(path, undefined) },
+      ...bookmarkGroups().map((group) => ({ label: group, checked: group === now, action: () => setGroup(path, group) })),
+      {
+        label: "New group…",
+        divider: true,
+        action: () => setNaming({ title: "New bookmark group", confirm: "Create", done: (name) => setGroup(path, name) }),
+      },
+    ],
+  };
 }
 
 // The main layout. Moving parts of the app around should only change this file.
@@ -282,6 +324,7 @@ export function App() {
     tabs.activeView().list()?.focus();
   };
   const [paletteOpen, setPaletteOpen] = createSignal(false);
+  const [foundFiles, setFoundFiles] = createSignal<Command[]>([]);
   const [edgeShown, setEdgeShown] = createSignal(drawsEdge);
   const [places, setPlaces] = createSignal<Places>();
   const [deleting, setDeleting] = createSignal<DeleteRequest>();
@@ -369,7 +412,7 @@ export function App() {
 
   // Covers every way to close, including Alt+F4 and the taskbar.
   const closeListener = onCloseAsked(onClose);
-  const dragListener = followFileDrag(tabs.allViews, jobs.report, (x, y, items) => setMenu({ x, y, items }));
+  const dragListener = followFileDrag(tabs.allViews, jobs.report, (x, y, items) => setMenu({ x, y, items }), dropNoted);
   // Other apps and Windows' own commands change folders without Perli running a job.
   const folderListener = onFolderChanged((id) => tabs.allViews().find((view) => view.id === id)?.reload());
   const searchListener = onSearchGrew((id, walk) =>
@@ -501,9 +544,127 @@ export function App() {
             ...keepItems(path),
             ...shell.placeItems(path, { x: event.clientX, y: event.clientY }),
             ...(isDriveRoot(path) ? networkItems() : []),
+            ...(places()?.drives.some((drive) => drive.removable && samePath(drive.path, path))
+              ? [{ label: "Eject", divider: true, action: () => quietly(ejectDrive(path)) }]
+              : []),
           ]),
     ];
     setMenu({ x: event.clientX, y: event.clientY, items });
+  }
+
+  /** The bookmarks of a group, under its button on the bar. Each has its own menu to the side. */
+  function showBookmarkGroup(anchor: HTMLElement, group: string) {
+    const view = tabs.activeView();
+    const box = anchor.getBoundingClientRect();
+    const items: MenuItem[] = bookmarks()
+      .filter((path) => groupOf(path) === group)
+      .map((path) => ({ label: placeLabel(path), icon: folderGlyph(path).icon, action: () => view.open(path) }));
+    setMenu({
+      x: box.left,
+      y: box.bottom + 4,
+      items: [
+        ...items,
+        { label: "Open all in tabs", divider: true, action: () => openTabsBehind(bookmarks().filter((path) => groupOf(path) === group)) },
+        {
+          label: "Rename group…",
+          action: () =>
+            setNaming({
+              title: "Rename bookmark group",
+              confirm: "Rename",
+              start: group,
+              done: (name) => bookmarks().forEach((path) => groupOf(path) === group && setGroup(path, name)),
+            }),
+        },
+        { label: "Ungroup", action: () => bookmarks().forEach((path) => groupOf(path) === group && setGroup(path, undefined)) },
+      ],
+    });
+  }
+
+  /** Files were dropped on a place of Perli's own, which only takes note of them. */
+  async function dropNoted(place: string, paths: string[]) {
+    if (place === BOOKMARKS) {
+      const files = await Promise.all(paths.map(isFile));
+      addBookmarks(paths.filter((_, at) => !files[at]));
+    } else if (place.startsWith(TAG_DROP)) {
+      await setTagPaths(paths, Number(place.slice(TAG_DROP.length)), true);
+      showTagChange();
+    }
+  }
+
+  /** Goes to the folder, then puts its search and filter on. */
+  async function openSmart(view: FolderView, smart: SmartFolder) {
+    if (!(await view.open(smart.folder))) return;
+    view.setFilterForm(smart.filter);
+    view.setScope(smart.scope);
+    view.search(smart.query);
+  }
+
+  /** Keeps what `view` shows now: its folder, its search and its filter. */
+  function saveSmart(view: FolderView) {
+    const folder = view.folder()?.path;
+    if (!folder || view.isBin()) return;
+    const query = view.query();
+    const start = query && query !== FLAT_QUERY ? query.replace(/^tag:/, "") : baseName(folder) || folder;
+    setNaming({
+      title: "New smart folder",
+      confirm: "Save",
+      start,
+      done: (name) =>
+        setSmartFolders(withSmart(smartFolders(), { name, folder, query, scope: view.scope(), filter: view.filterForm() })),
+    });
+  }
+
+  function showSmartMenu(event: MouseEvent, smart: SmartFolder) {
+    event.preventDefault();
+    const view = tabs.activeView();
+    setMenu({
+      x: event.clientX,
+      y: event.clientY,
+      items: [
+        { label: "Open", action: () => quietly(openSmart(view, smart)) },
+        {
+          label: "Show in new tab",
+          action: () => quietly(tabs.add([smart.folder]).then((opened) => opened && openSmart(opened, smart))),
+        },
+        {
+          label: "Rename…",
+          divider: true,
+          action: () =>
+            setNaming({
+              title: "Rename smart folder",
+              confirm: "Rename",
+              start: smart.name,
+              done: (name) => setSmartFolders(renamedSmart(smartFolders(), smart.name, name)),
+            }),
+        },
+        { label: "Remove smart folder", action: () => setSmartFolders(withoutSmart(smartFolders(), smart.name)) },
+      ],
+    });
+  }
+
+  /** Every file with the tag, on every drive, as a search of its own. */
+  function showTagged(view: FolderView, tag: Tag) {
+    view.setScope("drives");
+    view.search(tagQuery(tag.name));
+  }
+
+  function showTagMenu(event: MouseEvent, tag: Tag) {
+    event.preventDefault();
+    const view = tabs.activeView();
+    const path = view.folder()?.path;
+    setMenu({
+      x: event.clientX,
+      y: event.clientY,
+      items: [
+        { label: "Show tagged files", action: () => showTagged(view, tag) },
+        {
+          label: "Show in new tab",
+          disabled: !path,
+          action: () => quietly(tabs.add([path!]).then((opened) => opened && showTagged(opened, tag))),
+        },
+        { label: "Delete tag…", divider: true, action: () => askDeleteTag(tag) },
+      ],
+    });
   }
 
   /** Shows the file among its neighbours, the way Explorer's Open file location does. */
@@ -588,6 +749,12 @@ export function App() {
       { label: "Put on the shelf", action: () => putOnShelf(view) },
       ...toolItems,
       shell.tagsItem(view, showTagChange, () => setNamingTag(view)),
+      ...(inCloud(path)
+        ? [
+            { label: "Always keep on this device", divider: true, checked: row.isPinned, action: () => keepHere(view, true) },
+            { label: "Free up space", disabled: row.isCloud && !row.isPinned, action: () => keepHere(view, false) },
+          ]
+        : []),
     ];
     if (tabs.active().other()) {
       items.push(
@@ -600,8 +767,18 @@ export function App() {
   }
 
   /** A search would start over, and its rows don't show tags. */
+  /** True for a folder a sync app keeps, or anything under one. */
+  const inCloud = (path: string) =>
+    (places()?.clouds ?? []).some((cloud) => (path + "\\").toLowerCase().startsWith(cloud.path.replace(/\\+$/, "").toLowerCase() + "\\"));
+
+  /** The sync app does the fetching or the freeing in its own time. The rows show the wish at once. */
+  function keepHere(view: FolderView, keep: boolean) {
+    const selection = actions.selected(view);
+    if (selection) quietly(keepOnDevice(selection, keep).then(() => view.reload()));
+  }
+
   function showTagChange() {
-    for (const view of tabs.allViews()) if (!view.query()) view.reload();
+    for (const view of tabs.allViews()) if (!view.query() || view.query().startsWith(tagQuery(""))) view.reload();
   }
 
   function askDeleteTag(tag: Tag) {
@@ -836,8 +1013,36 @@ export function App() {
   }
 
   function togglePalette() {
-    if (!paletteOpen()) listPlaces().then(setPlaces).catch(console.error);
+    if (!paletteOpen()) {
+      listPlaces().then(setPlaces).catch(console.error);
+      paletteFiles(tabs.activeView(), setFoundFiles).catch(console.error);
+    }
     setPaletteOpen(!paletteOpen());
+  }
+
+  /** Files the palette can also find by name: the ones opened lately, and the folder on screen. */
+  async function paletteFiles(view: FolderView, show: (files: Command[]) => void) {
+    const shown = view.folder();
+    const plain = shown && !view.query() && !view.isBin();
+    const icon = (isDir: boolean) => (isDir ? ICON_FOLDER : ICON_FILE);
+    const rows = plain ? await fetchRows(view.id, shown.request, 0, PALETTE_FILES).catch(() => []) : [];
+    const here = rows.map(
+      (row): Command => ({ label: row.name, group: "This folder", icon: icon(row.isDir), run: () => view.reload([row.name]) }),
+    );
+    // The folder's own rows show at once: Windows can take a while over the recent files.
+    show(here);
+    const recent = await recentFiles(PALETTE_FILES).catch(() => []);
+    show([
+      ...here,
+      ...recent.map(
+        ({ name, path, isDir }): Command => ({
+          label: name,
+          group: "Recent files",
+          icon: icon(isDir),
+          run: () => (isDir ? view.open(path) : openFile(path).catch(jobs.report)),
+        }),
+      ),
+    ]);
   }
 
   /** The rows a command acts on, which the Recycle Bin and an empty selection have none of. */
@@ -959,6 +1164,9 @@ export function App() {
     openToSide: () => quietly(pickedFolders(here()).then(([path]) => (path ? tabs.openToSide(path) : undefined))),
     close: () => tabs.closePane(tabs.active(), here()),
     reopen: () => tabs.reopenClosed(),
+    duplicateTab: () => tabs.duplicate(tabs.active()),
+    pinTab: () => tabs.togglePinned(tabs.active()),
+    tabToWindow: () => quietly(tabs.toWindow(tabs.active())),
     split: splitView,
     otherPane: () => tabs.active().activate(tabs.active().other() ?? here()),
     nextTab: () => tabs.cycle(1),
@@ -1079,10 +1287,14 @@ export function App() {
 
   function commands(): Command[] {
     const view = tabs.activeView();
-    const goTo = (label: string, path: string): Command => ({
+    const goTo = (label: string, path: string, icon = ICON_FOLDER): Command => ({
       label: `Go to ${label}`,
+      group: "Go",
+      icon,
       run: () => view.open(path),
     });
+    const more = (group: string, list: Command[]) =>
+      list.map((command) => ({ group, icon: iconFor(command.label), ...command }));
     const known = places();
     const keyed = KEYS.filter((command) => !command.fixed && !command.quiet && !(view.isBin() && FOLDER_ONLY.has(command.id)));
     const inFolder: Command[] = view.isBin()
@@ -1098,27 +1310,47 @@ export function App() {
           ...keepCommands(view),
         ];
     return [
-      ...keyed.map((command) => ({ label: command.label, keys: keyText(command.id), run: RUN[command.id] })),
-      { label: "Quick preview", keys: "Space", run: () => previewSelected(view) },
-      { label: "Compact rows", run: () => setRowDensity("compact") },
-      { label: "Cozy rows", run: () => setRowDensity("cozy") },
-      { label: "Roomy rows", run: () => setRowDensity("roomy") },
-      { label: windowsIcons() ? "Perli icons" : "Windows icons", run: () => setWindowsIcons(!windowsIcons()) },
-      ...(view.filtered() ? [{ label: "Clear filter", run: () => view.setFilterForm(NO_FILTER) }] : []),
-      ...inFolder,
-      { label: statusBar() ? "Hide status bar" : "Always show status bar", run: () => setStatusBar(!statusBar()) },
-      ...BACKDROPS.map(({ id, label }) => ({ label: `Window backdrop: ${label}`, run: () => setBackdrop(id) })),
-      ...SCALES.map((scale) => ({
-        label: `Text and interface size: ${Math.round(scale * 100)}%`,
-        run: () => setUiScale(scale),
+      ...keyed.map((command) => ({
+        label: command.label,
+        group: command.group,
+        icon: iconFor(command.label),
+        keys: keyText(command.id),
+        run: RUN[command.id],
       })),
-      { label: "Map network drive", run: () => setDrives("map") },
-      { label: "Disconnect network drive", run: () => setDrives("disconnect") },
-      goTo("Recycle Bin", BIN_PATH),
+      ...more("Files", [{ label: "Quick preview", keys: "Space", run: () => previewSelected(view) }, ...inFolder]),
+      ...more("View", [
+        { label: "Compact rows", run: () => setRowDensity("compact") },
+        { label: "Cozy rows", run: () => setRowDensity("cozy") },
+        { label: "Roomy rows", run: () => setRowDensity("roomy") },
+        { label: windowsIcons() ? "Perli icons" : "Windows icons", icon: iconFor("Windows icons"), run: () => setWindowsIcons(!windowsIcons()) },
+        ...(view.filtered() ? [{ label: "Clear filter", run: () => view.setFilterForm(NO_FILTER) }] : []),
+        ...(!view.isBin() && (view.filtered() || view.query())
+          ? [{ label: "Save as smart folder", icon: ICON_SMART, run: () => saveSmart(view) }]
+          : []),
+        { label: statusBar() ? "Hide status bar" : "Always show status bar", run: () => setStatusBar(!statusBar()) },
+        ...BACKDROPS.map(({ id, label }) => ({ label: `Window backdrop: ${label}`, run: () => setBackdrop(id) })),
+        ...SCALES.map((scale) => ({
+          label: `Text and interface size: ${Math.round(scale * 100)}%`,
+          run: () => setUiScale(scale),
+        })),
+      ]),
+      ...more("Go", [
+        { label: "Map network drive", run: () => setDrives("map") },
+        { label: "Disconnect network drive", run: () => setDrives("disconnect") },
+      ]),
+      goTo("Recycle Bin", BIN_PATH, iconFor("Empty Recycle Bin")),
       ...(known?.folders ?? []).map(({ kind, path }) => goTo(FOLDERS[kind].label, path)),
-      ...(known?.clouds ?? []).map(({ name, path }) => goTo(name, path)),
-      ...(known?.drives ?? []).map(({ name, path }) => goTo(name, path)),
-      ...[...pinned(), ...bookmarks()].map((path) => goTo(baseName(path) || path, path)),
+      ...(known?.clouds ?? []).map(({ name, path }) => goTo(name, path, ICON_CLOUD)),
+      ...(known?.drives ?? []).map(({ name, path }) => goTo(name, path, ICON_DRIVE)),
+      ...pinned().map((path) => goTo(baseName(path) || path, path, iconFor("Pin tab"))),
+      ...bookmarks().map((path) => goTo(baseName(path) || path, path, iconFor("Add bookmark"))),
+      ...smartFolders().map(
+        (smart): Command => ({ label: `Open smart folder: ${smart.name}`, group: "Go", icon: ICON_SMART, run: () => quietly(openSmart(view, smart)) }),
+      ),
+      ...(view.isBin()
+        ? []
+        : allTags().map((tag): Command => ({ label: `Show tag: ${tag.name}`, group: "Go", icon: iconFor("Tags"), run: () => showTagged(view, tag) }))),
+      ...foundFiles(),
     ];
   }
 
@@ -1262,6 +1494,7 @@ export function App() {
                 columns={ownColumns(view) ?? columns()}
                 fixedColumns={ownColumns(view) !== undefined}
                 cut={view.query() ? undefined : cutNames(view.folder()!.path)}
+                synced={!view.query() && inCloud(view.folder()!.path)}
                 empty={emptyState(view)}
                 match={view.query() === FLAT_QUERY ? undefined : view.query()}
                 active={tab === tabs.active() && view === tab.active()}
@@ -1317,6 +1550,12 @@ export function App() {
           onMenu={(event, path) => showFolderMenu(event, tabs.activeView(), path)}
           onRecentMenu={(event, recent) => showRecentMenu(event, tabs.activeView(), recent)}
           onSectionMenu={showSectionMenu}
+          onTag={(tag) => showTagged(tabs.activeView(), tag)}
+          onTagMenu={showTagMenu}
+          onSmart={(smart) => quietly(openSmart(tabs.activeView(), smart))}
+          onSmartMenu={showSmartMenu}
+          onPlaces={setPlaces}
+          report={jobs.report}
         />
         <button
           class="settings-button"
@@ -1339,6 +1578,7 @@ export function App() {
           view={tabs.activeView()}
           onNewTab={(path) => tabs.add([path])}
           onMenu={(event, path) => showFolderMenu(event, tabs.activeView(), path)}
+          onGroup={showBookmarkGroup}
         />
         <For each={tabs.tabs()}>
           {(tab) => (
@@ -1391,10 +1631,13 @@ export function App() {
         {(request) => <BatchRename request={request} onClose={() => setRenaming(undefined)} />}
       </Show>
       <Show when={filtering()} keyed>
-        {(view) => <FilterDialog view={view} onClose={() => setFiltering(undefined)} />}
+        {(view) => <FilterDialog view={view} onClose={() => setFiltering(undefined)} onSave={() => saveSmart(view)} />}
       </Show>
       <Show when={selectingPattern()} keyed>
         {(view) => <SelectPattern view={view} onClose={() => setSelectingPattern(undefined)} />}
+      </Show>
+      <Show when={naming()} keyed>
+        {(ask) => <NameSheet ask={ask} onClose={() => setNaming(undefined)} />}
       </Show>
       <Show when={namingTag()} keyed>
         {(view) => (

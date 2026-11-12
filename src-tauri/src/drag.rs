@@ -126,11 +126,13 @@ impl Drags {
     }
 }
 
-/// Where files wait without moving. It is no folder, so no job can land there.
+/// Places of Perli's own that only take note of what is dropped: the shelf, the bookmarks bar, a
+/// tag. None is a folder, so no job can land there.
+#[cfg(test)]
 const SHELF: &str = "perli:shelf";
 
 fn is_shelf(folder: &Path) -> bool {
-    folder == Path::new(SHELF)
+    folder.to_str().is_some_and(|place| place.starts_with("perli:"))
 }
 
 fn is_bin(folder: &Path) -> bool {

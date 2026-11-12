@@ -2,17 +2,27 @@
 
 use std::mem::size_of;
 use std::path::Path;
+use std::process::Command;
+use std::ptr;
 
 use serde::Serialize;
-use windows::core::{Result, GUID, HSTRING};
+use windows::core::{Owned, Result, GUID, HSTRING, PCWSTR, PWSTR};
+use windows::Win32::Devices::PortableDevices::{IPortableDeviceManager, PortableDeviceManager};
 use windows::Win32::Storage::FileSystem::{
-    GetDiskFreeSpaceExW, GetDriveTypeW, GetLogicalDrives, FILE_FLAGS_AND_ATTRIBUTES,
+    BusTypeUsb, CreateFileW, GetDiskFreeSpaceExW, GetDriveTypeW, GetLogicalDrives, FILE_FLAGS_AND_ATTRIBUTES,
+    FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
 };
 use windows::Win32::System::Com::{
-    CoInitializeEx, CoTaskMemFree, CoUninitialize, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE,
+    CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
+    COINIT_DISABLE_OLE1DDE,
+};
+use windows::Win32::System::Ioctl::{
+    PropertyStandardQuery, StorageDeviceProperty, IOCTL_STORAGE_QUERY_PROPERTY, STORAGE_DEVICE_DESCRIPTOR,
+    STORAGE_PROPERTY_QUERY,
 };
 use windows::Win32::System::Registry::HKEY_CURRENT_USER;
-use windows::Win32::System::WindowsProgramming::{DRIVE_REMOTE, DRIVE_REMOVABLE};
+use windows::Win32::System::WindowsProgramming::{DRIVE_CDROM, DRIVE_FIXED, DRIVE_REMOTE, DRIVE_REMOVABLE};
+use windows::Win32::System::IO::DeviceIoControl;
 use windows::Win32::UI::Shell::{
     FOLDERID_Desktop, FOLDERID_Documents, FOLDERID_Downloads, FOLDERID_Music, FOLDERID_Pictures,
     FOLDERID_Profile, FOLDERID_Videos, SHGetFileInfoW, SHGetKnownFolderPath, KF_FLAG_DEFAULT,
@@ -46,6 +56,16 @@ pub struct Drive {
     name: String,
     path: String,
     network: bool,
+    /// It can be ejected: a card, a disc, or a disk on a USB cable.
+    removable: bool,
+}
+
+/// A phone, camera or player that shows its files without a drive letter.
+#[derive(Serialize)]
+pub struct Device {
+    name: String,
+    /// What Windows calls it, which is also where Explorer finds it.
+    id: String,
 }
 
 /// A folder a sync app keeps, such as OneDrive.
@@ -60,6 +80,7 @@ pub struct Places {
     folders: Vec<Folder>,
     drives: Vec<Drive>,
     clouds: Vec<Cloud>,
+    devices: Vec<Device>,
 }
 
 #[derive(Serialize)]
@@ -93,9 +114,11 @@ pub fn read() -> Result<Places> {
         // Windows requires COM on this thread for `SHGetFileInfoW`.
         CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE).ok()?;
         let drives = read_drives();
+        // A computer with no phone plugged in, or no service for them, just has none to show.
+        let devices = read_devices().unwrap_or_default();
         CoUninitialize();
         let clouds = read_clouds(NAMESPACE, CLASSES);
-        Ok(Places { folders, drives, clouds })
+        Ok(Places { folders, drives, clouds, devices })
     }
 }
 
@@ -120,10 +143,92 @@ fn read_drives() -> Vec<Drive> {
     drive_paths()
         .map(|path| {
             let name = display_name(&path).unwrap_or_else(|| path.clone());
-            let network = unsafe { GetDriveTypeW(&HSTRING::from(&path)) } == DRIVE_REMOTE;
-            Drive { name, path, network }
+            let kind = unsafe { GetDriveTypeW(&HSTRING::from(&path)) };
+            let removable = kind == DRIVE_REMOVABLE || kind == DRIVE_CDROM || (kind == DRIVE_FIXED && is_usb(&path));
+            Drive { name, path, network: kind == DRIVE_REMOTE, removable }
         })
         .collect()
+}
+
+/// True for a disk on a USB cable, which Windows calls fixed like the ones inside.
+fn is_usb(drive: &str) -> bool {
+    let volume = HSTRING::from(format!(r"\\.\{}", drive.trim_end_matches('\\')));
+    let share = FILE_SHARE_READ | FILE_SHARE_WRITE;
+    // Asking for no access is enough for this question, and needs no rights.
+    let opened = unsafe { CreateFileW(&volume, 0, share, None, OPEN_EXISTING, FILE_FLAGS_AND_ATTRIBUTES(0), None) };
+    let Ok(opened) = opened.map(|handle| unsafe { Owned::new(handle) }) else {
+        return false;
+    };
+    let query = STORAGE_PROPERTY_QUERY {
+        PropertyId: StorageDeviceProperty,
+        QueryType: PropertyStandardQuery,
+        ..Default::default()
+    };
+    let mut device = STORAGE_DEVICE_DESCRIPTOR::default();
+    let asked = unsafe {
+        DeviceIoControl(
+            *opened,
+            IOCTL_STORAGE_QUERY_PROPERTY,
+            Some((&raw const query).cast()),
+            size_of::<STORAGE_PROPERTY_QUERY>() as u32,
+            Some((&raw mut device).cast()),
+            size_of::<STORAGE_DEVICE_DESCRIPTOR>() as u32,
+            Some(&mut 0),
+            None,
+        )
+    };
+    asked.is_ok() && device.BusType == BusTypeUsb
+}
+
+/// Windows' own folder of drives and devices, which is where a phone's files are found.
+const THIS_PC: &str = "::{20D04FE0-3AEA-1069-A2D8-08002B30309D}";
+/// How Windows names a drive it also lists as a device. Those have a letter, and are drives here.
+const DRIVE_AS_DEVICE: &str = "wpdbusenum";
+
+/// Phones and the like. COM must be set up on this thread.
+unsafe fn read_devices() -> Result<Vec<Device>> {
+    let manager: IPortableDeviceManager = CoCreateInstance(&PortableDeviceManager, None, CLSCTX_INPROC_SERVER)?;
+    let mut count = 0;
+    manager.GetDevices(ptr::null_mut(), &mut count)?;
+    let mut ids = vec![PWSTR::null(); count as usize];
+    manager.GetDevices(ids.as_mut_ptr(), &mut count)?;
+    ids.truncate(count as usize);
+
+    let mut devices = Vec::new();
+    for id in ids {
+        if id.is_null() {
+            continue;
+        }
+        let text = id.to_string().unwrap_or_default();
+        let mut length = 0;
+        let _ = manager.GetDeviceFriendlyName(PCWSTR(id.0), PWSTR::null(), &mut length);
+        let mut name = vec![0u16; length as usize];
+        let named = length > 0 && manager.GetDeviceFriendlyName(PCWSTR(id.0), PWSTR(name.as_mut_ptr()), &mut length).is_ok();
+        CoTaskMemFree(Some(id.0.cast()));
+        if named && !text.to_lowercase().contains(DRIVE_AS_DEVICE) {
+            let end = name.iter().position(|&unit| unit == 0).unwrap_or(name.len());
+            devices.push(Device { name: String::from_utf16_lossy(&name[..end]), id: text });
+        }
+    }
+    Ok(devices)
+}
+
+/// Shows a device's files in Explorer, which is the one app that can browse them. Only a device
+/// that is plugged in now opens, so nothing else can be started through here.
+pub fn open_device(id: &str) -> std::result::Result<(), String> {
+    let known = read()
+        .map_err(|error| error.message())?
+        .devices
+        .iter()
+        .any(|device| device.id == id);
+    if !known {
+        return Err("This device is no longer connected".to_string());
+    }
+    Command::new("explorer.exe")
+        .arg(format!(r"{THIS_PC}\{id}"))
+        .spawn()
+        .map(drop)
+        .map_err(|error| error.to_string())
 }
 
 /// A class names its folder outright, or as a known folder's id, which is how OneDrive does it.
@@ -203,6 +308,8 @@ mod tests {
         let space = drive_space(&drive.path).unwrap();
         assert!(space.total > 0 && space.free <= space.total);
         assert!(!drive.network);
+        assert!(!drive.removable, "the system drive can't be ejected");
+        assert!(open_device("no such device").is_err());
     }
 
     #[test]

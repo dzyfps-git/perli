@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { holds, lookKey, moved, placeLabel, savedPaths, toggled, withLook } from "./placeLists.ts";
+import { groupsOf, holds, lookKey, moved, placeLabel, savedPaths, toggled, withGroup, withLook } from "./placeLists.ts";
 
 test("toggling adds at the end and takes out whatever the case", () => {
   const list = toggled(toggled([], "C:\\A"), "D:\\B");
@@ -39,4 +39,10 @@ test("a look changes in parts and goes once it is empty", () => {
   looks = withLook(looks, "C:\\Work", { color: undefined });
   assert.deepEqual(looks, { "c:\\work": { icon: "\uE734" } });
   assert.deepEqual(withLook(looks, "C:\\Work", { icon: undefined }), {});
+});
+
+test("bookmark groups are kept by path, whatever its case", () => {
+  const groups = withGroup(withGroup({}, "C:\\Work\\", "Jobs"), "D:\\Art", "Fun");
+  assert.deepEqual(groupsOf(["d:\\art", "C:\\WORK", "C:\\Other"], groups), ["Fun", "Jobs"]);
+  assert.deepEqual(withGroup(groups, "c:\\work", undefined), { "d:\\art": "Fun" });
 });

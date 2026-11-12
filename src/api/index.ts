@@ -95,7 +95,9 @@ export interface DriveSpace {
 
 export interface Places {
   folders: { kind: string; path: string }[];
-  drives: { name: string; path: string; network: boolean }[];
+  drives: { name: string; path: string; network: boolean; removable: boolean }[];
+  /** Phones and the like, which have no drive letter. Explorer shows their files. */
+  devices: { name: string; id: string }[];
   /** Folders a sync app keeps, such as OneDrive. */
   clouds: { name: string; path: string }[];
 }
@@ -301,6 +303,12 @@ export const saveSession = (text: string) => invoke<void>("save_session", { text
 
 export const listPlaces = () => invoke<Places>("list_places");
 
+/** Ejects a card, a disc or a USB disk. Windows says so itself when a file on it is still open. */
+export const ejectDrive = (path: string) => invoke<void>("eject_drive", { path });
+
+/** Shows a phone's files in File Explorer. */
+export const openDevice = (id: string) => invoke<void>("open_device", { id });
+
 export const checkUpdate = () => invoke<UpdateOffer | null>("check_update");
 
 /** Ends Perli once the installer starts. */
@@ -480,6 +488,14 @@ export const deleteTag = (id: number) => invoke<void>("delete_tag", { id });
 export const setTag = (selection: Selection, tag: number, on: boolean) =>
   invoke<void>("set_tag", { selection, tag, on });
 
+/** Puts `tag` on files by their paths, or takes it off. */
+export const setTagPaths = (paths: string[], tag: number, on: boolean) =>
+  invoke<void>("set_tag_paths", { paths, tag, on });
+
+/** Asks the sync app to keep the selected rows on this device for good, or to free their space. */
+export const keepOnDevice = (selection: Selection, keep: boolean) =>
+  invoke<void>("keep_on_device", { selection, keep });
+
 /** The tags all the selected rows have. */
 export const commonTags = (selection: Selection) => invoke<number[]>("common_tags", { selection });
 
@@ -528,6 +544,12 @@ export const openPathsWithExe = (paths: string[], exe: string) =>
 
 /** Windows' file picker for an app. `null` when the user backs out. */
 export const browseApp = () => invoke<string | null>("browse_app");
+
+/** Saves `text` to a file the user picks. False when they back out. */
+export const exportSettings = (text: string) => invoke<boolean>("export_settings", { text });
+
+/** The text of a settings file the user picks, or null when they back out. */
+export const importSettings = () => invoke<string | null>("import_settings");
 
 /** Windows' own window for picking an app, the only thing that may set a default. */
 export const chooseAppFor = (path: string) => invoke<void>("choose_app_for", { path });

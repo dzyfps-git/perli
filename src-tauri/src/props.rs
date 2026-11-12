@@ -11,7 +11,8 @@ use windows::core::{Error, Result, HSTRING, PWSTR};
 use windows::Win32::Foundation::E_FAIL;
 use windows::Win32::Storage::FileSystem::{
     GetFileAttributesW, SetFileAttributesW, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_HIDDEN,
-    FILE_ATTRIBUTE_READONLY, FILE_FLAGS_AND_ATTRIBUTES, INVALID_FILE_ATTRIBUTES,
+    FILE_ATTRIBUTE_PINNED, FILE_ATTRIBUTE_READONLY, FILE_ATTRIBUTE_UNPINNED, FILE_FLAGS_AND_ATTRIBUTES,
+    INVALID_FILE_ATTRIBUTES,
 };
 use windows::Win32::UI::Shell::{AssocQueryStringW, ASSOCF_NONE, ASSOCSTR_FRIENDLYAPPNAME};
 
@@ -151,9 +152,42 @@ pub fn set_attributes(paths: &[PathBuf], read_only: Option<bool>, hidden: Option
     Ok(())
 }
 
+/// `now` with the wish to stay on this device for good, or to give its space back.
+fn kept(now: u32, keep: bool) -> u32 {
+    let (on, off) = if keep {
+        (FILE_ATTRIBUTE_PINNED.0, FILE_ATTRIBUTE_UNPINNED.0)
+    } else {
+        (FILE_ATTRIBUTE_UNPINNED.0, FILE_ATTRIBUTE_PINNED.0)
+    };
+    (now | on) & !off
+}
+
+/// Tells the sync app that keeps these files to hold them on this device for good, or that their
+/// space may be freed. Only the wish is written, the way `attrib +P` does it: the sync app does
+/// the fetching or the freeing in its own time, and nothing is read here.
+pub fn keep_on_device(paths: &[PathBuf], keep: bool) -> Result<()> {
+    for path in paths {
+        let name = HSTRING::from(path.as_os_str());
+        let now = unsafe { GetFileAttributesW(&name) };
+        if now == INVALID_FILE_ATTRIBUTES {
+            return Err(Error::from_thread());
+        }
+        unsafe { SetFileAttributesW(&name, FILE_FLAGS_AND_ATTRIBUTES(kept(now, keep))) }?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keeping_and_freeing_undo_each_other_and_leave_the_rest() {
+        let (pinned, unpinned) = (FILE_ATTRIBUTE_PINNED.0, FILE_ATTRIBUTE_UNPINNED.0);
+        assert_eq!(kept(HIDDEN, true), HIDDEN | pinned);
+        assert_eq!(kept(HIDDEN | pinned, false), HIDDEN | unpinned);
+        assert_eq!(kept(HIDDEN | unpinned, true), HIDDEN | pinned);
+    }
 
     fn temp(name: &str) -> PathBuf {
         let folder = std::env::temp_dir().join(format!("perli-props-{name}-{}", std::process::id()));

@@ -929,6 +929,22 @@ async fn open_file(path: String) -> Result<(), String> {
         .map_err(|error| error.message())
 }
 
+/// Ejects a card, a disc or a USB disk. Only the top of a drive can be asked for.
+#[tauri::command]
+async fn eject_drive(path: PathBuf, app: AppHandle) -> Result<(), String> {
+    if path.parent().is_some() {
+        return Err("Only a drive can be ejected".to_string());
+    }
+    let main = jobs::owner(&app);
+    off_main(move || menus::eject(path, main)).await
+}
+
+/// Shows a phone's files in Explorer.
+#[tauri::command]
+async fn open_device(id: String) -> Result<(), String> {
+    async_runtime::spawn_blocking(move || places::open_device(&id)).await.map_err(|error| error.to_string())?
+}
+
 #[tauri::command]
 async fn open_link(url: String) -> Result<(), String> {
     off_main(move || shell::open_link(&url)).await
@@ -964,6 +980,33 @@ async fn open_paths_with_exe(paths: Vec<PathBuf>, exe: PathBuf) -> Result<(), St
 async fn browse_app(app: AppHandle) -> Result<Option<String>, String> {
     let main = jobs::owner(&app);
     off_main(move || menus::browse_app(main)).await
+}
+
+/// The most a file of settings may hold. A real one is a few thousand bytes.
+const MOST_SETTINGS_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Saves Perli's settings to a file the user picks. False when they back out. The page never
+/// names the file, so it can write nowhere else.
+#[tauri::command]
+async fn export_settings(text: String, app: AppHandle) -> Result<bool, String> {
+    let main = jobs::owner(&app);
+    off_main(move || menus::pick_settings_file(main, true)).await?.map_or(Ok(false), |path| {
+        std::fs::write(path, text).map(|()| true).map_err(|error| error.to_string())
+    })
+}
+
+/// The text of a file of settings the user picks, or nothing when they back out.
+#[tauri::command]
+async fn import_settings(app: AppHandle) -> Result<Option<String>, String> {
+    let main = jobs::owner(&app);
+    let Some(path) = off_main(move || menus::pick_settings_file(main, false)).await? else {
+        return Ok(None);
+    };
+    let size = std::fs::metadata(&path).map_err(|error| error.to_string())?.len();
+    if size > MOST_SETTINGS_BYTES {
+        return Err("This file is too big to be Perli settings".to_string());
+    }
+    std::fs::read_to_string(path).map(Some).map_err(|error| error.to_string())
 }
 
 /// Windows' own window for picking an app, which is the only thing allowed to set a default.
@@ -1344,6 +1387,19 @@ async fn set_tag(selection: Selection, tag: u32, on: bool, views: State<'_, View
     with_tags(move || tags::set(&paths, tag, on)).await
 }
 
+/// Puts `tag` on files by their paths, for a drop on a tag.
+#[tauri::command]
+async fn set_tag_paths(paths: Vec<PathBuf>, tag: u32, on: bool) -> Result<(), String> {
+    with_tags(move || tags::set(&paths, tag, on)).await
+}
+
+/// Asks the sync app to keep the selected rows on this device, or to free their space.
+#[tauri::command]
+async fn keep_on_device(selection: Selection, keep: bool, views: State<'_, Views>) -> Result<(), String> {
+    let paths = views.read(&selection, folder::Listing::paths)?;
+    off_main(move || props::keep_on_device(&paths, keep)).await
+}
+
 /// The tags all the selected rows have.
 #[tauri::command]
 async fn common_tags(selection: Selection, views: State<'_, Views>) -> Result<Vec<u32>, String> {
@@ -1655,6 +1711,10 @@ fn main() {
             open_paths_with,
             open_paths_with_exe,
             browse_app,
+            eject_drive,
+            open_device,
+            export_settings,
+            import_settings,
             choose_app_for,
             open_with,
             choose_app,
@@ -1697,6 +1757,8 @@ fn main() {
             edit_tag,
             delete_tag,
             set_tag,
+            set_tag_paths,
+            keep_on_device,
             common_tags,
             rows_matching,
             selection_size,

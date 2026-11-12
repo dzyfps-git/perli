@@ -21,6 +21,7 @@ use crate::folder::Filter;
 use crate::folder::{self, Entry, Found, Listing, Order, SortKey};
 use crate::network;
 use crate::ops::sys::{self, Stat};
+use crate::tags;
 
 /// How many rows past the user the walk keeps ready. Scrolling never catches up, so the list
 /// feels endless, while a search nobody scrolls goes no further than this.
@@ -33,6 +34,8 @@ const WORD_START: i32 = 6;
 const SKIPPED_COST: i32 = 1;
 /// Stands for every file under a folder, which makes a flat view of it. No file name can hold it.
 const EVERY_FILE: &str = "*";
+/// Starts a search for the files that have a tag, by its name. No file name can hold a colon.
+const TAGGED: &str = "tag:";
 
 // ponytail: each report copies every row found so far, so reports thin out as rows grow. Rows
 // that share their memory would lift this.
@@ -336,6 +339,41 @@ fn other_drives(own: &Path) -> Vec<PathBuf> {
     roots.filter(|root| !root.as_os_str().eq_ignore_ascii_case(own.as_os_str())).collect()
 }
 
+/// True when `path` is `folder` or under it, whatever the case of either.
+fn is_under(path: &Path, folder: &Path) -> bool {
+    let lowered = |path: &Path| PathBuf::from(path.to_string_lossy().to_lowercase());
+    lowered(path).starts_with(lowered(folder))
+}
+
+/// The files that have the tag called `name`, as far from `folder` as `scope` reaches. The
+/// database of tags knows them all, so no folder is walked.
+fn tagged(name: &str, scope: Scope, folder: &Path) -> Found {
+    let mut found = Found::default();
+    let Some(tag) = tags::named_id(name.trim()) else {
+        return found;
+    };
+    let mut locations = HashMap::<PathBuf, Arc<[u16]>>::new();
+    for (path, tags) in tags::files_with(tag) {
+        let Some(parent) = path.parent() else { continue };
+        let reached = match scope {
+            Scope::Drives => true,
+            Scope::Drive => is_under(parent, &root_of(folder)),
+            Scope::Below => is_under(parent, folder),
+            Scope::Folder => is_under(parent, folder) && is_under(folder, parent),
+        };
+        if !reached {
+            continue;
+        }
+        let mut entry = None;
+        let _ = sys::each_entry(&sys::extended(&path), |data| entry = Entry::from_find_data(data));
+        if let Some(entry) = entry {
+            let location = locations.entry(parent.to_path_buf()).or_insert_with(|| folder::null_terminated(parent).into());
+            found.push_tagged(entry, location.clone(), tags);
+        }
+    }
+    found
+}
+
 /// A filter can leave so few rows that scrolling never asks for more.
 fn needs_every_row(order: &Order) -> bool {
     order.key != SortKey::Found || order.filter.is_active()
@@ -389,6 +427,13 @@ impl Searches {
         }
 
         let shown_folder = PathBuf::from(folder::resolve(path)?);
+        if let Some(name) = asked.query.strip_prefix(TAGGED) {
+            let found = tagged(name, asked.scope, &shown_folder);
+            self.stop(view);
+            self.all().insert(view, Arc::new(Search::new(found.clone(), usize::MAX)));
+            report(Walk::Done);
+            return Ok(Listing::searched(found, order));
+        }
         let folder = match asked.scope {
             Scope::Drive | Scope::Drives => root_of(&shown_folder),
             Scope::Below | Scope::Folder => shown_folder,

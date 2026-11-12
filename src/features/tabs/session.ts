@@ -11,6 +11,7 @@ export interface SavedTab {
   panes: SavedPane[];
   active: number;
   swapped: boolean;
+  pinned?: boolean;
 }
 
 export interface Session {
@@ -42,7 +43,12 @@ export function parseSession(text: string | null | undefined): Omit<Session, "st
     for (const tab of saved.tabs) {
       const panes = tab.panes.flatMap(cleanPane).slice(0, 2);
       if (panes.length === 0) continue;
-      tabs.push({ panes, active: inRange(tab.active, panes.length), swapped: tab.swapped === true });
+      tabs.push({
+        panes,
+        active: inRange(tab.active, panes.length),
+        swapped: tab.swapped === true,
+        ...(tab.pinned === true ? { pinned: true } : {}),
+      });
     }
     return tabs.length > 0 ? { tabs, active: inRange(saved.active, tabs.length) } : undefined;
   } catch {

@@ -3,6 +3,7 @@ import { createEffect, createSignal, For, onCleanup, onMount, Show } from "solid
 import { placeSnapArea } from "../../api";
 import { Menu } from "../../ui/Menu";
 import { toCrumbs } from "../navigation/path";
+import { lookOf } from "../sidebar/saved";
 import type { Tab, Tabs } from "../tabs/tabs";
 import "./titlebar.css";
 
@@ -14,6 +15,8 @@ const ICON_RESTORE = "";
 
 const ICON_SETTINGS = "";
 
+const ICON_PIN = "\uE718";
+
 /** The settings, when they are open as a tab after the folders. */
 export interface SettingsTab {
   active: boolean;
@@ -21,6 +24,12 @@ export interface SettingsTab {
   /** A folder tab was picked, so the settings step back. */
   onLeave: () => void;
   onClose: () => void;
+}
+
+/** The colour its folder wears in the sidebar, if any. */
+function tint(tab: Tab) {
+  const color = lookOf(tab.active().path() ?? "")?.color;
+  return color === undefined ? undefined : `var(--tag-${color})`;
 }
 
 function tabTitle(tab: Tab) {
@@ -69,6 +78,7 @@ export function TitleBar(props: { tabs: Tabs; onNewTab: () => void; settings?: S
     props.tabs.tabs();
     props.tabs.active();
     props.settings?.active;
+    for (const tab of props.tabs.tabs()) tab.pinned();
     moveInk();
   });
 
@@ -89,17 +99,21 @@ export function TitleBar(props: { tabs: Tabs; onNewTab: () => void; settings?: S
     const list = tabs.tabs();
     const split = tab.panes().length > 1;
     const path = tab.active().folder()?.path;
+    const alone = list.length === 1;
     return [
       { label: "New tab", action: props.onNewTab },
       { label: "Reopen closed tab", action: tabs.reopenClosed, disabled: !tabs.canReopen() },
       { label: "Duplicate", action: () => tabs.duplicate(tab) },
+      { label: tab.pinned() ? "Unpin tab" : "Pin tab", action: () => tabs.togglePinned(tab) },
+      { label: "Move to new window", action: () => tabs.toWindow(tab).catch(console.error), disabled: alone || !path },
       { label: "Split view", action: () => tabs.openToSide(path!, tab), disabled: split || !path },
       { label: "Swap panes", action: tab.swap, disabled: !split },
       { label: "Close pane", action: () => tabs.closePane(tab, tab.active()), disabled: !split },
       { label: "Move left", action: () => tabs.move(tab, -1), disabled: list[0] === tab },
       { label: "Move right", action: () => tabs.move(tab, 1), disabled: list.at(-1) === tab },
-      { label: "Close", action: () => tabs.close(tab), disabled: list.length === 1 },
-      { label: "Close others", action: () => tabs.closeOthers(tab), disabled: list.length === 1 },
+      { label: "Close", action: () => tabs.close(tab), disabled: alone || tab.pinned() },
+      { label: "Close others", action: () => tabs.closeOthers(tab), disabled: alone },
+      { label: "Close tabs to the right", action: () => tabs.closeRight(tab), disabled: list.at(-1) === tab },
     ];
   }
 
@@ -110,8 +124,9 @@ export function TitleBar(props: { tabs: Tabs; onNewTab: () => void; settings?: S
           {(tab) => (
             <div
               class="tab"
-              classList={{ "tab-active": isActive(tab) }}
-              style={{ "--tab-name": `tab-${tab.id}` }}
+              classList={{ "tab-active": isActive(tab), "tab-pinned": tab.pinned() }}
+              style={{ "--tab-name": `tab-${tab.id}`, "--tab-tint": tint(tab) }}
+              data-tinted={tint(tab) ? "" : undefined}
               data-drop={tab.active().folder()?.path}
               role="tab"
               aria-selected={isActive(tab)}
@@ -126,8 +141,13 @@ export function TitleBar(props: { tabs: Tabs; onNewTab: () => void; settings?: S
                 setMenu({ x: event.clientX, y: Math.max(event.clientY, below), tab });
               }}
             >
+              <Show when={tab.pinned()}>
+                <span class="tab-glyph tab-pin" aria-hidden="true">
+                  {ICON_PIN}
+                </span>
+              </Show>
               <span class="tab-title">{tabTitle(tab)}</span>
-              <Show when={props.tabs.tabs().length > 1}>
+              <Show when={props.tabs.tabs().length > 1 && !tab.pinned()}>
                 <button
                   class="tab-close"
                   aria-label={`Close ${tabTitle(tab)}`}

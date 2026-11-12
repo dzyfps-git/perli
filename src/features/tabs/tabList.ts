@@ -16,6 +16,11 @@ export function moved<T>(tabs: T[], tab: T, offset: number) {
   return result;
 }
 
+/** Pinned tabs first. Each group keeps its own order. */
+export function pinnedFirst<T>(tabs: T[], pinned: (tab: T) => boolean) {
+  return [...tabs.filter(pinned), ...tabs.filter((tab) => !pinned(tab))];
+}
+
 /** The pane beside `pane`, if the tab has two. */
 export function otherPane<T>(panes: T[], pane: T) {
   return panes.find((other) => other !== pane);

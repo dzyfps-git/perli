@@ -29,6 +29,22 @@ export function placeLabel(path: string) {
   return name && !/^[a-z]:$/i.test(trimmed) ? name : path;
 }
 
+/** Which group each bookmark is in, by path in lower case. A bookmark not in here stands alone. */
+export type Groups = Record<string, string>;
+
+/** `groups` with `path` in `group`, or in none. */
+export function withGroup(groups: Groups, path: string, group: string | undefined): Groups {
+  const next = { ...groups };
+  if (group) next[lookKey(path)] = group;
+  else delete next[lookKey(path)];
+  return next;
+}
+
+/** The groups in use, each once, in the order their first bookmark has. */
+export const groupsOf = (paths: string[], groups: Groups) => [
+  ...new Set(paths.flatMap((path) => groups[lookKey(path)] ?? [])),
+];
+
 /** Folder looks are kept by path, in lower case. */
 export interface Look {
   /** Which of the `--tag-` colors. */

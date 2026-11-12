@@ -218,3 +218,62 @@ html[data-blurred] .tab-active::before {
     animation: none;
   }
 }
+
+/* The close button waits until the pointer or the keyboard reaches its tab. */
+.tab-close {
+  opacity: 0;
+  transition:
+    background var(--motion),
+    opacity var(--motion);
+}
+
+.tab:hover .tab-close,
+.tab:focus-within .tab-close {
+  opacity: 1;
+}
+
+/* A folder with a colour of its own lends it to its tab, as a line along the foot. */
+.tab[data-tinted]::after {
+  content: "";
+  position: absolute;
+  inset: auto var(--space-3) 2px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--tab-tint);
+  opacity: 0.55;
+  transition: opacity var(--motion);
+  pointer-events: none;
+}
+
+.tab-active[data-tinted]::after,
+.tab[data-tinted]:hover::after {
+  opacity: 1;
+}
+
+/* Pinned tabs sit first and stay narrow. */
+.tab-pinned {
+  flex: 0 1 auto;
+  min-width: 44px;
+  max-width: 132px;
+  padding-right: var(--space-3);
+}
+
+.tab-pin {
+  flex: none;
+  font-size: 11px;
+  color: var(--accent);
+  animation: tab-pin-in var(--motion-spring);
+}
+
+@keyframes tab-pin-in {
+  from {
+    scale: 0;
+    rotate: -45deg;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tab-pin {
+    animation: none;
+  }
+}
