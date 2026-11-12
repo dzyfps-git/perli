@@ -15,6 +15,8 @@ use windows::Win32::Security::Cryptography::{
     BCRYPT_MD5_ALG_HANDLE, BCRYPT_SHA1_ALG_HANDLE, BCRYPT_SHA256_ALG_HANDLE, BCRYPT_SHA512_ALG_HANDLE,
 };
 use windows::Win32::System::Com::CoTaskMemFree;
+use windows::Win32::System::Com::StructuredStorage::{PropVariantClear, PropVariantToFileTime};
+use windows::Win32::System::Variant::PSTF_UTC;
 use windows::Win32::UI::Shell::PropertiesSystem::{
     IPropertyDescription, IPropertyStore, PSFormatPropertyValue, PSGetPropertyDescription, PSGetPropertyKeyFromName,
     SHGetPropertyStoreFromParsingName, GPS_DEFAULT, GPS_FASTPROPERTIESONLY, PDFF_DEFAULT, PDTF_ISVIEWABLE,
@@ -310,24 +312,91 @@ pub struct Tags {
     album: Option<String>,
 }
 
+/// A file's property store, or nothing where Windows can't read one.
+fn store_of(path: &Path) -> Option<IPropertyStore> {
+    let flags = if thumbs::is_online_only(path) { GPS_FASTPROPERTIESONLY } else { GPS_DEFAULT };
+    unsafe { SHGetPropertyStoreFromParsingName::<_, _, IPropertyStore>(&HSTRING::from(path.as_os_str()), None, flags) }.ok()
+}
+
+fn key_of(name: &str) -> Option<PROPERTYKEY> {
+    let mut key = PROPERTYKEY::default();
+    unsafe { PSGetPropertyKeyFromName(&HSTRING::from(name), &raw mut key) }.ok()?;
+    Some(key)
+}
+
+/// A property as Windows would show it, such as `System.Music.Artist`.
+fn shown(store: &IPropertyStore, name: &str) -> Option<String> {
+    let key = key_of(name)?;
+    let mut raw = std::ptr::null_mut();
+    unsafe { PSGetPropertyDescription(&raw const key, &IPropertyDescription::IID, &raw mut raw) }.ok()?;
+    let description = unsafe { IPropertyDescription::from_raw(raw) };
+    let value = owned(unsafe { PSFormatPropertyValue(store, &description, PDFF_DEFAULT) }.ok()?);
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
+}
+
+/// A date property in milliseconds since 1970, read as the raw time, since the shown text
+/// follows the user's locale and carries direction marks.
+fn date(store: &IPropertyStore, name: &str) -> Option<u64> {
+    let key = key_of(name)?;
+    let mut value = unsafe { store.GetValue(&raw const key) }.ok()?;
+    let time = unsafe { PropVariantToFileTime(&raw const value, PSTF_UTC) };
+    let _ = unsafe { PropVariantClear(&raw mut value) };
+    let time = time.ok()?;
+    unix_ms((u64::from(time.dwHighDateTime) << 32) | u64::from(time.dwLowDateTime))
+}
+
+/// FILETIME ticks since 1601 as milliseconds since 1970. Nothing for a time before 1970 or none.
+fn unix_ms(ticks: u64) -> Option<u64> {
+    const TICKS_PER_MS: u64 = 10_000;
+    const FROM_1601_MS: u64 = 11_644_473_600_000;
+    (ticks / TICKS_PER_MS).checked_sub(FROM_1601_MS).filter(|&ms| ms > 0)
+}
+
 pub fn tags(path: &Path) -> Tags {
     let _com = Com::enter();
-    let flags = if thumbs::is_online_only(path) { GPS_FASTPROPERTIESONLY } else { GPS_DEFAULT };
-    let Ok(store) = (unsafe { SHGetPropertyStoreFromParsingName::<_, _, IPropertyStore>(&HSTRING::from(path.as_os_str()), None, flags) })
-    else {
+    let Some(store) = store_of(path) else {
         return Tags::default();
     };
-    let read = |name: &str| -> Option<String> {
-        let mut key = PROPERTYKEY::default();
-        unsafe { PSGetPropertyKeyFromName(&HSTRING::from(name), &raw mut key) }.ok()?;
-        let mut raw = std::ptr::null_mut();
-        unsafe { PSGetPropertyDescription(&raw const key, &IPropertyDescription::IID, &raw mut raw) }.ok()?;
-        let description = unsafe { IPropertyDescription::from_raw(raw) };
-        let value = owned(unsafe { PSFormatPropertyValue(&store, &description, PDFF_DEFAULT) }.ok()?);
-        let value = value.trim();
-        (!value.is_empty()).then(|| value.to_string())
+    Tags {
+        title: shown(&store, "System.Title"),
+        artist: shown(&store, "System.Music.Artist"),
+        album: shown(&store, "System.Music.AlbumTitle"),
+    }
+}
+
+/// What a batch rename's name tokens read from one item. Dates are milliseconds since 1970,
+/// which the UI shows in the user's own time.
+#[derive(Debug, Default, Serialize)]
+pub struct NameFacts {
+    modified: Option<u64>,
+    /// When a picture was taken, if it says.
+    taken: Option<u64>,
+    artist: Option<String>,
+    title: Option<String>,
+    /// The name of the folder it is in.
+    folder: String,
+}
+
+/// `deep` reads the file's own properties too, which is slower and only needed for some tokens.
+pub fn name_facts(path: &Path, deep: bool) -> NameFacts {
+    let modified = std::fs::metadata(path).and_then(|meta| meta.modified()).ok();
+    let modified = modified.and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok());
+    let folder = path.parent().and_then(Path::file_name).map(|name| name.to_string_lossy().into_owned());
+    let mut facts = NameFacts {
+        modified: modified.map(|since| since.as_millis() as u64),
+        folder: folder.unwrap_or_default(),
+        ..NameFacts::default()
     };
-    Tags { title: read("System.Title"), artist: read("System.Music.Artist"), album: read("System.Music.AlbumTitle") }
+    if deep {
+        let _com = Com::enter();
+        if let Some(store) = store_of(path) {
+            facts.taken = date(&store, "System.Photo.DateTaken");
+            facts.artist = shown(&store, "System.Music.Artist");
+            facts.title = shown(&store, "System.Title");
+        }
+    }
+    facts
 }
 
 /// Takes a string Windows allocated.
@@ -429,6 +498,13 @@ pub fn hash(path: &Path, algorithm: &str) -> std::io::Result<Option<String>> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn file_times_turn_into_unix_milliseconds() {
+        assert_eq!(super::unix_ms(116_444_736_000_000_000 + 10_000), Some(1));
+        assert_eq!(super::unix_ms(116_444_736_000_000_000), None);
+        assert_eq!(super::unix_ms(0), None);
+    }
+
     use std::fs;
     use std::path::PathBuf;
 

@@ -176,6 +176,13 @@ pub fn has_files() -> bool {
     unsafe { IsClipboardFormatAvailable(CF_HDROP) }.is_ok()
 }
 
+/// True if text or a picture is there to make a file from. Reads nothing, like `can_paste`.
+pub fn has_content() -> bool {
+    [CF_UNICODETEXT, CF_BITMAP, png_format()]
+        .into_iter()
+        .any(|format| unsafe { IsClipboardFormatAvailable(format) }.is_ok())
+}
+
 /// True if a paste would make something. This reads nothing, so it never wakes a program that
 /// renders its copied data late.
 pub fn can_paste() -> bool {

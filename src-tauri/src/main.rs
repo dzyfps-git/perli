@@ -199,7 +199,10 @@ enum Task {
     CopyPaths { paths: Vec<PathBuf>, folder: String },
     MovePaths { paths: Vec<PathBuf>, folder: String },
     Template { folder: String, extension: String },
-    OwnTemplate { folder: String, name: String },
+    /// `date` is today as the user writes it, for a `{date}` in the template's name.
+    OwnTemplate { folder: String, name: String, date: Option<String> },
+    /// A new file from the text or picture on the clipboard, never its files.
+    FromClipboard { folder: String },
     SaveTemplate { selection: Selection },
     Zip { selection: Selection },
     /// `only` names the entries to take out, rather than all of them.
@@ -271,10 +274,15 @@ impl Task {
                 folder: target(folder)?,
                 template: templates::template(&extension)?,
             },
-            Self::OwnTemplate { folder, name } => Job::Template {
+            Self::OwnTemplate { folder, name, date } => Job::Template {
                 folder: target(folder)?,
-                template: templates::own_template(&name)?,
+                template: templates::own_template(&name, date.as_deref())?,
             },
+            Self::FromClipboard { folder } => {
+                let content = clipboard::content().map_err(|error| error.message())?;
+                let template = content.ok_or("The clipboard holds no text or picture")?;
+                Job::Template { folder: target(folder)?, template }
+            }
             Self::SaveTemplate { selection } => Job::Copy {
                 sources: paths(&selection)?,
                 folder: templates::own_folder()?,
@@ -644,8 +652,8 @@ async fn start_job(
 }
 
 #[tauri::command]
-async fn undo_job(origin: Option<u32>, step: Option<u64>, app: AppHandle) -> Result<(), String> {
-    jobs::undo(&app, origin, step)
+async fn undo_job(origin: Option<u32>, step: Option<u64>, back: Option<bool>, app: AppHandle) -> Result<(), String> {
+    jobs::undo(&app, origin, step, back.unwrap_or(false))
 }
 
 #[tauri::command]
@@ -767,6 +775,14 @@ async fn check_renames(
         .map_err(|error| error.to_string())
 }
 
+/// What the name tokens of a batch rename read from each selected row. `deep` reads the files'
+/// own properties too: date taken, artist and title.
+#[tauri::command]
+async fn rename_facts(selection: Selection, deep: bool, views: State<'_, Views>) -> Result<Vec<preview::NameFacts>, String> {
+    let paths = views.read(&selection, folder::Listing::paths)?;
+    blocking(move || Ok(paths.iter().map(|path| preview::name_facts(path, deep)).collect())).await
+}
+
 /// The selected rows' names, and whether each is a folder.
 #[tauri::command]
 fn row_facts(selection: Selection, views: State<'_, Views>) -> Result<Vec<(String, bool)>, String> {
@@ -816,6 +832,12 @@ fn clipboard_sequence() -> u32 {
 #[tauri::command]
 fn clipboard_can_paste() -> bool {
     clipboard::can_paste()
+}
+
+/// The clipboard holds text or a picture, which can become a new file.
+#[tauri::command]
+fn clipboard_has_content() -> bool {
+    clipboard::has_content()
 }
 
 #[tauri::command]
@@ -1843,11 +1865,13 @@ fn main() {
             measure_selection,
             check_renames,
             row_facts,
+            rename_facts,
             bin_summary,
             set_clipboard,
             cancel_cut,
             clipboard_sequence,
             clipboard_can_paste,
+            clipboard_has_content,
             rows,
             find_row,
             close_view,

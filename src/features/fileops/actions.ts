@@ -11,6 +11,7 @@ import {
   type Task,
 } from "../../api";
 import type { FolderView } from "../navigation/folderView";
+import { dayText } from "./renameRules";
 import type { RenameRequest } from "./BatchRename";
 import { forgetCut, markCut } from "./clipboard";
 import type { DeleteRequest } from "./ConfirmDelete";
@@ -125,10 +126,16 @@ export function createFileActions(
       if (folder && !view.isBin()) start(view, { kind: "template", folder, extension });
     },
 
-    /** A new file from one the user keeps in their templates folder. */
+    /** A new file from one the user keeps in their templates folder. A `{date}` in its name is today. */
     newFromOwn(view: FolderView, name: string) {
       const folder = view.folder()?.path;
-      if (folder && !view.isBin()) start(view, { kind: "ownTemplate", folder, name });
+      if (folder && !view.isBin()) start(view, { kind: "ownTemplate", folder, name, date: dayText(Date.now()) });
+    },
+
+    /** A new file from the text or picture on the clipboard. */
+    newFromClipboard(view: FolderView) {
+      const folder = view.folder()?.path;
+      if (folder && !view.isBin()) start(view, { kind: "fromClipboard", folder });
     },
 
     /** The Recycle Bin is the last stop, so deleting from it always asks first. */

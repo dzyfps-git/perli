@@ -16,7 +16,7 @@ import {
 } from "../../api";
 import type { FolderView } from "../navigation/folderView";
 import { baseName, join, samePath } from "../navigation/path";
-import { markDeleted } from "../filelist/rowMotion";
+import { markBack, markDeleted } from "../filelist/rowMotion";
 import { checkCut } from "./clipboard";
 import { setLanded } from "./landed";
 import { nextRate, startRate, type Rate } from "./progress";
@@ -63,6 +63,8 @@ export function createJobs(views: () => FolderView[]) {
   const [cards, setCards] = createStore<JobCard[]>([]);
   const [latestStep, setLatestStep] = createSignal<number | null>(null);
   const [canRedo, setCanRedo] = createSignal(false);
+  const [undoText, setUndoText] = createSignal<string | null>(null);
+  const [redoText, setRedoText] = createSignal<string | null>(null);
   /** Cards with no job behind them count down, so their ids never meet a job's. */
   let failures = 0;
 
@@ -80,13 +82,16 @@ export function createJobs(views: () => FolderView[]) {
   function undoable(state: Undoable) {
     setLatestStep(state.latestStep);
     setCanRedo(state.redo);
+    setUndoText(state.undoText);
+    setRedoText(state.redoText);
   }
 
   function started(event: Extract<JobEvent, { kind: "started" }>) {
-    const { id, title, origin, newItem, recycle } = event;
+    const { id, title, origin, newItem, recycle, back } = event;
     const rate = startRate(performance.now());
     setCards(cards.length, { id, title, origin, newItem, recycle, shown: false, paused: false, rate });
     if (recycle) markDeleted();
+    if (back) markBack();
     setTimeout(() => patch(id, { shown: true }), SHOW_AFTER_MS);
   }
 
@@ -163,6 +168,9 @@ export function createJobs(views: () => FolderView[]) {
     cards,
     latestStep,
     canRedo,
+    /** What Undo and Redo would do now, for their hover text and menu labels. */
+    undoText,
+    redoText,
     /** Undo reverses the newest step only, so an older job can no longer offer it. */
     canUndo: (card: JobCard) => card.ended?.step != null && card.ended.step === latestStep(),
     undo(card: JobCard) {

@@ -34,6 +34,10 @@ export const lookOf = (path: string): Look | undefined => looks()[lookKey(path)]
 
 export const setLook = (path: string, change: Look) => setLooks(withLook(looks(), path, change));
 
+/** Gives many folders the same change at once, saved once. */
+export const setLooksFor = (paths: string[], change: Look) =>
+  setLooks(paths.reduce((all, path) => withLook(all, path, change), looks()));
+
 export const togglePinned = (path: string) => setPinned(toggled(pinned(), path));
 
 export const movePinned = (path: string, step: -1 | 1) => setPinned(moved(pinned(), path, step));

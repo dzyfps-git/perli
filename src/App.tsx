@@ -34,6 +34,8 @@ import {
   stopSizes,
   subfolders,
   undoJob,
+  commonTags,
+  setTag,
   type Grouping,
   type Places,
   type Recent,
@@ -50,6 +52,9 @@ import { checkCut, cutNames, takeBackCut } from "./features/fileops/clipboard";
 import { ConfirmDelete, type DeleteRequest } from "./features/fileops/ConfirmDelete";
 import { createJobs } from "./features/fileops/jobs";
 import { JobsPanel } from "./features/fileops/JobsPanel";
+import { NewGallery, type NewPick } from "./features/fileops/NewGallery";
+import { LookPicker } from "./features/sidebar/LookPicker";
+import { kindOf } from "./features/filelist/fileKinds";
 import { createShellItems } from "./features/fileops/shellItems";
 import { AppPicker } from "./features/dialogs/AppPicker";
 import { DisconnectDrive, MapDrive } from "./features/dialogs/NetworkDrives";
@@ -132,7 +137,6 @@ import {
   groupOf,
   setGroup,
   hiddenSections,
-  lookOf,
   movePinned,
   pinned,
   SECTIONS,
@@ -148,7 +152,7 @@ import { folderGlyph, FOLDERS, Sidebar } from "./features/sidebar/Sidebar";
 import { parseSession } from "./features/tabs/session";
 import { createTabs, type Tab } from "./features/tabs/tabs";
 import { NewTag } from "./features/tags/NewTag";
-import { refreshTags, TAG_COLORS, TAG_DROP, tagQuery, tags as allTags } from "./features/tags/tags";
+import { refreshTags, TAG_DROP, tagQuery, tags as allTags } from "./features/tags/tags";
 import { TitleBar } from "./features/titlebar/TitleBar";
 import { Menu, type MenuItem } from "./ui/Menu";
 import { NameSheet, type NameAsk } from "./ui/NameSheet";
@@ -229,49 +233,21 @@ const ownColumns = (view: FolderView) => (view.isBin() ? BIN_COLUMNS : view.quer
 const rowPath = (view: FolderView, row: Row) => join(row.location || view.folder()!.path, row.name);
 const toggleFlat = (view: FolderView) => view.search(view.query() === FLAT_QUERY ? "" : FLAT_QUERY);
 
-/** Glyphs a folder can wear, from Segoe Fluent Icons. */
-const LOOK_ICONS: [string, string | undefined][] = [
-  ["Folder", undefined],
-  ["Star", "\uE734"],
-  ["Heart", "\uEB51"],
-  ["Work", "\uE821"],
-  ["Code", "\uE943"],
-  ["Music", "\uE8D6"],
-  ["Pictures", "\uE8B9"],
-  ["Video", "\uE714"],
-  ["Games", "\uE7FC"],
-  ["Package", "\uE7B8"],
-  ["Lock", "\uE72E"],
-  ["People", "\uE716"],
-  ["Globe", "\uE774"],
-];
+/** Long enough for "Renamed a long name to another", short enough for a menu. */
+const UNDO_LABEL_LENGTH = 48;
+
+/** "Undo: Renamed a.txt to b.txt", cut short where the names are long. */
+function undoLabel(verb: string, text: string | null) {
+  if (!text) return verb;
+  const short = text.length > UNDO_LABEL_LENGTH ? `${text.slice(0, UNDO_LABEL_LENGTH - 1)}…` : text;
+  return `${verb}: ${short}`;
+}
+
+/** The folder whose look is being chosen, in its own sheet. */
+const [lookFor, setLookFor] = createSignal<string>();
 
 function lookItem(path: string): MenuItem {
-  const look = lookOf(path);
-  return {
-    label: "Folder look",
-    items: [
-      {
-        label: "Color",
-        items: [
-          { label: "None", checked: look?.color === undefined, action: () => setLook(path, { color: undefined }) },
-          ...TAG_COLORS.map((name, color) => ({
-            label: name,
-            checked: look?.color === color,
-            action: () => setLook(path, { color }),
-          })),
-        ],
-      },
-      {
-        label: "Icon",
-        items: LOOK_ICONS.map(([label, icon]) => ({
-          label,
-          checked: look?.icon === icon,
-          action: () => setLook(path, { icon }),
-        })),
-      },
-    ],
-  };
+  return { label: "Folder look…", action: () => setLookFor(path) };
 }
 
 /** Pinning, bookmarking and the look of a folder. */
@@ -349,6 +325,8 @@ export function App() {
   const [activityOpen, setActivityOpen] = createSignal(false);
   /** The folder the disk map starts in, while the map is open. */
   const [mapping, setMapping] = createSignal<string>();
+  /** The New gallery, where it opens and the view it makes things in. */
+  const [making, setMaking] = createSignal<{ view: FolderView; x: number; y: number }>();
   /** A sheet covers the tabs, so nothing behind it may change. */
   const sheetOpen = () =>
     !!deleting() ||
@@ -770,6 +748,9 @@ export function App() {
       { label: "Copy path", action: () => copyPath(view) },
       { label: "New folder with selection", action: () => gather(view) },
       { label: "Put on the shelf", action: () => putOnShelf(view) },
+      ...(kindOf(row.name, row.isDir) === "picture"
+        ? [{ label: "Use as folder cover", action: () => setLook(row.location || view.folder()!.path, { cover: path }) }]
+        : []),
       ...toolItems,
       shell.tagsItem(view, showTagChange, () => setNamingTag(view)),
       ...(inCloud(path)
@@ -798,6 +779,20 @@ export function App() {
   function keepHere(view: FolderView, keep: boolean) {
     const selection = actions.selected(view);
     if (selection) quietly(keepOnDevice(selection, keep).then(() => view.reload()));
+  }
+
+  /** Alt+1 to 9 puts the tag in that place on the selected rows, or takes it off if all have it. */
+  async function toggleTagKey(view: FolderView, place: number) {
+    const tag = allTags()[place - 1];
+    const selection = actions.selected(view);
+    if (!tag || !selection) return;
+    try {
+      const common = await commonTags(selection);
+      await setTag(selection, tag.id, !common.includes(tag.id));
+      showTagChange();
+    } catch (failure) {
+      jobs.report(failure);
+    }
   }
 
   function showTagChange() {
@@ -960,11 +955,20 @@ export function App() {
     ];
   }
 
+  function makeNew(view: FolderView, pick: NewPick) {
+    if (pick.kind === "folder" || pick.kind === "file") actions.newItem(view, pick.kind === "folder");
+    else if (pick.kind === "clipboard") actions.newFromClipboard(view);
+    else if (pick.kind === "type") actions.newFrom(view, pick.extension);
+    else if (pick.kind === "own") actions.newFromOwn(view, pick.name);
+    else actions.openTemplates(view);
+  }
+
   async function showBackgroundMenu(event: MouseEvent, view: FolderView) {
     const { clientX: x, clientY: y } = event;
+    // Each says what it will do, so nobody has to guess what a press takes back.
     const undo = [
-      { label: "Undo", disabled: jobs.latestStep() === null, action: () => actions.undo(view) },
-      { label: "Redo", disabled: !jobs.canRedo(), action: () => actions.redo(view) },
+      { label: undoLabel("Undo", jobs.undoText()), disabled: jobs.latestStep() === null, action: () => actions.undo(view) },
+      { label: undoLabel("Redo", jobs.redoText()), disabled: !jobs.canRedo(), action: () => actions.redo(view) },
     ];
     const fileItems: MenuItem[] = view.isBin()
       ? [
@@ -977,11 +981,12 @@ export function App() {
         ]
       : [
           { label: "Paste", disabled: !(await clipboardCanPaste()), action: () => actions.paste(view) },
-          shell.newItem(view),
+          { label: "New…", action: () => setMaking({ view, x, y }) },
           { label: "Search here", action: () => view.askSearch() },
           { label: "Select by pattern…", action: () => setSelectingPattern(view) },
           { label: "Filter…", action: () => setFiltering(view) },
           ...undo,
+          { label: "Undo several…", disabled: jobs.latestStep() === null, action: () => setActivityOpen(true) },
           { label: "Activity log", action: () => setActivityOpen(true) },
           { label: "Disk map", action: () => setMapping(view.folder()?.path) },
         ];
@@ -1181,6 +1186,7 @@ export function App() {
       const path = pinned()[place - 1];
       if (path) here().open(path);
     }),
+    ...numbered("tag", (place) => toggleTagKey(here(), place)),
     list: () => here().setLayout("list"),
     grid: () => here().setLayout("grid"),
     largerTiles: () => resizeTiles(here(), TILE_STEP),
@@ -1540,6 +1546,10 @@ export function App() {
                 onDragOut={() => actions.dragOut(view)}
                 onOpen={(row, toSide) => openRow(view, row, toSide)}
                 onMenu={(event, row) => showRowMenu(event, view, row)}
+                onTag={(id) => {
+                  const tag = allTags().find((known) => known.id === id);
+                  if (tag) view.search(tagQuery(tag.name));
+                }}
                 onBackgroundMenu={(event) => showBackgroundMenu(event, view)}
                 onHeaderMenu={(event) => (ownColumns(view) ? event.preventDefault() : showHeaderMenu(event))}
                 onGroup={cycleGrouping}
@@ -1648,6 +1658,14 @@ export function App() {
       <Show when={menu()} keyed>
         {(open) => <Menu x={open.x} y={open.y} items={open.items} onClose={closeMenu} />}
       </Show>
+      <Show when={lookFor()} keyed>
+        {(path) => <LookPicker path={path} onClose={() => setLookFor(undefined)} />}
+      </Show>
+      <Show when={making()} keyed>
+        {(open) => (
+          <NewGallery x={open.x} y={open.y} onPick={(pick) => makeNew(open.view, pick)} onClose={() => setMaking(undefined)} />
+        )}
+      </Show>
       <JobsPanel jobs={jobs} />
       <Shelf
         folder={dropFolder}
@@ -1660,7 +1678,7 @@ export function App() {
         <ActivityLog
           canRedo={jobs.canRedo}
           onShow={(path) => showInFolder(tabs.activeView(), path)}
-          onUndo={(step) => undoJob(tabs.activeView().id, step).catch(failed)}
+          onUndo={(step, back) => undoJob(tabs.activeView().id, step, back).catch(failed)}
           onRedo={() => redoJob(tabs.activeView().id).catch(failed)}
           onClose={() => setActivityOpen(false)}
         />

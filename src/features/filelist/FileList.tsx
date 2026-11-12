@@ -1,6 +1,7 @@
-import { createEffect, createMemo, createSignal, on, onCleanup, onMount, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
 import {
   fetchRows,
+  fetchPictureFile,
   fetchThumb,
   findRow,
   selectionSize,
@@ -141,13 +142,17 @@ const CELL_CLASS: Partial<Record<SortKey, string>> = {
   location: "file-meta file-clipped",
 };
 
-function tagDot(id: number) {
+/** A tag on a row: a soft pill with its name in the list, a dot where room is short. */
+function tagMark(id: number, pill: boolean) {
   const tag = tags().find((known) => known.id === id);
   if (!tag) return [];
-  const dot = document.createElement("span");
-  dot.className = "tag-dot";
-  dot.style.background = tagColor(tag.color);
-  return [dot];
+  const mark = document.createElement("span");
+  mark.className = pill ? "tag-pill" : "tag-dot";
+  mark.dataset.tag = String(id);
+  mark.style.setProperty("--tag", tagColor(tag.color));
+  // Its name is drawn by CSS, so the cell's text stays the row's name (a drop target reads it).
+  if (pill) mark.dataset.name = tag.name;
+  return [mark];
 }
 
 /** The second line of a roomy row. */
@@ -185,6 +190,23 @@ function createRow(cells: SortKey[], withThumb: boolean, inGrid: boolean): Poole
     thumb,
   };
 }
+
+/** Windows refuses these in a name. */
+const BAD_NAME_CHARACTERS = /[\\/:*?"<>|]/g;
+const BAD_NAME_HINT = 'A name can\'t have any of \\ / : * ? " < > |';
+
+/** The extension of a file's name, in lower case, or nothing. */
+function extensionOf(name: string) {
+  const dot = name.lastIndexOf(".");
+  return dot > 0 ? name.slice(dot).toLowerCase() : "";
+}
+
+/** How big a folder's cover picture is read, enough for the largest tile. */
+const COVER_EDGE = 256;
+
+/** Offered while a new file is named, narrowed by what follows the dot. */
+const NEW_EXTENSIONS = [".txt", ".md", ".json", ".csv", ".html", ".css", ".js", ".ts", ".py", ".ps1", ".xml", ".yaml", ".log", ".ini"];
+const MOST_EXTENSIONS = 8;
 
 /** What F2 selects in the name editor, in turn. */
 type NamePart = "stem" | "whole" | "extension";
@@ -228,6 +250,8 @@ export function FileList(props: {
   onDragOut: () => void;
   onOpen: (row: Row, toSide: boolean) => void;
   onMenu: (event: MouseEvent, row: Row) => void;
+  /** A click on a tag pill, to show what else has that tag. */
+  onTag?: (id: number) => void;
   onBackgroundMenu: (event: MouseEvent) => void;
   onHeaderMenu: (event: MouseEvent) => void;
   onGroup: () => void;
@@ -261,8 +285,16 @@ export function FileList(props: {
     left: number;
     top: number;
     width: number;
+    /** It was just made, so its extension is still the user's to pick without a question. */
+    fresh: boolean;
   }>();
+  /** What the name editor holds now. */
+  const [editValue, setEditValue] = createSignal("");
   const [editError, setEditError] = createSignal<string>();
+  /** A gentle word under the name editor, rather than a dialog: a hint or a question. */
+  const [editHint, setEditHint] = createSignal<string>();
+  /** The new extension the user was asked about, which the next Enter accepts. */
+  let extensionAsked: string | undefined;
   const [card, setCard] = createSignal<CardAsk>();
   /** How many rows are selected and their bytes, for the status line. */
   const [picked, setPicked] = createSignal({ count: 0, bytes: 0 });
@@ -318,8 +350,14 @@ export function FileList(props: {
     return pooled?.index === index && pooled.thumbKey === key ? pooled : undefined;
   }
 
+  /** The picture a folder row wears as its cover, if it was given one. */
+  const coverOf = (row: Row | undefined) => (row?.isDir ? lookOf(join(row.location || props.folder, row.name))?.cover : undefined);
+
   const thumbs = createThumbLoader(
-    (index) => fetchThumb(props.view, shown, index),
+    (index) => {
+      const cover = coverOf(rowAt(index));
+      return cover ? fetchPictureFile(cover, COVER_EDGE) : fetchThumb(props.view, shown, index);
+    },
     (index, key) => rowShowing(index, key) !== undefined,
     (index, key) => {
       const pooled = rowShowing(index, key);
@@ -432,7 +470,8 @@ export function FileList(props: {
     for (const cell of pooled.cells) {
       cell.element.textContent = row ? CELL_TEXT[cell.id](row, props.folder) : "";
       if (cell.id === "name") {
-        if (row) cell.element.prepend(...row.tags.flatMap(tagDot));
+        if (row && inList) cell.element.append(...row.tags.flatMap((id) => tagMark(id, true)));
+        else if (row) cell.element.prepend(...row.tags.flatMap((id) => tagMark(id, false)));
         if (inList) cell.element.prepend(pooled.icon);
         if (nests()) cell.element.prepend(twistOf(pooled, row));
         if (row && inList && rowDensity() === "roomy") cell.element.dataset.sub = subText(row);
@@ -445,7 +484,7 @@ export function FileList(props: {
     // Windows' picture of a folder would hide the look it was given. Other files show Perli's
     // own icon, unless a picture says more or Windows gave the folder an icon of its own.
     const pictured = row && !look && (windowsIcons() || row.isCustom || hasPicture(kind!) || COVERED.test(row.name));
-    showThumb(pooled, pictured ? thumbKey(row) : undefined);
+    showThumb(pooled, look?.cover ? `cover|${look.cover}` : pictured ? thumbKey(row) : undefined);
     // A book or comic part read shows how far, as a thin bar under its icon.
     const read = row && !row.isDir ? readProgress()[join(row.location || props.folder, row.name)] : undefined;
     if (read !== undefined) {
@@ -465,7 +504,8 @@ export function FileList(props: {
   function lightMatch(pooled: PooledRow, row: Row | undefined) {
     for (const range of pooled.matches ?? []) nameMatches.delete(range);
     pooled.matches = undefined;
-    const text = pooled.cells.find((cell) => cell.id === "name")?.element.lastChild;
+    const cell = pooled.cells.find((cell) => cell.id === "name")?.element;
+    const text = cell && [...cell.childNodes].find((node) => node instanceof Text);
     if (!row || !props.match || !(text instanceof Text)) return;
     pooled.matches = matchSpans(row.name, props.match).map(([start, end]) => {
       const range = new Range();
@@ -717,6 +757,9 @@ export function FileList(props: {
 
   function onClick(event: MouseEvent) {
     const index = indexFromEvent(event);
+    // A tag on a row shows every item with that tag, unless the click picks rows.
+    const tag = (event.target as HTMLElement).closest<HTMLElement>(".tag-pill");
+    if (tag && props.onTag && !event.ctrlKey && !event.shiftKey) return props.onTag(Number(tag.dataset.tag));
     if (index >= 0 && (event.target as HTMLElement).closest(".file-twist")) return toggleFolder(index);
     if (index < 0) selection.clear();
     else if (event.shiftKey) selection.extendTo(index, event.ctrlKey);
@@ -859,7 +902,7 @@ export function FileList(props: {
     }
     const next = renameNext;
     renameNext = undefined;
-    if (props.rename) startRename(selection.focused());
+    if (props.rename) startRename(selection.focused(), true);
     else if (next) moveRename(loadedIndex(next));
   }
 
@@ -889,7 +932,7 @@ export function FileList(props: {
     startRename(index);
   }
 
-  function startRename(index: number) {
+  function startRename(index: number, fresh = false) {
     const row = index >= 0 ? rowAt(index) : undefined;
     const sample = pool[0];
     if (!row || !sample || editor()) return;
@@ -900,10 +943,12 @@ export function FileList(props: {
     const twistRoom = nests() ? TWIST_ROOM + depthOf(row) * INDENT : 0;
     const iconRoom = inList ? sample.icon.offsetWidth + ICON_GAP + twistRoom : 0;
     const middle = inList && rowDensity() === "roomy" ? ROOMY_LINE / 2 : cell.offsetHeight / 2;
+    setEditValue(row.name);
     setEditor({
       index,
       name: row.name,
       isDir: row.isDir,
+      fresh,
       left: (index % perRow) * element.offsetWidth + element.clientLeft + cell.offsetLeft + iconRoom,
       top: Math.floor(index / perRow) * itemHeight + element.clientTop + cell.offsetTop + middle,
       width: Math.max(cell.offsetWidth - iconRoom, MIN_EDITOR_WIDTH),
@@ -931,6 +976,8 @@ export function FileList(props: {
   function endRename() {
     setEditor(undefined);
     setEditError(undefined);
+    setEditHint(undefined);
+    extensionAsked = undefined;
     if (props.active) grid.focus({ preventScroll: true });
     props.onEditEnd();
   }
@@ -945,6 +992,18 @@ export function FileList(props: {
       endRename();
       return moveRename(target);
     }
+    // A new extension can leave a file no app opens, so the first Enter only asks.
+    const [before, after] = [extensionOf(current.name), extensionOf(name)];
+    if (!current.isDir && !current.fresh && before !== after && extensionAsked !== after) {
+      extensionAsked = after;
+      setEditError(undefined);
+      const change = after ? `to ${after}` : "off";
+      const was = before ? `${before} ` : "";
+      setEditHint(`Change the ${was}extension ${change}? The file may then open in another app, or none. Press Enter again to change it, or Esc to keep it.`);
+      shake();
+      editInput.focus();
+      return;
+    }
     committing = true;
     // The new name can move rows around, so the next row is found again by its name.
     const next = target >= 0 && target < props.count ? rowAt(target) : undefined;
@@ -954,11 +1013,60 @@ export function FileList(props: {
       endRename();
     } catch (failure) {
       renameNext = undefined;
+      setEditHint(undefined);
       setEditError(String(failure));
+      shake();
       editInput.focus();
     } finally {
       committing = false;
     }
+  }
+
+  /** A soft shake of the name editor, where a dialog would have been. */
+  function shake() {
+    if (reducedMotion.matches) return;
+    editInput.animate({ translate: ["0 0", "-4px 0", "4px 0", "-2px 0", "0 0"] }, { duration: 260, easing: "ease-out", composite: "add" });
+  }
+
+  /** Characters Windows refuses never get in: they shake the editor and say why. */
+  function onEditorInput() {
+    const typed = editInput.value;
+    setEditValue(typed);
+    if (extensionAsked !== undefined && extensionOf(typed) !== extensionAsked) {
+      extensionAsked = undefined;
+      setEditHint(undefined);
+    }
+    if (typed.search(BAD_NAME_CHARACTERS) < 0) return;
+    const caret = editInput.selectionStart ?? typed.length;
+    const before = typed.slice(0, caret).replace(BAD_NAME_CHARACTERS, "");
+    editInput.value = before + typed.slice(caret).replace(BAD_NAME_CHARACTERS, "");
+    editInput.setSelectionRange(before.length, before.length);
+    setEditValue(editInput.value);
+    setEditError(undefined);
+    setEditHint(BAD_NAME_HINT);
+    shake();
+  }
+
+  /** The extensions to offer a new file, the one it has first, then those matching what is typed. */
+  function extensionChoices() {
+    const open = editor();
+    if (!open?.fresh || open.isDir) return [];
+    const typed = extensionOf(editValue());
+    // A whole extension, such as the one a new file starts with, comes first with the others after.
+    if (NEW_EXTENSIONS.includes(typed)) return [typed, ...NEW_EXTENSIONS.filter((other) => other !== typed)].slice(0, MOST_EXTENSIONS);
+    const fitting = NEW_EXTENSIONS.filter((extension) => extension.startsWith(typed));
+    return (fitting.length > 0 ? fitting : NEW_EXTENSIONS).slice(0, MOST_EXTENSIONS);
+  }
+
+  /** Puts `extension` on the name being typed, and leaves the rest of the name selected. */
+  function useExtension(extension: string) {
+    const name = editInput.value;
+    const dot = name.lastIndexOf(".");
+    const stem = dot > 0 ? name.slice(0, dot) : name;
+    editInput.value = stem + extension;
+    setEditValue(editInput.value);
+    editInput.focus();
+    editInput.setSelectionRange(0, stem.length);
   }
 
   function onEditorKey(event: KeyboardEvent) {
@@ -1200,11 +1308,29 @@ export function FileList(props: {
                 spellcheck={false}
                 value={open.name}
                 onKeyDown={onEditorKey}
+                onInput={onEditorInput}
                 onBlur={onEditorBlur}
               />
-              <Show when={editError()}>
-                <p class="file-editor-error" role="alert">
-                  {editError()}
+              <Show when={extensionChoices().length > 0 && !editError() && !editHint()}>
+                <p class="file-editor-extensions" role="group" aria-label="Extensions">
+                  <For each={extensionChoices()}>
+                    {(extension) => (
+                      <button
+                        class="file-editor-extension"
+                        tabIndex={-1}
+                        aria-current={extensionOf(editValue()) === extension}
+                        onPointerDown={(event) => event.preventDefault()}
+                        onClick={() => useExtension(extension)}
+                      >
+                        {extension}
+                      </button>
+                    )}
+                  </For>
+                </p>
+              </Show>
+              <Show when={editError() ?? editHint()}>
+                <p class="file-editor-error" role="alert" data-hint={editError() ? undefined : ""}>
+                  {editError() ?? editHint()}
                 </p>
               </Show>
             </div>

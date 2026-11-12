@@ -390,3 +390,12 @@
     animation: none;
   }
 }
+
+/* A folder with a color wears it in the crumbs too, as a soft underline. */
+.crumb[data-look] {
+  box-shadow: inset 0 -2px 0 color-mix(in srgb, var(--look-color) 70%, transparent);
+}
+
+.crumb[data-look]:hover {
+  background: color-mix(in srgb, var(--look-color) 14%, var(--surface-hover));
+}

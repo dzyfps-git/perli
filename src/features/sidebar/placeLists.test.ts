@@ -39,6 +39,9 @@ test("a look changes in parts and goes once it is empty", () => {
   looks = withLook(looks, "C:\\Work", { color: undefined });
   assert.deepEqual(looks, { "c:\\work": { icon: "\uE734" } });
   assert.deepEqual(withLook(looks, "C:\\Work", { icon: undefined }), {});
+  const covered = withLook({}, "C:\\Trip", { cover: "C:\\Trip\\beach.jpg" });
+  assert.deepEqual(covered, { "c:\\trip": { cover: "C:\\Trip\\beach.jpg" } });
+  assert.deepEqual(withLook(covered, "C:\\Trip", { cover: undefined }), {});
 });
 
 test("bookmark groups are kept by path, whatever its case", () => {

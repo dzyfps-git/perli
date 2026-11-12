@@ -51,6 +51,8 @@ export interface Look {
   color?: number;
   /** A Segoe Fluent Icons glyph. */
   icon?: string;
+  /** A picture shown for the folder in place of its icon. */
+  cover?: string;
 }
 
 export type Looks = Record<string, Look>;
@@ -64,6 +66,7 @@ export function withLook(looks: Looks, path: string, change: Look): Looks {
   const next = { ...looks };
   if (look.color === undefined) delete look.color;
   if (look.icon === undefined) delete look.icon;
+  if (look.cover === undefined) delete look.cover;
   if (Object.keys(look).length > 0) next[key] = look;
   else delete next[key];
   return next;

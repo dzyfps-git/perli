@@ -385,6 +385,175 @@
   display: none;
 }
 
+/* Chips for presets, tokens and the text mode, in one soft row. */
+.rename-presets,
+.rename-tokens {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1);
+  margin-top: var(--space-2);
+}
+
+.rename-chip,
+.rename-preset {
+  height: 24px;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  transition:
+    background-color var(--motion),
+    border-color var(--motion),
+    box-shadow var(--motion);
+}
+
+.rename-chip:hover:enabled,
+.rename-preset:hover {
+  background: var(--surface-hover);
+  border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
+}
+
+.rename-chip:disabled {
+  opacity: 0.5;
+}
+
+.rename-chip[aria-pressed="true"],
+.rename-preset[data-on] {
+  border-color: var(--accent);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+.rename-text-toggle {
+  margin-left: auto;
+}
+
+.rename-preset {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 2px 0 var(--space-2);
+}
+
+.rename-preset button {
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+}
+
+.rename-preset-forget {
+  width: 20px;
+  margin-left: 2px;
+  border-radius: 50%;
+  font-family: var(--font-icons) !important;
+  font-size: 8px !important;
+  opacity: 0.6;
+}
+
+.rename-preset-forget:hover {
+  opacity: 1;
+}
+
+.rename-preset-name {
+  height: 24px;
+  width: 140px;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--accent);
+  border-radius: 12px;
+  background: var(--surface-hover);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  outline: none;
+}
+
+.rename-fields-three {
+  grid-template-columns: 1fr 1fr 1fr;
+}
+
+.rename-tidy {
+  align-self: end;
+  height: var(--row-height);
+  margin-top: 0;
+}
+
+.rename-typed {
+  margin-top: var(--space-3);
+}
+
+.rename-typed textarea {
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-hover);
+  color: var(--text);
+  font: inherit;
+  line-height: 1.5;
+  resize: vertical;
+  user-select: text;
+  white-space: pre;
+}
+
+.rename-typed textarea:focus {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
+/* A numbered preview gets a handle on each row, to drag it to its place. */
+.rename-preview[data-numbering] li {
+  grid-template-columns: 20px 1fr 1fr;
+}
+
+.rename-grip {
+  width: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--space-1);
+  background: none;
+  color: var(--text-muted);
+  font-family: var(--font-icons);
+  font-size: 12px;
+  cursor: grab;
+  touch-action: none;
+}
+
+.rename-grip:hover,
+.rename-grip:focus-visible {
+  color: var(--text);
+  background: var(--surface-hover);
+}
+
+.rename-grip:focus-visible {
+  outline: 1px solid var(--accent);
+}
+
+.rename-preview li[data-dragging] {
+  background: var(--surface-selected);
+  border-radius: var(--space-1);
+  box-shadow: var(--shadow);
+}
+
+.rename-preview li[data-dragging] .rename-grip {
+  cursor: grabbing;
+}
+
+/* Why one row can't take its new name, right under it. */
+.rename-preview .rename-why {
+  grid-column: -3 / -1;
+  color: var(--danger);
+  font-size: 11.5px;
+  white-space: normal;
+}
+
+.rename-order-note {
+  margin: var(--space-1) 0 0;
+}
+
 .filter-one {
   grid-template-columns: 1fr;
 }
@@ -509,5 +678,177 @@
 
   .job-thread[data-done] {
     opacity: 0;
+  }
+}
+
+/* The New gallery: tiles with icons, in Perli's glass, where the menu was opened. */
+.new-gallery {
+  position: fixed;
+  inset: auto;
+  width: min(440px, calc(100vw - 16px));
+  max-height: calc(100vh - 16px);
+  margin: 0;
+  padding: var(--space-2) var(--space-3) var(--space-3);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  color: var(--text);
+  background: var(--overlay-tint);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-large);
+  box-shadow: var(--shadow);
+  backdrop-filter: var(--blur);
+  animation: menu-in 420ms var(--spring);
+}
+
+.new-section h3 {
+  margin: var(--space-2) 0 var(--space-1);
+  color: var(--text-muted);
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.new-tiles {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: var(--space-1);
+}
+
+.new-tile {
+  display: grid;
+  justify-items: center;
+  align-content: start;
+  gap: 2px;
+  min-width: 0;
+  padding: var(--space-2) var(--space-1);
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  background: none;
+  color: inherit;
+  font: inherit;
+  animation: new-tile-in 360ms var(--spring) backwards;
+  animation-delay: calc(min(var(--at), 12) * 18ms);
+  transition:
+    background var(--motion),
+    border-color var(--motion),
+    translate var(--motion);
+}
+
+.new-tile:hover:enabled,
+.new-tile:focus-visible {
+  background: var(--surface-hover);
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+  outline: none;
+  translate: 0 -1px;
+}
+
+.new-tile:disabled {
+  opacity: 0.45;
+}
+
+.new-tile .file-icon {
+  width: 34px;
+  height: 34px;
+  margin: 0 0 2px;
+  border-radius: 9px;
+}
+
+.new-tile .file-icon::before {
+  width: 20px;
+  height: 20px;
+}
+
+.new-label,
+.new-note {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.new-label {
+  font-size: 12px;
+}
+
+.new-note {
+  color: var(--text-muted);
+  font-size: 10.5px;
+}
+
+.new-empty {
+  margin: 0 0 var(--space-1);
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.new-open {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+  padding: 2px var(--space-2);
+  border: 0;
+  border-radius: var(--radius);
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  font-size: 12px;
+}
+
+.new-open:hover,
+.new-open:focus-visible {
+  background: var(--surface-hover);
+}
+
+.new-open-icon {
+  font-family: var(--font-icons);
+}
+
+@keyframes new-tile-in {
+  from {
+    opacity: 0;
+    scale: 0.9;
+  }
+}
+
+/* Extensions to pick from while a new file is named. */
+.file-editor-extensions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  width: max-content;
+  max-width: 320px;
+  margin: 0;
+  padding: var(--space-1);
+  translate: calc(var(--space-1) * -1) -6px;
+  background: var(--overlay-tint);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  backdrop-filter: var(--blur);
+  animation: menu-in 320ms var(--spring);
+}
+
+.file-editor-extension {
+  height: 20px;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 11.5px;
+}
+
+.file-editor-extension:hover,
+.file-editor-extension[aria-current="true"] {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, var(--surface));
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .new-gallery,
+  .new-tile,
+  .file-editor-extensions {
+    animation: none;
   }
 }

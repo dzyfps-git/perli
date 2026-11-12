@@ -3,10 +3,8 @@ import {
   commonTags,
   fileUsers,
   itemFacts,
-  newTypes,
   openTerminal,
   openWith,
-  ownTemplates,
   rowFacts,
   sendTargets,
   sendTo,
@@ -146,30 +144,6 @@ export function createShellItems(
           action: () => pickAppFor(view),
         };
         return [...appItems, choose];
-      },
-    }),
-
-    newItem: (view: FolderView): MenuItem => ({
-      label: "New",
-      items: [
-        { label: "Folder", action: () => actions.newItem(view, true) },
-        { label: "File", action: () => actions.newItem(view, false) },
-      ],
-      async load() {
-        const [own, types] = await Promise.all([ownTemplates(), newTypes()]);
-        return [
-          ...own.map((name, index) => ({
-            label: name,
-            divider: index === 0,
-            action: () => actions.newFromOwn(view, name),
-          })),
-          ...types.map(({ extension, name }, index) => ({
-            label: name,
-            divider: index === 0,
-            action: () => actions.newFrom(view, extension),
-          })),
-          { label: "Open templates folder", divider: true, action: () => actions.openTemplates(view) },
-        ];
       },
     }),
 
