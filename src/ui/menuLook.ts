@@ -58,6 +58,7 @@ const LOOK: Record<string, [icon: string, keys?: string]> = {
   "Larger tiles": [""],
   "Smaller tiles": [""],
   "Details panel": ["", "Alt+Shift+P"],
+  "Preview pane": ["\uE90D", "Alt+P"],
   "Keep sidebar open": ["\uE8A0", "Ctrl+B"],
   "Split view": ["", "Ctrl+\\"],
   "Swap panes": [""],
@@ -102,6 +103,8 @@ const LOOK: Record<string, [icon: string, keys?: string]> = {
   "New folder with selection": ["\uE8F4"],
   "Put on the shelf": ["\uE8F1"],
   "Activity log": ["\uE81C"],
+  "Disk map": ["\uEDA2", "Ctrl+Shift+M"],
+  "Send folder to file dialog (experimental)": ["\uE8DE", "Ctrl+Shift+O"],
   "Keyboard shortcuts": ["\uE765"],
   Settings: ["", "Ctrl+,"],
 };

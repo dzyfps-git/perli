@@ -138,7 +138,7 @@ pub fn picture(path: &Path, name: &str, edge: u32) -> Result<Vec<u8>, String> {
 
 /// Windows' own imaging reads the picture, so every format Windows can show works.
 /// ponytail: a JPEG's EXIF turn is not applied. Comic pages almost never have one.
-fn decode(bytes: &[u8], edge: u32) -> windows::core::Result<Vec<u8>> {
+pub(crate) fn decode(bytes: &[u8], edge: u32) -> windows::core::Result<Vec<u8>> {
     let _com = Com::enter();
     unsafe {
         let factory: IWICImagingFactory = CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER)?;

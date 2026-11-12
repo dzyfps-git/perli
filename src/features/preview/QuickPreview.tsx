@@ -1,6 +1,7 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { createEffect, createSignal, lazy, on, onCleanup, onMount, Show } from "solid-js";
 import {
+  aiffAudio,
   archiveText,
   bookChapter,
   fetchCover,
@@ -23,6 +24,7 @@ import {
 } from "../../api";
 import { formatSize } from "../../ui/format";
 import { typeText } from "../filelist/typeNames";
+import type { FolderView } from "../navigation/folderView";
 import { join, parentOf, resolveRelative } from "../navigation/path";
 import { languageOf } from "./highlight";
 import { tableDelimiter } from "./table";
@@ -63,7 +65,13 @@ const ComicView = lazy(() => import("./ComicView").then((module) => ({ default: 
 const PictureView = lazy(() => import("./PictureView").then((module) => ({ default: module.PictureView })));
 
 /** Files the player plays, for Play next to skip to. */
-const AUDIO = /\.(mid|midi|mp3|m4a|aac|wav|flac|ogg|oga|opus|weba)$/i;
+const AUDIO = /\.(mid|midi|mp3|m4a|aac|wav|flac|ogg|oga|opus|weba|aiff?|aifc)$/i;
+/** Sound the window cannot play, which Rust hands over as a WAV. */
+const AIFF = /\.(aiff?|aifc)$/i;
+/** Arrow keys held down skip past rows, so a row has to stay selected this long first. */
+const SETTLE_MS = 120;
+const ICON_DOCK = "\uE90D";
+const ICON_CLOSE = "\uE711";
 const NEXT_BATCH = 50;
 const NO_TAGS = { title: null, artist: null, album: null };
 const dates = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" });
@@ -84,6 +92,10 @@ export function QuickPreview(props: {
   onStep: (index: number) => void;
   onOpen: (row: Row) => void;
   onClose: () => void;
+  /** Beside the list instead of over it. The list keeps the keys, and `onClose` puts the pane away. */
+  docked?: boolean;
+  /** Moves the preview beside the list. */
+  onDock?: () => void;
 }) {
   const [index, setIndex] = createSignal(props.at.index);
   const [row, setRow] = createSignal<Row>();
@@ -219,9 +231,9 @@ export function QuickPreview(props: {
       path: pathOf(item),
       name: item.name,
       size: item.size,
-      load: midi
+      load: midi || AIFF.test(item.name)
         ? async () => {
-            const wav = await songAudio(view, shot, at);
+            const wav = await (midi ? songAudio : aiffAudio)(view, shot, at);
             return { url: URL.createObjectURL(new Blob([wav], { type: "audio/wav" })), made: true, tags: NO_TAGS };
           }
         : async () => {
@@ -302,8 +314,8 @@ export function QuickPreview(props: {
       event.preventDefault();
       return;
     }
-    // Typing in a view's box, such as Find, is left alone.
-    if (target.matches("input:not([type=range]), textarea")) return;
+    // Typing in a view's box, such as Find, is left alone. Beside the list, the list has the rest.
+    if (props.docked || target.matches("input:not([type=range]), textarea")) return;
     if (key === "ArrowLeft" || key === "ArrowUp") step(-1);
     else if (key === "ArrowRight" || key === "ArrowDown") step(1);
     else if (key === " ") {
@@ -324,8 +336,12 @@ export function QuickPreview(props: {
   }
 
   onMount(() => {
-    dialog.showModal();
-    body.focus();
+    // Not `show()`: that moves focus into the dialog, and the list must keep the keys.
+    if (props.docked) dialog.open = true;
+    else {
+      dialog.showModal();
+      body.focus();
+    }
     stir();
   });
   onCleanup(() => window.clearTimeout(idleTimer));
@@ -359,12 +375,15 @@ export function QuickPreview(props: {
     <dialog
       ref={dialog}
       class="quick-preview"
+      classList={{ "preview-docked": props.docked }}
+      // A click on something that takes no focus would leave the keys with nothing to go to.
+      onFocusOut={(event) => !props.docked && !event.relatedTarget && body.focus()}
       aria-label={row() ? `Preview of ${row()!.name}` : "Preview"}
       onKeyDown={onKeyDown}
       onPointerMove={stir}
       onPointerDown={stir}
       onClose={props.onClose}
-      onClick={(event) => event.target === dialog && props.onClose()}
+      onClick={(event) => event.target === dialog && !props.docked && props.onClose()}
     >
       <div
         ref={body}
@@ -410,7 +429,65 @@ export function QuickPreview(props: {
         <Show when={row() && parentOf(pathOf(row()!)) !== props.at.folder && row()!.location}>
           <span class="preview-facts">{row()!.location}</span>
         </Show>
+        <Show when={props.docked || props.onDock}>
+          <button
+            class="preview-dock-button"
+            aria-label={props.docked ? "Close preview pane" : "Keep beside the list"}
+            onClick={() => (props.docked ? props.onClose() : props.onDock!())}
+          >
+            {props.docked ? ICON_CLOSE : ICON_DOCK}
+          </button>
+        </Show>
       </footer>
     </dialog>
+  );
+}
+
+/** The preview kept beside the list, showing the one row selected there. */
+export function PreviewDock(props: { view: FolderView; onOpen: (row: Row) => void; onClose: () => void }) {
+  const [at, setAt] = createSignal<PreviewAt>();
+  let timer: number | undefined;
+  createEffect(
+    on(
+      () => props.view.cursor(),
+      (cursor) => {
+        window.clearTimeout(timer);
+        timer = window.setTimeout(() => {
+          const folder = props.view.folder();
+          setAt(
+            cursor && folder
+              ? {
+                  view: props.view.id,
+                  snapshot: () => cursor.snapshot,
+                  index: cursor.index,
+                  count: () => folder.count,
+                  selected: () => cursor.index,
+                  folder: folder.path,
+                }
+              : undefined,
+          );
+        }, SETTLE_MS);
+      },
+    ),
+  );
+  onCleanup(() => window.clearTimeout(timer));
+
+  return (
+    <aside class="preview-dock" aria-label="Preview">
+      <Show
+        when={at()}
+        keyed
+        fallback={
+          <p class="details-empty">
+            Select one item to preview it.
+            <button class="preview-dock-button" aria-label="Close preview pane" onClick={props.onClose}>
+              {ICON_CLOSE}
+            </button>
+          </p>
+        }
+      >
+        {(now) => <QuickPreview at={now} docked onStep={() => undefined} onOpen={props.onOpen} onClose={props.onClose} />}
+      </Show>
+    </aside>
   );
 }

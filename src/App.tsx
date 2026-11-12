@@ -30,6 +30,7 @@ import {
   selectionPaths,
   startJob,
   startState,
+  sendToFileDialog,
   stopSizes,
   subfolders,
   undoJob,
@@ -62,6 +63,9 @@ import { clampTile, isLargestTile, isSmallestTile, TILE_STEP, type Layout } from
 import {
   columns,
   detailsPanel,
+  previewPane,
+  setPreviewPane,
+  inlineFolders,
   folderSizes,
   rowDensity,
   setRowDensity,
@@ -94,6 +98,7 @@ import { comboOf, KEYS } from "./features/keys/keys";
 import { KeySheet } from "./features/keys/KeySheet";
 import { ActivityLog } from "./features/reach/ActivityLog";
 import { DropChips } from "./features/reach/DropChips";
+import { DiskMap } from "./features/diskmap/DiskMap";
 import { readTyped } from "./features/reach/lists";
 import {
   forgetNickname,
@@ -108,7 +113,7 @@ import {
 import type { BarItem } from "./features/reach/SelectionBar";
 import { Shelf } from "./features/reach/Shelf";
 import { DetailsPanel } from "./features/preview/DetailsPanel";
-import { QuickPreview, type PreviewAt } from "./features/preview/QuickPreview";
+import { PreviewDock, QuickPreview, type PreviewAt } from "./features/preview/QuickPreview";
 import { BACKDROPS, SCALES, setBackdrop, setUiScale } from "./features/settings/appearance";
 import { Settings } from "./features/settings/Settings";
 import { startUpdates, updateState } from "./features/settings/updates";
@@ -209,6 +214,8 @@ const FOLDER_ONLY = new Set([
   "terminal",
   "backgroundTab",
   "openToSide",
+  "diskMap",
+  "toFileDialog",
 ]);
 /** A key with no Ctrl or Alt in it types a letter, so it must not run a command while typing. */
 const typesText = (combo: string) => !/Ctrl|Alt|^F\d+$/.test(combo);
@@ -338,6 +345,8 @@ export function App() {
   const [previewing, setPreviewing] = createSignal<{ view: FolderView; at: PreviewAt }>();
   const [keysOpen, setKeysOpen] = createSignal(false);
   const [activityOpen, setActivityOpen] = createSignal(false);
+  /** The folder the disk map starts in, while the map is open. */
+  const [mapping, setMapping] = createSignal<string>();
   /** A sheet covers the tabs, so nothing behind it may change. */
   const sheetOpen = () =>
     !!deleting() ||
@@ -350,6 +359,7 @@ export function App() {
     !!drives() ||
     !!previewing() ||
     keysOpen() ||
+    !!mapping() ||
     activityOpen();
   /** The settings page stands where the files do, so the keys of the files rest too. */
   const dialogOpen = () => settingsShown() || sheetOpen();
@@ -895,6 +905,7 @@ export function App() {
           ...(view.layout() === "grid" ? tileItems : rowItems),
           { label: "Windows icons", divider: true, checked: windowsIcons(), action: () => setWindowsIcons(!windowsIcons()) },
           { label: "Details panel", checked: detailsPanel(), action: toggleDetails },
+          { label: "Preview pane", checked: previewPane(), action: () => setPreviewPane(!previewPane()) },
           { label: "Status bar", checked: statusBar(), action: () => setStatusBar(!statusBar()) },
           { label: "Keep sidebar open", checked: sidebarOpen(), action: toggleSidebar },
         ],
@@ -959,6 +970,7 @@ export function App() {
           { label: "Filter…", action: () => setFiltering(view) },
           ...undo,
           { label: "Activity log", action: () => setActivityOpen(true) },
+          { label: "Disk map", action: () => setMapping(view.folder()?.path) },
         ];
     const shellItems = view.isBin() ? [] : shell.backgroundItems(view, { x, y });
     setMenu({ x, y, items: [...fileItems, ...viewItems(view), ...shellItems] });
@@ -1137,6 +1149,14 @@ export function App() {
     undo: () => actions.undo(here()),
     redo: () => actions.redo(here()),
     activity: () => setActivityOpen(true),
+    diskMap: () => setMapping(here().folder()?.path),
+    toFileDialog: () => {
+      const folder = here().folder()?.path;
+      if (!folder) return;
+      sendToFileDialog(folder)
+        .then((title) => jobs.notify(`Sent to "${title || "file dialog"}"`, `It now shows ${baseName(folder) || folder}.`))
+        .catch(jobs.report);
+    },
     back: () => here().back(),
     forward: () => here().forward(),
     up: () => here().up(),
@@ -1156,6 +1176,7 @@ export function App() {
     filter: () => setFiltering(here()),
     selectPattern: () => setSelectingPattern(here()),
     details: toggleDetails,
+    previewPane: () => setPreviewPane(!previewPane()),
     sidebar: toggleSidebar,
     fullScreen: () => quietly(toggleFullScreen()),
     shelf: () => setShelfOpen(!shelfOpen()),
@@ -1494,6 +1515,8 @@ export function App() {
                 columns={ownColumns(view) ?? columns()}
                 fixedColumns={ownColumns(view) !== undefined}
                 cut={view.query() ? undefined : cutNames(view.folder()!.path)}
+                expanded={view.expanded()}
+                onExpand={inlineFolders() && !view.query() && !view.isBin() ? (path) => void view.toggleExpand(path) : undefined}
                 synced={!view.query() && inCloud(view.folder()!.path)}
                 empty={emptyState(view)}
                 match={view.query() === FLAT_QUERY ? undefined : view.query()}
@@ -1587,6 +1610,13 @@ export function App() {
               <Show when={detailsPanel() && tab === tabs.active()}>
                 <DetailsPanel view={tab.active()} />
               </Show>
+              <Show when={previewPane() && tab === tabs.active()}>
+                <PreviewDock
+                  view={tab.active()}
+                  onOpen={(row) => openRow(tab.active(), row, false)}
+                  onClose={() => setPreviewPane(false)}
+                />
+              </Show>
             </div>
           )}
         </For>
@@ -1623,6 +1653,16 @@ export function App() {
       </Show>
       <Show when={keysOpen()}>
         <KeySheet onClose={() => setKeysOpen(false)} />
+      </Show>
+      <Show when={mapping()} keyed>
+        {(folder) => (
+          <DiskMap
+            folder={folder}
+            onOpen={(path) => void tabs.activeView().open(path)}
+            onShow={(path) => showInFolder(tabs.activeView(), path)}
+            onClose={() => setMapping(undefined)}
+          />
+        )}
       </Show>
       <Show when={deleting()} keyed>
         {(request) => <ConfirmDelete request={request} onClose={() => setDeleting(undefined)} />}
@@ -1686,6 +1726,10 @@ export function App() {
             onStep={(index) => view.list()?.select([index])}
             onOpen={(row) => openRow(view, row, false)}
             onClose={closePreview}
+            onDock={() => {
+              setPreviewPane(true);
+              closePreview();
+            }}
           />
         )}
       </Show>

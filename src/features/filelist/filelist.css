@@ -816,3 +816,43 @@ html[data-blurred] :is(.empty-float, .empty-shadow) {
     transition: none;
   }
 }
+
+/* The arrow that opens a folder in place. Each folder a row is inside of moves it in a step. */
+.file-twist {
+  display: inline-grid;
+  place-items: center;
+  width: 16px;
+  height: 20px;
+  margin: 0 2px 0 calc(var(--depth, 0) * 16px);
+  vertical-align: middle;
+  border-radius: 4px;
+  color: var(--text-muted);
+  font: 8px / 1 var(--font-icons);
+  transition:
+    rotate var(--motion-spring),
+    background-color var(--motion),
+    color var(--motion);
+}
+
+.file-twist::before {
+  content: "\E76C";
+}
+
+.file-twist[data-open] {
+  rotate: 90deg;
+}
+
+.file-twist[data-none] {
+  visibility: hidden;
+}
+
+.file-twist:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .file-twist {
+    transition: none;
+  }
+}

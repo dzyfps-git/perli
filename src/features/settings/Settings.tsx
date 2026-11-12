@@ -9,6 +9,8 @@ import {
   dateForm,
   folderSizes,
   hoverCards,
+  inlineFolders,
+  setInlineFolders,
   openInWindow,
   ROW_HEIGHTS,
   rowDensity,
@@ -520,6 +522,12 @@ export function Settings(props: {
               note="Off, the same actions stay in the menu of a row and on their keys."
               checked={selectionBar()}
               onChange={setSelectionBar}
+            />
+            <Switch
+              label="Open folders in place with an arrow"
+              note="In the list, a folder's arrow shows what is in it under its row. Right and Left do the same."
+              checked={inlineFolders()}
+              onChange={setInlineFolders}
             />
             <Switch
               label="Show details when the pointer rests on a file"

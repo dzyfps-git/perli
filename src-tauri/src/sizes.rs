@@ -8,10 +8,14 @@ use std::sync::{Arc, LazyLock, Mutex, PoisonError, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use serde::Serialize;
+
 use crate::folder::Entry;
 use crate::ops::sys::{self, Stat};
 
 const REPORT_GAP: Duration = Duration::from_secs(1);
+/// The disk map hears of the folders weighed so far this often.
+const MAP_GAP: Duration = Duration::from_millis(200);
 
 // ponytail: grows with every folder looked at and each total stays until the next scan. Dropping
 // the least recently used would cap it.
@@ -90,6 +94,54 @@ fn scan(folder: &Path, stop: &AtomicBool, report: impl Fn()) {
         }
     }
     report();
+}
+
+/// One thing right inside a folder, with all the bytes under it, for the disk map.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Cell {
+    pub name: String,
+    pub bytes: u64,
+    pub folder: bool,
+}
+
+/// The one disk map being measured.
+static MAPPING: LazyLock<Mutex<Arc<AtomicBool>>> = LazyLock::new(Mutex::default);
+
+pub fn stop_map() {
+    MAPPING.lock().unwrap_or_else(PoisonError::into_inner).store(true, Ordering::SeqCst);
+}
+
+/// Weighs everything right inside `folder` on a thread of its own, in place of any map before it.
+/// `report` hears the cells that are new or have grown, and whether those were the last.
+pub fn map(folder: PathBuf, report: impl Fn(Vec<Cell>, bool) + Send + 'static) {
+    let stop = Arc::new(AtomicBool::new(false));
+    mem::replace(&mut *MAPPING.lock().unwrap_or_else(PoisonError::into_inner), stop.clone()).store(true, Ordering::SeqCst);
+    thread::spawn(move || weigh(&folder, &stop, report));
+}
+
+/// Files are known at once, and folders come first as empty cells that fill as each is added up.
+fn weigh(folder: &Path, stop: &AtomicBool, report: impl Fn(Vec<Cell>, bool)) {
+    let mut cells = Vec::new();
+    each_item(folder, |entry, is_folder| {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        cells.push(Cell { name, bytes: if is_folder { 0 } else { entry.size() }, folder: is_folder });
+    });
+    let folders: Vec<String> = cells.iter().filter(|cell| cell.folder).map(|cell| cell.name.clone()).collect();
+    report(cells, folders.is_empty());
+
+    let mut ready = Vec::new();
+    let mut reported = Instant::now();
+    for (at, name) in folders.iter().enumerate() {
+        let Some(bytes) = total(&folder.join(name), stop) else {
+            return;
+        };
+        ready.push(Cell { name: name.clone(), bytes, folder: true });
+        let last = at + 1 == folders.len();
+        if last || reported.elapsed() >= MAP_GAP {
+            report(mem::take(&mut ready), last);
+            reported = Instant::now();
+        }
+    }
 }
 
 /// The running scan of each view that has one.
@@ -195,6 +247,31 @@ mod tests {
 
         assert_eq!(listing.names(&[0, 1]), ["top", "empty"]);
         assert_eq!(listing.encode_rows(0, 1)[8..16], 120u64.to_le_bytes());
+    }
+
+    #[test]
+    fn a_map_weighs_each_thing_in_the_folder() {
+        let tree = Tree::new("map");
+        let heard = Mutex::new(Vec::new());
+        weigh(&tree.0, &AtomicBool::new(false), |cells, done| heard.lock().unwrap().push((cells, done)));
+        let heard = heard.into_inner().unwrap();
+
+        let cell = |name: &str, bytes, folder| Cell { name: name.into(), bytes, folder };
+        let mut first = heard[0].0.clone();
+        first.sort_by(|a, b| a.name.cmp(&b.name));
+        assert_eq!(first, [cell("empty", 0, true), cell("loose.bin", 9, false), cell("top", 0, true)]);
+        assert!(!heard[0].1, "the folders are still to come");
+        let mut grown: Vec<Cell> = heard[1..].iter().flat_map(|(cells, _)| cells.clone()).collect();
+        grown.sort_by(|a, b| a.name.cmp(&b.name));
+        assert_eq!(grown, [cell("empty", 0, true), cell("top", 120, true)]);
+        assert!(heard.last().unwrap().1);
+
+        let stopped = Mutex::new(0);
+        weigh(&tree.0, &AtomicBool::new(true), |_, _| *stopped.lock().unwrap() += 1);
+        assert_eq!(stopped.into_inner().unwrap(), 1, "only what was known at once");
+        fs::remove_dir_all(tree.0.join("top")).unwrap();
+        fs::remove_dir_all(tree.0.join("empty")).unwrap();
+        weigh(&tree.0, &AtomicBool::new(false), |cells, done| assert!(done && cells.len() == 1));
     }
 
     #[test]

@@ -27,7 +27,7 @@ export function BookmarksBar(props: {
 
   return (
     <Show when={bookmarksBar() && (bookmarks().length > 0 || dragging())}>
-      <nav class="bookmarks" aria-label="Bookmarks" data-drop={BOOKMARKS}>
+      <nav class="bookmarks" classList={{ "bookmarks-floating": bookmarks().length === 0 }} aria-label="Bookmarks" data-drop={BOOKMARKS}>
         <For each={bookmarkGroups()}>
           {(group) => (
             <button

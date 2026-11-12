@@ -112,6 +112,8 @@ export function createFolderView(id: number, saved?: SavedPane) {
   const [scope, setScopeValue] = createSignal<SearchScope>("below");
   /** Stays with the folder until the view goes to another one. */
   const [filterForm, setFilterFormValue] = createSignal(NO_FILTER);
+  /** Folders opened in place, whose rows show under them. They last until the view goes elsewhere. */
+  const [expanded, setExpanded] = createSignal<string[]>([]);
   /** The one row selected in the list, for the details panel. */
   const [cursor, setCursor] = createSignal<RowAt | undefined>(undefined, {
     equals: (a, b) => a?.snapshot === b?.snapshot && a?.index === b?.index,
@@ -136,6 +138,7 @@ export function createFolderView(id: number, saved?: SavedPane) {
     showHidden: showHidden(),
     // Rows of a search carry no tags, so a tag would leave none of them.
     filter: { ...toFilter(filterForm()), tags: query() ? [] : filterForm().tags },
+    expanded: query() || isBin(target) ? [] : expanded(),
   });
   /** A folder opens in its own order, even from a search. */
   const openingOrder = (target: string, wanted: Sort, form: typeof NO_FILTER): Order => ({
@@ -143,6 +146,7 @@ export function createFolderView(id: number, saved?: SavedPane) {
     group: isBin(target) ? "mixed" : grouping(),
     showHidden: showHidden(),
     filter: toFilter(form),
+    expanded: samePath(path(), target) && !isBin(target) ? expanded() : [],
   });
   /** Row numbers mean nothing outside the snapshot they came from. */
   const selectedRows = (snapshot: number) => {
@@ -207,6 +211,7 @@ export function createFolderView(id: number, saved?: SavedPane) {
         }
         if (folderSort) setSortValue(folderSort);
         setFilterFormValue(form);
+        if (!samePath(path(), opened.path)) setExpanded([]);
         show(opened);
       });
       setTrail(nextTrail(trail(), opened.path));
@@ -436,6 +441,18 @@ export function createFolderView(id: number, saved?: SavedPane) {
       list = handle;
     },
     list: () => list,
+    expanded,
+    /** Opens `folder` in place, under its row, or closes it and every folder opened inside it. */
+    toggleExpand(folder: string) {
+      const open = expanded().some((other) => samePath(other, folder));
+      const inside = `${folder.toLowerCase()}\\`;
+      setExpanded(
+        open
+          ? expanded().filter((other) => !samePath(other, folder) && !other.toLowerCase().startsWith(inside))
+          : [...expanded(), folder],
+      );
+      return reload();
+    },
     cursor,
     setCursor,
     /** A reload that waited for an edit of a name can go ahead. */

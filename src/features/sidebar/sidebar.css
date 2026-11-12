@@ -321,6 +321,21 @@ html[data-blurred] .place-used::before {
   outline-offset: -1px;
 }
 
+/* With no bookmarks yet the bar is only there for the drag, and must not push the files down under it. */
+.files:has(.bookmarks-floating) {
+  position: relative;
+}
+
+.bookmarks-floating {
+  position: absolute;
+  inset: 0 var(--space-1) auto 0;
+  z-index: 5;
+  height: 28px;
+  border-radius: var(--radius);
+  background: var(--overlay-tint);
+  backdrop-filter: var(--blur);
+}
+
 @keyframes bookmark-hint-in {
   from {
     opacity: 0;

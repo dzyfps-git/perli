@@ -106,7 +106,8 @@ function spotAt(x: number, y: number, views: FolderView[]): Spot | undefined {
   // A folder in the Recycle Bin is deleted, so the bin as a whole takes the drop.
   const row = view.isBin() ? null : under?.closest<HTMLElement>(".file-row[data-folder]");
   const name = row?.querySelector(".file-name")?.textContent;
-  return row && name ? { element: row, folder: join(path, name), view } : { element: pane, folder: path, view };
+  // A folder opened in place has its rows under it, and each says where it is.
+  return row && name ? { element: row, folder: join(row.dataset.location || path, name), view } : { element: pane, folder: path, view };
 }
 
 /**

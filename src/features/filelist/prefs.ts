@@ -64,6 +64,10 @@ export const [dateForm, setDateForm] = stored<DateForm>(
 /** The bar of buttons that floats over the list while rows are selected. */
 export const [selectionBar, setSelectionBar] = stored("selection-bar", saved("selection-bar") !== false);
 export const [detailsPanel, setDetailsPanel] = stored("details-panel", saved("details-panel") === true);
+/** Arrows beside the folders of a list, which open them in place. */
+export const [inlineFolders, setInlineFolders] = stored("inline-folders", saved("inline-folders") !== false);
+/** The preview kept beside the list, following the selection. */
+export const [previewPane, setPreviewPane] = stored("preview-pane", saved("preview-pane") === true);
 
 const [sortMemory, setSortMemory] = stored<SortMemory>(
   "folder-sorts",
