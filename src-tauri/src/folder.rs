@@ -540,16 +540,21 @@ impl Listing {
                 by_group.then_with(|| compare(entries, locations, &ranks, a, b, &order))
             });
         } else {
-            // Each folder's rows are sorted among themselves and follow it.
-            // ponytail: a row whose folder the filter leaves out goes with it. Search finds those.
+            // Each folder's rows are sorted among themselves and follow it. A row the filter keeps
+            // brings back the folders it sits in, so it is never hidden by its folder's name.
+            // Hidden folders stay hidden, and what is inside them with them.
             let mut kept = vec![false; entries.len()];
-            let mut inside: HashMap<u32, Vec<u32>> = HashMap::new();
             for row in visible.drain(..) {
-                let parent = parents[row as usize];
-                if parent == TOP || kept[parent as usize] {
-                    kept[row as usize] = true;
-                    inside.entry(parent).or_default().push(row);
+                kept[row as usize] = true;
+                let mut parent = parents[row as usize];
+                while parent != TOP && !kept[parent as usize] && shown(&entries[parent as usize]) {
+                    kept[parent as usize] = true;
+                    parent = parents[parent as usize];
                 }
+            }
+            let mut inside: HashMap<u32, Vec<u32>> = HashMap::new();
+            for row in (0..entries.len() as u32).filter(|&row| kept[row as usize]) {
+                inside.entry(parents[row as usize]).or_default().push(row);
             }
             for rows in inside.values_mut() {
                 rows.sort_unstable_by(|&a, &b| compare(entries, locations, &ranks, b, a, &order));
@@ -1244,7 +1249,13 @@ mod tests {
 
         let named = |name: &str| Order { filter: Filter { name: name.into(), ..Filter::default() }, ..open(&["apple"], false) };
         assert_eq!(sorted(&folder, named("a")), ["apple", "a.txt", "banana"]);
-        assert_eq!(sorted(&folder, named("txt")), ["cherry.txt"], "rows go with the folder they are in");
+        assert_eq!(
+            sorted(&folder, named("txt")),
+            ["apple", "a.txt", "b.txt", "cherry.txt"],
+            "a row that fits brings back the folder it is in"
+        );
+        let seed = Order { filter: Filter { name: "seed".into(), ..Filter::default() }, ..open(&["apple", "apple/core"], false) };
+        assert_eq!(sorted(&folder, seed), ["apple", "core", "seed.txt"], "and every folder above that");
 
         let rows = deep.encode_rows(0, 3);
         let location_bytes = |at: usize| u32::from_le_bytes(rows[at..at + 4].try_into().unwrap());
