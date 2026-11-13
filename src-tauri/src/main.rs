@@ -1394,6 +1394,13 @@ async fn drag_entry(view: u32, request: u64, row: u32, entry: String, password: 
     drag_out(vec![taken], app).await
 }
 
+/// The loudest point of each slice of a sound, for its waveform, read a little at a time.
+#[tauri::command]
+async fn audio_peaks(view: u32, request: u64, row: u32, bars: usize, views: State<'_, Views>) -> Result<Vec<f32>, String> {
+    let path = row_path(&views, view, request, row)?;
+    blocking(move || sound::peaks(&path, bars)).await
+}
+
 /// The words beside a file under its own name: a song's lyrics (`lrc`) or a film's subtitles.
 #[tauri::command]
 async fn beside_text(view: u32, request: u64, row: u32, extension: String, views: State<'_, Views>) -> Result<Option<String>, String> {
@@ -2098,6 +2105,7 @@ fn main() {
             archive_password,
             archive_test,
             drag_entry,
+            audio_peaks,
             beside_text,
             save_frame,
             picture_file,

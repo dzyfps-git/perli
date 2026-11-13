@@ -60,7 +60,7 @@ const RESUME_MARGIN_SECONDS = 30;
 const MOST_RESUMES = 100;
 const RESUME_SAVE_MS = 5000;
 const RESUME_SHOWN_MS = 15000;
-/** Bigger files skip the waveform, which needs the whole file decoded at once. */
+/** Bigger files have their waveform read by the app, as decoding here needs the whole file at once. */
 const WAVEFORM_BYTES = 48 * 1024 * 1024;
 const WAVEFORM_BARS = 400;
 /** A drag shorter than this is a click that seeks. */
@@ -92,6 +92,8 @@ export interface PlayerProps {
   /** A MIDI file played with these settings, through this sound set or the bundled one. */
   render?: (playing: Playing, font?: string) => Promise<Source>;
   cover?: (edge: number) => Promise<Thumb | null>;
+  /** A waveform's bars, read by the app a little at a time, for sounds too big to decode here at once. */
+  peaks?: (bars: number) => Promise<number[]>;
   /** The `.lrc` file beside the song, if there is one. */
   lyrics?: () => Promise<string | null>;
   /** The files of the folder that play, and the sound sets (`.sf2`) there. */
@@ -276,8 +278,10 @@ export function Player(live: PlayerProps) {
 
   createEffect(() => {
     const loaded = source();
-    if (!loaded || midi || props.size > WAVEFORM_BYTES) return;
-    waveform(loaded.url)
+    if (!loaded || midi) return;
+    const big = props.size > WAVEFORM_BYTES;
+    if (big && !props.peaks) return;
+    (big ? props.peaks!(WAVEFORM_BARS).then((found) => Float32Array.from(found)) : waveform(loaded.url))
       .then((found) => gone || setBars(found))
       .catch(() => {});
   });

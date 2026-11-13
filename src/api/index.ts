@@ -919,6 +919,10 @@ export const dragEntry = (view: number, request: number, row: number, entry: str
   invoke<void>("drag_entry", { view, request, row, entry, password: password ?? null });
 
 /** The words beside a file under its own name: lyrics (`lrc`) or subtitles (`srt`, `vtt`). */
+/** The loudest point of each of `bars` slices of a sound, from 0 to 1, read a little at a time. */
+export const audioPeaks = (view: number, request: number, row: number, bars: number) =>
+  invoke<number[]>("audio_peaks", { view, request, row, bars });
+
 export const besideText = (view: number, request: number, row: number, extension: "lrc" | "srt" | "vtt") =>
   invoke<string | null>("beside_text", { view, request, row, extension });
 
