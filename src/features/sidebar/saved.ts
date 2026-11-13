@@ -1,7 +1,7 @@
 import { NO_FILTER } from "../filelist/filter";
 import { saved, stored } from "../filelist/prefs";
 import { cleanSmart, type SmartFolder } from "../smart/smartList";
-import { groupsOf, holds, lookKey, moved, savedPaths, toggled, withGroup, withLook, type Groups, type Look, type Looks } from "./placeLists";
+import { groupsOf, holds, lookIn, lookKey, moved, savedPaths, toggled, withGroup, withLook, type Groups, type Look, type Looks } from "./placeLists";
 
 export type SectionId = "pinned" | "places" | "smart" | "recent" | "tags" | "cloud" | "network" | "drives";
 
@@ -33,13 +33,13 @@ const [looks, setLooks] = stored<Looks>("folder-looks", (saved("folder-looks") a
 /** Changes whenever any folder's look does, so lists know to repaint. */
 export const allLooks = looks;
 
-export const lookOf = (path: string): Look | undefined => looks()[lookKey(path)];
+/** What `path` shows, with a look handed down from a folder above it. */
+export const lookOf = (path: string): Look | undefined => lookIn(looks(), path);
+
+/** What was set on `path` itself. */
+export const ownLookOf = (path: string): Look | undefined => looks()[lookKey(path)];
 
 export const setLook = (path: string, change: Look) => setLooks(withLook(looks(), path, change));
-
-/** Gives many folders the same change at once, saved once. */
-export const setLooksFor = (paths: string[], change: Look) =>
-  setLooks(paths.reduce((all, path) => withLook(all, path, change), looks()));
 
 export const togglePinned = (path: string) => setPinned(toggled(pinned(), path));
 

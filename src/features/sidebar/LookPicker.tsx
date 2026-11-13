@@ -1,49 +1,27 @@
 import { createMemo, createSignal, For, onMount, Show } from "solid-js";
-import { subfolders } from "../../api";
 import { openSheet } from "../../ui/sheet";
-import { showHidden, showSystem } from "../filelist/prefs";
-import { baseName, join } from "../navigation/path";
+import { baseName } from "../navigation/path";
 import { TAG_COLORS, tagColor } from "../tags/tags";
 import { findIcons } from "./folderIcons";
-import { lookOf, setLook, setLooksFor } from "./saved";
+import { lookOf, ownLookOf, setLook } from "./saved";
 import "../settings/settings.css";
 import "../fileops/fileops.css";
 import "./sidebar.css";
 
-// ponytail: stops after this many folders inside, which keeps a whole drive from freezing the
-// sheet. A job in Rust would be the way past it.
-const MOST_FOLDERS = 500;
 const ICON_FOLDER = "";
 
 /** A folder's color, icon and cover in one sheet, with a search through the icons. */
 export function LookPicker(props: { path: string; onClose: () => void }) {
   const [typed, setTyped] = createSignal("");
-  const [spread, setSpread] = createSignal<string>();
   const look = () => lookOf(props.path);
   const icons = createMemo(() => findIcons(typed()));
   let dialog!: HTMLDialogElement;
   let search!: HTMLInputElement;
   let close!: ReturnType<typeof openSheet>;
 
-  /** Every folder inside, a level at a time, up to `MOST_FOLDERS`. */
-  async function giveInside() {
-    const found: string[] = [];
-    const waiting = [props.path];
-    while (waiting.length > 0 && found.length < MOST_FOLDERS) {
-      const folder = waiting.shift()!;
-      const names = await subfolders(folder, showHidden(), showSystem()).catch((): string[] => []);
-      for (const name of names.slice(0, MOST_FOLDERS - found.length)) {
-        found.push(join(folder, name));
-        waiting.push(join(folder, name));
-      }
-      setSpread(`Finding folders… ${found.length.toLocaleString()}`);
-    }
-    const { color, icon } = look() ?? {};
-    setLooksFor(found, { color, icon });
-    const more = waiting.length > 0 && found.length >= MOST_FOLDERS ? ", the first ones found" : "";
-    const many = found.length === 1 ? "1 folder inside looks" : `${found.length.toLocaleString()} folders inside look`;
-    setSpread(found.length === 0 ? "There are no folders inside." : `${many} the same now${more}.`);
-  }
+  /** Folders inside, at any depth and also ones made later, take this look unless they have their own. */
+  const handsDown = () => ownLookOf(props.path)?.inside === true;
+  const canHand = () => ownLookOf(props.path)?.color !== undefined || ownLookOf(props.path)?.icon !== undefined;
 
   onMount(() => {
     close = openSheet(dialog);
@@ -135,14 +113,19 @@ export function LookPicker(props: { path: string; onClose: () => void }) {
           </p>
         )}
       </Show>
-      <Show when={spread()}>
+      <Show when={handsDown()}>
         <p class="settings-note" role="status">
-          {spread()}
+          Folders inside look the same, new ones too, unless they have a look of their own.
         </p>
       </Show>
       <div class="confirm-buttons">
-        <button class="job-choice look-inside" disabled={!look() || spread()?.startsWith("Finding")} onClick={giveInside}>
-          Same look for folders inside
+        <button
+          class="job-choice look-inside"
+          aria-pressed={handsDown()}
+          disabled={!canHand()}
+          onClick={() => setLook(props.path, { inside: !handsDown() })}
+        >
+          {handsDown() ? "Folders inside go their own way" : "Same look for folders inside"}
         </button>
         <button class="job-choice" onClick={() => close()}>
           Done
