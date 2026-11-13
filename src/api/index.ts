@@ -16,6 +16,8 @@ export interface Opened {
   groups: Group[];
   /** The biggest size a row shows, which the size bars measure against. */
   largest: number;
+  /** Files a search by tag couldn't reach, on a drive or computer that isn't here. */
+  away: number;
   loadMs: number;
   /** Rows to select straight away, when this is a new order of the same folder. */
   selected?: number[];
@@ -83,6 +85,7 @@ export interface Arranged {
   hiddenCount: number;
   groups: Group[];
   largest: number;
+  away: number;
   selected: number[];
 }
 

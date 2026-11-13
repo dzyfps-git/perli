@@ -143,6 +143,8 @@ pub struct Shape {
     pub groups: Vec<Group>,
     /// The biggest size a row shows, which the size bars measure against.
     pub largest: u64,
+    /// Files a search by tag couldn't reach, on a drive or computer that isn't here.
+    pub away: usize,
 }
 
 /// What a filter lets through, of files and folders.
@@ -393,6 +395,8 @@ pub struct Found {
     locations: Vec<Arc<[u16]>>,
     /// Only a search by tag knows the tags of its rows.
     tags: tags::Tagged,
+    /// Files with the tag searched for that are on a drive or computer that isn't here.
+    pub away: usize,
 }
 
 impl Found {
@@ -412,6 +416,7 @@ impl Found {
         self.tags.extend(other.tags.drain().map(|(row, tags)| (row + after, tags)));
         self.entries.append(&mut other.entries);
         self.locations.append(&mut other.locations);
+        self.away += std::mem::take(&mut other.away);
     }
 
     pub fn len(&self) -> usize {
@@ -441,6 +446,8 @@ pub struct Listing {
     parents: Arc<Vec<u32>>,
     /// Only entries that have tags are here, so normal rows stay small.
     tags: Arc<tags::Tagged>,
+    /// Files a search by tag couldn't reach, on a drive or computer that isn't here.
+    away: usize,
     visible: Vec<u32>,
     groups: Vec<Group>,
     order: Order,
@@ -524,6 +531,7 @@ impl Listing {
             entries: Arc::new(found.entries),
             found_in: Arc::new(found.locations),
             tags: Arc::new(found.tags),
+            away: found.away,
             ..Self::default()
         }
         .arrange(order)
@@ -702,6 +710,7 @@ impl Listing {
             hidden_count: self.hidden_count(),
             groups: self.groups.clone(),
             largest: self.visible.iter().map(|&row| self.size_of(row as usize)).max().unwrap_or(0),
+            away: self.away,
         }
     }
 

@@ -42,6 +42,13 @@ const SCHEMA: &str = "
         tag INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
         PRIMARY KEY(volume, file, tag)
     ) WITHOUT ROWID;
+    -- Where each tagged file was last seen, to find it on a drive that can't open a file by ID.
+    CREATE TABLE IF NOT EXISTS seen(
+        volume INTEGER NOT NULL,
+        file BLOB NOT NULL,
+        path TEXT NOT NULL,
+        PRIMARY KEY(volume, file)
+    ) WITHOUT ROWID;
 ";
 const NO_NTFS: &str = "Tags need an NTFS drive";
 const NAME_TAKEN: &str = "A tag with this name already exists";
@@ -132,17 +139,25 @@ fn read_folder(
 ) -> windows::core::Result<Tagged> {
     let access = FILE_LIST_DIRECTORY.0 | FILE_READ_ATTRIBUTES.0;
     let handle = sys::open_folder(folder, access)?;
-    let files = on_volume(key_of(*handle)?.volume);
+    let volume = key_of(*handle)?.volume;
+    let files = on_volume(volume);
     if files.is_empty() {
         return Ok(Tagged::new());
     }
     let places: HashMap<&[u16], u32> = entries.iter().map(Entry::name).zip(0..).collect();
     let mut tagged = Tagged::new();
+    let mut seen = Vec::new();
     each_id(*handle, |name, id| {
         if let (Some(&entry), Some(tags)) = (places.get(name), files.get(&id)) {
             tagged.insert(entry, tags.as_slice().into());
+            seen.push((Key { volume, file: id }, folder.join(OsString::from_wide(name))));
         }
     })?;
+    // A tag view finds files on another computer by where they were last seen.
+    if !seen.is_empty() && crate::network::is_remote(&folder.to_string_lossy()) {
+        let places: Vec<(Key, &Path)> = seen.iter().map(|(key, path)| (*key, path.as_path())).collect();
+        let _ = opened(|store| store.remember(&places));
+    }
     Ok(tagged)
 }
 
@@ -151,9 +166,9 @@ const DRIVE_REMOTE: u32 = 4;
 /// How Windows starts the paths it gives for a handle.
 const VERBATIM: &str = r"\\?\";
 
-/// The open top of each drive of this computer, by the serial number of its volume.
-// ponytail: network drives are left out, since one that is gone can take many seconds to say so.
-// Tags are for NTFS, which a share rarely passes on.
+/// The open top of each drive of this computer, by the serial number of its volume. Network drives
+/// are left out, since one that is gone can take many seconds to say so; their files are found by
+/// where they were last seen.
 fn volumes() -> HashMap<u64, Owned<HANDLE>> {
     let letters = unsafe { GetLogicalDrives() };
     let roots = (0..26u8).filter(|bit| letters & (1 << bit) != 0).map(|bit| format!("{}:\\", char::from(b'A' + bit)));
@@ -219,6 +234,26 @@ impl Store {
     fn delete(&self, id: u32) -> rusqlite::Result<()> {
         self.0.execute("DELETE FROM tags WHERE id = ?", [id])?;
         Ok(())
+    }
+
+    /// Notes where files are now, as (key, path).
+    fn remember(&self, places: &[(Key, &Path)]) -> rusqlite::Result<()> {
+        let all_at_once = self.0.unchecked_transaction()?;
+        let mut statement = all_at_once.prepare("INSERT OR REPLACE INTO seen(volume, file, path) VALUES(?, ?, ?)")?;
+        for (key, path) in places {
+            statement.execute(params![key.volume as i64, key.file, path.to_string_lossy()])?;
+        }
+        drop(statement);
+        all_at_once.commit()
+    }
+
+    /// Where each file with `tag` was last seen.
+    fn seen_with(&self, tag: u32) -> rusqlite::Result<HashMap<(u64, FileId), PathBuf>> {
+        let mut rows = self.0.prepare_cached(
+            "SELECT volume, file, path FROM seen WHERE (volume, file) IN (SELECT volume, file FROM tagged WHERE tag = ?)",
+        )?;
+        let row = rows.query_map([tag], |row| Ok(((row.get::<_, i64>(0)? as u64, row.get(1)?), PathBuf::from(row.get::<_, String>(2)?))))?;
+        row.collect()
     }
 
     fn set(&self, keys: &[Key], tag: u32, on: bool) -> rusqlite::Result<()> {
@@ -349,7 +384,11 @@ pub fn delete(id: u32) -> Result<(), String> {
 /// Nothing changes unless every file can take it.
 pub fn set(paths: &[PathBuf], tag: u32, on: bool) -> Result<(), String> {
     let keys = file_keys(paths)?;
-    opened(|store| store.set(&keys, tag, on))
+    opened(|store| {
+        store.set(&keys, tag, on)?;
+        let places: Vec<(Key, &Path)> = keys.iter().copied().zip(paths.iter().map(PathBuf::as_path)).collect();
+        if on { store.remember(&places) } else { Ok(()) }
+    })
 }
 
 /// The tags all of `paths` have.
@@ -364,19 +403,57 @@ pub fn named_id(name: &str) -> Option<u32> {
     tags.iter().find(|tag| tag.name.to_lowercase() == name.to_lowercase()).map(|tag| tag.id)
 }
 
-/// Where each file with `tag` is now, with all of its tags, by path. A file that is gone, or on a
-/// drive that is not here, is left out and keeps its tags.
-pub fn files_with(tag: u32) -> Vec<(PathBuf, Box<[u32]>)> {
+/// The files with a tag: where each is now, with all of its tags, by path, and how many are on a
+/// drive that isn't plugged in or a computer that isn't answering. A file that is gone is left
+/// out and keeps its tags.
+#[derive(Default)]
+pub struct WithTag {
+    pub files: Vec<(PathBuf, Box<[u32]>)>,
+    /// Where each file that isn't here was last seen, if Perli saw it.
+    pub away: Vec<Option<PathBuf>>,
+}
+
+pub fn files_with(tag: u32) -> WithTag {
     let files = existing(|store| store.with_tag(tag)).and_then(Result::ok).unwrap_or_default();
     if files.is_empty() {
-        return Vec::new();
+        return WithTag::default();
     }
+    let seen = existing(|store| store.seen_with(tag)).and_then(Result::ok).unwrap_or_default();
     let volumes = volumes();
-    let mut found: Vec<(PathBuf, Box<[u32]>)> = files
-        .into_iter()
-        .filter_map(|((volume, file), tags)| Some((path_of(**volumes.get(&volume)?, file)?, tags.into())))
-        .collect();
-    found.sort();
+    let mut answering = HashMap::<String, bool>::new();
+    let mut moved = Vec::new();
+    let mut found = WithTag::default();
+    for ((volume, file), tags) in files {
+        let last = seen.get(&(volume, file));
+        let path = match volumes.get(&volume) {
+            Some(top) => path_of(**top, file),
+            // A network drive, a share or a drive not plugged in: the file is where it was last
+            // seen, if that place answers and still holds this very file.
+            None => {
+                let Some(last) = last else {
+                    found.away.push(None);
+                    continue;
+                };
+                let place = crate::network::place_of(&last.to_string_lossy());
+                if !*answering.entry(place).or_insert_with(|| crate::network::answers(&last.to_string_lossy())) {
+                    found.away.push(Some(last.clone()));
+                    continue;
+                }
+                file_key(last).ok().filter(|key| key.volume == volume && key.file == file).map(|_| last.clone())
+            }
+        };
+        if let Some(path) = path {
+            if last != Some(&path) {
+                moved.push((Key { volume, file }, path.clone()));
+            }
+            found.files.push((path, tags.into()));
+        }
+    }
+    if !moved.is_empty() {
+        let places: Vec<(Key, &Path)> = moved.iter().map(|(key, path)| (*key, path.as_path())).collect();
+        let _ = opened(|store| store.remember(&places));
+    }
+    found.files.sort();
     found
 }
 
@@ -472,6 +549,22 @@ mod tests {
         store.create("Work", 1).unwrap();
 
         assert_eq!(described(store.create("work", 2).unwrap_err()), NAME_TAKEN);
+    }
+
+    #[test]
+    fn where_a_tagged_file_was_last_seen_is_kept_for_its_tag() {
+        let store = store();
+        let folder = Folder::new("seen");
+        let (a, b) = (folder.file("a.txt"), folder.file("b.txt"));
+        let work = store.create("Work", 1).unwrap();
+        store.set(&[key(&a)], work.id, true).unwrap();
+
+        store.remember(&[(key(&a), a.as_path()), (key(&b), b.as_path())]).unwrap();
+        let moved = folder.0.join("moved.txt");
+        store.remember(&[(key(&a), moved.as_path())]).unwrap();
+
+        let seen = store.seen_with(work.id).unwrap();
+        assert_eq!(seen.into_values().collect::<Vec<_>>(), [moved], "only files with the tag, at their newest place");
     }
 
     #[test]

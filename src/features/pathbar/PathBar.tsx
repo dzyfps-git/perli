@@ -19,6 +19,7 @@ const ICON_GRID = "\uF0E2";
 const ICON_SHOWN = "\uE7B3";
 const ICON_HIDDEN = "\uED1A";
 const ICON_FILTER = "\uE71C";
+const ICON_AWAY = "\uE8CD";
 const ICON_CHEVRON = "\uE76C";
 const ICON_LINK = "\uE71B";
 const ICON_MORE = "\uE712";
@@ -516,6 +517,22 @@ export function PathBar(props: {
               {showHidden() ? ICON_SHOWN : ICON_HIDDEN}
             </span>
             {count()} hidden
+          </button>
+        )}
+      </Show>
+      {/* Tagged files a tag view can't reach: on a drive not plugged in or a computer that isn't
+          answering. A click looks again, for a drive plugged in since. */}
+      <Show when={props.view.folder()?.away}>
+        {(away) => (
+          <button
+            class="hidden-count"
+            aria-label={`${away() === 1 ? "1 tagged file is" : `${away()} tagged files are`} on a drive that isn't plugged in or a computer that isn't answering. Click to look again.`}
+            onClick={() => void props.view.refresh()}
+          >
+            <span class="hidden-icon" aria-hidden="true">
+              {ICON_AWAY}
+            </span>
+            {away()} away
           </button>
         )}
       </Show>
