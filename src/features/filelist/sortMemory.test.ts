@@ -15,6 +15,11 @@ test("remembered replaces a folder's old sort", () => {
   assert.deepEqual(memory, { "c:\\a": byName });
 });
 
+test("remembered forgets a folder given nothing", () => {
+  const memory = remembered(remembered({}, "C:\\A", bySize), "C:\\B", byName);
+  assert.deepEqual(remembered(memory, "c:\\a", undefined), { "c:\\b": byName });
+});
+
 test("remembered drops the oldest folder once full", () => {
   let memory = {};
   for (let i = 0; i < 1001; i++) memory = remembered(memory, `C:\\${i}x`, bySize);

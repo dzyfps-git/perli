@@ -1,7 +1,7 @@
 import { createMemo, createSignal, For, onMount, Show } from "solid-js";
 import { subfolders } from "../../api";
 import { openSheet } from "../../ui/sheet";
-import { showHidden } from "../filelist/prefs";
+import { showHidden, showSystem } from "../filelist/prefs";
 import { baseName, join } from "../navigation/path";
 import { TAG_COLORS, tagColor } from "../tags/tags";
 import { findIcons } from "./folderIcons";
@@ -31,7 +31,7 @@ export function LookPicker(props: { path: string; onClose: () => void }) {
     const waiting = [props.path];
     while (waiting.length > 0 && found.length < MOST_FOLDERS) {
       const folder = waiting.shift()!;
-      const names = await subfolders(folder, showHidden()).catch((): string[] => []);
+      const names = await subfolders(folder, showHidden(), showSystem()).catch((): string[] => []);
       for (const name of names.slice(0, MOST_FOLDERS - found.length)) {
         found.push(join(folder, name));
         waiting.push(join(folder, name));

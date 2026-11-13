@@ -30,7 +30,7 @@ import { cachedThumb, createThumbLoader } from "./thumbs";
 import { matchSpans } from "./nameMatch";
 import { readProgress } from "../preview/viewerPrefs";
 import { playMoves, seen } from "./rowMotion";
-import { createTypeJump } from "./typeJump";
+import { createTypeJump, PAUSE_MS } from "./typeJump";
 import { typesLearned, typeText } from "./typeNames";
 import "./filelist.css";
 
@@ -305,6 +305,12 @@ export function FileList(props: {
   let sizeTimer: number | undefined;
   let sizeTicket = 0;
   let whisper: HTMLParagraphElement | undefined;
+  /** What typing to jump looks for, shown in a bubble until the pause that starts it over. */
+  const [jumpText, setJumpText] = createSignal("");
+  const [jumpShown, setJumpShown] = createSignal(false);
+  const [jumpMissed, setJumpMissed] = createSignal(false);
+  let jumpTimer: number | undefined;
+  let bubble: HTMLParagraphElement | undefined;
   let cardTimer: ReturnType<typeof setTimeout> | undefined;
   /** The row under the pointer, so resting on one row asks for its card only once. */
   let hovered = -1;
@@ -445,6 +451,7 @@ export function FileList(props: {
     pooled.element.toggleAttribute("data-empty", !row);
     pooled.element.toggleAttribute("data-folder", row?.isDir ?? false);
     pooled.element.toggleAttribute("data-hidden", row?.isHidden ?? false);
+    pooled.element.toggleAttribute("data-system", row?.isSystem ?? false);
     pooled.element.toggleAttribute("data-cut", !!row && !row.location && !!props.cut?.has(row.name));
     // The bin by date deleted reads in days: a small label where one day gives way to the next.
     // ponytail: a row whose neighbour above is not loaded yet goes without, until it refills.
@@ -693,7 +700,8 @@ export function FileList(props: {
   };
   /** An empty list says so itself, in its middle. */
   const barShown = () => selectionBar() && picked().count > 0 && !editor();
-  const whisperShown = () => statusBar() || (picked().count > 0 && !barShown()) || (fresh() && props.count > 0);
+  /** The selection bar already says the count, and the whisper would sit under it. */
+  const whisperShown = () => statusBar() || (!barShown() && (picked().count > 0 || (fresh() && props.count > 0)));
 
   function selectionChanged(instant = false, reveal = true) {
     pool.forEach(decorate);
@@ -850,9 +858,18 @@ export function FileList(props: {
     }
     const ticket = ++latestJump;
     const start = Math.max(0, selection.focused() + jump.offset);
+    window.clearTimeout(jumpTimer);
+    setJumpText(jump.prefix);
+    setJumpShown(true);
+    jumpTimer = window.setTimeout(() => setJumpShown(false), PAUSE_MS);
     findRow(props.view, props.snapshot, jump.prefix, start)
       .then((index) => {
-        if (ticket !== latestJump || index === null) return;
+        if (ticket !== latestJump) return;
+        setJumpMissed(index === null);
+        if (index === null) {
+          if (!reducedMotion.matches) bubble?.animate({ translate: ["-4px 0", "4px 0", "-2px 0", "0 0"] }, 240);
+          return;
+        }
         selection.select(index);
         selectionChanged();
       })
@@ -1178,6 +1195,7 @@ export function FileList(props: {
       props.onCursor(undefined);
       window.clearTimeout(freshTimer);
       window.clearTimeout(sizeTimer);
+      window.clearTimeout(jumpTimer);
       leftFrom.set(props.view, { folder, y: openedAt.get(props.view) });
       openedAt.delete(props.view);
     });
@@ -1346,6 +1364,15 @@ export function FileList(props: {
           )}
         </Show>
       </div>
+      <p
+        ref={bubble}
+        class="type-bubble"
+        classList={{ "type-bubble-on": jumpShown() }}
+        data-missed={jumpMissed() ? "" : undefined}
+        aria-hidden="true"
+      >
+        {jumpText()}
+      </p>
       <p
         ref={whisper}
         class="whisper"

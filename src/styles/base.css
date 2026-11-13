@@ -285,7 +285,8 @@ html[data-blurred] .logo {
   display: grid;
   flex: 1 1 0;
   grid-template-columns: minmax(0, 1fr);
-  grid-template-rows: auto minmax(0, 1fr);
+  /* The path bar, then the quick filters and the pattern bar when they show, then the list. */
+  grid-template-rows: auto auto auto minmax(0, 1fr);
   min-width: 0;
   overflow: hidden;
   background: var(--surface);
@@ -299,8 +300,17 @@ html[data-blurred] .logo {
 
 .file-area {
   display: flex;
+  grid-row: 4;
   flex-direction: column;
   min-height: 0;
+}
+
+.pane > .filter-chips {
+  grid-row: 2;
+}
+
+.pane > .pattern-bar {
+  grid-row: 3;
 }
 
 .message {

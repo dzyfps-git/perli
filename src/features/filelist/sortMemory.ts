@@ -8,9 +8,10 @@ export type SortMemory = Record<string, Sort>;
 /** Windows paths ignore case, and only drive roots need their trailing slash. */
 export const folderKey = (path: string) => path.toLowerCase().replace(/(?<!:)\\+$/, "");
 
-/** Adds a folder's sort as the newest entry, dropping the oldest once full. */
-export function remembered(memory: SortMemory, path: string, sort: Sort): SortMemory {
+/** Adds what a folder keeps, such as its sort, as the newest entry, dropping the oldest once full. No value forgets it. */
+export function remembered<T>(memory: Record<string, T>, path: string, value: T | undefined): Record<string, T> {
   const key = folderKey(path);
   const others = Object.entries(memory).filter(([folder]) => folder !== key);
-  return Object.fromEntries([...others, [key, sort] as const].slice(-MAX_FOLDERS));
+  const kept = value === undefined ? others : [...others, [key, value] as const];
+  return Object.fromEntries(kept.slice(-MAX_FOLDERS));
 }

@@ -28,6 +28,7 @@ import {
   onSizesGrew,
   openFile,
   openTerminal,
+  rowsWhere,
   rankNames,
   redoJob,
   saveSession,
@@ -41,6 +42,7 @@ import {
   commonTags,
   setTag,
   type Grouping,
+  type Filter,
   type Places,
   type Recent,
   type Row,
@@ -59,12 +61,13 @@ import { createJobs } from "./features/fileops/jobs";
 import { JobsPanel } from "./features/fileops/JobsPanel";
 import { NewGallery, type NewPick } from "./features/fileops/NewGallery";
 import { LookPicker } from "./features/sidebar/LookPicker";
-import { kindOf } from "./features/filelist/fileKinds";
+import { extensionsOf, kindOf } from "./features/filelist/fileKinds";
 import { createShellItems } from "./features/fileops/shellItems";
 import { AppPicker } from "./features/dialogs/AppPicker";
 import { DisconnectDrive, MapDrive } from "./features/dialogs/NetworkDrives";
 import { Properties } from "./features/dialogs/Properties";
-import { NO_FILTER } from "./features/filelist/filter";
+import { NO_FILTER, toFilter } from "./features/filelist/filter";
+import { FilterChips } from "./features/pathbar/FilterChips";
 import { BIN_COLUMNS, nextGrouping, nextSort, SEARCH_COLUMNS } from "./features/filelist/columns";
 import type { Empty } from "./features/filelist/EmptyState";
 import { FileList } from "./features/filelist/FileList";
@@ -92,9 +95,11 @@ import {
   setLastLayout,
   setLastSort,
   setShowHidden,
+  setShowSystem,
   setTileSize,
   openInWindow,
   showHidden,
+  showSystem,
   tileSize,
   toggleColumn,
   verifyCopies,
@@ -341,7 +346,6 @@ export function App() {
     !!deleting() ||
     !!renaming() ||
     !!filtering() ||
-    !!selectingPattern() ||
     !!namingTag() ||
     !!showingProperties() ||
     !!pickingApp() ||
@@ -528,7 +532,7 @@ export function App() {
     if (crumbClosed.path === path && performance.now() - crumbClosed.at < CLICK_MS) return;
     let items: MenuItem[];
     try {
-      const names = await subfolders(path, showHidden());
+      const names = await subfolders(path, showHidden(), showSystem());
       items = names.slice(0, MOST_CRUMB_FOLDERS).map((name) => ({ label: name, action: () => view.open(join(path, name)) }));
       if (names.length > MOST_CRUMB_FOLDERS) {
         items.push({ label: `${names.length - MOST_CRUMB_FOLDERS} more, open the folder to see them`, disabled: true });
@@ -772,6 +776,7 @@ export function App() {
       { label: "Copy name", action: () => quietly(copyName(view)) },
       { label: "New folder with selection", action: () => gather(view) },
       { label: "Put on the shelf", action: () => putOnShelf(view) },
+      { label: "Select same", items: sameItems(view, row) },
       ...(kindOf(row.name, row.isDir) === "picture"
         ? [{ label: "Use as folder cover", action: () => setLook(row.location || view.folder()!.path, { cover: path }) }]
         : []),
@@ -866,6 +871,55 @@ export function App() {
   }
 
   const toggleHidden = () => changeOrder(() => setShowHidden(!showHidden()));
+  /** Windows' own files show only with hidden files, so asking for them asks for those too. */
+  const toggleSystem = () =>
+    changeOrder(() => {
+      const on = !(showHidden() && showSystem());
+      setShowSystem(on);
+      if (on) setShowHidden(true);
+    });
+
+  /** Selects every row that fits `filter`, such as all of one kind, tag or day. */
+  async function selectWhere(view: FolderView, filter: Partial<Filter>) {
+    const request = view.folder()?.request;
+    if (request === undefined) return;
+    const rows = await rowsWhere(view.id, request, { ...toFilter(NO_FILTER), ...filter });
+    view.list()?.select(rows);
+  }
+
+  function sameItems(view: FolderView, row: Row): MenuItem[] {
+    const kind = kindOf(row.name, row.isDir);
+    const extension = row.name.includes(".") ? row.name.slice(row.name.lastIndexOf(".") + 1).toLowerCase() : "";
+    const day = new Date(row.modified);
+    const dayStart = new Date(day.getFullYear(), day.getMonth(), day.getDate());
+    const nextDay = new Date(day.getFullYear(), day.getMonth(), day.getDate() + 1);
+    return [
+      {
+        label: row.isDir ? "Folders" : kind === "file" ? `Same type (.${extension || "none"})` : "Same kind",
+        action: () =>
+          quietly(
+            selectWhere(view, row.isDir ? { kinds: "folders" } : { extensions: kind === "file" ? [extension] : extensionsOf(kind) }),
+          ),
+      },
+      {
+        label: "Changed the same day",
+        disabled: row.modified <= 0,
+        action: () => quietly(selectWhere(view, { modifiedFrom: dayStart.getTime(), modifiedTo: nextDay.getTime() - 1 })),
+      },
+      ...row.tags.flatMap((id) => {
+        const tag = allTags().find((known) => known.id === id);
+        return tag ? [{ label: `Tagged ${tag.name}`, action: () => quietly(selectWhere(view, { tags: [id] })) }] : [];
+      }),
+    ];
+  }
+
+  /** Every row that wasn't selected, and none that was. */
+  function invertSelection(view: FolderView) {
+    const list = view.list();
+    const chosen = new Set(list?.selection().rows);
+    const count = view.folder()?.count ?? 0;
+    list?.select(Array.from({ length: count }, (_, row) => row).filter((row) => !chosen.has(row)));
+  }
   const cycleGrouping = () => changeOrder(() => setGrouping(nextGrouping(grouping())));
 
   async function toggleSizes() {
@@ -972,6 +1026,7 @@ export function App() {
         checked: showHidden(),
         action: toggleHidden,
       },
+      { label: "Show protected system files", checked: showHidden() && showSystem(), action: toggleSystem },
       ...(view.isBin()
         ? []
         : [{ label: "Flat view", checked: view.query() === FLAT_QUERY, action: () => toggleFlat(view) }]),
@@ -1009,6 +1064,7 @@ export function App() {
           { label: "New…", action: () => setMaking({ view, x, y }) },
           { label: "Search here", action: () => view.askSearch() },
           { label: "Select by pattern…", action: () => setSelectingPattern(view) },
+          { label: "Invert selection", action: () => invertSelection(view) },
           { label: "Filter…", action: () => setFiltering(view) },
           ...undo,
           { label: "Undo several…", disabled: jobs.latestStep() === null, action: () => setActivityOpen(true) },
@@ -1226,8 +1282,11 @@ export function App() {
     largerTiles: () => resizeTiles(here(), TILE_STEP),
     smallerTiles: () => resizeTiles(here(), -TILE_STEP),
     hidden: toggleHidden,
-    filter: () => setFiltering(here()),
+    systemFiles: toggleSystem,
+    filter: () => here().toggleChips(),
+    filterMore: () => setFiltering(here()),
     selectPattern: () => setSelectingPattern(here()),
+    invertSelection: () => invertSelection(here()),
     details: toggleDetails,
     previewPane: () => setPreviewPane(!previewPane()),
     sidebar: toggleSidebar,
@@ -1334,7 +1393,7 @@ export function App() {
     const typedParent = text.slice(0, cut);
     const parent = /^([a-z]:[\\/]|\\\\)/i.test(typedParent) ? typedParent : join(from, typedParent);
     const start = text.slice(cut).toLowerCase();
-    const names = await subfolders(parent, showHidden()).catch((): string[] => []);
+    const names = await subfolders(parent, showHidden(), showSystem()).catch((): string[] => []);
     return names
       .filter((name) => name.toLowerCase().startsWith(start))
       .slice(0, MOST_OFFERS)
@@ -1573,13 +1632,19 @@ export function App() {
         <PathBar
           view={view}
           onToggleHidden={toggleHidden}
-          onFilter={() => setFiltering(view)}
+          onFilter={() => view.toggleChips()}
           onInputMenu={showInputMenu}
           onCrumbMenu={(path, x, y) => showCrumbMenu(view, path, x, y)}
           menuFor={menu()?.from}
           onNewTab={(path) => tabs.add([path])}
           suggest={(text) => suggest(view, text)}
         />
+        <Show when={view.chipsShown()}>
+          <FilterChips view={view} onMore={() => setFiltering(view)} />
+        </Show>
+        <Show when={selectingPattern() === view}>
+          <SelectPattern view={view} onClose={() => setSelectingPattern(undefined)} />
+        </Show>
         <div class="file-area">
           <Show when={view.error()}>
             <p class="message" role="alert">
@@ -1719,6 +1784,7 @@ export function App() {
           shown={settingsShown()}
           onClose={closeSettings}
           onToggleSizes={toggleSizes}
+          onToggleSystem={toggleSystem}
           onTagsChanged={showTagChange}
           onDeleteTag={askDeleteTag}
           onBeforeUpdate={flushSession}
@@ -1777,9 +1843,6 @@ export function App() {
       </Show>
       <Show when={filtering()} keyed>
         {(view) => <FilterDialog view={view} onClose={() => setFiltering(undefined)} onSave={() => saveSmart(view)} />}
-      </Show>
-      <Show when={selectingPattern()} keyed>
-        {(view) => <SelectPattern view={view} onClose={() => setSelectingPattern(undefined)} />}
       </Show>
       <Show when={naming()} keyed>
         {(ask) => <NameSheet ask={ask} onClose={() => setNaming(undefined)} />}

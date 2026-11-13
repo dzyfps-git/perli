@@ -18,7 +18,7 @@ use windows::core::Result;
 
 #[cfg(test)]
 use crate::folder::Filter;
-use crate::folder::{self, Entry, Found, Listing, Order, SortKey};
+use crate::folder::{self, Entry, Found, Listing, Order, Sight, SortKey};
 use crate::network;
 use crate::ops::sys::{self, Stat};
 use crate::tags;
@@ -36,6 +36,15 @@ const SKIPPED_COST: i32 = 1;
 const EVERY_FILE: &str = "*";
 /// Starts a search for the files that have a tag, by its name. No file name can hold a colon.
 const TAGGED: &str = "tag:";
+/// Past this a file takes too long to read for a search that reads every one it passes.
+const INSIDE_MAX: u64 = 2 * 1024 * 1024;
+/// Files whose content is text a search inside files may read.
+const TEXT_TYPES: &[&str] = &[
+    "txt", "md", "markdown", "log", "csv", "tsv", "json", "jsonc", "xml", "yaml", "yml", "toml", "ini", "cfg",
+    "conf", "html", "htm", "css", "scss", "js", "mjs", "cjs", "ts", "tsx", "jsx", "rs", "py", "go", "c", "h",
+    "cpp", "hpp", "cs", "java", "kt", "swift", "rb", "php", "lua", "sql", "sh", "bat", "cmd", "ps1", "srt",
+    "vtt", "tex", "rst", "nfo", "svg", "vue", "svelte", "env", "properties",
+];
 
 // ponytail: each report copies every row found so far, so reports thin out as rows grow. Rows
 // that share their memory would lift this.
@@ -52,6 +61,8 @@ struct Query {
     text: String,
     letters: Vec<char>,
     every_file: bool,
+    /// Text files whose content holds the text fit too.
+    inside: bool,
 }
 
 impl Query {
@@ -60,22 +71,37 @@ impl Query {
             text: text.to_lowercase(),
             letters: text.chars().map(lower).collect(),
             every_file: text == EVERY_FILE,
+            inside: false,
         }
     }
 
-    fn is_in(&self, entry: &Entry) -> bool {
+    fn is_in(&self, entry: &Entry, folder: &Path) -> bool {
         if self.every_file {
             return !entry.is_dir();
         }
-        String::from_utf16_lossy(entry.name()).to_lowercase().contains(&self.text)
+        String::from_utf16_lossy(entry.name()).to_lowercase().contains(&self.text) || self.holds(entry, folder)
     }
 
-    /// How well an entry of the searched folder itself fits.
-    fn fit_of(&self, entry: &Entry) -> Option<i32> {
+    /// How well an entry of the searched folder itself fits. A file that only holds the text
+    /// comes after every name that fits.
+    fn fit_of(&self, entry: &Entry, folder: &Path) -> Option<i32> {
         if self.every_file {
             return (!entry.is_dir()).then_some(0);
         }
-        self.fit(entry.name())
+        self.fit(entry.name()).or_else(|| self.holds(entry, folder).then_some(i32::MIN))
+    }
+
+    /// Whether a small text file's content holds the text, in any case. A file in the cloud
+    /// stays there.
+    // ponytail: reads UTF-8 only, so UTF-16 text never fits. A BOM check would add it.
+    fn holds(&self, entry: &Entry, folder: &Path) -> bool {
+        self.inside
+            && !entry.is_dir()
+            && !entry.is_cloud()
+            && entry.size() <= INSIDE_MAX
+            && TEXT_TYPES.contains(&entry.extension_text().as_str())
+            && std::fs::read(folder.join(entry.file_name()))
+                .is_ok_and(|bytes| String::from_utf8_lossy(&bytes).to_lowercase().contains(&self.text))
     }
 
     /// How well a name fits if its letters match from `start`, which holds the query's first.
@@ -131,12 +157,12 @@ pub fn rank(query: &str, names: &[String]) -> Vec<u32> {
 /// could lead back around, and hidden folders hold what the user chose not to see.
 fn read_folder(
     folder: &Path,
-    show_hidden: bool,
+    sight: Sight,
     below: &mut VecDeque<PathBuf>,
     mut visit: impl FnMut(Entry),
 ) -> Result<()> {
     let mut take = |entry: Entry, is_folder: bool| {
-        if is_folder && (show_hidden || !entry.is_hidden()) {
+        if is_folder && sight.shows(&entry) {
             below.push_back(folder.join(OsString::from_wide(entry.name())));
         }
         visit(entry);
@@ -155,11 +181,11 @@ fn read_folder(
 }
 
 /// The folder's own matches, best first, and the folders under it.
-fn read_top(folder: &Path, query: &Query, show_hidden: bool) -> Result<(Found, VecDeque<PathBuf>)> {
+fn read_top(folder: &Path, query: &Query, sight: Sight) -> Result<(Found, VecDeque<PathBuf>)> {
     let mut below = VecDeque::new();
     let mut fits = Vec::new();
-    read_folder(folder, show_hidden, &mut below, |entry| {
-        if let Some(fit) = query.fit_of(&entry) {
+    read_folder(folder, sight, &mut below, |entry| {
+        if let Some(fit) = query.fit_of(&entry, folder) {
             fits.push((fit, entry));
         }
     })?;
@@ -255,12 +281,12 @@ impl Search {
         query: &Query,
         mut rows: Found,
         mut below: VecDeque<PathBuf>,
-        show_hidden: bool,
+        sight: Sight,
         mut quiet: bool,
         report: impl Fn(Walk),
     ) {
         let mut reported = Instant::now();
-        let mut in_sight = if quiet { rows.in_sight(show_hidden) } else { self.found().in_sight(show_hidden) };
+        let mut in_sight = if quiet { rows.in_sight(sight) } else { self.found().in_sight(sight) };
         while let Some(folder) = below.pop_front() {
             if in_sight >= self.room() && !self.stopped() {
                 self.show(&mut rows, &mut quiet);
@@ -272,9 +298,9 @@ impl Search {
             }
             let location: Arc<[u16]> = folder::null_terminated(&folder).into();
             // A folder that can't be read has nothing to show, which is no reason to stop.
-            let _ = read_folder(&folder, show_hidden, &mut below, |entry| {
-                if query.is_in(&entry) {
-                    in_sight += usize::from(show_hidden || !entry.is_hidden());
+            let _ = read_folder(&folder, sight, &mut below, |entry| {
+                if query.is_in(&entry, &folder) {
+                    in_sight += usize::from(sight.shows(&entry));
                     rows.push(entry, location.clone());
                 }
             });
@@ -325,6 +351,9 @@ pub struct Asked {
     pub query: String,
     #[serde(default)]
     pub scope: Scope,
+    /// Look in the content of text files as well as at names.
+    #[serde(default)]
+    pub inside: bool,
 }
 
 /// The top of the drive or share `folder` is on.
@@ -438,8 +467,8 @@ impl Searches {
             Scope::Drive | Scope::Drives => root_of(&shown_folder),
             Scope::Below | Scope::Folder => shown_folder,
         };
-        let query = Query::new(&asked.query);
-        let (first, mut below) = read_top(&folder, &query, order.show_hidden)?;
+        let query = Query { inside: asked.inside, ..Query::new(&asked.query) };
+        let (first, mut below) = read_top(&folder, &query, order.sight())?;
         match asked.scope {
             Scope::Folder => below.clear(),
             Scope::Drives => below.extend(other_drives(&folder)),
@@ -457,8 +486,8 @@ impl Searches {
         let search = Arc::new(Search::new(shown.clone(), room));
         self.all().insert(view, search.clone());
         let rows = if quiet { first } else { Found::default() };
-        let show_hidden = order.show_hidden;
-        thread::spawn(move || search.walk(&query, rows, below, show_hidden, quiet, report));
+        let sight = order.sight();
+        thread::spawn(move || search.walk(&query, rows, below, sight, quiet, report));
         Ok(Listing::searched(shown, order))
     }
 }
@@ -528,7 +557,7 @@ mod tests {
         let report = move |done| {
             let _ = reports.send(done);
         };
-        let asked = Asked { step: Step::Start, query: query.to_string(), scope: Scope::Below };
+        let asked = Asked { step: Step::Start, query: query.to_string(), scope: Scope::Below, inside: false };
         (searches.rows(1, asked, tree.path(), order, report).unwrap(), heard)
     }
 
@@ -537,7 +566,7 @@ mod tests {
         let tree = Tree::new("scope");
         let searches = Searches::default();
         let (reports, heard) = mpsc::channel();
-        let asked = Asked { step: Step::Start, query: "report".to_string(), scope: Scope::Folder };
+        let asked = Asked { step: Step::Start, query: "report".to_string(), scope: Scope::Folder, inside: false };
         let report = move |walk| {
             let _ = reports.send(walk);
         };
@@ -554,7 +583,7 @@ mod tests {
     }
 
     fn grown(searches: &Searches, tree: &Tree, order: Order) -> Listing {
-        let asked = Asked { step: Step::Grown, query: String::new(), scope: Scope::Below };
+        let asked = Asked { step: Step::Grown, query: String::new(), scope: Scope::Below, inside: false };
         searches.rows(1, asked, tree.path(), order, |_| ()).unwrap()
     }
 
@@ -580,7 +609,7 @@ mod tests {
             let report = move |walk| {
                 let _ = reports.send(walk);
             };
-            search.walk(&Query::new("report"), Found::default(), below, false, quiet, report);
+            search.walk(&Query::new("report"), Found::default(), below, Sight::default(), quiet, report);
         });
         heard
     }
@@ -714,7 +743,7 @@ mod tests {
 
         fs::rename(tree.0.join(r"deep\inner\plain.txt"), tree.0.join(r"deep\inner\plainer.txt")).unwrap();
         let (reports, heard) = mpsc::channel();
-        let asked = Asked { step: Step::Again, query: "plain".to_string(), scope: Scope::Below };
+        let asked = Asked { step: Step::Again, query: "plain".to_string(), scope: Scope::Below, inside: false };
         let report = move |done| {
             let _ = reports.send(done);
         };
@@ -734,7 +763,7 @@ mod tests {
         search.stop();
         let below = VecDeque::from([tree.0.clone()]);
 
-        search.walk(&Query::new("report"), Found::default(), below, false, false, move |walk| {
+        search.walk(&Query::new("report"), Found::default(), below, Sight::default(), false, move |walk| {
             let _ = reports.send(walk);
         });
 
@@ -776,7 +805,7 @@ mod tests {
     #[test]
     fn a_quiet_walk_shows_its_rows_when_it_starts_to_wait() {
         let tree = tree_of_folders("quiet");
-        let (old, _) = read_top(&tree.0, &Query::new("other"), false).unwrap();
+        let (old, _) = read_top(&tree.0, &Query::new("other"), Sight::default()).unwrap();
         let search = Arc::new(Search::new(old, 2));
 
         let heard = walk_tree(&search, &tree, true);
@@ -838,7 +867,7 @@ mod tests {
         wait_until_done(&heard);
         searches.reached(1, AHEAD);
 
-        let asked = Asked { step: Step::Again, query: "report".to_string(), scope: Scope::Below };
+        let asked = Asked { step: Step::Again, query: "report".to_string(), scope: Scope::Below, inside: false };
         searches.rows(1, asked, tree.path(), found_order(), |_| ()).unwrap();
 
         assert_eq!(searches.all()[&1].room(), AHEAD * 2);
@@ -860,9 +889,9 @@ mod tests {
     #[test]
     fn a_server_offers_its_shares_and_walks_those_in_sight() {
         let system = std::env::var("SystemDrive").unwrap().replace(':', "$");
-        let read = |show_hidden| {
+        let read = |hidden| {
             let (mut below, mut seen) = (VecDeque::new(), Vec::new());
-            read_folder(Path::new(r"\\localhost"), show_hidden, &mut below, |entry| {
+            read_folder(Path::new(r"\\localhost"), Sight { hidden, system: false }, &mut below, |entry| {
                 seen.push(String::from_utf16_lossy(entry.name()));
             })
             .unwrap();
@@ -874,11 +903,31 @@ mod tests {
     }
 
     #[test]
+    fn a_search_inside_files_finds_text_files_by_what_they_hold() {
+        let tree = Tree::new("inside");
+        fs::write(tree.0.join("notes.txt"), "Meet at the Harbour").unwrap();
+        fs::write(tree.0.join(r"deep\more.md"), "the harbour again").unwrap();
+        fs::write(tree.0.join("picture.png"), "harbour").unwrap();
+        let searches = Searches::default();
+        let (reports, heard) = mpsc::channel();
+        let report = move |walk| {
+            let _ = reports.send(walk);
+        };
+        let asked = |inside| Asked { step: Step::Start, query: "harbour".to_string(), scope: Scope::Below, inside };
+
+        searches.rows(1, asked(true), tree.path(), found_order(), report).unwrap();
+        wait_until_done(&heard);
+        assert_eq!(names(&grown(&searches, &tree, found_order())), ["notes.txt", "more.md"]);
+        let names_only = searches.rows(1, asked(false), tree.path(), found_order(), |_| ()).unwrap();
+        assert_eq!(names_only.len(), 0);
+    }
+
+    #[test]
     fn a_missing_folder_is_an_error_and_a_sort_still_works() {
         let tree = Tree::new("sort");
         let searches = Searches::default();
         let missing = tree.0.join("nope");
-        let asked = Asked { step: Step::Start, query: "a".to_string(), scope: Scope::Below };
+        let asked = Asked { step: Step::Start, query: "a".to_string(), scope: Scope::Below, inside: false };
         assert!(searches.rows(1, asked, missing.to_str().unwrap(), found_order(), |_| ()).is_err());
 
         let (_, heard) = start(&searches, &tree, "report", found_order());

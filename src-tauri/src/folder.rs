@@ -28,8 +28,11 @@ const FLAG_HIDDEN: u8 = 2;
 const FLAG_CLOUD: u8 = 4;
 const FLAG_PINNED: u8 = 8;
 const FLAG_CUSTOM: u8 = 16;
+const FLAG_SYSTEM: u8 = 32;
 /// How Windows marks a folder whose `desktop.ini` gives it an icon of its own.
 const CUSTOMIZED: u32 = FILE_ATTRIBUTE_READONLY.0 | FILE_ATTRIBUTE_SYSTEM.0;
+/// What Explorer keeps out of sight even when hidden files show.
+const PROTECTED: u32 = FILE_ATTRIBUTE_HIDDEN.0 | FILE_ATTRIBUTE_SYSTEM.0;
 /// What the row format's one byte can count.
 const MAX_ROW_TAGS: usize = u8::MAX as usize;
 /// Between FILETIME's start in 1601 and the 1970 start of the UI's times.
@@ -132,11 +135,34 @@ pub struct Order {
     pub descending: bool,
     pub group: Grouping,
     pub show_hidden: bool,
+    /// Protected system files, which also need `show_hidden`.
+    #[serde(default)]
+    pub show_system: bool,
     #[serde(default)]
     pub filter: Filter,
     /// Folders whose rows show under them, by full path. Only a read looks at these.
     #[serde(default)]
     pub expanded: Vec<String>,
+}
+
+impl Order {
+    pub fn sight(&self) -> Sight {
+        Sight { hidden: self.show_hidden, system: self.show_system }
+    }
+}
+
+/// Which of the entries the user chose not to see show anyway.
+#[derive(Clone, Copy, Default)]
+pub struct Sight {
+    pub hidden: bool,
+    /// Only counts with `hidden`, since every protected system file is hidden too.
+    pub system: bool,
+}
+
+impl Sight {
+    pub fn shows(self, entry: &Entry) -> bool {
+        (self.hidden || !entry.hidden) && (self.system || !entry.system)
+    }
 }
 
 #[derive(Clone)]
@@ -150,6 +176,8 @@ pub struct Entry {
     created: u64,
     is_dir: bool,
     hidden: bool,
+    /// Hidden and system both, which Explorer calls a protected operating system file.
+    system: bool,
     /// Its content is in the cloud.
     cloud: bool,
     /// The user asked to always keep it on this device.
@@ -178,6 +206,7 @@ impl Entry {
                 | u64::from(data.ftCreationTime.dwLowDateTime),
             is_dir: data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0,
             hidden: data.dwFileAttributes & FILE_ATTRIBUTE_HIDDEN.0 != 0,
+            system: data.dwFileAttributes & PROTECTED == PROTECTED,
             cloud: data.dwFileAttributes & ONLINE_ONLY != 0,
             pinned: data.dwFileAttributes & FILE_ATTRIBUTE_PINNED.0 != 0,
             custom: data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0 && data.dwFileAttributes & CUSTOMIZED != 0,
@@ -192,6 +221,7 @@ impl Entry {
             created: item.deleted,
             is_dir: item.is_dir,
             hidden: false,
+            system: false,
             cloud: false,
             pinned: false,
             custom: false,
@@ -207,6 +237,7 @@ impl Entry {
             created: 0,
             is_dir: true,
             hidden: out_of_sight,
+            system: false,
             cloud: false,
             pinned: false,
             custom: false,
@@ -230,8 +261,9 @@ impl Entry {
         self.is_dir
     }
 
-    pub fn is_hidden(&self) -> bool {
-        self.hidden
+    /// Reading its content would fetch it from the cloud.
+    pub fn is_cloud(&self) -> bool {
+        self.cloud
     }
 
     /// The null-terminated extension with its dot. Folders have none.
@@ -242,7 +274,7 @@ impl Entry {
     }
 
     /// In lowercase with no dot.
-    fn extension_text(&self) -> String {
+    pub fn extension_text(&self) -> String {
         let dotted = &self.extension()[..self.extension().len() - 1];
         String::from_utf16_lossy(dotted.get(1..).unwrap_or_default()).to_lowercase()
     }
@@ -304,8 +336,8 @@ impl Found {
     }
 
     /// The rows the list would show.
-    pub fn in_sight(&self, show_hidden: bool) -> usize {
-        self.entries.iter().filter(|entry| show_hidden || !entry.hidden).count()
+    pub fn in_sight(&self, sight: Sight) -> usize {
+        self.entries.iter().filter(|entry| sight.shows(entry)).count()
     }
 }
 
@@ -420,7 +452,8 @@ impl Listing {
     fn arrange(mut self, order: Order) -> Self {
         let entries = &self.entries;
         let name = order.filter.name.to_lowercase();
-        let shown = |entry: &Entry| order.show_hidden || !entry.hidden;
+        let sight = order.sight();
+        let shown = |entry: &Entry| sight.shows(entry);
         let fits = |row: u32| {
             let entry = &entries[row as usize];
             shown(entry) && order.filter.keeps(entry, &name, self.tags_of(row))
@@ -496,9 +529,10 @@ impl Listing {
         self.visible.len()
     }
 
-    /// Hidden entries in the folder, whether or not they are being shown.
+    /// Hidden entries the hidden switch would show, whether or not they are being shown.
     pub fn hidden_count(&self) -> usize {
-        self.entries.iter().filter(|entry| entry.hidden).count()
+        let system = self.order.show_system;
+        self.entries.iter().filter(|entry| entry.hidden && (system || !entry.system)).count()
     }
 
     #[cfg(test)]
@@ -624,6 +658,13 @@ impl Listing {
         (0..self.visible.len() as u32).filter(|&row| fits(self.visible[row as usize])).collect()
     }
 
+    /// The rows that fit `filter`, such as all of one kind or of one day.
+    pub fn fitting(&self, filter: &Filter) -> Vec<u32> {
+        let name = filter.name.to_lowercase();
+        let fits = |entry: u32| filter.keeps(&self.entries[entry as usize], &name, self.tags_of(entry));
+        (0..self.visible.len() as u32).filter(|&row| fits(self.visible[row as usize])).collect()
+    }
+
     /// Encodes rows as: row count (u32), then for each row the name length in bytes (u32),
     /// size (u64), modified (u64), created (u64), flags (u8), the location length in bytes
     /// (u32), the tag count (u8), the UTF-16 name, the UTF-16 location and the tags (u32 each).
@@ -641,6 +682,7 @@ impl Listing {
             let cloud = if row.cloud { FLAG_CLOUD } else { 0 };
             let pinned = if row.pinned { FLAG_PINNED } else { 0 };
             let custom = if row.custom { FLAG_CUSTOM } else { 0 };
+            let system = if row.system { FLAG_SYSTEM } else { 0 };
             // A row of the folder itself has no place of its own to name.
             let top = self.parents.get(entry as usize) == Some(&TOP);
             let location = if top { &[0][..] } else { location_of(self.locations(), entry) };
@@ -649,7 +691,7 @@ impl Listing {
             bytes.extend(self.size_of(entry as usize).to_le_bytes());
             bytes.extend(row.modified.to_le_bytes());
             bytes.extend(row.created.to_le_bytes());
-            bytes.push(folder | hidden | cloud | pinned | custom);
+            bytes.push(folder | hidden | cloud | pinned | custom | system);
             bytes.extend((location.len() as u32 * 2).to_le_bytes());
             let tags = &self.tags_of(entry)[..self.tags_of(entry).len().min(MAX_ROW_TAGS)];
             bytes.push(tags.len() as u8);
@@ -753,7 +795,7 @@ fn natural(a: &[u16], b: &[u16]) -> Ordering {
 }
 
 /// The names of the folders right inside `path`, in Explorer's order, for a path crumb's menu.
-pub fn subfolders(path: &Path, show_hidden: bool) -> std::io::Result<Vec<String>> {
+pub fn subfolders(path: &Path, sight: Sight) -> std::io::Result<Vec<String>> {
     use std::os::windows::fs::MetadataExt;
 
     let mut names: Vec<Box<[u16]>> = std::fs::read_dir(path)?
@@ -761,7 +803,9 @@ pub fn subfolders(path: &Path, show_hidden: bool) -> std::io::Result<Vec<String>
         .filter(|entry| {
             entry.metadata().is_ok_and(|facts| {
                 let attributes = facts.file_attributes();
-                attributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0 && (show_hidden || attributes & FILE_ATTRIBUTE_HIDDEN.0 == 0)
+                let hidden = attributes & FILE_ATTRIBUTE_HIDDEN.0 != 0;
+                let system = attributes & PROTECTED == PROTECTED;
+                attributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0 && (sight.hidden || !hidden) && (sight.system || !system)
             })
         })
         .map(|entry| null_terminated(Path::new(&entry.file_name())))
@@ -818,10 +862,50 @@ mod tests {
     }
 
     fn hide(file: &Path) {
+        set_attributes(file, FILE_ATTRIBUTE_HIDDEN);
+    }
+
+    fn set_attributes(file: &Path, attributes: windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES) {
         use windows::core::HSTRING;
 
-        unsafe { SetFileAttributesW(&HSTRING::from(file.as_os_str()), FILE_ATTRIBUTE_HIDDEN) }
-            .unwrap();
+        unsafe { SetFileAttributesW(&HSTRING::from(file.as_os_str()), attributes) }.unwrap();
+    }
+
+    /// Hidden and system, as Windows marks its own files.
+    fn protect(file: &Path) {
+        set_attributes(file, FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM);
+    }
+
+    #[test]
+    fn system_files_need_both_switches() {
+        let folder = TempFolder::new("system");
+        for name in ["seen", "secret", "boot"] {
+            fs::write(folder.0.join(name), "").unwrap();
+        }
+        hide(&folder.0.join("secret"));
+        protect(&folder.0.join("boot"));
+        let order = |show_hidden, show_system| Order { show_hidden, show_system, ..Order::default() };
+
+        assert_eq!(sorted(&folder, order(true, false)), ["secret", "seen"]);
+        assert_eq!(sorted(&folder, order(false, true)), ["seen"]);
+        assert_eq!(sorted(&folder, order(true, true)), ["boot", "secret", "seen"]);
+        let path = folder.0.to_str().unwrap();
+        assert_eq!(Listing::read(path, order(false, false)).unwrap().hidden_count(), 1);
+        assert_eq!(Listing::read(path, order(false, true)).unwrap().hidden_count(), 2);
+        let listing = Listing::read(path, order(true, true)).unwrap();
+        assert_eq!(listing.encode_rows(0, 1)[32], FLAG_HIDDEN | FLAG_SYSTEM);
+    }
+
+    #[test]
+    fn fitting_rows_are_the_ones_a_filter_keeps() {
+        let folder = TempFolder::new("fitting");
+        for name in ["a.jpg", "b.txt", "c.JPG"] {
+            fs::write(folder.0.join(name), "").unwrap();
+        }
+        let listing = Listing::read(folder.0.to_str().unwrap(), Order::default()).unwrap();
+        let jpg = Filter { extensions: vec!["jpg".into()], ..Filter::default() };
+
+        assert_eq!(listing.fitting(&jpg), [0, 2]);
     }
 
     #[test]
@@ -983,8 +1067,9 @@ mod tests {
         fs::write(folder.0.join("notes.txt"), "").unwrap();
         hide(&folder.0.join("secret"));
 
-        assert_eq!(subfolders(&folder.0, false).unwrap(), ["Apps", "photos 2", "photos 10"]);
-        assert_eq!(subfolders(&folder.0, true).unwrap(), ["Apps", "photos 2", "photos 10", "secret"]);
+        let shown = Sight { hidden: true, system: false };
+        assert_eq!(subfolders(&folder.0, Sight::default()).unwrap(), ["Apps", "photos 2", "photos 10"]);
+        assert_eq!(subfolders(&folder.0, shown).unwrap(), ["Apps", "photos 2", "photos 10", "secret"]);
     }
 
     #[test]

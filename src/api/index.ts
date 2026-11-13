@@ -32,6 +32,8 @@ export interface Row {
   isPinned: boolean;
   /** A folder Windows gives an icon of its own. */
   isCustom: boolean;
+  /** Hidden and system both: one of Windows' own files. */
+  isSystem: boolean;
   /** Where a deleted item came from, or where a search found the row. Otherwise empty. */
   location: string;
   /** Ids of its tags. */
@@ -76,6 +78,8 @@ export interface Filter {
 export interface Order extends Sort {
   group: Grouping;
   showHidden: boolean;
+  /** Protected system files, which also need `showHidden`. */
+  showSystem: boolean;
   filter: Filter;
   /** Folders whose rows show under them, by full path. */
   expanded?: string[];
@@ -329,6 +333,7 @@ const FLAG_HIDDEN = 2;
 const FLAG_CLOUD = 4;
 const FLAG_PINNED = 8;
 const FLAG_CUSTOM = 16;
+const FLAG_SYSTEM = 32;
 const UINT32_RANGE = 2 ** 32;
 const FILETIME_TICKS_PER_MS = 10_000;
 const FILETIME_TO_UNIX_MS = 11_644_473_600_000;
@@ -414,7 +419,7 @@ export const arrangeView = (
   order: Order,
   selected: number[],
 ) =>
-  invoke<{ count: number; selected: number[] }>("arrange_view", { view, request, shown, order, selected });
+  invoke<{ count: number; hiddenCount: number; selected: number[] }>("arrange_view", { view, request, shown, order, selected });
 
 /**
  * Reads the shown folder again. `select` names the new selection, or `selected` rows keep theirs.
@@ -428,7 +433,7 @@ export const reloadView = (
   order: Order,
   selected: number[],
   select: string[],
-  search: { step: SearchStep; query: string; scope: SearchScope } | null,
+  search: { step: SearchStep; query: string; scope: SearchScope; inside: boolean } | null,
 ) =>
   invoke<{ count: number; hiddenCount: number; selected: number[] }>("reload_view", {
     view,
@@ -566,6 +571,10 @@ export const commonTags = (selection: Selection) => invoke<number[]>("common_tag
 export const rowsMatching = (view: number, request: number, pattern: string) =>
   invoke<number[]>("rows_matching", { view, request, pattern });
 
+/** The rows that fit `filter`, for picking all of one kind, tag or day. */
+export const rowsWhere = (view: number, request: number, filter: Filter) =>
+  invoke<number[]>("rows_where", { view, request, filter });
+
 /** The bytes of the selected files, from the listing alone. Folders count as nothing. */
 export const selectionSize = (selection: Selection) => invoke<number>("selection_size", { selection });
 
@@ -691,7 +700,8 @@ export const ownTemplates = () => invoke<string[]>("own_templates");
 export const templatesFolder = () => invoke<string>("templates_folder");
 
 /** The names of the folders right inside `path`, in Explorer's order. */
-export const subfolders = (path: string, showHidden: boolean) => invoke<string[]>("subfolders", { path, showHidden });
+export const subfolders = (path: string, showHidden: boolean, showSystem: boolean) =>
+  invoke<string[]>("subfolders", { path, showHidden, showSystem });
 
 /** The apps holding the selected files. */
 export const fileUsers = (selection: Selection) => invoke<string[]>("file_users", { selection });
@@ -943,6 +953,7 @@ function decodeRows(buffer: ArrayBuffer): Row[] {
       isCloud: (flags & FLAG_CLOUD) !== 0,
       isPinned: (flags & FLAG_PINNED) !== 0,
       isCustom: (flags & FLAG_CUSTOM) !== 0,
+      isSystem: (flags & FLAG_SYSTEM) !== 0,
     };
     offset = tagStart + tagCount * TAG_BYTES;
   }
