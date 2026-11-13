@@ -10,9 +10,11 @@ use std::sync::Mutex;
 
 use pulldown_cmark::{html, CowStr, Event, Options, Parser, Tag, TagEnd};
 use serde::Serialize;
-use windows::core::{Interface, HSTRING, PWSTR};
+use windows::core::{Interface, HSTRING, PCWSTR, PWSTR};
 use windows::Win32::Foundation::PROPERTYKEY;
-use windows::Win32::Globalization::{GetACP, MultiByteToWideChar, CP_ACP, MULTI_BYTE_TO_WIDE_CHAR_FLAGS};
+use windows::Win32::Globalization::{
+    GetACP, GetLocaleInfoEx, MultiByteToWideChar, LOCALE_IDEFAULTANSICODEPAGE, LOCALE_RETURN_NUMBER, MULTI_BYTE_TO_WIDE_CHAR_FLAGS,
+};
 use windows::Win32::Security::Cryptography::{
     BCryptCreateHash, BCryptDestroyHash, BCryptFinishHash, BCryptHashData, BCRYPT_HASH_HANDLE,
     BCRYPT_MD5_ALG_HANDLE, BCRYPT_SHA1_ALG_HANDLE, BCRYPT_SHA256_ALG_HANDLE, BCRYPT_SHA512_ALG_HANDLE,
@@ -99,7 +101,7 @@ impl Encoding {
             Self::Utf8 => "UTF-8".into(),
             Self::Utf16 { big: false } => "UTF-16 LE".into(),
             Self::Utf16 { big: true } => "UTF-16 BE".into(),
-            Self::Ansi => match unsafe { GetACP() } {
+            Self::Ansi => match ansi_page() {
                 page @ 1250..=1258 => format!("Windows-{page}"),
                 page => format!("Code page {page}"),
             },
@@ -132,9 +134,9 @@ impl Encoding {
                     return Some((String::new(), 0));
                 }
                 let flags = MULTI_BYTE_TO_WIDE_CHAR_FLAGS(0);
-                let length = unsafe { MultiByteToWideChar(CP_ACP, flags, bytes, None) };
+                let length = unsafe { MultiByteToWideChar(ansi_page(), flags, bytes, None) };
                 let mut wide = vec![0; usize::try_from(length).ok().filter(|&length| length > 0)?];
-                unsafe { MultiByteToWideChar(CP_ACP, flags, bytes, Some(&mut wide)) };
+                unsafe { MultiByteToWideChar(ansi_page(), flags, bytes, Some(&mut wide)) };
                 Some((String::from_utf16(&wide).ok()?, bytes.len()))
             }
         }
@@ -147,6 +149,23 @@ impl Encoding {
             // In UTF-8 and the ANSI code pages a `\n` byte is always a line end, never part of a letter.
             _ => bytes.iter().rposition(|&byte| byte == b'\n').map(|at| at + 1),
         }
+    }
+}
+
+/// The code page Notepad calls ANSI: the user's language's own, even when Windows is set to use
+/// UTF-8 for programs (its "worldwide language support"), where old files are still in it.
+fn ansi_page() -> u32 {
+    const UTF8: u32 = 65001;
+    let mut number = [0u16; 2];
+    let asked = LOCALE_IDEFAULTANSICODEPAGE | LOCALE_RETURN_NUMBER;
+    let found = unsafe { GetLocaleInfoEx(PCWSTR::null(), asked, Some(&mut number)) } > 0;
+    let page = if found { u32::from(number[0]) | (u32::from(number[1]) << 16) } else { 0 };
+    match page {
+        0 | UTF8 => match unsafe { GetACP() } {
+            UTF8 => 1252,
+            page => page,
+        },
+        page => page,
     }
 }
 
@@ -737,7 +756,7 @@ mod tests {
         let Preview::Text { text, encoding, .. } = read(&folder.join("old.txt"), 0) else { panic!("not text") };
         assert!(text.starts_with("caf") && text.ends_with(" au lait\r\n"), "{text}");
         assert!(encoding.starts_with("Windows-") || encoding.starts_with("Code page"), "{encoding}");
-        if unsafe { GetACP() } == 1252 {
+        if ansi_page() == 1252 {
             assert_eq!((text.as_str(), encoding.as_str()), ("caf\u{e9} au lait\r\n", "Windows-1252"));
         }
         assert_eq!(read(&folder.join("tool.exe"), 0), Preview::Picture);
