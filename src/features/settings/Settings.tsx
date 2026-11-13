@@ -137,6 +137,8 @@ export function Settings(props: {
   const [backupNote, setBackupNote] = createSignal<string>();
   const [hidden, setHidden] = createSignal<SectionId[]>([]);
   const [current, setCurrent] = createSignal<SectionId>("look");
+  // Closing drops the page and its empty search box, so a search's hidden parts go with it.
+  createEffect(on(() => props.open, (open) => open || setHidden([])));
   /** What the pointer is over, which the small window tries on. */
   const [tryTheme, setTryTheme] = createSignal<Theme>();
   const [tryAccent, setTryAccent] = createSignal<Accent>();

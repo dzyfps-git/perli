@@ -332,6 +332,8 @@ export function ToolCog(props: { label: string; items: CogItem[] }) {
         aria-label={props.label}
         // A click here must not reach the viewer under it, which would turn its page.
         onClick={(event) => event.stopPropagation()}
+        // Nor a key: Space on a switch would close the viewer, Enter would open the file.
+        onKeyDown={(event) => event.stopPropagation()}
       >
         <For each={props.items}>
           {(item) => <Switch label={item.label} checked={item.checked()} onChange={item.toggle} />}

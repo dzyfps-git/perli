@@ -13,6 +13,7 @@ import {
   onCloseAsked,
   onFolderChanged,
   onOpenAsked,
+  asksWaiting,
   comeForward,
   ejectDrive,
   keepOnDevice,
@@ -449,7 +450,10 @@ export function App() {
     }
     comeForward().catch(console.error);
     setSettingsShown(false);
-    const shown = ask.select.length > 0 && tabs.tabs().find((tab) => samePath(tab.active().folder()?.path, folder));
+    // A tab showing search results there can't select by name, so it gets a plain tab instead.
+    const shown =
+      ask.select.length > 0 &&
+      tabs.tabs().find((tab) => !tab.active().query() && samePath(tab.active().folder()?.path, folder));
     if (shown) tabs.activate(shown);
     const view = shown ? shown.active() : await tabs.add([folder]);
     if (ask.select.length > 0) await view?.reload(ask.select);
@@ -1431,6 +1435,9 @@ export function App() {
       if (opened && start.select.length > 0) await tabs.activeView().reload(start.select);
     }
     setKeepSession(!start.folder);
+    // Starts handed over while this window loaded wait in the back end until now.
+    await openListener;
+    for (const ask of await asksWaiting()) await openAsked(ask).catch(console.error);
   });
   onCleanup(() => {
     window.clearTimeout(saveTimer);
@@ -1653,7 +1660,7 @@ export function App() {
           <Properties
             target={target}
             onPickApp={setPickingApp}
-            onWindows={() => shell.windowsProperties(target, at)}
+            onWindows={(lasting) => shell.windowsProperties(lasting, at)}
             onChanged={showTagChange}
             onClose={() => setShowingProperties(undefined)}
           />
