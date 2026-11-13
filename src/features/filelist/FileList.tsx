@@ -1107,11 +1107,11 @@ export function FileList(props: {
 
     // Rows changing in place play their change. Opening, sorting and scrolling don't. A search
     // plays only from the top of the list, where the rows that stop matching can be seen to go.
-    // ponytail: rows past the screen's edge just appear, and a reveal that scrolls plays nothing.
     const scrolled = grid.scrollTop;
     const still = props.match ? scrolled === 0 : !props.top;
     const moving = still && !props.rearranged && firstPaintDone && !reducedMotion.matches;
-    const before = moving ? seen(rowsShown(), props.count < lastCount) : undefined;
+    const closing = props.count < lastCount;
+    const before = moving ? seen(rowsShown(), closing) : undefined;
     lastCount = props.count;
 
     pages.clear();
@@ -1133,9 +1133,12 @@ export function FileList(props: {
     builtFor = "";
     resize();
     selectionChanged(true, props.reveal);
-    if (before && grid.scrollTop === scrolled) {
+    // A reveal may have scrolled, which the moves take into account. One that jumps a screen or
+    // more lands somewhere new, where there is nothing to follow.
+    if (before && Math.abs(grid.scrollTop - scrolled) < grid.clientHeight) {
       // In a search, rows that no longer match drift off and the rest close ranks without a show.
-      playMoves(before, rowsShown(), spacer, props.match ? "drift" : "shrink", !!props.match);
+      const edge = closing && !props.match ? grid.getBoundingClientRect().bottom : undefined;
+      playMoves(before, rowsShown(), spacer, props.match ? "drift" : "shrink", !!props.match, grid.scrollTop - scrolled, edge);
     }
     const next = renameNext;
     renameNext = undefined;
