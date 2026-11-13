@@ -25,7 +25,7 @@ export function NewTag(props: {
       const tag = await createTag(name(), color());
       await refreshTags();
       const selection = props.selection();
-      if (selection) await setTag(selection, tag.id, true);
+      if (selection) await setTag({ kind: "rows", selection }, tag.id, true);
       close();
       props.onDone();
     } catch (reason) {

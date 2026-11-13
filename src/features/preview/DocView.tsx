@@ -321,7 +321,7 @@ export function BookView(live: BookViewProps) {
   });
 
   onMount(() => {
-    scroller.focus({ preventScroll: true });
+    if (!scroller.closest(".preview-docked")) scroller.focus({ preventScroll: true });
     if (resumed()) setTimeout(() => setResumed(false), RESUME_SHOWN_MS);
   });
 

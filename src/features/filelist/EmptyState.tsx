@@ -1,4 +1,5 @@
 import { createSignal, For, onCleanup, onMount, type JSX } from "solid-js";
+import { CLIPBOARD_SET } from "../../api";
 
 export type EmptyArt = "folder" | "bin" | "search" | "filter";
 
@@ -7,7 +8,7 @@ export interface EmptyAction {
   /** The keys that do the same, read out with the button's name. */
   keys?: string;
   run: () => void;
-  /** Asked when the list shows and each time Perli comes back to the front. */
+  /** Asked when the list shows, each time Perli comes back to the front, and after Perli copies. */
   enabled?: () => Promise<boolean>;
 }
 
@@ -54,7 +55,12 @@ function Action(props: { action: EmptyAction }) {
     ask();
     // What another app copied is there to paste once Perli is back in front.
     window.addEventListener("focus", ask);
-    onCleanup(() => window.removeEventListener("focus", ask));
+    // And what Perli copied in another pane, which needs no change of focus.
+    window.addEventListener(CLIPBOARD_SET, ask);
+    onCleanup(() => {
+      window.removeEventListener("focus", ask);
+      window.removeEventListener(CLIPBOARD_SET, ask);
+    });
   });
   return (
     <button

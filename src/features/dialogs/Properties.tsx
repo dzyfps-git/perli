@@ -65,8 +65,8 @@ export function Properties(props: {
   target: ShellTarget;
   /** Opens the app picker for these files. */
   onPickApp: (paths: string[]) => void;
-  /** Windows' own Properties window for the same thing. */
-  onWindows: () => void;
+  /** Windows' own Properties window for the same thing, by path once known. */
+  onWindows: (target: ShellTarget) => void;
   /** After read-only, hidden or a tag changed, so the list can show it. */
   onChanged: () => void;
   onClose: () => void;
@@ -86,10 +86,16 @@ export function Properties(props: {
   const first = () => paths()[0];
   const isFile = () => alone() && facts()!.files === 1;
   const selection = props.target.kind === "rows" ? props.target.selection : undefined;
+  /**
+   * The rows by path once read: a tag or attribute change reloads the folder behind the sheet,
+   * after which the rows it opened on are gone.
+   */
+  const lasting = (): ShellTarget => (selection && facts() ? { kind: "paths", paths: paths() } : props.target);
 
   const [picture] = createResource(first, (path) => fetchPictureFile(path, PICTURE_EDGE).catch(() => null));
   const [measured] = createResource(
-    () => (facts() && !isFile() ? paths() : undefined),
+    // A drive shows its free space instead, and adding it all up would read the whole disk.
+    () => (facts() && !isFile() && !facts()!.isRoot ? paths() : undefined),
     (all) => measurePaths(all),
   );
   const [space] = createResource(
@@ -137,7 +143,7 @@ export function Properties(props: {
       if (selection) {
         await refreshTags();
         // A drive with no file IDs has no tags to show.
-        setCommon(await commonTags(selection).catch((): number[] => []));
+        setCommon(await commonTags(lasting()).catch((): number[] => []));
       }
     } catch (reason) {
       setFailure(String(reason));
@@ -157,13 +163,11 @@ export function Properties(props: {
     }
   }
 
-  // ponytail: the rows are the ones the sheet opened on. If the folder reloads behind the sheet
-  // Windows' answer is "that row is gone", which shows here. Tag by path if that comes up.
   async function toggleTag(id: number) {
     if (!selection) return;
     try {
       const on = !common().includes(id);
-      await setTag(selection, id, on);
+      await setTag(lasting(), id, on);
       setCommon(on ? [...common(), id] : common().filter((tag) => tag !== id));
       setFailure(undefined);
       props.onChanged();
@@ -185,7 +189,7 @@ export function Properties(props: {
       ["Name", title()],
       ["Kind", kind()],
       ["Place", alone() ? first() : parentOf(first())],
-      ["Size", sizeText()],
+      ["Size", found.isRoot ? space() && `${formatSize(space()!.free)} free of ${formatSize(space()!.total)}` : sizeText()],
       ["Created", alone() && when(found.created)],
       ["Modified", alone() && when(found.modified)],
       ["Opened", alone() && when(found.accessed)],
@@ -344,7 +348,7 @@ export function Properties(props: {
       </Show>
 
       <div class="confirm-buttons properties-buttons">
-        <button class="properties-link" onClick={() => close(props.onWindows)}>
+        <button class="properties-link" onClick={() => close(() => props.onWindows(lasting()))}>
           Windows Properties
         </button>
         <span class="properties-said" role="status">
