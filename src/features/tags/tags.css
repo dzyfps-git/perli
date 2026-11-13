@@ -59,3 +59,41 @@
   outline: 2px solid var(--accent);
   outline-offset: -2px;
 }
+
+/* A tag on a list row: a soft pill that glows faintly in its color, and filters by it on a click. */
+.tag-pill {
+  display: inline-block;
+  flex: none;
+  max-width: 96px;
+  height: 16px;
+  margin-left: var(--space-2);
+  padding: 0 6px;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--tag) 45%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--tag) 16%, transparent);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--tag) 28%, transparent);
+  color: var(--text);
+  font-size: 10.5px;
+  line-height: 14px;
+  text-overflow: ellipsis;
+  vertical-align: 1px;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    box-shadow var(--motion),
+    background var(--motion);
+}
+
+.tag-pill::before {
+  content: attr(data-name);
+}
+
+.tag-pill:hover {
+  background: color-mix(in srgb, var(--tag) 28%, transparent);
+  box-shadow: 0 0 10px color-mix(in srgb, var(--tag) 50%, transparent);
+}
+
+.tag-dot {
+  background: var(--tag);
+}

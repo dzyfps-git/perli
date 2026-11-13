@@ -134,7 +134,8 @@ export type Task =
   | { kind: "newFolderFrom"; selection: Selection; folder: string; moveIn: boolean }
   | { kind: "copyPaths" | "movePaths"; paths: string[]; folder: string }
   | { kind: "template"; folder: string; extension: string }
-  | { kind: "ownTemplate"; folder: string; name: string }
+  | { kind: "ownTemplate"; folder: string; name: string; date?: string }
+  | { kind: "fromClipboard"; folder: string }
   | { kind: "saveTemplate" | "zip"; selection: Selection }
   | { kind: "unzip"; selection: Selection; ownFolder: boolean; only?: string[]; password?: string }
   | { kind: "paste"; folder: string }
@@ -177,7 +178,7 @@ export type Question =
   | { kind: "noBin"; path: string; choices: Answer[] };
 
 export type JobEvent = { id: number } & (
-  | { kind: "started"; title: string; origin: number | null; newItem: boolean; recycle: boolean }
+  | { kind: "started"; title: string; origin: number | null; newItem: boolean; recycle: boolean; back: boolean }
   | ({ kind: "progress" } & Progress)
   | { kind: "asked"; question: Question }
   | ({
@@ -199,6 +200,9 @@ export interface Undoable {
   /** The step Undo would reverse next. */
   latestStep: number | null;
   redo: boolean;
+  /** What Undo and Redo would do, like "Renamed a.txt to b.txt". */
+  undoText: string | null;
+  redoText: string | null;
 }
 
 export interface Measured {
@@ -417,7 +421,8 @@ export const onSearchGrew = (handler: (view: number, walk: SearchWalk) => void) 
 export const startJob = (task: Task, origin?: number) => invoke<void>("start_job", { task, origin });
 
 /** With `step`, this only undoes that step, and only while it is the newest. */
-export const undoJob = (origin?: number, step?: number) => invoke<void>("undo_job", { origin, step });
+/** With `back`, undoes every step from the newest down to `step`, as one. */
+export const undoJob = (origin?: number, step?: number, back = false) => invoke<void>("undo_job", { origin, step, back });
 export const redoJob = (origin?: number) => invoke<void>("redo_job", { origin });
 export const undoState = () => invoke<Undoable>("undo_state");
 
@@ -473,6 +478,9 @@ export const checkRenames = (selection: Selection, names: string[]) =>
 
 /** The selected rows' names, and whether each is a folder. */
 export const rowFacts = (selection: Selection) => invoke<[string, boolean][]>("row_facts", { selection });
+/** What a batch rename's tokens read from each row. `deep` reads date taken, artist and title too. */
+export const renameFacts = (selection: Selection, deep: boolean) =>
+  invoke<import("../features/fileops/renameRules").NameFacts[]>("rename_facts", { selection, deep });
 
 export const measureSelection = (selection: Selection) => invoke<Measured>("measure_selection", { selection });
 
@@ -493,6 +501,8 @@ export const clipboardSequence = () => invoke<number>("clipboard_sequence");
 
 /** True if a paste would make something: files, an image or text. */
 export const clipboardCanPaste = () => invoke<boolean>("clipboard_can_paste");
+/** Text or a picture is on the clipboard, to make a new file from. */
+export const clipboardHasContent = () => invoke<boolean>("clipboard_has_content");
 
 /** The first row at or after `start` whose name starts with `prefix`, wrapping around. */
 export const findRow = (view: number, request: number, prefix: string, start: number) =>

@@ -34,6 +34,9 @@ export const KEYS: KeyCommand[] = [
   { id: "undo", label: "Undo", group: "Files", keys: ["Ctrl+Z"], where: "list" },
   { id: "redo", label: "Redo", group: "Files", keys: ["Ctrl+Y"], where: "list" },
   { id: "activity", label: "Activity log", group: "Files", keys: ["Ctrl+Shift+H"] },
+  ...nine.map(
+    (tag): KeyCommand => ({ id: `tag-${tag}`, label: `Tag with tag ${tag}`, group: "Files", keys: [`Alt+${tag}`], where: "list", quiet: true }),
+  ),
   { id: "diskMap", label: "Disk map", group: "View", keys: ["Ctrl+Shift+M"] },
   { id: "toFileDialog", label: "Send folder to file dialog (experimental)", group: "Go", keys: ["Ctrl+Shift+O"] },
   { id: "open", label: "Open", group: "Files", keys: ["Enter"], fixed: true },
@@ -51,8 +54,8 @@ export const KEYS: KeyCommand[] = [
     (place): KeyCommand => ({ id: `pinned-${place}`, label: `Go to pinned place ${place}`, group: "Go", keys: [`Ctrl+Shift+${place}`], quiet: true }),
   ),
 
-  { id: "list", label: "List view", group: "View", keys: ["Alt+1"] },
-  { id: "grid", label: "Grid view", group: "View", keys: ["Alt+2"] },
+  { id: "list", label: "List view", group: "View", keys: ["Alt+Shift+1"] },
+  { id: "grid", label: "Grid view", group: "View", keys: ["Alt+Shift+2"] },
   { id: "largerTiles", label: "Larger tiles", group: "View", keys: ["Ctrl+=", "Ctrl+Shift+="] },
   { id: "smallerTiles", label: "Smaller tiles", group: "View", keys: ["Ctrl+-"] },
   { id: "hidden", label: "Show hidden files", group: "View", keys: ["Ctrl+H"] },

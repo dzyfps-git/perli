@@ -73,6 +73,8 @@ enum Change {
         /// The job makes a new item, whose name the UI opens for editing.
         new_item: bool,
         recycle: bool,
+        /// An undo, whose rows go back to where they were.
+        back: bool,
     },
     Progress(Progress),
     Asked {
@@ -97,6 +99,9 @@ pub struct Undoable {
     /// The step Undo would reverse next.
     latest_step: Option<u64>,
     redo: bool,
+    /// What Undo and Redo would do, told the way a person would.
+    undo_text: Option<String>,
+    redo_text: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -129,6 +134,9 @@ struct Step {
     /// When it happened, in milliseconds since 1970. Zero for steps saved before this was kept.
     #[serde(default)]
     at: u64,
+    /// What a redo step will do again. Its records are what the undo did, which tell it backwards.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    text: Option<String>,
 }
 
 /// One step of the undo log, told the way a person would.
@@ -204,6 +212,9 @@ struct UndoLog {
     next: u64,
     steps: Vec<Step>,
     redo: Vec<Step>,
+    /// What the steps taken for the running undo did, for its redo step.
+    #[serde(skip)]
+    undone: Option<String>,
 }
 
 impl UndoLog {
@@ -252,10 +263,10 @@ impl UndoLog {
         let id = self.next;
         self.next += 1;
         let at = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_millis() as u64);
-        let step = Step { id, records, at };
+        let step = Step { id, records, at, text: None };
         match history {
             History::Undo => {
-                self.redo.push(step);
+                self.redo.push(Step { text: self.undone.take(), ..step });
                 return None;
             }
             History::New => {
@@ -279,7 +290,26 @@ impl UndoLog {
         if wanted.is_some() && wanted != self.latest() {
             return None;
         }
-        self.steps.pop().map(|step| step.records)
+        let at = self.steps.len().checked_sub(1)?;
+        Some(self.take_from(at))
+    }
+
+    /// Takes the newest steps down to and including `step`, as one batch in the order they
+    /// happened. Nothing if `step` is no longer in the log.
+    fn take_back_to(&mut self, step: u64) -> Option<Vec<Done>> {
+        let at = self.steps.iter().position(|kept| kept.id == step)?;
+        Some(self.take_from(at))
+    }
+
+    fn take_from(&mut self, at: usize) -> Vec<Done> {
+        let taken: Vec<Step> = self.steps.drain(at..).collect();
+        let newest = taken.last().map(|step| describe(&step.records).0).unwrap_or_default();
+        self.undone = Some(match taken.len() {
+            1 => newest,
+            2 => format!("{newest}, and the step before it"),
+            many => format!("{newest}, and {} steps before it", many - 1),
+        });
+        taken.into_iter().flat_map(|step| step.records).collect()
     }
 
     fn take_redo(&mut self) -> Option<Vec<Done>> {
@@ -297,9 +327,12 @@ impl UndoLog {
     }
 
     fn undoable(&self) -> Undoable {
+        let told = |step: &Step| step.text.clone().unwrap_or_else(|| describe(&step.records).0);
         Undoable {
             latest_step: self.latest(),
             redo: !self.redo.is_empty(),
+            undo_text: self.steps.last().map(told).filter(|text| !text.is_empty()),
+            redo_text: self.redo.last().map(told).filter(|text| !text.is_empty()),
         }
     }
 }
@@ -450,9 +483,16 @@ fn replay(
     }
 }
 
-/// Reverses the newest step. Does nothing if there is none, or if `step` is no longer it.
-pub fn undo(app: &AppHandle, origin: Option<u32>, step: Option<u64>) -> Result<(), String> {
-    let records = app.state::<Jobs>().log().take(step);
+/// Reverses the newest step. Does nothing if there is none, or if `step` is no longer it. With
+/// `back`, reverses every step from the newest down to `step`, as one.
+pub fn undo(app: &AppHandle, origin: Option<u32>, step: Option<u64>, back: bool) -> Result<(), String> {
+    let jobs = app.state::<Jobs>();
+    let mut log = jobs.log();
+    let records = match (back, step) {
+        (true, Some(step)) => log.take_back_to(step),
+        _ => log.take(step),
+    };
+    drop(log);
     replay(app, records, origin, History::Undo)
 }
 
@@ -487,6 +527,7 @@ impl Bridge {
             origin: plan.origin,
             new_item: matches!(plan.job, Job::New { .. } | Job::Gather { .. } | Job::Template { .. } | Job::Zip { .. }),
             recycle: matches!(plan.job, Job::Recycle { .. }),
+            back: matches!(plan.history, History::Undo),
         });
 
         let outcome = ops::run(plan.job, self, &self.entry.control);
@@ -708,6 +749,39 @@ mod tests {
     }
 
     #[test]
+    fn undo_can_go_back_several_steps_at_once() {
+        let mut log = UndoLog::default();
+        for number in 1..=4 {
+            log.record(History::New, step(number));
+        }
+
+        // Records come in the order they happened, so the undo plays them backwards.
+        let records = log.take_back_to(1).unwrap();
+        assert_eq!(records, [step(2), step(3), step(4)].concat());
+        assert_eq!(log.latest(), Some(0));
+        assert_eq!(log.take_back_to(1), None, "that step is gone now");
+
+        log.record(History::Undo, step(9));
+        let redo = log.undoable().redo_text.unwrap();
+        assert!(redo.starts_with("Added 4 to"), "{redo}");
+        assert!(redo.ends_with("and 2 steps before it"), "{redo}");
+    }
+
+    #[test]
+    fn undo_and_redo_say_what_they_will_do() {
+        let mut log = UndoLog::default();
+        let moved = vec![Done::Moved { from: PathBuf::from(r"C:\a\x.txt"), to: PathBuf::from(r"C:\a\y.txt") }];
+        log.record(History::New, moved);
+        assert_eq!(log.undoable().undo_text.as_deref(), Some("Renamed x.txt to y.txt"));
+
+        log.take(None);
+        let back = vec![Done::Moved { from: PathBuf::from(r"C:\a\y.txt"), to: PathBuf::from(r"C:\a\x.txt") }];
+        log.record(History::Undo, back);
+        assert_eq!(log.undoable().undo_text, None);
+        assert_eq!(log.undoable().redo_text.as_deref(), Some("Renamed x.txt to y.txt"));
+    }
+
+    #[test]
     fn ctrl_z_takes_whatever_is_newest() {
         let mut log = UndoLog::default();
         log.record(History::New, step(1));
@@ -821,6 +895,8 @@ mod tests {
                 undoable: Undoable {
                     latest_step: Some(3),
                     redo: true,
+                    undo_text: Some("Renamed a to b".into()),
+                    redo_text: None,
                 },
             },
         };

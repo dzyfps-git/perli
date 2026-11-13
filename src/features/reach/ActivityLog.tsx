@@ -14,8 +14,8 @@ import "./reach.css";
 export function ActivityLog(props: {
   canRedo: () => boolean;
   onShow: (path: string) => void;
-  /** Undoes the step with this id, which is the newest. */
-  onUndo: (step: number) => Promise<unknown>;
+  /** Undoes the step with this id, which is the newest, or with `back` every step down to it. */
+  onUndo: (step: number, back: boolean) => Promise<unknown>;
   onRedo: () => Promise<unknown>;
   onClose: () => void;
 }) {
@@ -35,6 +35,8 @@ export function ActivityLog(props: {
     return found;
   };
 
+  const newer = (step: Activity) => (steps() ?? []).findIndex((other) => other.id === step.id);
+
   // The log changes when a job ends, which can be long after it was asked for.
   const change = (ask: Promise<unknown>) => ask.catch(() => undefined);
   const listening = onJobEvent((event) => event.kind === "finished" && refetch());
@@ -47,7 +49,7 @@ export function ActivityLog(props: {
   return (
     <dialog ref={dialog} class="settings confirm activity" aria-label="Activity log" onClose={props.onClose}>
       <h2>Activity</h2>
-      <p class="settings-note">What can still be undone, newest first. Undo takes the newest step.</p>
+      <p class="settings-note">What can still be undone, newest first. Undo back to any step to take it and every newer one back.</p>
       <div class="activity-list">
         <For each={days()} fallback={<p class="activity-empty">{steps.loading ? "" : "Nothing to undo yet."}</p>}>
           {(group) => (
@@ -61,8 +63,19 @@ export function ActivityLog(props: {
                         <span class="activity-text">{step.text}</span>
                         <span class="activity-when">{step.at > 0 ? ago(step.at, now) : ""}</span>
                       </button>
-                      <Show when={step.newest}>
-                        <button class="job-choice" onClick={() => change(props.onUndo(step.id))}>
+                      <Show
+                        when={step.newest}
+                        fallback={
+                          <button
+                            class="job-choice activity-back"
+                            aria-label={`Undo this and the ${newer(step)} newer ${newer(step) === 1 ? "step" : "steps"}`}
+                            onClick={() => change(props.onUndo(step.id, true))}
+                          >
+                            Back to here
+                          </button>
+                        }
+                      >
+                        <button class="job-choice" onClick={() => change(props.onUndo(step.id, false))}>
                           Undo
                         </button>
                       </Show>

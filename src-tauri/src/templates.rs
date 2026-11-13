@@ -171,20 +171,25 @@ pub fn own_names() -> Vec<String> {
     names
 }
 
-fn own_from(folder: &Path, name: &str) -> Result<Template, String> {
+/// A `{date}` in a template's name stands for `date`, so "Notes {date}.md" starts "Notes 2026-03-05.md".
+fn own_from(folder: &Path, name: &str, date: Option<&str>) -> Result<Template, String> {
     let only_a_name = Path::new(name).file_name() == Some(OsStr::new(name));
     let file = folder.join(name);
     if !only_a_name || !file.is_file() {
         return Err(format!("There is no template called {name}"));
     }
     let stem = file.file_stem().unwrap_or_default().to_string_lossy().into_owned();
+    let stem = match date {
+        Some(date) => stem.replace("{date}", date),
+        None => stem,
+    };
     let extension = file.extension().map_or(String::new(), |extension| format!(".{}", extension.to_string_lossy()));
     Ok(Template { stem, extension, content: Content::Copy(file) })
 }
 
 /// A new file that starts as a copy of the user's template `name`.
-pub fn own_template(name: &str) -> Result<Template, String> {
-    own_from(&own_folder()?, name)
+pub fn own_template(name: &str, date: Option<&str>) -> Result<Template, String> {
+    own_from(&own_folder()?, name, date)
 }
 
 #[cfg(test)]
@@ -289,13 +294,16 @@ mod tests {
         fs::write(folder.join("Letter.final.docx"), "letter").unwrap();
         fs::write(folder.join("Notes"), "notes").unwrap();
 
-        let letter = own_from(&folder, "Letter.final.docx").unwrap();
+        let letter = own_from(&folder, "Letter.final.docx", None).unwrap();
         assert_eq!((letter.stem.as_str(), letter.extension.as_str()), ("Letter.final", ".docx"));
         assert_eq!(letter.content, Content::Copy(folder.join("Letter.final.docx")));
-        assert_eq!(own_from(&folder, "Notes").unwrap().extension, "");
-        assert!(own_from(&folder, r"inner\..\Notes").is_err());
-        assert!(own_from(&folder, "inner").is_err());
-        assert!(own_from(&folder, "gone.txt").is_err());
+        assert_eq!(own_from(&folder, "Notes", None).unwrap().extension, "");
+        assert!(own_from(&folder, r"inner\..\Notes", None).is_err());
+        assert!(own_from(&folder, "inner", None).is_err());
+        assert!(own_from(&folder, "gone.txt", None).is_err());
+        fs::write(folder.join("Day {date}.md"), "day").unwrap();
+        assert_eq!(own_from(&folder, "Day {date}.md", Some("2026-03-05")).unwrap().stem, "Day 2026-03-05");
+        assert_eq!(own_from(&folder, "Day {date}.md", None).unwrap().stem, "Day {date}");
 
         fs::remove_dir_all(folder).unwrap();
     }

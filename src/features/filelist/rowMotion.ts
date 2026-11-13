@@ -31,11 +31,23 @@ const LEAVES: Record<Leave, { frames: Keyframe[]; duration: number }> = {
 };
 
 let deletedAt = -Infinity;
+let backAt = -Infinity;
 
 /** A delete to the Recycle Bin has started, so the rows that go next fold shut and send a wisp. */
 export function markDeleted() {
   deletedAt = performance.now();
 }
+
+/** An undo has started, so the rows that come next glide back into place rather than spring in. */
+export function markBack() {
+  backAt = performance.now();
+}
+
+/** A row coming back from an undo slides in from the side it left by, fading up. */
+const BACK_FRAMES: Keyframe[] = [
+  { translate: `${-DRIFT_PX * 2}px 0`, opacity: 0 },
+  { translate: "0 0", opacity: 1 },
+];
 
 interface Seen {
   top: number;
@@ -118,13 +130,17 @@ export function playMoves(
 ) {
   const spring = getComputedStyle(document.documentElement).getPropertyValue("--spring").trim() || "ease-out";
   const deleted = performance.now() - deletedAt < DELETE_WINDOW_MS;
-  const { frames, duration } = LEAVES[deleted ? "fold" : leave];
+  const back = performance.now() - backAt < DELETE_WINDOW_MS;
+  const { frames, duration } = LEAVES[deleted ? "fold" : back ? "drift" : leave];
+  let arrived = 0;
   const here = new Set<string>();
   for (const [key, element] of after) {
     here.add(key);
     const was = before.get(key);
     if (!was) {
-      if (!quiet) element.animate({ scale: [0.85, 1], opacity: [0, 1] }, { duration: ARRIVE_MS, easing: spring });
+      // Back rows come one after another, so the eye can follow them home.
+      if (back) element.animate(BACK_FRAMES, { duration: ARRIVE_MS, delay: Math.min(arrived++, 8) * 40, easing: spring, fill: "backwards" });
+      else if (!quiet) element.animate({ scale: [0.85, 1], opacity: [0, 1] }, { duration: ARRIVE_MS, easing: spring });
       continue;
     }
     const { top, left } = element.getBoundingClientRect();
@@ -147,4 +163,5 @@ export function playMoves(
   }
   // One delete, one show: a reload that follows for another reason shrinks as usual.
   if (deleted && wisps > 0) deletedAt = -Infinity;
+  if (back && arrived > 0) backAt = -Infinity;
 }

@@ -6,6 +6,8 @@ import type { Layout } from "../filelist/layout";
 import { showHidden } from "../filelist/prefs";
 import type { FolderView } from "../navigation/folderView";
 import { isBin, toCrumbs, typedPath } from "../navigation/path";
+import { lookOf } from "../sidebar/saved";
+import { tagColor } from "../tags/tags";
 import "./pathbar.css";
 
 const ICON_BACK = "";
@@ -18,6 +20,12 @@ const ICON_SHOWN = "\uE7B3";
 const ICON_HIDDEN = "\uED1A";
 const ICON_FILTER = "\uE71C";
 const ICON_CHEVRON = "\uE76C";
+
+/** The color a folder wears, which its crumb takes on too. */
+function lookColor(path: string) {
+  const color = lookOf(path)?.color;
+  return color === undefined ? undefined : tagColor(color);
+}
 
 /** Long enough that typing a word starts one search, not one per letter. */
 const SEARCH_WAIT_MS = 120;
@@ -292,6 +300,8 @@ export function PathBar(props: {
                 class="crumb"
                 classList={{ "crumb-left": index >= depth() }}
                 data-drop={crumb().path}
+                data-look={lookOf(crumb().path)?.color === undefined ? undefined : ""}
+                style={{ "--look-color": lookColor(crumb().path) }}
                 aria-current={index === depth() - 1 ? "location" : undefined}
                 onClick={() => props.view.open(crumb().path)}
                 onAuxClick={(event) => event.button === 1 && props.onNewTab(crumb().path)}

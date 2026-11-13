@@ -443,3 +443,165 @@ html[data-blurred] .place-used::before {
     transition: none;
   }
 }
+
+/* The folder look sheet: color, a searchable set of icons, the cover. */
+.look-picker {
+  width: min(480px, 92vw);
+}
+
+.look-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.look-head h2 {
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.look-sample {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  background: color-mix(in oklch, var(--look-color, var(--accent)) 18%, transparent);
+  box-shadow: 0 0 14px color-mix(in srgb, var(--look-color, var(--accent)) 30%, transparent);
+  color: var(--look-color, var(--accent));
+  font: 22px / 1 var(--font-icons);
+  transition:
+    background var(--motion),
+    color var(--motion),
+    box-shadow var(--motion);
+}
+
+.look-title {
+  margin: var(--space-3) 0 var(--space-1);
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.look-colors {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.look-color {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  outline-offset: 2px;
+  transition: scale var(--motion-slide);
+}
+
+.look-color:hover {
+  scale: 1.12;
+}
+
+.look-color[aria-checked="true"] {
+  outline: 2px solid var(--text);
+}
+
+.look-color:focus-visible {
+  outline: 2px solid var(--accent);
+}
+
+/* No color: a ring with a slash through it. */
+.look-none {
+  background: linear-gradient(135deg, transparent 45%, var(--text-muted) 45% 55%, transparent 55%);
+  box-shadow: inset 0 0 0 1px var(--border);
+}
+
+.look-search {
+  box-sizing: border-box;
+  width: 100%;
+  height: var(--row-height);
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-hover);
+  color: var(--text);
+  font: inherit;
+}
+
+.look-search:focus {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.look-icons {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(36px, 1fr));
+  gap: 4px;
+  max-height: 168px;
+  margin-top: var(--space-2);
+  overflow-y: auto;
+}
+
+.look-icon {
+  height: 36px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  background: none;
+  color: var(--text);
+  font: 16px / 1 var(--font-icons);
+  transition:
+    background var(--motion),
+    border-color var(--motion),
+    scale var(--motion-slide);
+}
+
+.look-icon:hover {
+  background: var(--surface-hover);
+  scale: 1.08;
+}
+
+.look-icon[aria-checked="true"] {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent);
+}
+
+.look-icon:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.look-none-found {
+  grid-column: 1 / -1;
+  margin: var(--space-2) 0;
+  color: var(--text-muted);
+}
+
+.look-cover {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  margin: 0;
+}
+
+.look-cover span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.look-inside {
+  margin-right: auto;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .look-color,
+  .look-icon {
+    transition: none;
+  }
+}

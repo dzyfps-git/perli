@@ -323,6 +323,11 @@ html[data-blurred] .file-row[data-cut] {
   backdrop-filter: var(--blur);
 }
 
+/* A hint or a question rather than a failure. */
+.file-editor-error[data-hint] {
+  border-color: var(--accent);
+}
+
 .file-grid[data-layout="grid"] .file-row,
 .file-grid[data-layout="grid"] .file-marker {
   border-width: 2px;
