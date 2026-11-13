@@ -103,6 +103,8 @@ impl Closing {
 struct Snapshot {
     request: u64,
     listing: folder::Listing,
+    /// The folders it shows, which the watch follows while these rows are on screen.
+    watch: Option<Watch>,
 }
 
 #[derive(Default)]
@@ -115,16 +117,18 @@ struct View {
 }
 
 impl View {
-    fn begin(&mut self, request: u64, shown: u64) {
+    /// Returns what the shown rows watch, for the watch to stay on while this read runs.
+    fn begin(&mut self, request: u64, shown: u64) -> Option<Watch> {
         self.latest = self.latest.max(request);
         self.snapshots.retain(|snapshot| snapshot.request == shown);
+        self.snapshots.first().and_then(|snapshot| snapshot.watch.clone())
     }
 
     /// Says whether `listing` is the newest read, which moves the view on to it.
-    fn finish(&mut self, request: u64, listing: folder::Listing) -> bool {
+    fn finish(&mut self, request: u64, listing: folder::Listing, watch: Option<Watch>) -> bool {
         let newest = request == self.latest;
         if newest {
-            self.snapshots.push(Snapshot { request, listing });
+            self.snapshots.push(Snapshot { request, listing, watch });
         }
         newest
     }
@@ -523,14 +527,15 @@ async fn open_folder(
     app: AppHandle,
 ) -> Result<Opened, String> {
     let started = Instant::now();
-    let watch = watch_of(&path);
-    views
+    let watch = watch_of(&path, &order.expanded);
+    let shown_watch = views
         .0
         .write()
         .unwrap_or_else(|error| error.into_inner())
         .entry(view)
         .or_default()
         .begin(request, shown);
+    watches.follow(view, shown_watch);
 
     let waiting = preload
         .0
@@ -543,10 +548,11 @@ async fn open_folder(
         network::must_answer(&full)?;
         let read = || folder::Listing::read(&path, order.clone());
         let first = match waiting {
-            Some((_, reader)) => reader
-                .join()
-                .unwrap_or_else(|_| read())
-                .map(|listing| listing.arranged(order.clone())),
+            Some((_, reader)) => match reader.join().unwrap_or_else(|_| read()) {
+                // Rows of folders opened in place come only with a read.
+                Ok(listing) if listing.expanded() != order.expanded => read(),
+                first => first.map(|listing| listing.arranged(order.clone())),
+            },
             None => read(),
         };
         first.or_else(|failure| {
@@ -569,7 +575,7 @@ async fn open_folder(
     };
     let mut views = views.0.write().unwrap_or_else(|error| error.into_inner());
     if let Some(current) = views.get_mut(&view) {
-        if current.finish(request, listing) {
+        if current.finish(request, listing, watch.clone()) {
             searches.stop(view);
             watches.set(view, watch);
         }
@@ -577,14 +583,13 @@ async fn open_folder(
     Ok(opened)
 }
 
-/// What a view watches once `path` has read fine. Make it before the read, and hand it over only
-/// after, because a failed open leaves the old folder or search on screen, and that one must go
-/// on as it was.
-// ponytail: a finished read the UI drops for a newer open that then fails leaves the watch on the
-// dropped folder until the next open. Handing over when the UI takes the rows would close that.
-fn watch_of(path: &str) -> Option<Watch> {
+/// What a view watches once `path` and the folders opened in it have read fine. Make it before
+/// the read, and hand it over only after, because a failed open leaves the old folder or search
+/// on screen, and that one must go on as it was. Each read's rows keep theirs, so a read the UI
+/// drops can't keep the watch either: the next read starts by going back to the rows shown.
+fn watch_of(path: &str, expanded: &[String]) -> Option<Watch> {
     let resolved = folder::resolve(path).ok().filter(|_| path != folder::BIN_PATH)?;
-    Some(Watch::new(resolved.into()))
+    Some(Watch::new(std::iter::once(PathBuf::from(resolved)).chain(expanded.iter().map(PathBuf::from))))
 }
 
 /// Puts the shown folder in a new order as a new snapshot, the same way an open would.
@@ -602,10 +607,11 @@ async fn arrange_view(
     let before = {
         let mut views = views.0.write().unwrap_or_else(|error| error.into_inner());
         let current = views.entry(view).or_default();
-        current.begin(request, shown);
-        current.listing(shown).cloned()
+        let watch = current.begin(request, shown);
+        current.listing(shown).cloned().map(|listing| (listing, watch))
     }
     .ok_or("This folder is no longer open")?;
+    let (before, watch) = before;
 
     let (listing, arranged) = async_runtime::spawn_blocking(move || {
         let listing = before.clone().arranged(order);
@@ -620,7 +626,7 @@ async fn arrange_view(
 
     let mut views = views.0.write().unwrap_or_else(|error| error.into_inner());
     if let Some(current) = views.get_mut(&view) {
-        current.finish(request, listing);
+        current.finish(request, listing, watch);
     }
     Ok(arranged)
 }
@@ -651,14 +657,14 @@ async fn reload_view(
     searches: State<'_, Searches>,
     app: AppHandle,
 ) -> Result<Reloaded, String> {
-    let watch = if search.is_some() { None } else { watch_of(&path) };
+    let watch = if search.is_some() { None } else { watch_of(&path, &order.expanded) };
     if search.is_none() {
         searches.stop(view);
     }
     let keys = {
         let mut views = views.0.write().unwrap_or_else(|error| error.into_inner());
         let current = views.entry(view).or_default();
-        current.begin(request, shown);
+        watches.follow(view, current.begin(request, shown));
         match current.listing(shown) {
             Some(listing) if select.is_empty() => listing.keys(&selected),
             _ => select.iter().map(|name| name.encode_utf16().collect()).collect(),
@@ -684,7 +690,7 @@ async fn reload_view(
 
     let mut views = views.0.write().unwrap_or_else(|error| error.into_inner());
     if let Some(current) = views.get_mut(&view) {
-        if current.finish(request, listing) {
+        if current.finish(request, listing, watch.clone()) {
             watches.set(view, watch);
         }
     }
@@ -2222,14 +2228,27 @@ mod tests {
     fn shown_snapshot_survives_a_dropped_result_and_a_failed_open() {
         let mut view = View::default();
         view.begin(1, 0);
-        view.finish(1, folder::Listing::default());
+        view.finish(1, folder::Listing::default(), None);
 
         // B finishes, but the UI starts C before accepting it, and C fails.
         view.begin(2, 1);
-        view.finish(2, folder::Listing::default());
+        view.finish(2, folder::Listing::default(), None);
         view.begin(3, 1);
 
         assert_eq!(held(&view), [1]);
+    }
+
+    #[test]
+    fn a_read_starts_by_handing_back_what_the_shown_rows_watch() {
+        let mut view = View::default();
+        view.begin(1, 0);
+        view.finish(1, folder::Listing::default(), Some(Watch::new([PathBuf::from(r"C:\shown")])));
+        view.begin(2, 1);
+        view.finish(2, folder::Listing::default(), Some(Watch::new([PathBuf::from(r"C:\dropped")])));
+
+        // The UI never took B's rows, so C's start puts the watch back on A's folder.
+        let back = view.begin(3, 1).expect("A's watch");
+        assert!(back.same_folders(&Watch::new([PathBuf::from(r"C:\shown")])));
     }
 
     #[test]
@@ -2238,8 +2257,8 @@ mod tests {
         view.begin(1, 0);
         view.begin(2, 0);
 
-        assert!(view.finish(2, folder::Listing::default()));
-        assert!(!view.finish(1, folder::Listing::default()));
+        assert!(view.finish(2, folder::Listing::default(), None));
+        assert!(!view.finish(1, folder::Listing::default(), None));
         assert_eq!(held(&view), [2]);
     }
 
@@ -2247,9 +2266,9 @@ mod tests {
     fn old_snapshot_stays_until_rows_of_the_new_one_are_asked_for() {
         let mut view = View::default();
         view.begin(1, 0);
-        view.finish(1, folder::Listing::default());
+        view.finish(1, folder::Listing::default(), None);
         view.begin(2, 1);
-        view.finish(2, folder::Listing::default());
+        view.finish(2, folder::Listing::default(), None);
 
         assert!(!view.replaced_by(1));
         assert!(view.replaced_by(2));

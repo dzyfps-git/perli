@@ -1,77 +1,161 @@
 //! Tells the UI when something outside Perli changes a shown folder or the set of drives.
 //!
-//! This asks about each folder once a second instead of holding a change notification open.
-//! A notification keeps a handle on the folder, and Windows then refuses to rename or move any
-//! folder above it, and a drive can't be ejected. Perli must never get in the way like that.
+//! This lists each watched folder about once a second instead of holding a change notification
+//! open. A notification keeps a handle on the folder, and Windows then refuses to rename or move
+//! any folder above it, and a drive can't be ejected. Perli must never get in the way like that.
+//! A listing also sees what a folder's own modified time misses: a file that grows in place, and
+//! any change at all on FAT and exFAT, which never update that time.
 //
-// ponytail: a folder's modified time misses a file growing in place, and FAT and exFAT don't
-// update it at all, so those need F5. A subtree watch on the drive root could cover both, if it
-// also lets go when the drive asks to be ejected.
+// ponytail: NTFS writes a growing file's new size into the folder when the writer closes it or
+// flushes, so a file still being written shows its size in steps. A folder that takes long to
+// list is looked at less often, up to LOOK_SHARE of the time, rather than through a smarter feed.
 
+use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::hash::{Hash, Hasher};
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 use std::thread;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use tauri::{AppHandle, Emitter, Manager};
 use windows::Win32::Storage::FileSystem::GetLogicalDrives;
 
-const CHECK_GAP: Duration = Duration::from_secs(1);
+use crate::ops::sys;
 
+const CHECK_GAP: Duration = Duration::from_secs(1);
+/// A slow folder waits this many times as long as its last look took, so watching costs about
+/// one part in this many of a drive's time.
+const LOOK_SHARE: u32 = 20;
+
+/// The folders one view shows: its own, and each one opened in place.
+#[derive(Clone, Debug)]
 pub struct Watch {
-    folder: PathBuf,
-    seen: Option<SystemTime>,
+    folders: Vec<(PathBuf, Seen)>,
+}
+
+/// What a folder looked like last.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Seen {
+    /// Its modified time, taken before the read, until the first look lists it.
+    Modified(Option<SystemTime>),
+    /// A stamp of every name, size and time in it. None if it couldn't be listed.
+    Listed(Option<u64>),
 }
 
 impl Watch {
-    /// Must run before the folder is read, so a change during the read still shows up.
-    pub fn new(folder: PathBuf) -> Self {
-        let seen = modified(&folder);
-        Self { folder, seen }
+    /// Must run before the folders are read, so a change during the read still shows up.
+    pub fn new(folders: impl IntoIterator<Item = PathBuf>) -> Self {
+        let folders = folders.into_iter().map(|folder| {
+            let seen = Seen::Modified(modified(&folder));
+            (folder, seen)
+        });
+        Self { folders: folders.collect() }
+    }
+
+    pub fn same_folders(&self, other: &Watch) -> bool {
+        self.folders.len() == other.folders.len()
+            && self.folders.iter().zip(&other.folders).all(|((a, _), (b, _))| a == b)
     }
 }
 
-fn modified(folder: &PathBuf) -> Option<SystemTime> {
+fn modified(folder: &Path) -> Option<SystemTime> {
     std::fs::metadata(folder).and_then(|data| data.modified()).ok()
 }
 
-/// The folder each view shows.
+fn stamp(folder: &Path) -> Option<u64> {
+    let entries = sys::read_dir(folder).ok()?;
+    let mut hasher = DefaultHasher::new();
+    for (name, stat) in entries {
+        // NTFS moves a folder's time in its parent a while after something inside changed,
+        // which would read the folder twice for one change. What is inside has its own watch.
+        let time = if stat.is_dir() { 0 } else { stat.modified };
+        (name, stat.size, time, stat.is_dir()).hash(&mut hasher);
+    }
+    Some(hasher.finish())
+}
+
+/// Lists `folder` and says whether it changed since `seen`.
+fn look(folder: &Path, seen: Seen) -> (bool, Seen) {
+    // The listing goes first: a change between the two then shows twice, never not at all.
+    let listed = stamp(folder);
+    let changed = match seen {
+        Seen::Modified(then) => modified(folder) != then,
+        Seen::Listed(then) => listed != then,
+    };
+    (changed, Seen::Listed(listed))
+}
+
+struct Watched {
+    watch: Watch,
+    /// Which `set` made it, so a look that started before a newer one can't overwrite it.
+    made: u64,
+    next: Instant,
+}
+
+/// The folders each view shows.
 #[derive(Default)]
-pub struct Watches(Mutex<HashMap<u32, Watch>>);
+pub struct Watches(Mutex<(HashMap<u32, Watched>, u64)>);
 
 impl Watches {
-    /// Moves a view to `watch`. With none it stops, as the Recycle Bin has no folder to ask about.
+    /// Moves a view to `watch`. With none it stops, as the Recycle Bin and a search have no
+    /// folder to ask about.
     pub fn set(&self, view: u32, watch: Option<Watch>) {
-        let mut watches = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut guard = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let (watches, made) = &mut *guard;
+        *made += 1;
         match watch {
-            Some(watch) => watches.insert(view, watch),
+            Some(watch) => watches.insert(view, Watched { watch, made: *made, next: Instant::now() }),
             None => watches.remove(&view),
         };
+    }
+
+    /// Keeps the view on `shown`, the rows the UI has on screen. A newer read the UI dropped
+    /// may have moved the watch away from them. The same folders keep their newer looks.
+    pub fn follow(&self, view: u32, shown: Option<Watch>) {
+        let same = {
+            let guard = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+            match (guard.0.get(&view), &shown) {
+                (Some(current), Some(shown)) => current.watch.same_folders(shown),
+                (None, None) => true,
+                _ => false,
+            }
+        };
+        if !same {
+            self.set(view, shown);
+        }
     }
 
     pub fn stop(&self, view: u32) {
         self.set(view, None);
     }
 
-    /// The views whose folder changed since the last look.
+    /// The views whose folders changed since the last look.
     fn changed(&self) -> Vec<u32> {
         // A slow network drive must not hold the lock, so the folders are read outside it.
-        let folders: Vec<(u32, PathBuf, Option<SystemTime>)> = {
-            let watches = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-            watches.iter().map(|(&view, watch)| (view, watch.folder.clone(), watch.seen)).collect()
+        let due: Vec<(u32, Watch, u64)> = {
+            let guard = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+            let now = Instant::now();
+            guard.0.iter().filter(|(_, watched)| watched.next <= now).map(|(&view, watched)| (view, watched.watch.clone(), watched.made)).collect()
         };
         let mut changed = Vec::new();
-        for (view, folder, seen) in folders {
-            let now = modified(&folder);
-            if now == seen {
-                continue;
+        for (view, mut watch, made) in due {
+            let started = Instant::now();
+            let mut moved = false;
+            for (folder, seen) in &mut watch.folders {
+                let (changed, now) = look(folder, *seen);
+                moved |= changed;
+                *seen = now;
             }
-            let mut watches = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-            // The view may have moved on while the folder was read.
-            if let Some(watch) = watches.get_mut(&view).filter(|watch| watch.folder == folder) {
-                watch.seen = now;
-                changed.push(view);
+            let took = started.elapsed() * LOOK_SHARE;
+            let mut guard = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+            // The view may have moved on while the folders were read.
+            if let Some(watched) = guard.0.get_mut(&view).filter(|watched| watched.made == made) {
+                watched.watch = watch;
+                watched.next = if took > CHECK_GAP { Instant::now() + took } else { started };
+                if moved {
+                    changed.push(view);
+                }
             }
         }
         changed
@@ -100,13 +184,20 @@ pub fn start(app: AppHandle) {
 mod tests {
     use super::*;
     use std::fs;
+    use std::io::Write;
+
+    fn sandbox(name: &str) -> PathBuf {
+        let folder = std::env::temp_dir().join(format!("perli-watch-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&folder);
+        fs::create_dir_all(&folder).unwrap();
+        folder
+    }
 
     #[test]
     fn a_new_file_changes_the_folder_once() {
-        let folder = std::env::temp_dir().join(format!("perli-watch-{}", std::process::id()));
-        fs::create_dir_all(&folder).unwrap();
+        let folder = sandbox("new");
         let watches = Watches::default();
-        watches.set(1, Some(Watch::new(folder.clone())));
+        watches.set(1, Some(Watch::new([folder.clone()])));
         assert!(watches.changed().is_empty());
 
         // Modified times only move with the clock's tick.
@@ -120,6 +211,47 @@ mod tests {
         thread::sleep(Duration::from_millis(50));
         fs::remove_file(folder.join("new.txt")).unwrap();
         assert!(watches.changed().is_empty());
-        fs::remove_dir(&folder).unwrap();
+        fs::remove_dir_all(&folder).unwrap();
+    }
+
+    #[test]
+    fn a_file_growing_in_place_and_a_folder_opened_in_place_are_seen() {
+        let folder = sandbox("grow");
+        let inner = folder.join("inner");
+        fs::create_dir(&inner).unwrap();
+        fs::write(folder.join("log.txt"), "a").unwrap();
+        let watches = Watches::default();
+        watches.set(1, Some(Watch::new([folder.clone(), inner.clone()])));
+        assert!(watches.changed().is_empty());
+
+        // The folder's own modified time stays put for this.
+        let before = modified(&folder);
+        fs::OpenOptions::new().append(true).open(folder.join("log.txt")).unwrap().write_all(b"more").unwrap();
+        assert_eq!(modified(&folder), before);
+        assert_eq!(watches.changed(), [1]);
+
+        fs::write(inner.join("new.txt"), "").unwrap();
+        assert_eq!(watches.changed(), [1]);
+        assert!(watches.changed().is_empty());
+        fs::remove_dir_all(&folder).unwrap();
+    }
+
+    #[test]
+    fn the_watch_follows_the_rows_on_screen() {
+        let (shown, dropped) = (sandbox("shown"), sandbox("dropped"));
+        let watches = Watches::default();
+        watches.set(1, Some(Watch::new([shown.clone()])));
+        assert!(watches.changed().is_empty());
+        // A read the UI then dropped moved the watch, and the next open failed.
+        watches.set(1, Some(Watch::new([dropped.clone()])));
+        watches.follow(1, Some(Watch::new([shown.clone()])));
+
+        thread::sleep(Duration::from_millis(50));
+        fs::write(shown.join("new.txt"), "").unwrap();
+        assert_eq!(watches.changed(), [1]);
+        fs::write(dropped.join("new.txt"), "").unwrap();
+        assert!(watches.changed().is_empty());
+        fs::remove_dir_all(&shown).unwrap();
+        fs::remove_dir_all(&dropped).unwrap();
     }
 }
