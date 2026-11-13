@@ -406,6 +406,8 @@ export function QuickPreview(props: {
     const target = event.target as HTMLElement;
     // A slider takes its own arrow keys.
     if (key.startsWith("Arrow") && target.matches("input")) return;
+    // Enter and Space press a focused button, such as Open with or Copy path.
+    if ((key === "Enter" || key === " ") && target.closest("button, summary, a[href]")) return;
     if (viewKeys?.(event)) {
       event.preventDefault();
       return;
