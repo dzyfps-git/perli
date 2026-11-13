@@ -675,6 +675,56 @@ fn move_on_one_drive_renames_and_undo_moves_back() {
 }
 
 #[test]
+fn gather_makes_a_folder_moves_the_picks_in_and_undo_puts_all_of_it_back() {
+    let sandbox = Sandbox::new();
+    let one = sandbox.file(r"here\Trip.jpg", "1");
+    let two = sandbox.file(r"here\notes.txt", "2");
+    let here = sandbox.path("here");
+
+    let outcome = go(Job::Gather { sources: vec![one.clone(), two.clone()], folder: here.clone(), name: Some("Trip".to_string()) });
+
+    assert_eq!(sandbox.names("here"), ["Trip"]);
+    assert_eq!(sandbox.names(r"here\Trip"), ["Trip.jpg", "notes.txt"]);
+    assert!(matches!(&outcome.done[0], Done::Created { path } if *path == sandbox.path(r"here\Trip")));
+
+    undo(outcome);
+    assert_eq!(sandbox.names("here"), ["Trip.jpg", "notes.txt"]);
+    assert_eq!(read(&one), "1");
+    assert_eq!(read(&two), "2");
+}
+
+#[test]
+fn gather_with_a_name_windows_refuses_or_a_taken_one_still_makes_a_folder() {
+    let sandbox = Sandbox::new();
+    let here = sandbox.folder("here");
+    sandbox.folder(r"here\Trip");
+
+    go(Job::Gather { sources: Vec::new(), folder: here.clone(), name: Some("Trip".to_string()) });
+    go(Job::Gather { sources: Vec::new(), folder: here.clone(), name: Some("a:b".to_string()) });
+
+    assert_eq!(sandbox.names("here"), ["New folder", "Trip", "Trip (2)"]);
+}
+
+#[test]
+fn a_conflict_says_how_many_names_are_taken_and_how_many_are_free() {
+    let sandbox = Sandbox::new();
+    let sources = vec![sandbox.file(r"from\a.txt", "new"), sandbox.file(r"from\b.txt", "new"), sandbox.file(r"from\c.txt", "new")];
+    sandbox.file(r"to\a.txt", "old");
+    let host = Script::always(Answer::Skip);
+    run_with(Job::Copy { sources, folder: sandbox.path("to") }, &host);
+
+    let asked = host.questions.borrow_mut().pop();
+    match asked {
+        Some(Question::Conflict { clashes, fresh, source_path, target_path, .. }) => {
+            assert_eq!((clashes, fresh), (1, 2));
+            assert_eq!(source_path, Some(sandbox.path(r"from\a.txt").to_string_lossy().into_owned()));
+            assert_eq!(target_path, sandbox.path(r"to\a.txt").to_string_lossy().into_owned());
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
 fn move_onto_its_own_folder_does_nothing() {
     let sandbox = Sandbox::new();
     let source = sandbox.file(r"here\a.txt", "a");

@@ -1,0 +1,134 @@
+/* The sheet of every key, where keys are also changed. */
+.key-sheet {
+  display: flex;
+  flex-direction: column;
+  width: min(520px, 92vw);
+  max-height: min(680px, 88vh);
+}
+
+.key-sheet:not([open]) {
+  display: none;
+}
+
+.key-sheet .settings-search {
+  margin: var(--space-3) 0 0;
+}
+
+.key-said {
+  min-height: 1.4em;
+  margin: var(--space-2) 0 0;
+  color: var(--text-muted);
+}
+
+.key-list {
+  flex: 1;
+  min-height: 120px;
+  margin: 0 calc(-1 * var(--space-2)) var(--space-3);
+  padding: 0 var(--space-2);
+  overflow-y: auto;
+}
+
+.key-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-height: var(--row-height);
+  padding: 0 var(--space-1) 0 var(--space-2);
+  border-radius: var(--radius);
+}
+
+.key-row:hover {
+  background: var(--surface-hover);
+}
+
+.key-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.key-row[data-changed] .key-label::after {
+  content: " •";
+  color: var(--accent);
+}
+
+.key-chip {
+  flex: none;
+  min-width: 44px;
+  height: 24px;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  text-align: center;
+  line-height: 22px;
+  transition:
+    border-color var(--motion),
+    scale 320ms var(--spring);
+}
+
+button.key-chip:hover {
+  border-color: var(--accent);
+}
+
+.key-chip[aria-pressed="true"] {
+  border-color: var(--accent);
+  color: var(--accent);
+  scale: 1.06;
+  animation: key-wait 1.1s ease-in-out infinite alternate;
+}
+
+@keyframes key-wait {
+  to {
+    box-shadow: 0 0 0 3px color-mix(in oklch, var(--accent) 28%, transparent);
+  }
+}
+
+.key-fixed {
+  color: var(--text-muted);
+  background: transparent;
+}
+
+.key-reset {
+  flex: none;
+  height: 24px;
+  padding: 0 var(--space-2);
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 12px;
+  opacity: 0;
+  transition: opacity var(--motion);
+}
+
+.key-row:hover .key-reset,
+.key-reset:focus-visible {
+  opacity: 1;
+}
+
+.key-reset:hover {
+  color: var(--text);
+}
+
+.key-chip:focus-visible,
+.key-reset:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .key-chip {
+    transition: none;
+  }
+
+  .key-chip[aria-pressed="true"] {
+    animation: none;
+  }
+}

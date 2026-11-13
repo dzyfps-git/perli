@@ -20,7 +20,9 @@ import { HoverCard, type CardAsk } from "./HoverCard";
 import { columnsWidth, gridTemplate, type Column } from "./columns";
 import { clampTile, moveTarget, TILE_STEP, type Layout } from "./layout";
 import { ageShare, hasPicture, iconSheet, kindOf } from "./fileKinds";
-import { hoverCards, ROW_HEIGHTS, rowDensity, setTileSize, statusBar, tileSize, windowsIcons } from "./prefs";
+import { dateForm, hoverCards, ROW_HEIGHTS, rowDensity, selectionBar, setTileSize, statusBar, tileSize, windowsIcons } from "./prefs";
+import { ago, isoText } from "../../ui/dates";
+import { SelectionBar, type BarItem } from "../reach/SelectionBar";
 import { createSelection } from "./selection";
 import { cachedThumb, createThumbLoader } from "./thumbs";
 import { matchSpans } from "./nameMatch";
@@ -98,7 +100,15 @@ CSS.highlights.set("name-match", nameMatches);
 const dates = new Intl.DateTimeFormat(undefined, { dateStyle: "short", timeStyle: "short" });
 
 /** A server's shares have no dates. */
-const dateText = (time: number) => (time > 0 ? dates.format(time) : "");
+const dateText = (time: number) => {
+  if (time <= 0) return "";
+  const form = dateForm();
+  return form === "ago" ? ago(time, Date.now()) : form === "iso" ? isoText(time) : dates.format(time);
+};
+/** "2 min ago" is wrong a minute later, so the rows are told again this often. */
+const AGO_REFRESH_MS = 30_000;
+/** The corner of a tile that picks it, in pixels. */
+const PICK_CORNER = 26;
 
 const syncText = (row: Row | undefined) => {
   if (row?.isCloud) return "In the cloud";
@@ -220,6 +230,10 @@ export function FileList(props: {
   onPreview: (at: RowAt) => void;
   /** The one row selected, or nothing when none or many are. */
   onCursor: (at: RowAt | undefined) => void;
+  /** A middle click on a row. */
+  onOpenBehind: (row: Row) => void;
+  /** What the bar over a selection offers. */
+  barItems: () => BarItem[];
   connect: (list: ListHandle) => void;
 }) {
   const pages = new Map<number, Row[]>();
@@ -567,7 +581,8 @@ export function FileList(props: {
     return props.match ? counted(props.count, "match", "matches") : counted(props.count, "item", "items");
   };
   /** An empty list says so itself, in its middle. */
-  const whisperShown = () => statusBar() || picked().count > 0 || (fresh() && props.count > 0);
+  const barShown = () => selectionBar() && picked().count > 0 && !editor();
+  const whisperShown = () => statusBar() || (picked().count > 0 && !barShown()) || (fresh() && props.count > 0);
 
   function selectionChanged(instant = false, reveal = true) {
     pool.forEach(decorate);
@@ -592,13 +607,26 @@ export function FileList(props: {
     return element ? Number(element.getAttribute("aria-rowindex")) - 1 : -1;
   }
 
+  /** A click on a row's icon, or on the corner of a tile, adds the row to the selection. */
+  function onPicker(event: MouseEvent) {
+    const target = event.target as HTMLElement;
+    if (props.layout === "list") return !!target.closest(".file-icon");
+    const box = target.closest(".file-row")?.getBoundingClientRect();
+    return !!box && event.clientX - box.left < PICK_CORNER && event.clientY - box.top < PICK_CORNER;
+  }
+
   function onClick(event: MouseEvent) {
     const index = indexFromEvent(event);
     if (index < 0) selection.clear();
     else if (event.shiftKey) selection.extendTo(index, event.ctrlKey);
-    else if (event.ctrlKey) selection.toggle(index);
+    else if (event.ctrlKey || onPicker(event)) selection.toggle(index);
     else selection.select(index);
     selectionChanged();
+  }
+
+  function onMiddleClick(event: MouseEvent) {
+    const row = event.button === 1 ? rowAt(indexFromEvent(event)) : undefined;
+    if (row) props.onOpenBehind(row);
   }
 
   function onPointerDown(event: PointerEvent) {
@@ -867,8 +895,8 @@ export function FileList(props: {
     if (target !== undefined) {
       if (event.shiftKey) selection.extendTo(target, false);
       else selection.select(target);
-    } else if (event.key === "Enter" && focused >= 0) {
-      openIndex(focused, event.ctrlKey);
+    } else if (event.key === "Enter" && !event.ctrlKey && focused >= 0) {
+      openIndex(focused, false);
     } else if (event.ctrlKey && !event.shiftKey && event.key.toLowerCase() === "a") {
       selection.selectAll(props.count);
     } else if (event.key === "Escape") {
@@ -918,7 +946,13 @@ export function FileList(props: {
     speak();
     // By the time this list goes, the folder it is told about is already the next one.
     const folder = props.folder;
+    const agoTimer = window.setInterval(() => {
+      if (dateForm() !== "ago") return;
+      for (const pooled of pool) pooled.filled = false;
+      paint();
+    }, AGO_REFRESH_MS);
     onCleanup(() => {
+      window.clearInterval(agoTimer);
       forgetMatches();
       observer.disconnect();
       props.onCursor(undefined);
@@ -955,7 +989,7 @@ export function FileList(props: {
 
   createEffect(
     on(
-      [typesLearned, () => props.cut, () => props.match, tags, allLooks, windowsIcons],
+      [typesLearned, () => props.cut, () => props.match, tags, allLooks, windowsIcons, dateForm],
       () => {
         for (const pooled of pool) pooled.filled = false;
         paint();
@@ -1028,6 +1062,9 @@ export function FileList(props: {
         onScroll={onScroll}
         onClick={onClick}
         onDblClick={(event) => openIndex(indexFromEvent(event), event.ctrlKey)}
+        onAuxClick={onMiddleClick}
+        // Left alone, the middle button starts the browser's own scrolling.
+        onMouseDown={(event) => event.button === 1 && event.preventDefault()}
         onContextMenu={onContextMenu}
         onKeyDown={onKeyDown}
         onPointerDown={onPointerDown}
@@ -1076,6 +1113,18 @@ export function FileList(props: {
       >
         {whisperText()}
       </p>
+      <Show when={barShown()}>
+        <SelectionBar
+          count={picked().count}
+          of={props.count}
+          bytes={picked().bytes}
+          items={props.barItems()}
+          onClear={() => {
+            selection.clear();
+            selectionChanged();
+          }}
+        />
+      </Show>
       <Show when={card()} keyed>
         {(ask) => <HoverCard ask={ask} view={props.view} folder={props.folder} sync={syncText(ask.row)} />}
       </Show>

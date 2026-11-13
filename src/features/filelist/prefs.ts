@@ -55,6 +55,14 @@ export const [rowDensity, setRowDensity] = stored<Density>(
 export const [windowsIcons, setWindowsIcons] = stored("windows-icons", saved("windows-icons") === true);
 /** The count and the selection, always on show at the bottom of each pane. */
 export const [statusBar, setStatusBar] = stored("status-bar", saved("status-bar") === true);
+/** How the date columns read: the PC's own short form, how long ago, or ISO. */
+export type DateForm = "short" | "ago" | "iso";
+export const [dateForm, setDateForm] = stored<DateForm>(
+  "date-form",
+  (["short", "ago", "iso"] as const).find((form) => form === saved("date-form")) ?? "short",
+);
+/** The bar of buttons that floats over the list while rows are selected. */
+export const [selectionBar, setSelectionBar] = stored("selection-bar", saved("selection-bar") !== false);
 export const [detailsPanel, setDetailsPanel] = stored("details-panel", saved("details-panel") === true);
 
 const [sortMemory, setSortMemory] = stored<SortMemory>(

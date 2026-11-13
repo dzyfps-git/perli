@@ -126,6 +126,9 @@ export type Task =
   | { kind: "rename"; selection: Selection; name: string }
   | { kind: "renameAll"; selection: Selection; names: string[] }
   | { kind: "new"; folder: string; directory: boolean }
+  /** A new folder named after the first selected row. With `moveIn` the rows go into it. */
+  | { kind: "newFolderFrom"; selection: Selection; folder: string; moveIn: boolean }
+  | { kind: "copyPaths" | "movePaths"; paths: string[]; folder: string }
   | { kind: "template"; folder: string; extension: string }
   | { kind: "ownTemplate"; folder: string; name: string }
   | { kind: "saveTemplate" | "zip"; selection: Selection }
@@ -153,7 +156,19 @@ export interface Facts {
 }
 
 export type Question =
-  | { kind: "conflict"; name: string; source: Facts; target: Facts; choices: Answer[] }
+  | {
+      kind: "conflict";
+      name: string;
+      source: Facts;
+      target: Facts;
+      /** The file coming in, when it is one on a disk. */
+      sourcePath: string | null;
+      targetPath: string;
+      /** Of everything picked for the job, how many names are taken there and how many are free. */
+      clashes: number;
+      fresh: number;
+      choices: Answer[];
+    }
   | { kind: "problem"; path: string; message: string; choices: Answer[] }
   | { kind: "noBin"; path: string; choices: Answer[] };
 
@@ -356,7 +371,7 @@ export const reloadView = (
   order: Order,
   selected: number[],
   select: string[],
-  search: { step: SearchStep; query: string } | null,
+  search: { step: SearchStep; query: string; scope: SearchScope } | null,
 ) =>
   invoke<{ count: number; hiddenCount: number; selected: number[] }>("reload_view", {
     view,
@@ -385,6 +400,36 @@ export const startJob = (task: Task, origin?: number) => invoke<void>("start_job
 export const undoJob = (origin?: number, step?: number) => invoke<void>("undo_job", { origin, step });
 export const redoJob = (origin?: number) => invoke<void>("redo_job", { origin });
 export const undoState = () => invoke<Undoable>("undo_state");
+
+/** One step of the undo log, told the way a person would. */
+export interface Activity {
+  id: number;
+  /** Milliseconds since 1970, or 0 for a step from before times were kept. */
+  at: number;
+  text: string;
+  /** Where to look for what it left. */
+  path: string;
+  /** Only the newest step can be undone. */
+  newest: boolean;
+}
+
+/** What can still be undone, newest first. */
+export const activity = () => invoke<Activity[]>("activity");
+
+/** The files of the last drop, for the shelf to keep. Nothing moves. */
+export const shelveDrop = () => invoke<string[]>("shelve_drop");
+
+/** The full paths of the selected rows. */
+export const selectionPaths = (selection: Selection) => invoke<string[]>("selection_paths", { selection });
+
+/** Drags files out by their paths, the way `startDrag` does with rows. */
+export const startDragPaths = (paths: string[]) => invoke<void>("start_drag_paths", { paths });
+
+/** Which of `paths` are still there, in the same order. */
+export const pathsExist = (paths: string[]) => invoke<boolean[]>("paths_exist", { paths });
+
+/** How far from the shown folder a search looks. */
+export type SearchScope = "below" | "folder" | "drive" | "drives";
 /** With jobs running, this keeps the window open past the close limit. True if it did. */
 /** `request` is the number `onCloseAsked` gave, so a late answer can't hold a newer request. */
 export const holdClose = (request: number) => invoke<boolean>("hold_close", { request });
@@ -541,7 +586,9 @@ export const entryPicture = (icon: number[]) => decodeThumb(new Uint8Array(icon)
 export const showProperties = (target: ShellTarget, x: number, y: number) =>
   invoke<void>("show_properties", { target, x, y });
 
-export const openTerminal = (path: string) => invoke<void>("open_terminal", { path });
+/** Opens Windows Terminal in a folder, or else PowerShell. `shell` asks for one by name. */
+export const openTerminal = (path: string, shell?: "cmd" | "wt" | "powershell" | "pwsh") =>
+  invoke<void>("open_terminal", { path, shell });
 
 export const newTypes = () => invoke<NewType[]>("new_types");
 

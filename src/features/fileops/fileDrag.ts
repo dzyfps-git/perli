@@ -1,4 +1,5 @@
-import { dropChoices, onFileDrag, setDropTarget, startJob, type DropAction } from "../../api";
+import { dropChoices, onFileDrag, setDropTarget, shelveDrop, startJob, type DropAction } from "../../api";
+import { setDragging, SHELF, shelve } from "../reach/reach";
 import type { MenuItem } from "../../ui/Menu";
 import { kindOf } from "../filelist/fileKinds";
 import type { FolderView } from "../navigation/folderView";
@@ -140,7 +141,13 @@ export function followFileDrag(
     setDropTarget(spot?.folder ?? null).catch(console.error);
   }
 
+  /** The shelf keeps the files where they are, and only remembers them. */
+  const park = () => shelveDrop().then(shelve).catch(report);
+
   return onFileDrag((event) => {
+    // Found before the drag ends, which takes away the chips and bars that only show during one.
+    const landed = event.kind === "drop" ? spotAt(event.x, event.y, views()) : undefined;
+    setDragging(event.kind === "enter" || event.kind === "over");
     if (event.kind === "enter") return deck.show(event.count, event.name, event.folder);
     if (event.kind === "over") {
       deck.move(event.x / window.devicePixelRatio, event.y / window.devicePixelRatio);
@@ -149,8 +156,9 @@ export function followFileDrag(
     aim(undefined);
     deck.hide(event.kind === "drop");
     if (event.kind === "leave") return;
-    const spot = spotAt(event.x, event.y, views());
-    if (spot && event.right) ask(spot, event.x, event.y).catch(report);
+    const spot = landed;
+    if (spot?.folder === SHELF) park();
+    else if (spot && event.right) ask(spot, event.x, event.y).catch(report);
     else if (spot) run(spot);
   });
 }

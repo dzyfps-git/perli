@@ -103,6 +103,13 @@ impl Drags {
         })
     }
 
+    /// The files of the last drop, taken for the shelf, where they wait and nothing moves.
+    /// Files with no paths of their own can't wait, so they give nothing.
+    pub fn shelve(&self) -> Vec<PathBuf> {
+        let dropped = self.dropped.lock().unwrap_or_else(PoisonError::into_inner).take();
+        dropped.filter(|dropped| dropped.incoming.is_none()).map_or_else(Vec::new, |dropped| dropped.paths)
+    }
+
     /// What the last drop can do on `folder`, for the user to pick from.
     // ponytail: a dismissed menu leaves the drop waiting until the next one replaces it, which
     // only ever holds a list of paths or a source that gave up its data.
@@ -117,6 +124,13 @@ impl Drags {
         let fitting = |action: &DropAction| fits(action.effect(), dropped.allowed, &dropped.paths, folder);
         DropAction::ALL.into_iter().filter(fitting).collect()
     }
+}
+
+/// Where files wait without moving. It is no folder, so no job can land there.
+const SHELF: &str = "perli:shelf";
+
+fn is_shelf(folder: &Path) -> bool {
+    folder == Path::new(SHELF)
 }
 
 fn is_bin(folder: &Path) -> bool {
@@ -143,6 +157,10 @@ fn choose(
     folder: &Path,
 ) -> Option<DROPEFFECT> {
     paths.first()?;
+    if is_shelf(folder) {
+        // Nothing moves, and the cursor should say so.
+        return [DROPEFFECT_LINK, DROPEFFECT_COPY, DROPEFFECT_MOVE].into_iter().find(|effect| allowed.0 & effect.0 != 0);
+    }
     if is_bin(folder) {
         return fits(DROPEFFECT_MOVE, allowed, paths, folder).then_some(DROPEFFECT_MOVE);
     }
@@ -218,7 +236,8 @@ impl Hover {
     /// Files with no paths can only be copied out of where they are, and never to the bin.
     fn effect(&self, keys: MODIFIERKEYS_FLAGS, folder: &Path) -> Option<DROPEFFECT> {
         if self.source.is_some() {
-            return (self.allowed.0 & DROPEFFECT_COPY.0 != 0 && !is_bin(folder)).then_some(DROPEFFECT_COPY);
+            let takes = !is_bin(folder) && !is_shelf(folder);
+            return (self.allowed.0 & DROPEFFECT_COPY.0 != 0 && takes).then_some(DROPEFFECT_COPY);
         }
         choose(keys, self.allowed, &self.paths, folder)
     }
@@ -541,6 +560,23 @@ mod tests {
         let held = Dropped { paths, keys: NO_KEYS, allowed: ANY, incoming: None };
         *drags.dropped.lock().unwrap() = Some(held);
         drags
+    }
+
+    #[test]
+    fn the_shelf_takes_the_dropped_paths_and_leaves_no_drop_behind() {
+        let drags = dropped(on_c());
+        assert_eq!(drags.shelve(), on_c());
+        assert!(drags.shelve().is_empty());
+        assert!(drags.job(Path::new(r"D:\there"), None).is_none());
+    }
+
+    #[test]
+    fn the_shelf_never_shows_a_move_while_a_link_or_copy_is_on_offer() {
+        let all = DROPEFFECT(DROPEFFECT_COPY.0 | DROPEFFECT_MOVE.0 | DROPEFFECT_LINK.0);
+        let none = MODIFIERKEYS_FLAGS(0);
+        assert_eq!(choose(none, all, &on_c(), Path::new(SHELF)), Some(DROPEFFECT_LINK));
+        assert_eq!(choose(none, DROPEFFECT_COPY, &on_c(), Path::new(SHELF)), Some(DROPEFFECT_COPY));
+        assert_eq!(choose(none, all, &[], Path::new(SHELF)), None);
     }
 
     #[test]

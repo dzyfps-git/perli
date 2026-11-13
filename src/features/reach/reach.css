@@ -1,0 +1,484 @@
+/* The selection bar, the shelf, the drop chips and the activity log. */
+
+/* Floats over the foot of the list it belongs to. */
+.selection-bar {
+  position: absolute;
+  inset: auto 0 var(--space-3) 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  box-sizing: border-box;
+  width: fit-content;
+  max-width: calc(100% - var(--space-4));
+  margin-inline: auto;
+  overflow: hidden;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--overlay-tint);
+  box-shadow: var(--shadow);
+  backdrop-filter: var(--blur);
+  transition: bottom 420ms var(--spring);
+  animation: selection-bar-in var(--motion-spring);
+}
+
+/* The shelf has the foot of the window, so the bar stands on it. */
+.shell:has(.shelf-on) .selection-bar {
+  bottom: calc(var(--space-3) + 60px);
+}
+
+@keyframes selection-bar-in {
+  from {
+    opacity: 0;
+    translate: 0 14px;
+    scale: 0.92;
+  }
+}
+
+.selection-count {
+  padding: 0 var(--space-2) 0 var(--space-3);
+  color: var(--text-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.selection-action {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  transition:
+    background var(--motion),
+    scale 320ms var(--spring);
+}
+
+.selection-action:hover {
+  background: var(--surface-hover);
+}
+
+.selection-action:active {
+  scale: 0.94;
+}
+
+.selection-icon {
+  color: var(--text-muted);
+  font: 13px / 1 var(--font-icons);
+}
+
+.selection-action:hover .selection-icon {
+  color: var(--accent);
+}
+
+.selection-clear {
+  padding: 0 7px;
+}
+
+/* With little room the bar keeps the count and the icons, whose names the hover text still gives. */
+.panes:has(.pane + .pane) .selection-label {
+  display: none;
+}
+
+@media (max-width: 1000px) {
+  .selection-label {
+    display: none;
+  }
+}
+
+@media (max-width: 1300px) {
+  .shell[data-sidebar="open"] .selection-label {
+    display: none;
+  }
+}
+
+/* The corner of a tile that picks it without Ctrl. */
+.file-grid[data-layout="grid"] .file-row::before {
+  content: "";
+  position: absolute;
+  inset: 6px auto auto 6px;
+  width: 14px;
+  height: 14px;
+  border: 1.5px solid var(--text-muted);
+  border-radius: 50%;
+  z-index: 1;
+  background: var(--overlay-tint);
+  opacity: 0;
+  scale: 0.6;
+  transition:
+    opacity var(--motion),
+    scale 320ms var(--spring);
+}
+
+.file-grid[data-layout="grid"] .file-row:hover::before,
+.file-grid[data-layout="grid"] .file-row[aria-selected="true"]::before {
+  opacity: 1;
+  scale: 1;
+}
+
+.file-grid[data-layout="grid"] .file-row[aria-selected="true"]::before {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+
+.file-grid[data-layout="grid"] .file-row[data-empty]::before {
+  display: none;
+}
+
+.file-grid[data-layout="list"] .file-icon {
+  cursor: copy;
+}
+
+/* The shelf waits under the foot of the window and slides up when there is a use for it. */
+.shelf {
+  position: fixed;
+  inset: auto auto var(--space-3) 50%;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  box-sizing: border-box;
+  min-width: 280px;
+  max-width: min(760px, calc(100vw - 420px));
+  min-height: 48px;
+  padding: var(--space-2) var(--space-2) var(--space-2) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-large);
+  background: var(--glass-tint);
+  box-shadow: var(--shadow);
+  backdrop-filter: var(--blur);
+  opacity: 0;
+  translate: -50% calc(100% + var(--space-4));
+  transition:
+    translate 460ms var(--spring),
+    opacity 200ms,
+    border-color var(--motion);
+}
+
+.shelf-on {
+  opacity: 1;
+  translate: -50% 0;
+}
+
+/* A job's card has the right of the foot, so the shelf keeps to the room beside it. */
+.shell:has(.jobs .job) .shelf {
+  left: calc((100vw - 372px) / 2);
+  max-width: min(760px, calc(100vw - 372px - var(--space-4)));
+}
+
+/* While files are in the air, the shelf asks for them. */
+.shelf-waiting {
+  border-style: dashed;
+  border-color: var(--accent-line, var(--accent));
+}
+
+.shelf[data-drop-over] {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  scale: 1.03;
+}
+
+.shelf-empty {
+  flex: 1;
+  margin: 0;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.shelf-all {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 4px;
+  height: 28px;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+  cursor: grab;
+}
+
+.shelf-all span {
+  font: 13px / 1 var(--font-icons);
+}
+
+.shelf-items {
+  display: flex;
+  flex: 1;
+  gap: var(--space-1);
+  min-width: 0;
+  margin: 0;
+  padding: 2px;
+  overflow-x: auto;
+  list-style: none;
+  scrollbar-width: none;
+}
+
+.shelf-item {
+  position: relative;
+  display: flex;
+  flex: none;
+  animation: shelf-item-in var(--motion-spring);
+}
+
+@keyframes shelf-item-in {
+  from {
+    opacity: 0;
+    translate: 0 12px;
+    scale: 0.8;
+  }
+}
+
+.shelf-file {
+  display: flex;
+  align-items: center;
+  max-width: 160px;
+  height: 30px;
+  padding: 0 22px 0 var(--space-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  cursor: grab;
+  transition:
+    background var(--motion),
+    translate 320ms var(--spring);
+}
+
+.shelf-file:hover {
+  background: var(--surface-hover);
+  translate: 0 -2px;
+}
+
+.shelf-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.shelf-remove,
+.shelf-close {
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-muted);
+  font: 9px / 1 var(--font-icons);
+}
+
+.shelf-remove {
+  position: absolute;
+  inset: 6px 3px auto auto;
+  width: 18px;
+  height: 18px;
+  opacity: 0;
+  transition: opacity var(--motion);
+}
+
+.shelf-item:hover .shelf-remove,
+.shelf-remove:focus-visible {
+  opacity: 1;
+}
+
+.shelf-close {
+  flex: none;
+  width: 24px;
+  height: 24px;
+}
+
+.shelf-remove:hover,
+.shelf-close:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.shelf-actions {
+  display: flex;
+  flex: none;
+  gap: var(--space-1);
+}
+
+.shelf button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* Places to drop on, along the top of the files while a drag is going. */
+.drop-chips {
+  position: fixed;
+  inset: calc(var(--title-bar-height) + var(--space-2)) auto auto 50%;
+  z-index: 6;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--space-1);
+  max-width: min(900px, calc(100vw - 320px));
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  translate: -50% 0;
+}
+
+.drop-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 220px;
+  height: 30px;
+  padding: 0 var(--space-3);
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--overlay-tint);
+  box-shadow: var(--shadow);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  backdrop-filter: var(--blur);
+  animation: drop-chip-in var(--motion-spring) backwards;
+  animation-delay: calc(var(--at) * 28ms);
+  transition: scale 320ms var(--spring);
+}
+
+.drop-chip[data-drop-over] {
+  outline-offset: 0;
+  background: var(--surface-selected);
+  scale: 1.08;
+}
+
+.drop-chip-icon {
+  color: var(--text-muted);
+  font: 12px / 1 var(--font-icons);
+}
+
+@keyframes drop-chip-in {
+  from {
+    opacity: 0;
+    translate: 0 -14px;
+    scale: 0.85;
+  }
+}
+
+/* The activity log. */
+.activity {
+  display: flex;
+  flex-direction: column;
+  width: min(480px, 92vw);
+  max-height: min(620px, 88vh);
+}
+
+.activity:not([open]) {
+  display: none;
+}
+
+.activity-list {
+  flex: 1;
+  min-height: 80px;
+  margin: var(--space-2) calc(-1 * var(--space-2)) var(--space-3);
+  padding: 0 var(--space-2);
+  overflow-y: auto;
+}
+
+.activity-list ul {
+  margin: 0;
+  padding: 0 0 0 var(--space-3);
+  border-left: 1px solid var(--border);
+  list-style: none;
+}
+
+.activity-step {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+/* A dot on the line for each step, lit for the one Undo would take. */
+.activity-step::before {
+  content: "";
+  position: absolute;
+  inset: 50% auto auto calc(-1 * var(--space-3) - 3.5px);
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--border);
+  translate: 0 -50%;
+}
+
+.activity-step[data-newest]::before {
+  background: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--accent) 25%, transparent);
+}
+
+.activity-what {
+  display: flex;
+  flex: 1;
+  align-items: baseline;
+  gap: var(--space-2);
+  min-width: 0;
+  min-height: var(--row-height);
+  padding: 0 var(--space-2);
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+}
+
+.activity-what:hover {
+  background: var(--surface-hover);
+}
+
+.activity-what:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.activity-text {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.activity-when,
+.activity-empty {
+  color: var(--text-muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.activity-empty {
+  margin: var(--space-4) 0;
+  text-align: center;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .selection-bar,
+  .shelf-item,
+  .drop-chip {
+    animation: none;
+  }
+
+  .shelf,
+  .shelf-file,
+  .drop-chip,
+  .selection-bar,
+  .selection-action,
+  .file-grid[data-layout="grid"] .file-row::before {
+    transition: none;
+  }
+}

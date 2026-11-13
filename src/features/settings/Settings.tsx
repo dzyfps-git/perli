@@ -6,20 +6,26 @@ import type { Tag } from "../../api";
 import { ColorField, Switch } from "../../ui/Controls";
 import { morph } from "../../ui/morph";
 import {
+  dateForm,
   folderSizes,
   hoverCards,
   openInWindow,
   ROW_HEIGHTS,
   rowDensity,
+  selectionBar,
+  setDateForm,
   setHoverCards,
   setOpenInWindow,
   setRowDensity,
+  setSelectionBar,
   setStatusBar,
   setWindowsIcons,
   statusBar,
   windowsIcons,
+  type DateForm,
   type Density,
 } from "../filelist/prefs";
+import { keyText } from "../keys/keybinds";
 import { VIEWER_SETTINGS } from "../preview/viewerPrefs";
 import { setSidebarOpen, sidebarOpen } from "../sidebar/saved";
 import { TagSettings } from "../tags/TagSettings";
@@ -66,6 +72,11 @@ const DENSITIES: { id: Density; label: string }[] = [
   { id: "compact", label: "Compact" },
   { id: "cozy", label: "Cozy" },
   { id: "roomy", label: "Roomy" },
+];
+const DATE_FORMS: { id: DateForm; label: string }[] = [
+  { id: "short", label: "Short" },
+  { id: "ago", label: "How long ago" },
+  { id: "iso", label: "ISO" },
 ];
 const COLOR_NAMES = ["First color", "Middle color", "Last color"];
 const ACCENT_VARS = ["--accent-start", "--accent", "--accent-end"];
@@ -116,6 +127,8 @@ export function Settings(props: {
   onDeleteTag: (tag: Tag) => void;
   /** Saves what must survive Perli ending for an update. */
   onBeforeUpdate: () => Promise<unknown>;
+  /** Opens the sheet of keyboard shortcuts. */
+  onKeys: () => void;
 }) {
   const [isDefault, setIsDefault] = createSignal(false);
   const [defaultFailure, setDefaultFailure] = createSignal<string>();
@@ -429,7 +442,7 @@ export function Settings(props: {
           <section
             class="settings-section"
             data-section="files"
-            data-words="rows density compact cozy roomy height icons windows list status bar count selected items hover cards preview tooltip picture folder sizes space disk"
+            data-words="rows density compact cozy roomy height icons windows list status bar count selected items hover cards preview tooltip picture folder sizes space disk dates ago iso modified selection actions keyboard shortcuts keys"
           >
             <h3>Files</h3>
             <h4 id="settings-rows">Row height</h4>
@@ -448,6 +461,22 @@ export function Settings(props: {
               </For>
             </div>
             <p class="settings-note">Roomy rows show each file's kind and size under its name.</p>
+            <h4 id="settings-dates">Dates</h4>
+            <div class="settings-chips" role="radiogroup" aria-labelledby="settings-dates">
+              <For each={DATE_FORMS}>
+                {(choice) => (
+                  <button
+                    class="settings-chip"
+                    role="radio"
+                    aria-checked={dateForm() === choice.id}
+                    onClick={() => setDateForm(choice.id)}
+                  >
+                    {choice.label}
+                  </button>
+                )}
+              </For>
+            </div>
+            <p class="settings-note">The full date and time show when the pointer rests on a date.</p>
             <Switch
               label="Use Windows icons"
               note="Off, files wear Perli's own icons. Pictures and videos still show themselves, and a folder Windows gave its own icon keeps it."
@@ -461,6 +490,12 @@ export function Settings(props: {
               onChange={setStatusBar}
             />
             <Switch
+              label="Show a bar of actions over the selection"
+              note="Off, the same actions stay in the menu of a row and on their keys."
+              checked={selectionBar()}
+              onChange={setSelectionBar}
+            />
+            <Switch
               label="Show details when the pointer rests on a file"
               note="Text files show their first lines, and other files their picture."
               checked={hoverCards()}
@@ -472,13 +507,20 @@ export function Settings(props: {
               checked={folderSizes()}
               onChange={props.onToggleSizes}
             />
+            <h4>Keyboard</h4>
+            <div class="settings-chips">
+              <button class="settings-chip" aria-keyshortcuts={keyText("keys").replace("Ctrl", "Control") || undefined} onClick={props.onKeys}>
+                Keyboard shortcuts…
+              </button>
+            </div>
+            <p class="settings-note">Every key Perli answers to, and where each one is changed.</p>
           </section>
 
           <section class="settings-section" data-section="sidebar" data-words="rail places panel narrow wide">
             <h3>Sidebar</h3>
             <Switch
               label="Keep the sidebar open"
-              note="Off, the sidebar is a slim rail of icons. It slides out when the pointer reaches it, and Ctrl+B keeps it open."
+              note={`Off, the sidebar is a slim rail of icons. It slides out when the pointer reaches it${keyText("sidebar") ? `, and ${keyText("sidebar")} keeps it open` : ""}.`}
               checked={sidebarOpen()}
               onChange={setSidebarOpen}
             />

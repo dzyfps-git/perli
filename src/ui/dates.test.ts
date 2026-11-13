@@ -27,3 +27,25 @@ test("stepping a month crosses the year", () => {
   assert.deepEqual(monthAfter(2026, 11, 1), { year: 2027, month: 0 });
   assert.deepEqual(monthAfter(2026, 0, -1), { year: 2025, month: 11 });
 });
+
+test("how long ago reads in the fewest words", async () => {
+  const { ago } = await import("./dates.ts");
+  const now = Date.UTC(2026, 10, 11, 12);
+  const minute = 60_000;
+  const day = 24 * 60 * minute;
+  assert.equal(ago(now - 20_000, now), "just now");
+  assert.equal(ago(now - 2 * minute, now), "2 min ago");
+  assert.equal(ago(now - 60 * minute, now), "1 hour ago");
+  assert.equal(ago(now - 5 * 60 * minute, now), "5 hours ago");
+  assert.equal(ago(now - day, now), "yesterday");
+  assert.equal(ago(now - 3 * day, now), "3 days ago");
+  assert.equal(ago(now - 15 * day, now), "2 weeks ago");
+  assert.equal(ago(now - 70 * day, now), "2 months ago");
+  assert.equal(ago(now - 800 * day, now), "2 years ago");
+  assert.equal(ago(now + minute, now), "in the future");
+});
+
+test("an ISO time has no words in it", async () => {
+  const { isoText } = await import("./dates.ts");
+  assert.equal(isoText(new Date(2026, 0, 5, 9, 7).getTime()), "2026-01-05 09:07");
+});
