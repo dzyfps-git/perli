@@ -109,12 +109,14 @@ export function createTabs() {
     const tab = createTab(opened);
     // Tab changes land a frame later, once the old look is captured, so each one reads the list
     // as it is by then. Closing several at once never brings back one closed just before.
-    morph(() => {
+    const placed = morph(() => {
       const result = [...tabs()];
       result.splice(result.indexOf(after) + 1, 0, tab);
       setTabs(inOrder(result));
       if (!behind) setActive(tab);
     }, "tabs");
+    // Back only once the tab is in the list, so a caller adding the next one after it finds it.
+    await placed?.updateCallbackDone.catch(() => undefined);
     return opened[0];
   }
 

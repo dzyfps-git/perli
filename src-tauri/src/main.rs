@@ -61,6 +61,15 @@ const CANCEL_CHECK: Duration = Duration::from_millis(50);
 #[derive(Default)]
 struct PendingUpdate(Mutex<Option<tauri_plugin_updater::Update>>);
 
+/// Folders later starts handed over before the UI listened for them. `None` once it listens.
+struct Inbox(Mutex<Option<Vec<launch::Ask>>>);
+
+impl Default for Inbox {
+    fn default() -> Self {
+        Self(Mutex::new(Some(Vec::new())))
+    }
+}
+
 /// What a newer release offers.
 #[derive(Serialize)]
 struct UpdateOffer {
@@ -413,6 +422,8 @@ struct Measured {
 struct Clipped {
     /// The names on the clipboard, which the UI fades while they wait to move.
     names: Vec<String>,
+    /// The full paths, which a search's rows need since they come from many folders.
+    paths: Vec<String>,
     sequence: u32,
 }
 
@@ -469,6 +480,13 @@ impl Start {
 #[tauri::command]
 fn start_state(start: State<'_, Start>) -> Start {
     start.inner().clone()
+}
+
+/// Called once the UI listens for "open-asked": hands over what came before, and from then on
+/// each ask goes out as an event.
+#[tauri::command]
+fn asks_waiting(inbox: State<'_, Inbox>) -> Vec<launch::Ask> {
+    inbox.0.lock().unwrap().take().unwrap_or_default()
 }
 
 #[tauri::command]
@@ -861,6 +879,7 @@ async fn set_clipboard(
     clipboard::write(&paths, cut, jobs::owner(&app)).map_err(|error| error.message())?;
     Ok(Clipped {
         names,
+        paths: paths.iter().map(|path| path.to_string_lossy().into_owned()).collect(),
         sequence: clipboard::sequence(),
     })
 }
@@ -1144,12 +1163,14 @@ async fn send_to(selection: Selection, target: PathBuf, views: State<'_, Views>)
     off_main(move || menus::send_to(paths, target)).await
 }
 
-/// Rows, or with none the folder itself, for what Windows offers on either.
+/// Rows, or with none the folder itself, for what Windows offers on either. `Paths` outlives a
+/// reload of the folder, which rows don't.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", tag = "kind")]
 enum ShellTarget {
     Rows { selection: Selection },
     Folder { path: String },
+    Paths { paths: Vec<PathBuf> },
 }
 
 impl ShellTarget {
@@ -1159,6 +1180,15 @@ impl ShellTarget {
                 menus::Target::Items(views.read(&selection, folder::Listing::paths)?)
             }
             Self::Folder { path } => menus::Target::Folder(path.into()),
+            Self::Paths { paths } => menus::Target::Items(paths),
+        })
+    }
+
+    /// The items themselves, the folder being one.
+    fn paths(self, views: &Views) -> Result<Vec<PathBuf>, String> {
+        Ok(match self.read(views)? {
+            menus::Target::Items(paths) => paths,
+            menus::Target::Folder(folder) => vec![folder],
         })
     }
 }
@@ -1208,10 +1238,7 @@ async fn show_properties(
 /// folder reloading behind the sheet can't point them at other rows.
 #[tauri::command]
 async fn item_facts(target: ShellTarget, views: State<'_, Views>) -> Result<props::Facts, String> {
-    let paths = match target.read(&views)? {
-        menus::Target::Items(paths) => paths,
-        menus::Target::Folder(folder) => vec![folder],
-    };
+    let paths = target.paths(&views)?;
     off_main(move || props::facts(paths)).await
 }
 
@@ -1234,7 +1261,7 @@ async fn path_properties(path: PathBuf) -> Result<Vec<(&'static str, String, Str
 /// A checksum by `algorithm`, or nothing if a newer checksum took its place.
 #[tauri::command]
 async fn path_checksum(path: PathBuf, algorithm: String) -> Result<Option<String>, String> {
-    async_runtime::spawn_blocking(move || preview::hash(&path, &algorithm))
+    async_runtime::spawn_blocking(move || preview::hash(&path, &algorithm, preview::PROPERTIES_LANE))
         .await
         .map_err(|error| error.to_string())?
         .map_err(|error| error.to_string())
@@ -1395,6 +1422,13 @@ async fn archive_text(view: u32, request: u64, row: u32, entry: String, password
     blocking(move || inside::text(&path, &entry, password.as_deref())).await
 }
 
+/// Whether `password` opens the locked `entry`, read all the way through.
+#[tauri::command]
+async fn archive_password(view: u32, request: u64, row: u32, entry: String, password: String, views: State<'_, Views>) -> Result<(), String> {
+    let path = row_path(&views, view, request, row)?;
+    blocking(move || inside::check_password(&path, &entry, &password)).await
+}
+
 /// One chapter of a book, made safe to show.
 #[tauri::command]
 async fn book_chapter(view: u32, request: u64, row: u32, entry: String, views: State<'_, Views>) -> Result<String, String> {
@@ -1507,7 +1541,7 @@ async fn checksum(
     views: State<'_, Views>,
 ) -> Result<Option<String>, String> {
     let path = row_path(&views, view, request, row)?;
-    async_runtime::spawn_blocking(move || preview::hash(&path, &algorithm))
+    async_runtime::spawn_blocking(move || preview::hash(&path, &algorithm, view))
         .await
         .map_err(|error| error.to_string())?
         .map_err(|error| error.to_string())
@@ -1603,8 +1637,8 @@ async fn delete_tag(id: u32) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn set_tag(selection: Selection, tag: u32, on: bool, views: State<'_, Views>) -> Result<(), String> {
-    let paths = views.read(&selection, folder::Listing::paths)?;
+async fn set_tag(target: ShellTarget, tag: u32, on: bool, views: State<'_, Views>) -> Result<(), String> {
+    let paths = target.paths(&views)?;
     with_tags(move || tags::set(&paths, tag, on)).await
 }
 
@@ -1623,8 +1657,8 @@ async fn keep_on_device(selection: Selection, keep: bool, views: State<'_, Views
 
 /// The tags all the selected rows have.
 #[tauri::command]
-async fn common_tags(selection: Selection, views: State<'_, Views>) -> Result<Vec<u32>, String> {
-    let paths = views.read(&selection, folder::Listing::paths)?;
+async fn common_tags(target: ShellTarget, views: State<'_, Views>) -> Result<Vec<u32>, String> {
+    let paths = target.paths(&views)?;
     with_tags(move || tags::common(&paths)).await
 }
 
@@ -1842,10 +1876,12 @@ fn come_forward(window: tauri::WebviewWindow) {
 fn open_window(folder: String, select: Vec<String>) -> Result<(), String> {
     let mut start = Command::new(std::env::current_exe().map_err(|error| error.to_string())?);
     start.arg("--new-window");
-    match select.first() {
-        Some(name) => start.arg("--select").arg(Path::new(&folder).join(name)),
-        None => start.arg("--directory").arg(&folder),
-    };
+    if select.is_empty() {
+        start.arg("--directory").arg(&folder);
+    }
+    for name in &select {
+        start.arg("--select").arg(Path::new(&folder).join(name));
+    }
     start.spawn().map(|_| ()).map_err(|error| error.to_string())
 }
 
@@ -1923,6 +1959,7 @@ fn main() {
         .manage(Views::default())
         .manage(Jobs::loading_history())
         .manage(Closing::default())
+        .manage(Inbox::default())
         .manage(PendingUpdate::default())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(Watches::default())
@@ -1936,7 +1973,13 @@ fn main() {
             if let Some(door) = door {
                 let asked = app.handle().clone();
                 door.listen(move |ask| {
-                    let _ = asked.emit("open-asked", ask);
+                    // Held while sending, so an ask can't slip between the UI's take and its event.
+                    let inbox = asked.state::<Inbox>();
+                    let mut inbox = inbox.0.lock().unwrap();
+                    match inbox.as_mut() {
+                        Some(waiting) => waiting.push(ask),
+                        None => drop(asked.emit("open-asked", ask)),
+                    }
                 });
             }
             watch::start(app.handle().clone());
@@ -1948,6 +1991,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             start_state,
+            asks_waiting,
             save_session,
             list_places,
             drive_space,
@@ -2023,6 +2067,7 @@ fn main() {
             big_picture,
             picture_size,
             archive_text,
+            archive_password,
             archive_test,
             drag_entry,
             beside_text,
