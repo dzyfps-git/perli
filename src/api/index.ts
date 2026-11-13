@@ -626,6 +626,12 @@ export const setTag = (target: ShellTarget, tag: number, on: boolean) =>
 export const setTagPaths = (paths: string[], tag: number, on: boolean) =>
   invoke<void>("set_tag_paths", { paths, tag, on });
 
+/** Every tagged file here, by path, with its tags, for a backup. */
+export const taggedFiles = () => invoke<[string, number[]][]>("tagged_files");
+
+/** Puts a backup's tags back on the files here. Says how many files got them. */
+export const restoreTagged = (files: [string, number[]][]) => invoke<number>("restore_tagged", { files });
+
 /** Asks the sync app to keep the selected rows on this device for good, or to free their space. */
 export const keepOnDevice = (selection: Selection, keep: boolean) =>
   invoke<void>("keep_on_device", { selection, keep });

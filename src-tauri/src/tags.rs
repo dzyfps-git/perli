@@ -287,6 +287,18 @@ impl Store {
         self.0.query_row("SELECT EXISTS(SELECT 1 FROM tagged)", [], |row| row.get(0))
     }
 
+    /// Every tagged file with all of its tags.
+    fn tagged(&self) -> rusqlite::Result<HashMap<(u64, FileId), Vec<u32>>> {
+        let mut rows = self.0.prepare_cached("SELECT volume, file, tag FROM tagged")?;
+        let mut files = HashMap::<(u64, FileId), Vec<u32>>::new();
+        let row = rows.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get(1)?, row.get(2)?)))?;
+        for found in row {
+            let (volume, file, tag) = found?;
+            files.entry((volume as u64, file)).or_default().push(tag);
+        }
+        Ok(files)
+    }
+
     /// Every tagged file, once.
     fn files(&self) -> rusqlite::Result<Vec<(u64, FileId)>> {
         let mut rows = self.0.prepare_cached("SELECT DISTINCT volume, file FROM tagged")?;
@@ -396,7 +408,33 @@ pub fn named_id(name: &str) -> Option<u32> {
 /// Where each file with `tag` is now, with all of its tags, by path. A file that is gone, or on a
 /// drive that is not here, is left out and keeps its tags.
 pub fn files_with(tag: u32) -> Vec<(PathBuf, Box<[u32]>)> {
-    let files = existing(|store| store.with_tag(tag)).and_then(Result::ok).unwrap_or_default();
+    placed(existing(|store| store.with_tag(tag)).and_then(Result::ok).unwrap_or_default())
+}
+
+/// Every tagged file that is here now, by path, with its tags. A backup carries these, since a
+/// file's ID means nothing on another computer.
+pub fn every_file() -> Vec<(PathBuf, Box<[u32]>)> {
+    placed(existing(Store::tagged).and_then(Result::ok).unwrap_or_default())
+}
+
+/// Puts tags back on files by path, as a backup holds them. A path that isn't here, or isn't on
+/// NTFS, is passed over. Says how many files got their tags.
+pub fn restore(files: &[(PathBuf, Vec<u32>)]) -> Result<usize, String> {
+    let keyed: Vec<(Key, &[u32])> = files.iter().filter_map(|(path, tags)| Some((file_key(path).ok()?, tags.as_slice()))).collect();
+    if keyed.is_empty() {
+        return Ok(0);
+    }
+    opened(|store| {
+        for (key, tags) in &keyed {
+            for &tag in *tags {
+                store.set(slice::from_ref(key), tag, true)?;
+            }
+        }
+        Ok(keyed.len())
+    })
+}
+
+fn placed(files: HashMap<(u64, FileId), Vec<u32>>) -> Vec<(PathBuf, Box<[u32]>)> {
     if files.is_empty() {
         return Vec::new();
     }

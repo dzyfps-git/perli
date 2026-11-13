@@ -1675,6 +1675,19 @@ async fn set_tag_paths(paths: Vec<PathBuf>, tag: u32, on: bool) -> Result<(), St
     with_tags(move || tags::set(&paths, tag, on)).await
 }
 
+/// Every tagged file here by path, with its tags, for a backup.
+#[tauri::command]
+async fn tagged_files() -> Result<Vec<(String, Box<[u32]>)>, String> {
+    let files = with_tags(|| Ok(tags::every_file())).await?;
+    Ok(files.into_iter().map(|(path, tags)| (path.to_string_lossy().into_owned(), tags)).collect())
+}
+
+/// Puts a backup's tags back on the files here, by path. Says how many files got them.
+#[tauri::command]
+async fn restore_tagged(files: Vec<(PathBuf, Vec<u32>)>) -> Result<usize, String> {
+    with_tags(move || tags::restore(&files)).await
+}
+
 /// Asks the sync app to keep the selected rows on this device, or to free their space.
 #[tauri::command]
 async fn keep_on_device(selection: Selection, keep: bool, views: State<'_, Views>) -> Result<(), String> {
@@ -2134,6 +2147,8 @@ fn main() {
             delete_tag,
             set_tag,
             set_tag_paths,
+            tagged_files,
+            restore_tagged,
             keep_on_device,
             common_tags,
             rows_matching,
