@@ -80,6 +80,18 @@ export function relativeTo(folder: string, path: string) {
 }
 
 /**
+ * Where a linked pane showing `other` goes when its partner moved from `from` to `to`: as deep
+ * into its own folder, or as many folders up. Undefined for any other move.
+ */
+export function followed(from: string, to: string, other: string) {
+  if (samePath(from, to) || isBin(from) || isBin(to) || isBin(other)) return undefined;
+  if (isInside(to, from)) return join(other, relativeTo(from, to));
+  if (!isInside(from, to)) return undefined;
+  const levels = toCrumbs(from).length - toCrumbs(to).length;
+  return toCrumbs(other).at(-1 - levels)?.path;
+}
+
+/**
  * The deepest path to show in the path bar. Going up keeps the folders you came
  * from, so you can jump back into them. Going anywhere else starts a new trail.
  */

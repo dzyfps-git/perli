@@ -42,6 +42,10 @@ export function Palette(props: {
   onClose: () => void;
   /** For when what had the focus is gone by the time this closes. */
   focusList: () => void;
+  /** Commands made from what is typed, like "sort by size", which come first. */
+  words?: (text: string) => Command[];
+  /** Asks for one kind of thing, such as a tab, instead of any command. Nothing run is kept as recent. */
+  scope?: { label: string; placeholder: string };
 }) {
   const [text, setText] = createSignal("");
   const [shown, setShown] = createSignal<Command[]>([]);
@@ -67,12 +71,13 @@ export function Palette(props: {
       setActive(0);
     };
     if (!query) {
-      const { first, rest } = recentFirst(commands, recent());
+      const { first, rest } = props.scope ? { first: [], rest: commands } : recentFirst(commands, recent());
       return show([...first, ...byGroup(rest)], first.length);
     }
+    const said = props.words?.(query) ?? [];
     const names = commands.map((command) => command.label);
     rankNames(query, names)
-      .then((order) => show(order.map((index) => commands[index])))
+      .then((order) => show([...said, ...order.map((index) => commands[index])]))
       .catch(console.error);
   });
 
@@ -133,7 +138,7 @@ export function Palette(props: {
   /** Closing first gives the focus back, so a command can move it on from there. */
   function choose(command: Command | undefined) {
     if (!command) return;
-    setRecent([command.label, ...recent().filter((label) => label !== command.label)].slice(0, MOST_RECENT));
+    if (!props.scope) setRecent([command.label, ...recent().filter((label) => label !== command.label)].slice(0, MOST_RECENT));
     props.onClose();
     command.run();
   }
@@ -153,7 +158,7 @@ export function Palette(props: {
       class="palette"
       classList={{ "palette-open": props.open }}
       role="dialog"
-      aria-label="Command palette"
+      aria-label={props.scope?.label ?? "Command palette"}
     >
       <input
         ref={input}
@@ -163,7 +168,7 @@ export function Palette(props: {
         aria-expanded="true"
         aria-controls="palette-list"
         aria-activedescendant={shown().length ? optionId(active()) : undefined}
-        placeholder="Type a command"
+        placeholder={props.scope?.placeholder ?? "Type a command, or sort by, group by, tag, select, search…"}
         value={text()}
         onInput={(event) => setText(event.currentTarget.value)}
         onKeyDown={onKeyDown}

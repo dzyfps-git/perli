@@ -925,10 +925,6 @@
   animation: details-in var(--motion-slide);
 }
 
-.panes-swapped .details-panel {
-  order: -1;
-}
-
 @keyframes details-in {
   from {
     opacity: 0;
@@ -1565,10 +1561,6 @@
   border-radius: var(--radius);
   overflow: hidden;
   animation: details-in var(--motion-slide);
-}
-
-.panes-swapped .preview-dock {
-  order: -1;
 }
 
 .preview-dock > .details-empty {

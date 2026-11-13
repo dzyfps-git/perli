@@ -131,6 +131,54 @@
   }
 }
 
+/* Crumbs folded away in the middle of a long path. "…" after the first one lists them. */
+.crumbs li[hidden] {
+  display: none;
+}
+
+.crumb-fold {
+  font-family: var(--font-icons);
+  font-size: 12px;
+  animation: crumb-in var(--motion-spring);
+}
+
+/* The crumb of the folder on screen grows in each time it becomes the one, going down or up. */
+.crumb[aria-current] {
+  animation: crumb-grow var(--motion-spring);
+}
+
+@keyframes crumb-grow {
+  from {
+    scale: 0.82;
+    opacity: 0.4;
+  }
+}
+
+/* The rest of the first offer, faint after what was typed. Tab or Right takes it. */
+.path-ghost {
+  position: absolute;
+  inset: 0 0 auto 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  height: 32px;
+  padding: 0 var(--space-2);
+  overflow: hidden;
+  color: var(--text-muted);
+  white-space: pre;
+  pointer-events: none;
+}
+
+.path-ghost-typed {
+  visibility: hidden;
+}
+
+/* Linked panes follow each other. The button wears the accent while they do. */
+.link-button[aria-pressed="true"] {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
 /* The separator after each crumb lists the folders inside it, the way Explorer's does. */
 .crumb-chevron {
   display: grid;
@@ -162,7 +210,9 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .crumbs li {
+  .crumbs li,
+  .crumb-fold,
+  .crumb[aria-current] {
     animation: none;
   }
 }

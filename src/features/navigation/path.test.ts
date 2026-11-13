@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   baseName,
+  followed,
   BIN_PATH,
   isDriveRoot,
   join,
@@ -115,4 +116,16 @@ test("resolveRelative follows a document's own links to files beside it", () => 
   assert.equal(resolveRelative("C:\\", ".."), "C:\\");
   assert.equal(resolveRelative("\\\\server\\share\\docs", "../../a.png"), "\\\\server\\share\\a.png");
   assert.equal(resolveRelative(folder, "100%.png"), "C:\\docs\\100%.png");
+});
+
+test("a linked pane goes as deep, or as far up, as its partner", () => {
+  assert.equal(followed("C:\\a", "C:\\a\\b\\c", "D:\\x"), "D:\\x\\b\\c");
+  assert.equal(followed("C:\\", "C:\\b", "D:\\"), "D:\\b");
+  assert.equal(followed("C:\\a\\b\\c", "C:\\a", "D:\\x\\y\\z"), "D:\\x");
+  // Past the other pane's drive, there is nowhere to go.
+  assert.equal(followed("C:\\a\\b", "C:\\", "D:\\x"), undefined);
+  // A jump elsewhere is not followed, and nor is the Recycle Bin.
+  assert.equal(followed("C:\\a", "E:\\b", "D:\\x"), undefined);
+  assert.equal(followed("C:\\a", "C:\\a", "D:\\x"), undefined);
+  assert.equal(followed("C:\\a", BIN_PATH, "D:\\x"), undefined);
 });

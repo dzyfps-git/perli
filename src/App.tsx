@@ -30,6 +30,7 @@ import {
   openFile,
   openTerminal,
   rowsWhere,
+  rowsMatching,
   rankNames,
   redoJob,
   saveSession,
@@ -51,6 +52,7 @@ import {
   type Sort,
   type OpenAsk,
   type Tag,
+  type Terminal,
 } from "./api";
 import { createFileActions } from "./features/fileops/actions";
 import { BatchRename, type RenameRequest } from "./features/fileops/BatchRename";
@@ -110,11 +112,16 @@ import {
   toggleColumn,
   verifyCopies,
   onePerDrive,
+  terminalChoice,
+  TERMINAL_NAMES,
+  upOnDoubleClick,
 } from "./features/filelist/prefs";
 import { SelectPattern } from "./features/filelist/SelectPattern";
 import { FLAT_QUERY, type FolderView, type RowAt } from "./features/navigation/folderView";
-import { BIN_PATH, isBin, isDriveRoot, join, parentOf, baseName, relativeTo, samePath } from "./features/navigation/path";
+import { BIN_PATH, isBin, isDriveRoot, join, parentOf, baseName, relativeTo, samePath, type Crumb } from "./features/navigation/path";
 import { Palette, type Command } from "./features/palette/Palette";
+import { wordsFor, type Verb } from "./features/palette/words";
+import { PaneDivider } from "./features/tabs/PaneDivider";
 import { PathBar, type Suggested, type Suggestion } from "./features/pathbar/PathBar";
 import { commandFor, keyText } from "./features/keys/keybinds";
 import { comboOf, KEYS } from "./features/keys/keys";
@@ -214,7 +221,13 @@ const CLICK_MS = 400;
 const MOST_TABS_BEHIND = 8;
 /** As many as the path bar offers at once. */
 const MOST_OFFERS = 8;
-const TERMINALS = { cmd: "Command Prompt", wt: "Windows Terminal", powershell: "Windows PowerShell", pwsh: "PowerShell" };
+/** What "sort by" and "view" take in the palette. */
+const SORT_WORDS = ["name", "modified", "created", "type", "size"];
+const VIEW_WORDS = ["list", "grid", "compact", "cozy", "roomy"];
+/** Sorted by nothing a column stands for, so the next sort takes its own first direction. */
+const UNSORTED: Sort = { key: "found", descending: false };
+const ICON_PIN = "\uE718";
+const ICON_REOPEN = "\uE7A7";
 /** How many files of each kind the palette can find by name. */
 const PALETTE_FILES = 200;
 const ICON_FOLDER = "\uE8B7";
@@ -352,6 +365,10 @@ export function App() {
     tabs.activeView().list()?.focus();
   };
   const [paletteOpen, setPaletteOpen] = createSignal(false);
+  /** The palette asks for a tab instead of any command. */
+  const [paletteScope, setPaletteScope] = createSignal<"tabs">();
+  /** Where Alt+Home leads, as Windows tells it at the start. */
+  let homePath: string | undefined;
   const [foundFiles, setFoundFiles] = createSignal<Command[]>([]);
   const [edgeShown, setEdgeShown] = createSignal(drawsEdge);
   const [places, setPlaces] = createSignal<Places>();
@@ -583,11 +600,13 @@ export function App() {
     event.preventDefault();
     const items = [
       { label: "Open", action: () => view.open(path) },
+      { label: "Open in new tab", action: () => tabs.add([path]) },
       { label: "Open to side", action: () => tabs.openToSide(path) },
       ...(isBin(path)
         ? []
         : [
             { label: "Search here", action: () => searchIn(view, path) },
+            { label: "Copy path", action: () => quietly(copyFolderPath(path)) },
             ...keepItems(path),
             ...shell.placeItems(path, { x: event.clientX, y: event.clientY }),
             ...(isDriveRoot(path) ? networkItems() : []),
@@ -689,13 +708,10 @@ export function App() {
     });
   }
 
-  /** The user's own folder, for a search that can't start where the user is. */
-  let home = "C:\\";
-
   /** Every file with the tag, on every drive, as a search of its own. */
   async function showTagged(view: FolderView, tag: Tag) {
     // The Recycle Bin can't be searched, so the search starts from home. It covers all drives.
-    if ((view.isBin() || !view.folder()) && !(await view.open(home))) return;
+    if ((view.isBin() || !view.folder()) && !(await view.open(homePath ?? "C:\\"))) return;
     view.setScope("drives");
     view.search(tagQuery(tag.name));
   }
@@ -1175,10 +1191,84 @@ export function App() {
 
   function togglePalette() {
     if (!paletteOpen()) {
+      setPaletteScope(undefined);
       listPlaces().then(setPlaces).catch(console.error);
       paletteFiles(tabs.activeView(), setFoundFiles).catch(console.error);
     }
     setPaletteOpen(!paletteOpen());
+  }
+
+  /** The palette, asking for one of the open or lately closed tabs. Asked again, it closes. */
+  function searchTabs() {
+    if (paletteOpen() && paletteScope()) return setPaletteOpen(false);
+    setPaletteScope("tabs");
+    setPaletteOpen(true);
+  }
+
+  function tabCommands(): Command[] {
+    const named = (paths: string[]) => paths.map((path) => baseName(path) || path).join(" | ");
+    return [
+      ...tabs.tabs().map((tab) => ({
+        label: named(tab.panes().map((view) => view.path() ?? "New tab")),
+        group: "Open tabs",
+        icon: tab.pinned() ? ICON_PIN : ICON_FOLDER,
+        run: () => {
+          setSettingsShown(false);
+          tabs.activate(tab);
+        },
+      })),
+      ...tabs.closedList().map((paths, back) => ({
+        label: named(paths),
+        group: "Recently closed",
+        icon: ICON_REOPEN,
+        run: () => tabs.reopenClosed(back),
+      })),
+    ];
+  }
+
+  /** Commands said in words, like "sort by size" or "select *.jpg", made from what is typed. */
+  function paletteWords(text: string): Command[] {
+    const view = tabs.activeView();
+    const choice = (word: string) => GROUP_CHOICES.find((group) => group.label.toLowerCase() === word);
+    const terminal = (word: string) =>
+      (Object.keys(TERMINAL_NAMES) as Terminal[]).find((shell) => TERMINAL_NAMES[shell] === word);
+    // Bookmarks and folders opened lately, by name, the first of a name winning.
+    const near = new Map<string, string>();
+    for (const path of [...bookmarks(), ...recentFolders()]) if (!near.has(baseName(path) || path)) near.set(baseName(path) || path, path);
+    const verbs: (Verb & { run: (word: string) => unknown })[] = [
+      { says: "go to", words: [...near.keys()], run: (word) => view.open(near.get(word)!) },
+      { says: "sort by", words: SORT_WORDS, run: (word) => view.setSort(nextSort(UNSORTED, word as Sort["key"])) },
+      {
+        says: "group by",
+        words: GROUP_CHOICES.filter(({ by }) => by !== "none").map(({ label }) => label.toLowerCase()),
+        run: (word) => view.setGroupBy(choice(word)!.by),
+      },
+      { says: "tag", words: allTags().map((tag) => tag.name), run: (word) => quietly(tagSelected(view, word, true)) },
+      { says: "untag", words: allTags().map((tag) => tag.name), run: (word) => quietly(tagSelected(view, word, false)) },
+      { says: "view", words: VIEW_WORDS, run: (word) => (word === "list" || word === "grid" ? view.setLayout(word) : setRowDensity(word as Density)) },
+      { says: "select", words: "free", run: (word) => quietly(selectMatching(view, word)) },
+      { says: "search", words: "free", run: (word) => view.search(word) },
+      { says: "open in", words: Object.values(TERMINAL_NAMES), run: (word) => terminalHere(view, terminal(word)) },
+    ];
+    return wordsFor(text, verbs).map(({ verb, word }) => {
+      const says = `${verbs[verb].says[0].toUpperCase()}${verbs[verb].says.slice(1)}`;
+      return { label: `${says} ${word}`, group: "Do", icon: iconFor(says), run: () => verbs[verb].run(word) };
+    });
+  }
+
+  async function tagSelected(view: FolderView, name: string, on: boolean) {
+    const tag = allTags().find((known) => known.name === name);
+    const selection = actions.selected(view);
+    if (!tag || !selection) return;
+    await setTag({ kind: "rows", selection }, tag.id, on);
+    showTagChange();
+  }
+
+  /** Picks the rows whose names fit a pattern, such as `*.jpg` or `report`. */
+  async function selectMatching(view: FolderView, pattern: string) {
+    const shown = view.folder();
+    if (!shown) return;
+    view.list()?.select(await rowsMatching(view.id, shown.request, pattern));
   }
 
   /** Files the palette can also find by name: the ones opened lately, and the folder on screen. */
@@ -1221,6 +1311,27 @@ export function App() {
     const paths = await selectionPaths(selection);
     await navigator.clipboard.writeText(paths.join("\n"));
     jobs.notify(paths.length === 1 ? "Path copied" : `${paths.length} paths copied`, paths[0], true);
+  }
+
+  async function copyFolderPath(path: string) {
+    await navigator.clipboard.writeText(path);
+    jobs.notify("Path copied", path, true);
+  }
+
+  /** Back or Forward held: the folders that way, nearest first, any of them one click away. */
+  function showHistory(view: FolderView, behind: boolean, x: number, y: number) {
+    const items = view.historyList(behind).map(({ path, steps }) => ({
+      label: baseName(path) || path,
+      hint: path,
+      icon: folderGlyph(path).icon,
+      action: () => view.go(steps),
+    }));
+    setMenu({ x, y, items });
+  }
+
+  /** The crumbs folded away when a path is too long for its bar. */
+  function showFolded(view: FolderView, crumbs: Crumb[], x: number, y: number) {
+    setMenu({ x, y, items: crumbs.map((crumb) => ({ label: crumb.label, icon: folderGlyph(crumb.path).icon, action: () => view.open(crumb.path) })) });
   }
 
   /** Just the names, one to a line, for a list or a message. */
@@ -1272,9 +1383,9 @@ export function App() {
     if (row.isDir && !view.isBin()) openTabsBehind([rowPath(view, row)]).catch(jobs.report);
   }
 
-  function terminalHere(view: FolderView, shell?: keyof typeof TERMINALS) {
+  function terminalHere(view: FolderView, shell?: Terminal) {
     const path = view.folder()?.path;
-    if (path && !view.isBin()) openTerminal(path, shell).catch(jobs.report);
+    if (path && !view.isBin()) openTerminal(path, shell ?? terminalChoice()).catch(jobs.report);
   }
 
   async function toggleFullScreen() {
@@ -1357,6 +1468,11 @@ export function App() {
     ...numbered("tab", (place) => tabs.activateAt(place - 1)),
     settings: showSettings,
     keys: () => setKeysOpen(true),
+    home: () => homePath && here().open(homePath),
+    tabSearch: searchTabs,
+    stackPanes: () => tabs.active().panes().length > 1 && tabs.active().stack(),
+    linkPanes: () => tabs.active().panes().length > 1 && tabs.active().setLinked(!tabs.active().linked()),
+    mirrorPane: () => quietly(Promise.resolve(tabs.mirror())),
   };
 
   /** What the bar over a selection offers. A menu opens under its own button. */
@@ -1467,7 +1583,7 @@ export function App() {
     }
     if (typed.kind === "terminal") {
       const run = () => terminalHere(view, typed.shell);
-      return { first: true, items: folder ? [{ label: `Open ${TERMINALS[typed.shell]} here`, hint: folder, run }] : [] };
+      return { first: true, items: folder ? [{ label: `Open ${TERMINAL_NAMES[typed.shell]} here`, hint: folder, run }] : [] };
     }
     if (typed.kind === "search") {
       const run = () => view.search(typed.text);
@@ -1646,7 +1762,7 @@ export function App() {
       })
       .catch(console.error);
     const start = await startState();
-    home = start.home ?? home;
+    homePath = start.home ?? undefined;
     const session = start.folder ? undefined : parseSession(start.session);
     if (session) {
       tabs.restore(session);
@@ -1698,6 +1814,10 @@ export function App() {
           menuFor={menu()?.from}
           onNewTab={(path) => tabs.add([path])}
           suggest={(text) => suggest(view, text)}
+          onHistory={(behind, x, y) => showHistory(view, behind, x, y)}
+          onCrumbContext={(path, event) => showFolderMenu(event, view, path)}
+          onFoldedMenu={(crumbs, x, y) => showFolded(view, crumbs, x, y)}
+          linked={tab.panes().length > 1 ? { on: tab.linked(), toggle: () => tab.setLinked(!tab.linked()) } : undefined}
         />
         <Show when={view.chipsShown()}>
           <FilterChips view={view} onMore={() => setFiltering(view)} />
@@ -1724,6 +1844,9 @@ export function App() {
                 reveal={view.folder()!.reveal}
                 rename={view.folder()!.rename}
                 top={view.folder()!.top}
+                scrollTo={view.folder()!.scrollTo}
+                onLeave={view.keep}
+                onBackgroundDoubleClick={() => upOnDoubleClick() && void view.up()}
                 thumbs={!view.isBin()}
                 columns={shownColumns(view)}
                 columnSet={view.columnSet()}
@@ -1788,6 +1911,7 @@ export function App() {
       <TitleBar
         tabs={tabs}
         onNewTab={newTab}
+        onTabSearch={searchTabs}
         settings={
           settingsOpen()
             ? {
@@ -1841,8 +1965,17 @@ export function App() {
         />
         <For each={tabs.tabs()}>
           {(tab) => (
-            <div class="panes" classList={{ "panes-swapped": tab.swapped() }} hidden={tab !== tabs.active() || settingsShown()}>
-              <For each={tab.panes()}>{(view) => <Pane tab={tab} view={view} />}</For>
+            <div class="panes" hidden={tab !== tabs.active() || settingsShown()}>
+              <div
+                class="pane-pair"
+                classList={{ "panes-swapped": tab.swapped(), "pane-pair-stacked": tab.stacked() }}
+                style={{ "--split": tab.split() }}
+              >
+                <For each={tab.panes()}>{(view) => <Pane tab={tab} view={view} />}</For>
+                <Show when={tab.panes().length > 1}>
+                  <PaneDivider tab={tab} />
+                </Show>
+              </div>
               <Show when={detailsPanel() && tab === tabs.active()}>
                 <DetailsPanel view={tab.active()} />
               </Show>
@@ -1982,7 +2115,9 @@ export function App() {
       </Show>
       <Palette
         open={paletteOpen()}
-        commands={commands}
+        commands={paletteScope() ? tabCommands : commands}
+        words={paletteScope() ? undefined : paletteWords}
+        scope={paletteScope() ? { label: "Search tabs", placeholder: "Find an open or closed tab" } : undefined}
         onClose={() => setPaletteOpen(false)}
         focusList={() => tabs.activeView().list()?.focus()}
       />

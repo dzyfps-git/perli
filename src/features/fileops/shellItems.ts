@@ -4,6 +4,7 @@ import {
   fileUsers,
   itemFacts,
   openTerminal,
+  terminals,
   openWith,
   rowFacts,
   sendTargets,
@@ -20,6 +21,7 @@ import {
   type ShellTarget,
 } from "../../api";
 import type { MenuItem } from "../../ui/Menu";
+import { setTerminalChoice, terminalChoice, TERMINAL_NAMES } from "../filelist/prefs";
 import type { FolderView } from "../navigation/folderView";
 import { refreshTags, tags } from "../tags/tags";
 import type { FileActions } from "./actions";
@@ -72,11 +74,24 @@ export function createShellItems(
   const pickAppFor = (view: FolderView) =>
     withRows(view, async (selection) => sheets.pickApp((await itemFacts({ kind: "rows", selection })).paths));
 
-  const terminalItem = (path: string, divider = false): MenuItem => ({
-    label: "Open in terminal",
-    divider,
-    action: () => openTerminal(path).catch(report),
-  });
+  /** The chosen terminal, and the others on this PC to the side. Picking one there keeps it. */
+  const terminalItems = (path: string, divider = false): MenuItem[] => [
+    { label: "Open in terminal", divider, action: () => openTerminal(path, terminalChoice()).catch(report) },
+    {
+      label: "Open in another terminal",
+      items: [],
+      load: async () =>
+        (await terminals())
+          .filter((name) => name !== terminalChoice())
+          .map((name) => ({
+            label: TERMINAL_NAMES[name],
+            action: () => {
+              setTerminalChoice(name);
+              openTerminal(path, name).catch(report);
+            },
+          })),
+    },
+  ];
 
   /** Windows' whole menu, in place of this one. What Perli does better comes back to it. */
   async function showMore(view: FolderView, target: ShellTarget | undefined, at: Point, run: Record<string, () => void>) {
@@ -217,7 +232,7 @@ export function createShellItems(
                 isDrive ? actions.copyTo(view, path) : withRows(view, (rows) => sendTo(rows, path)),
             })),
         },
-        ...(folder ? [terminalItem(folder)] : []),
+        ...(folder ? terminalItems(folder) : []),
         { label: "What's using this?", action: () => withRows(view, whoIsUsing) },
         { label: "Properties", action: () => propertiesOf(ofRows(view), at) },
         moreItem(() => ofRows(view), at),
@@ -229,7 +244,7 @@ export function createShellItems(
       const path = view.folder()?.path;
       if (!path) return [];
       return [
-        terminalItem(path, true),
+        ...terminalItems(path, true),
         { label: "Properties", action: () => propertiesOf(ofFolder(path), at) },
         moreItem(() => ofFolder(path), at),
         {
@@ -241,7 +256,7 @@ export function createShellItems(
 
     /** For a folder or drive in the sidebar. */
     placeItems: (path: string, at: Point): MenuItem[] => [
-      terminalItem(path, true),
+      ...terminalItems(path, true),
       { label: "Properties", action: () => propertiesOf(ofFolder(path), at) },
     ],
   };

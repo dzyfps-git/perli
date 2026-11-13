@@ -4,6 +4,9 @@ import "./tooltip.css";
 
 const LABELLED = "button[aria-label], input[type=range][aria-label]";
 const OPEN_DELAY_MS = 450;
+/** Right after one closes, the next opens almost at once: the user is reading along a row. */
+const WARM_DELAY_MS = 60;
+const WARM_FOR_MS = 900;
 const ANCHOR_GAP = 6;
 const EDGE_GAP = 4;
 
@@ -16,25 +19,42 @@ export function Tooltip() {
   let box!: HTMLDivElement;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let current: Element | undefined;
+  let warmUntil = 0;
 
   const isOpen = () => box.matches(":popover-open");
 
   function hide() {
     clearTimeout(timer);
+    if (isOpen()) warmUntil = performance.now() + WARM_FOR_MS;
     current = undefined;
     box.togglePopover(false);
   }
 
+  /** Each key of a shortcut as a small pill, and "or" between shortcuts that do the same. */
+  function keyPills(keys: string) {
+    const hint = document.createElement("span");
+    hint.className = "tooltip-keys";
+    shortcutText(keys)
+      .split(" or ")
+      .forEach((combo, at) => {
+        if (at > 0) hint.append(" or ");
+        for (const key of combo.split(/\+(?=.)/)) {
+          const pill = document.createElement("kbd");
+          pill.className = "tooltip-key";
+          pill.textContent = key;
+          hint.append(pill);
+        }
+      });
+    return hint;
+  }
+
   function place() {
     if (!current) return;
+    // Already open, it glides over to the next control instead of jumping.
+    box.classList.toggle("tooltip-glide", isOpen());
     box.textContent = current.getAttribute("aria-label");
     const keys = current.getAttribute("aria-keyshortcuts");
-    if (keys) {
-      const hint = document.createElement("span");
-      hint.className = "tooltip-keys";
-      hint.textContent = shortcutText(keys);
-      box.append(hint);
-    }
+    if (keys) box.append(keyPills(keys));
     box.togglePopover(true);
     const anchor = current.getBoundingClientRect();
     const { width, height } = box.getBoundingClientRect();
@@ -52,7 +72,7 @@ export function Tooltip() {
     clearTimeout(timer);
     current = next;
     if (isOpen()) place();
-    else timer = setTimeout(place, OPEN_DELAY_MS);
+    else timer = setTimeout(place, performance.now() < warmUntil ? WARM_DELAY_MS : OPEN_DELAY_MS);
   }
 
   // A click can change the label, as the grouping icon does, or remove the control.

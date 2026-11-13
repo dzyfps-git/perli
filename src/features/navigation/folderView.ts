@@ -37,7 +37,8 @@ import {
   showSystem,
 } from "../filelist/prefs";
 import type { SavedPane } from "../tabs/session";
-import { isBin, nextTrail, parentOf, samePath } from "./path";
+import { historyList, jumped } from "./history";
+import { baseName, isBin, nextTrail, parentOf, samePath } from "./path";
 import { morph } from "../../ui/morph";
 
 export type FolderView = ReturnType<typeof createFolderView>;
@@ -71,6 +72,8 @@ interface ReadAgain {
   step: SearchStep;
   /** These rows have nothing to do with the ones before. */
   top: boolean;
+  /** The list stays scrolled where it is, even with rows to select. */
+  still?: boolean;
 }
 
 const combined = (a: ReadAgain, b: ReadAgain): ReadAgain => ({
@@ -78,6 +81,7 @@ const combined = (a: ReadAgain, b: ReadAgain): ReadAgain => ({
   rename: a.rename || b.rename,
   step: strongerStep(a.step, b.step),
   top: a.top || b.top,
+  still: a.still && b.still,
 });
 
 /** One row of one snapshot. */
@@ -105,6 +109,14 @@ export interface ShownFolder extends Opened {
   rename?: boolean;
   /** Start from the top with nothing selected. */
   top?: boolean;
+  /** Where the list starts scrolled to, coming back to the folder. */
+  scrollTo?: number;
+}
+
+/** What a folder left behind, for coming back to it. */
+interface Kept {
+  names: string[];
+  scrollTop: number;
 }
 
 /**
@@ -158,6 +170,12 @@ export function createFolderView(id: number, saved?: SavedPane) {
   let savedOpened = false;
   /** Which folders the user chose not to see the search walked, as hidden and system. */
   let walkedSight = "";
+  /** Each folder this pane left: its selection and scroll, by lowercase path. */
+  const kept = new Map<string, Kept>();
+  /** Rows of a search say nothing about their folder, so leaving one keeps nothing. */
+  let leavingSearch = false;
+  /** Told when the pane moves from one folder to another, for linked panes. */
+  let follower: ((from: string, to: string) => void) | undefined;
   const sight = () => `${showHidden()} ${showSystem()}`;
 
   /** Only the list with its arrows shows folders opened in place, and can close them again. */
@@ -250,9 +268,11 @@ export function createFolderView(id: number, saved?: SavedPane) {
     if (shown && folderSizes() && !isBin(shown)) scanSizes(id, shown).catch(console.error);
   }
 
-  /** Nothing about the shown rows changes until the folder has read fine. */
-  async function load(target: string) {
+  /** Nothing about the shown rows changes until the folder has read fine. `scrollTo` is where
+   *  the new list starts. A `quiet` load that fails says nothing. */
+  async function load(target: string, scrollTo?: number, quiet = false) {
     const searched = query();
+    const before = path();
     const request = ++latestRequest;
     const folderSort = arrivalSort(target);
     // Only a folder already open has a form of its own. A restored one reads its pinned filter.
@@ -264,6 +284,7 @@ export function createFolderView(id: number, saved?: SavedPane) {
       const opened = await openFolder(id, request, folder()?.request ?? 0, target, wanted);
       if (request !== latestRequest) return undefined;
       setError(undefined);
+      leavingSearch = !!searched;
       batch(() => {
         // Text typed while this opened is a search of the new folder, which is waiting to start.
         if (query() === searched) {
@@ -278,15 +299,17 @@ export function createFolderView(id: number, saved?: SavedPane) {
           setFolded([]);
         }
         setGroupByValue(by);
-        show(opened);
+        show({ ...opened, scrollTo });
       });
+      leavingSearch = false;
       setTrail(nextTrail(trail(), opened.path));
+      if (before && !samePath(before, opened.path)) follower?.(before, opened.path);
       scanFolder();
       if (isBin(opened.path)) setColumnSet("plain");
       else noteColumnSet(opened).catch(console.error);
       return opened;
     } catch (failure) {
-      if (request === latestRequest) setError(String(failure));
+      if (request === latestRequest && !quiet) setError(String(failure));
       return undefined;
     } finally {
       settle(request);
@@ -330,7 +353,8 @@ export function createFolderView(id: number, saved?: SavedPane) {
       if (request === latestRequest) {
         setError(undefined);
         const rename = !search && wanted.rename;
-        setFolder({ ...current, request, ...reloaded, reveal: select.length > 0, rename, top, rearranged: false });
+        const reveal = select.length > 0 && !wanted.still;
+        setFolder({ ...current, request, ...reloaded, reveal, rename, top, rearranged: false, scrollTo: undefined });
         return;
       }
     } catch (failure) {
@@ -468,9 +492,10 @@ export function createFolderView(id: number, saved?: SavedPane) {
     reload();
   }
 
-  async function open(path: string) {
+  /** A `quiet` open that fails leaves the folder shown as it was, with no word of it. */
+  async function open(path: string, quiet = false) {
     const from = folder()?.path;
-    const opened = await load(path);
+    const opened = await load(path, undefined, quiet);
     if (opened && from && opened.path !== from) {
       setBackStack([...backStack(), from]);
       setForwardStack([]);
@@ -485,27 +510,38 @@ export function createFolderView(id: number, saved?: SavedPane) {
     if (target) await load(target);
   }
 
-  async function back() {
-    if (query()) return search("");
-    const target = backStack().at(-1);
-    const from = folder()?.path;
-    if (!target || !from || !(await load(target))) return;
-    setBackStack(backStack().slice(0, -1));
-    setForwardStack([...forwardStack(), from]);
+  /** Opens `target` as it was left: scrolled the same, with the same rows selected, or else `select`. */
+  async function comeBack(target: string, select: string[] = []) {
+    const left = kept.get(target.toLowerCase());
+    const opened = await load(target, left?.scrollTop);
+    // Up names the folder it left, which wins over what was selected before; Back and Forward name none.
+    const names = select.length > 0 ? select : (left?.names ?? []);
+    if (opened && names.length > 0) await readAgain({ select: names, rename: false, step: "again", top: false, still: select.length === 0 });
+    return opened;
   }
 
-  async function forward() {
-    const target = forwardStack().at(-1);
+  /** Moves `steps` through the history: back for a negative count, forward for a positive one. */
+  async function go(steps: number) {
     const from = folder()?.path;
-    if (!target || !from || !(await load(target))) return;
-    setForwardStack(forwardStack().slice(0, -1));
-    setBackStack([...backStack(), from]);
+    const moved = from ? jumped({ back: backStack(), forward: forwardStack() }, from, steps) : undefined;
+    if (!moved || !(await comeBack(moved.target))) return;
+    setBackStack(moved.back);
+    setForwardStack(moved.forward);
   }
 
+  const back = () => (query() ? search("") : go(-1));
+  const forward = () => go(1);
+
+  /** The folder left is the one selected, as Explorer does. */
   async function up() {
     const path = folder()?.path;
     const parent = path && parentOf(path);
-    if (parent) await open(parent);
+    if (!parent || !path) return;
+    const opened = await comeBack(parent, [baseName(path)]);
+    if (opened && !samePath(opened.path, path)) {
+      setBackStack([...backStack(), path]);
+      setForwardStack([]);
+    }
   }
 
   return {
@@ -604,6 +640,17 @@ export function createFolderView(id: number, saved?: SavedPane) {
     /** The list took the rows of `snapshot`, or gave up on them. */
     swapped: settle,
     canGoBack: () => !!query() || backStack().length > 0,
+    /** The folders behind, or ahead, nearest first, with the steps to each. */
+    historyList: (behind: boolean) => historyList({ back: backStack(), forward: forwardStack() }, behind),
+    go,
+    /** The list going away says what it had selected and how far down it was. */
+    keep(path: string, names: string[], scrollTop: number) {
+      if (!leavingSearch) kept.set(path.toLowerCase(), { names, scrollTop });
+    },
+    /** Linked panes follow each other through `follow`. */
+    setFollower(follow: ((from: string, to: string) => void) | undefined) {
+      follower = follow;
+    },
     canGoForward: () => forwardStack().length > 0,
     canGoUp: () => {
       const path = folder()?.path;

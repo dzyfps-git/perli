@@ -110,6 +110,8 @@ const STACK_LEANS = [
   [0.13, 10],
 ] as const;
 const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
+/** How many selected names a folder keeps for coming back to it. */
+const KEPT_NAMES = 200;
 
 /** Each view's last folder, and where on screen the row that left it was, for the zoom. */
 const leftFrom = new Map<number, { folder: string; y?: number }>();
@@ -367,6 +369,12 @@ export function FileList(props: {
   /** What the bar over a selection offers. */
   barItems: () => BarItem[];
   connect: (list: ListHandle) => void;
+  /** Where to start scrolled to, on coming back to a folder. */
+  scrollTo?: number;
+  /** The list goes: what was selected, by name, and how far down it was. */
+  onLeave?: (folder: string, names: string[], scrollTop: number) => void;
+  /** A double click on no row. */
+  onBackgroundDoubleClick?: () => void;
 }) {
   const pages = new Map<number, Row[]>();
   const loading = new Set<number>();
@@ -1381,6 +1389,10 @@ export function FileList(props: {
       selection.restore(props.selected);
       selectionChanged(true);
     }
+    if (props.scrollTo) {
+      grid.scrollTop = props.scrollTo;
+      paint();
+    }
 
     const observer = new ResizeObserver(resize);
     observer.observe(grid);
@@ -1402,6 +1414,12 @@ export function FileList(props: {
       window.clearTimeout(jumpTimer);
       leftFrom.set(props.view, { folder, y: openedAt.get(props.view) });
       openedAt.delete(props.view);
+      // Only rows already read have names to keep. ponytail: the first 200, plenty to come back to.
+      const names = selection
+        .rows()
+        .slice(0, KEPT_NAMES)
+        .flatMap((index) => pages.get(Math.floor(index / PAGE_SIZE))?.[index % PAGE_SIZE]?.name ?? []);
+      props.onLeave?.(folder, names, grid.scrollTop);
     });
   });
 
@@ -1533,9 +1551,13 @@ export function FileList(props: {
         tabindex="0"
         onScroll={onScroll}
         onClick={onClick}
-        onDblClick={(event) =>
-          (event.target as HTMLElement).closest(".file-twist") || openIndex(indexFromEvent(event), event.ctrlKey)
-        }
+        onDblClick={(event) => {
+          if ((event.target as HTMLElement).closest(".file-twist, button")) return;
+          const index = indexFromEvent(event);
+          // A double click on the scroll bar is not one on empty space.
+          if (index >= 0) openIndex(index, event.ctrlKey);
+          else if (event.target === grid && event.offsetX < grid.clientWidth) props.onBackgroundDoubleClick?.();
+        }}
         onAuxClick={onMiddleClick}
         // Left alone, the middle button starts the browser's own scrolling.
         onMouseDown={(event) => event.button === 1 && event.preventDefault()}

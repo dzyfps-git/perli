@@ -744,8 +744,12 @@ export const showProperties = (target: ShellTarget, x: number, y: number) =>
   invoke<void>("show_properties", { target, x, y });
 
 /** Opens Windows Terminal in a folder, or else PowerShell. `shell` asks for one by name. */
-export const openTerminal = (path: string, shell?: "cmd" | "wt" | "powershell" | "pwsh") =>
-  invoke<void>("open_terminal", { path, shell });
+export type Terminal = "cmd" | "wt" | "powershell" | "pwsh";
+
+export const openTerminal = (path: string, shell?: Terminal) => invoke<void>("open_terminal", { path, shell });
+
+/** The terminals on this PC. */
+export const terminals = () => invoke<Terminal[]>("terminals");
 
 export const newTypes = () => invoke<NewType[]>("new_types");
 

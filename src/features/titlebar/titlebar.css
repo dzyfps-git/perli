@@ -23,7 +23,8 @@
   align-items: center;
   gap: var(--space-2);
   flex: 0 1 200px;
-  min-width: 72px;
+  /* Tabs narrow down to this, then the strip scrolls instead. */
+  min-width: 96px;
   height: 100%;
   padding: 0 var(--space-2) 0 var(--space-3);
   border-radius: var(--radius);
@@ -274,6 +275,116 @@ html[data-blurred] .tab-active::before {
 
 @media (prefers-reduced-motion: reduce) {
   .tab-pin {
+    animation: none;
+  }
+}
+
+/* The tabs and their tools share what the window buttons leave over. */
+.tab-strip {
+  display: flex;
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+/* More tabs than fit scroll sideways, with no bar, and fade at each cut edge. */
+.tabs {
+  --fade-left: 0px;
+  --fade-right: 0px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+  /* A tab scrolled into view stops at the padding, so no fade is left over it. */
+  scroll-padding-inline: var(--space-2);
+  mask-image: linear-gradient(
+    to right,
+    transparent,
+    #000 var(--fade-left),
+    #000 calc(100% - var(--fade-right)),
+    transparent
+  );
+}
+
+.tabs[data-more-left] {
+  --fade-left: 28px;
+}
+
+.tabs[data-more-right] {
+  --fade-right: 28px;
+}
+
+.tab-search {
+  margin-left: calc(-1 * var(--space-1));
+  font-size: 12px;
+  animation: tab-settings-in var(--motion-spring);
+}
+
+/* A look at a tab's folder while the pointer rests on it, glass like the hover text. */
+.tab-peek {
+  position: fixed;
+  z-index: 30;
+  width: 260px;
+  padding: var(--space-2) var(--space-3);
+  color: var(--text);
+  background: var(--overlay-tint);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  backdrop-filter: var(--blur);
+  pointer-events: none;
+  transform-origin: top left;
+  animation: tab-peek-in var(--motion-spring);
+}
+
+.tab-peek p {
+  margin: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.tab-peek-name {
+  font-weight: 600;
+}
+
+.tab-peek-path,
+.tab-peek-count {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.tab-peek-rows {
+  margin: var(--space-2) 0 0;
+  padding: var(--space-2) 0 0;
+  list-style: none;
+  border-top: 1px solid var(--border);
+}
+
+.tab-peek-rows li {
+  display: flex;
+  gap: var(--space-2);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  line-height: 20px;
+}
+
+.tab-peek-icon {
+  flex: none;
+  font: 12px var(--font-icons);
+  color: var(--text-muted);
+}
+
+@keyframes tab-peek-in {
+  from {
+    opacity: 0;
+    scale: 0.94;
+    translate: 0 -4px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tab-search,
+  .tab-peek {
     animation: none;
   }
 }

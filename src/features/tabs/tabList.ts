@@ -31,3 +31,18 @@ export function cycled<T>(tabs: T[], active: T, offset: number) {
   const index = tabs.indexOf(active);
   return tabs[(index + offset + tabs.length) % tabs.length];
 }
+
+/** A new split's first pane takes half. */
+export const EVEN_SPLIT = 0.5;
+/** Neither pane gets less than a fifth. */
+export const SPLIT_MIN = 0.2;
+export const SPLIT_MAX = 0.8;
+/** Where a dragged divider settles when it comes this near. */
+export const SPLIT_SNAPS = [1 / 3, EVEN_SPLIT, 2 / 3];
+const SNAP_REACH = 0.025;
+
+/** The first pane's share for a divider let go at `share`: kept in bounds, and drawn to a snap. */
+export function snapped(share: number) {
+  const kept = Math.min(SPLIT_MAX, Math.max(SPLIT_MIN, share));
+  return SPLIT_SNAPS.find((snap) => Math.abs(snap - kept) < SNAP_REACH) ?? kept;
+}
