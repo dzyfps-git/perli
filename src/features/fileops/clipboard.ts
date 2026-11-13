@@ -3,13 +3,14 @@ import { cancelCut, clipboardSequence } from "../../api";
 import { samePath } from "../navigation/path";
 
 /** Files waiting to move on the next paste, which fade until then. */
-const [mark, setMark] = createSignal<{ folder: string; names: Set<string>; sequence: number }>();
+/** `names` fade in `folder`. `paths` are what is really cut, which for a search is more. */
+const [mark, setMark] = createSignal<{ folder: string; names: Set<string>; paths: string[]; sequence: number }>();
 
 /** What is cut now, for the chip on the sidebar. */
 export const cutMark = mark;
 
-export const markCut = (folder: string, names: string[], sequence: number) =>
-  setMark({ folder, names: new Set(names), sequence });
+export const markCut = (folder: string, names: string[], paths: string[], sequence: number) =>
+  setMark({ folder, names: new Set(names), paths, sequence });
 
 export const forgetCut = () => setMark(undefined);
 

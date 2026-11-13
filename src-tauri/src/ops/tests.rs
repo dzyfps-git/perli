@@ -748,9 +748,11 @@ fn a_copy_lists_what_it_skipped_after_a_problem_for_a_later_try() {
 fn a_checked_copy_reads_back_the_same_bytes() {
     let sandbox = Sandbox::new();
     let a = sandbox.file("a.txt", "hello");
-    assert!(sys::same_bytes(&a, &sandbox.file("b.txt", "hello")).unwrap());
-    assert!(!sys::same_bytes(&a, &sandbox.file("c.txt", "hellO")).unwrap());
-    assert!(!sys::same_bytes(&a, &sandbox.file("d.txt", "hello!")).unwrap());
+    let go_on = || true;
+    assert!(sys::same_bytes(&a, &sandbox.file("b.txt", "hello"), &go_on).unwrap());
+    assert!(!sys::same_bytes(&a, &sandbox.file("c.txt", "hellO"), &go_on).unwrap());
+    assert!(!sys::same_bytes(&a, &sandbox.file("d.txt", "hello!"), &go_on).unwrap());
+    assert!(sys::same_bytes(&a, &sandbox.path("b.txt"), &|| false).is_err(), "a cancel stops the check");
 
     let script = Script { verify: true, ..Script::default() };
     let outcome = run_with(copy(&a, &sandbox.folder("to")), &script);

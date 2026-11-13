@@ -530,7 +530,7 @@ export const binSummary = () => invoke<Measured>("bin_summary");
 export const CLIPBOARD_SET = "perli-clipboard-set";
 
 export const setClipboard = (selection: Selection, cut: boolean) =>
-  invoke<{ names: string[]; sequence: number }>("set_clipboard", { selection, cut }).then((set) => {
+  invoke<{ names: string[]; paths: string[]; sequence: number }>("set_clipboard", { selection, cut }).then((set) => {
     window.dispatchEvent(new Event(CLIPBOARD_SET));
     return set;
   });

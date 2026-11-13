@@ -417,6 +417,8 @@ struct Measured {
 struct Clipped {
     /// The names on the clipboard, which the UI fades while they wait to move.
     names: Vec<String>,
+    /// The full paths, which a search's rows need since they come from many folders.
+    paths: Vec<String>,
     sequence: u32,
 }
 
@@ -874,6 +876,7 @@ async fn set_clipboard(
     clipboard::write(&paths, cut, jobs::owner(&app)).map_err(|error| error.message())?;
     Ok(Clipped {
         names,
+        paths: paths.iter().map(|path| path.to_string_lossy().into_owned()).collect(),
         sequence: clipboard::sequence(),
     })
 }

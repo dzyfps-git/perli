@@ -292,6 +292,9 @@ struct Run<'a> {
     touched: BTreeSet<PathBuf>,
     kept: Vec<PathBuf>,
     failed: Vec<Failed>,
+    /// Folders a scan was told to skip because they couldn't be listed, until a copy or move
+    /// records each as skipped with where it was going.
+    unread: Vec<PathBuf>,
     /// Folders a merge moved everything out of, children first.
     emptied: Vec<PathBuf>,
     elevated: Vec<Elevated>,
@@ -313,6 +316,7 @@ impl<'a> Run<'a> {
             touched: BTreeSet::new(),
             kept: Vec::new(),
             failed: Vec::new(),
+            unread: Vec::new(),
             emptied: Vec::new(),
             elevated: Vec::new(),
             undoing: false,
@@ -622,6 +626,15 @@ impl<'a> Run<'a> {
             kept: self.kept,
             failed: self.failed,
             cancelled,
+        }
+    }
+
+    /// Records each folder under `source` that its scan skipped, as going where `target` puts it.
+    fn note_unread(&mut self, source: &Path, target: &Path, moving: bool) {
+        let handed = self.elevated.len();
+        for path in mem::take(&mut self.unread) {
+            let inside = path.strip_prefix(source).unwrap_or(Path::new(""));
+            self.note_skip(&path, &target.join(inside), moving, handed);
         }
     }
 
