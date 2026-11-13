@@ -150,7 +150,10 @@ mod tests {
         assert_eq!(target_of(&links.join("folder.lnk")).map(|(_, dir)| dir), Some(true), "the shortcut knows");
         assert!(found[0].opened > found[1].opened, "newest first, with when");
 
-        assert_eq!(forget_in(&links, &files.join("new.txt").to_string_lossy()).unwrap(), 2, "both shortcuts to it");
+        // The path as the list gave it, as the sidebar sends it back. A temp folder can have a short
+        // 8.3 name that the shortcuts hold in its long form.
+        let new = &found.iter().find(|recent| recent.name == "new.txt").unwrap().path;
+        assert_eq!(forget_in(&links, new).unwrap(), 2, "both shortcuts to it");
         let left: Vec<_> = read_from(&links, 10).into_iter().map(|recent| recent.name).collect();
         assert_eq!(left, ["folder", "old.txt"]);
         assert!(files.join("new.txt").exists(), "the file itself stays");
