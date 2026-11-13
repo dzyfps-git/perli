@@ -105,10 +105,18 @@ export const queueAt = () => queue().findIndex((track) => track.path === now()?.
 export const hasNext = () => queueAt() >= 0 && queueAt() + 1 < queue().length;
 
 /** On to the next song of the queue, without a preview. False when there is none. */
+let skips = 0;
+
 export async function skip() {
   const next = queue()[queueAt() + 1];
   if (queueAt() < 0 || !next) return false;
+  const [mine, from] = [++skips, now()];
   const source = await sourceOf(next.path);
+  // A MIDI song takes a while to render. Stop, or a newer skip, in that time wins.
+  if (mine !== skips || now() !== from) {
+    if (source.made) URL.revokeObjectURL(source.url);
+    return true;
+  }
   start({ path: next.path, name: next.name, title: titleOf(next.name, source.tags), source });
   setMini(true);
   if ("mediaSession" in navigator) navigator.mediaSession.metadata = new MediaMetadata({ title: now()!.title, artist: source.tags.artist ?? "" });

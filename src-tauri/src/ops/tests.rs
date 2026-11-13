@@ -2442,3 +2442,20 @@ fn rename_checks_catch_taken_names_but_allow_a_new_case() {
     assert_eq!(check_rename(&file, "c.txt"), Ok(()));
     assert!(check_rename(&file, "c?.txt").is_err());
 }
+
+#[test]
+fn undoing_a_rename_then_a_move_of_the_same_file_runs_them_in_turn() {
+    let sandbox = Sandbox::new();
+    let (a, b, moved) = (sandbox.path("a.txt"), sandbox.path("b.txt"), sandbox.path(r"sub\b.txt"));
+    sandbox.file(r"sub\b.txt", "x");
+    let records = vec![
+        Done::Moved { from: a.clone(), to: b.clone() },
+        Done::Moved { from: b.clone(), to: moved.clone() },
+    ];
+    let batches = super::undo_batches(records.clone());
+    assert_eq!(batches.len(), 2, "the move back from sub waits for nothing, the rename back waits for it");
+
+    go(Job::Undo { records });
+
+    assert!(exists(&a) && !exists(&b) && !exists(&moved));
+}

@@ -1,6 +1,7 @@
 import { createSignal, For, onMount, Show } from "solid-js";
 import type { Filter } from "../../api";
 import { DateField } from "../../ui/Controls";
+import { parseDay } from "../../ui/dates";
 import { openSheet } from "../../ui/sheet";
 import type { FolderView } from "../navigation/folderView";
 import { tagColor, tags } from "../tags/tags";
@@ -31,7 +32,10 @@ export function FilterDialog(props: {
     close(() => props.view.list()?.focus());
   }
 
-  const apply = () => sizesAreGood(form()) && finish(form());
+  // A day that isn't one, such as 2026-02-30, would roll over or drop the bound.
+  const datesAreGood = () => [form().from, form().to].every((day) => !day.trim() || !!parseDay(day));
+  const formIsGood = () => sizesAreGood(form()) && datesAreGood();
+  const apply = () => formIsGood() && finish(form());
 
   /** The filter goes on first, so what is saved is what the list then shows. */
   function save() {
@@ -127,6 +131,9 @@ export function FilterDialog(props: {
       <Show when={!sizesAreGood(form())}>
         <p class="confirm-summary">A size looks like 500 KB or 2 GB.</p>
       </Show>
+      <Show when={!datesAreGood()}>
+        <p class="confirm-summary">A day looks like 2026-03-01, and must be on the calendar.</p>
+      </Show>
       <div class="confirm-buttons filter-buttons">
         <button class="job-choice" onClick={() => finish(NO_FILTER)}>
           Clear
@@ -137,7 +144,7 @@ export function FilterDialog(props: {
         <button class="job-choice" onClick={() => close()}>
           Cancel
         </button>
-        <button class="job-choice" disabled={!sizesAreGood(form())} onClick={apply}>
+        <button class="job-choice" disabled={!formIsGood()} onClick={apply}>
           Apply
         </button>
       </div>

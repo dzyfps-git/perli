@@ -63,9 +63,11 @@ impl Ask {
     }
 
     fn point_at(&mut self, path: &str) {
-        let path = Path::new(path.trim_matches('"'));
+        let path = full(path.trim_matches('"'));
+        let path = Path::new(&path);
         let text = |part: &std::ffi::OsStr| part.to_string_lossy().into_owned();
-        self.select = path.file_name().map(text).into_iter().collect();
+        // `--select` comes once per item when a window of its own is asked for several.
+        self.select.extend(path.file_name().map(text));
         self.folder = path.parent().map(|parent| text(parent.as_os_str()));
     }
 
@@ -79,10 +81,16 @@ impl Ask {
             self.folder = Some(BIN.into());
             return Ok(self);
         }
-        let path = Path::new(&folder);
-        if is_shell_place(&folder) || !(folder.starts_with(r"\\") || path.exists()) {
+        if is_shell_place(&folder) {
             return Err(folder);
         }
+        // The Perli this may go to started somewhere else, so "." means this start's folder.
+        let folder = full(&folder);
+        let path = Path::new(&folder);
+        if !(folder.starts_with(r"\\") || path.exists()) {
+            return Err(folder);
+        }
+        self.folder = Some(folder.clone());
         if self.select.is_empty() && path.is_file() {
             self.point_at(&folder);
         }
@@ -95,6 +103,11 @@ impl Ask {
         let folder = self.folder.as_deref()?;
         (self.select.is_empty() && folder != BIN).then_some(folder)
     }
+}
+
+/// `path` made whole against this start's working folder. Reads no disk, so it can't hang.
+fn full(path: &str) -> String {
+    std::path::absolute(path).map_or_else(|_| path.to_string(), |full| full.to_string_lossy().into_owned())
 }
 
 /// A place Windows names by an id, not by a path.
@@ -192,6 +205,8 @@ mod tests {
             assert_eq!(ask.select, ["a.txt"], "{args:?}");
         }
         assert_eq!(parsed(&["--select", r"C:\a.txt"]).folder.as_deref(), Some(r"C:\"));
+        let several = parsed(&["--new-window", "--select", r"C:\Users\a.txt", "--select", r"C:\Users\b.txt"]);
+        assert_eq!(several.select, ["a.txt", "b.txt"]);
     }
 
     #[test]
@@ -228,6 +243,16 @@ mod tests {
         assert_eq!(plain.plain_folder(), folder.to_str());
 
         std::fs::remove_dir_all(&folder).unwrap();
+    }
+
+    #[test]
+    fn relative_paths_are_made_whole_here() {
+        let here = std::env::current_dir().unwrap();
+        let ask = parsed(&["."]).settle().unwrap();
+        assert_eq!(ask.folder.as_deref(), here.to_str());
+        let ask = parsed(&["--select", "a.txt"]);
+        assert_eq!(ask.folder.as_deref(), here.to_str());
+        assert_eq!(ask.select, ["a.txt"]);
     }
 
     /// One test for the door, because there is one per user and tests run side by side.

@@ -127,7 +127,8 @@ export function BatchRename(props: { request: RenameRequest; onClose: () => void
     if (need === "none" || rows().length === 0 || asked === "deep" || asked === need) return;
     asked = need;
     renameFacts(props.request.selection, need === "deep")
-      .then((found) => setFacts({ deep: need === "deep", rows: found }))
+      // Deep facts hold the quick ones too, so a quick answer that comes last can't cover them.
+      .then((found) => (need === "deep" || !facts()?.deep) && setFacts({ deep: need === "deep", rows: found }))
       .catch((reason) => setFailure(String(reason)));
   });
 

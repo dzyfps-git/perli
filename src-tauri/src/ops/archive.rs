@@ -263,13 +263,14 @@ impl Run<'_> {
     }
 
     /// With `only`, just those entries come out, each as if its own folder were the top.
+    /// One inside a folder also picked comes out with that folder, not again on its own.
     pub(super) fn unzip(&mut self, archives: Vec<PathBuf>, own_folder: bool, smart: bool, only: &[String], password: Option<&str>) -> Flow {
         self.add_total(archives.len() as u64, 0);
         for archive in archives {
             if only.is_empty() {
                 self.unzip_one(&archive, own_folder, smart, None, password)?;
             }
-            for name in only {
+            for name in outermost(only) {
                 self.unzip_one(&archive, own_folder, false, Some(name), password)?;
             }
             self.step(1, 0);
@@ -449,4 +450,22 @@ fn is_under(zip: &ZipArchive<BufReader<File>>, index: usize, name: &str) -> bool
 fn entry_name(zip: &ZipArchive<BufReader<File>>, index: usize) -> String {
     let entry = zip.by_index_data(index);
     entry.ok().and_then(|entry| entry.name().ok().map(|name| name.replace(['/', '\\'], " "))).unwrap_or_default()
+}
+
+/// The names of `only` that no other picked folder holds. Folder names end in `/`.
+fn outermost(only: &[String]) -> impl Iterator<Item = &str> {
+    only.iter()
+        .filter(|name| !only.iter().any(|folder| folder.ends_with('/') && folder != *name && name.starts_with(folder.as_str())))
+        .map(String::as_str)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_pick_inside_a_picked_folder_comes_out_once() {
+        let only = ["docs/", "docs/a.txt", "docs/sub/", "docs/sub/b.txt", "other.txt", "docsy.txt"].map(String::from);
+        assert_eq!(outermost(&only).collect::<Vec<_>>(), ["docs/", "other.txt", "docsy.txt"]);
+    }
 }

@@ -1,4 +1,4 @@
-import { createEffect, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
 import type { Thumb } from "../../api";
 import { saved, stored } from "../filelist/prefs";
 import { ToolCog } from "../../ui/Controls";
@@ -83,16 +83,33 @@ export function ComicView(live: ComicViewProps) {
   /** The first showing must not forget the page saved last time. */
   let first = true;
 
+  /**
+   * The first page of each spread: the cover alone, then pages in pairs, except that a wide page
+   * stands alone and the pairs after it start one later. Undefined when each page is on its own.
+   */
+  const starts = createMemo(() => {
+    if (comicLong() || !spread()) return undefined;
+    const found: number[] = [];
+    for (let at = 0; at < count; ) {
+      found.push(at);
+      at += at > 0 && at + 1 < count && !wide().has(at) && !wide().has(at + 1) ? 2 : 1;
+    }
+    return found;
+  });
   const shown = () => {
     const at = page();
-    if (comicLong() || !spread() || at === 0 || at + 1 >= count || wide().has(at) || wide().has(at + 1)) return [at];
-    return [at, at + 1];
+    const all = starts();
+    // A page that stopped being a start, when a wide one was found, shows on its own.
+    const next = all?.[all.indexOf(at) + 1];
+    return all?.includes(at) && next === at + 2 ? [at, at + 1] : [at];
   };
-  /** Where a spread starts for any page: the cover alone, then odd pages first. */
-  const startOf = (at: number) => (spread() && !comicLong() && at > 0 ? at - ((at - 1) % 2) : at);
+  /** Where the spread holding `at` starts. */
+  const startOf = (at: number) => starts()?.filter((start) => start <= at).at(-1) ?? at;
 
   function go(target: number, by = Math.sign(target - page())) {
-    const start = startOf(Math.min(Math.max(target, 0), count - 1));
+    let start = startOf(Math.min(Math.max(target, 0), count - 1));
+    // Forward always moves on, even where a wide page found late has shifted the spreads.
+    if (by > 0 && start <= page()) start = starts()?.find((other) => other > page()) ?? start;
     setAtEnd(false);
     if (start === page()) return;
     turned = by;
@@ -110,8 +127,8 @@ export function ComicView(live: ComicViewProps) {
       else setAtEnd(true);
       return;
     }
-    const step = by > 0 ? shown().length : spread() && page() > 1 ? 2 : 1;
-    go(page() + by * step, by);
+    // Back lands on the start of the spread before, whatever its size.
+    go(by > 0 ? page() + shown().length : page() - 1, by);
   };
   /** Left and right on screen, which swap in manga. */
   const side = (right: boolean) => turn(right !== manga() ? 1 : -1);
