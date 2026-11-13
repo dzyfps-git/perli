@@ -145,6 +145,8 @@ export function followFileDrag(
   const park = () => shelveDrop().then(shelve).catch(report);
 
   return onFileDrag((event) => {
+    // Found before the drag ends, which takes away the chips and bars that only show during one.
+    const landed = event.kind === "drop" ? spotAt(event.x, event.y, views()) : undefined;
     setDragging(event.kind === "enter" || event.kind === "over");
     if (event.kind === "enter") return deck.show(event.count, event.name, event.folder);
     if (event.kind === "over") {
@@ -154,7 +156,7 @@ export function followFileDrag(
     aim(undefined);
     deck.hide(event.kind === "drop");
     if (event.kind === "leave") return;
-    const spot = spotAt(event.x, event.y, views());
+    const spot = landed;
     if (spot?.folder === SHELF) park();
     else if (spot && event.right) ask(spot, event.x, event.y).catch(report);
     else if (spot) run(spot);
