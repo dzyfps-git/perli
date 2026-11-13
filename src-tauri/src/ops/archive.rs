@@ -19,7 +19,7 @@ use super::tree::Node;
 use super::{names, Done, Flow, Run, Stopped};
 
 const CHUNK: usize = 256 * 1024;
-const NO_PASSWORDS: &str = "This file is protected by a password, which Perli can't open yet.";
+const NO_PASSWORDS: &str = "This file is protected by a password. Preview the ZIP to unlock it and take it out.";
 const UNSAFE_NAME: &str = "This name in the archive isn't safe to use, so Perli left it out.";
 
 type Writer<'a> = ZipWriter<BufWriter<&'a mut File>>;
@@ -241,16 +241,23 @@ impl Run<'_> {
         }
     }
 
-    pub(super) fn unzip(&mut self, archives: Vec<PathBuf>, own_folder: bool, only: Option<&str>) -> Flow {
+    /// With `only`, just those entries come out, each as if its own folder were the top.
+    /// One inside a folder also picked comes out with that folder, not again on its own.
+    pub(super) fn unzip(&mut self, archives: Vec<PathBuf>, own_folder: bool, only: &[String], password: Option<&str>) -> Flow {
         self.add_total(archives.len() as u64, 0);
         for archive in archives {
-            self.unzip_one(&archive, own_folder, only)?;
+            if only.is_empty() {
+                self.unzip_one(&archive, own_folder, None, password)?;
+            }
+            for name in outermost(only) {
+                self.unzip_one(&archive, own_folder, Some(name), password)?;
+            }
             self.step(1, 0);
         }
         Ok(())
     }
 
-    fn unzip_one(&mut self, archive: &Path, own_folder: bool, only: Option<&str>) -> Flow {
+    fn unzip_one(&mut self, archive: &Path, own_folder: bool, only: Option<&str>, password: Option<&str>) -> Flow {
         let Some(mut zip) = self.attempt(archive, None, |_| open_archive(archive))? else {
             return Ok(());
         };
@@ -297,7 +304,7 @@ impl Run<'_> {
                 self.progress.bytes += stat.size;
                 continue;
             };
-            if encrypted {
+            if encrypted && password.is_none() {
                 self.refuse(&landing.root.join(&relative), NO_PASSWORDS)?;
                 self.progress.bytes += stat.size;
             } else if is_dir {
@@ -305,7 +312,11 @@ impl Run<'_> {
                 self.step(1, 0);
             } else {
                 self.land_file(&mut landing, &relative, stat, |run, file, base| {
-                    let mut entry = zip.by_index(index).map_err(io::Error::other)?;
+                    let mut entry = match password.filter(|_| encrypted) {
+                        Some(password) => zip.by_index_decrypt(index, password.as_bytes()),
+                        None => zip.by_index(index),
+                    }
+                    .map_err(io::Error::other)?;
                     run.pour(&mut entry, file, base)
                 })?;
             }
@@ -411,4 +422,22 @@ fn is_under(zip: &ZipArchive<BufReader<File>>, index: usize, name: &str) -> bool
 fn entry_name(zip: &ZipArchive<BufReader<File>>, index: usize) -> String {
     let entry = zip.by_index_data(index);
     entry.ok().and_then(|entry| entry.name().ok().map(|name| name.replace(['/', '\\'], " "))).unwrap_or_default()
+}
+
+/// The names of `only` that no other picked folder holds. Folder names end in `/`.
+fn outermost(only: &[String]) -> impl Iterator<Item = &str> {
+    only.iter()
+        .filter(|name| !only.iter().any(|folder| folder.ends_with('/') && folder != *name && name.starts_with(folder.as_str())))
+        .map(String::as_str)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_pick_inside_a_picked_folder_comes_out_once() {
+        let only = ["docs/", "docs/a.txt", "docs/sub/", "docs/sub/b.txt", "other.txt", "docsy.txt"].map(String::from);
+        assert_eq!(outermost(&only).collect::<Vec<_>>(), ["docs/", "other.txt", "docsy.txt"]);
+    }
 }

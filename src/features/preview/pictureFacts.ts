@@ -51,3 +51,26 @@ export function headline(facts: [group: string, label: string, value: string][],
   const found = new Map(facts.map(([, label, value]) => [label, value.trim()]));
   return HEADLINE.flatMap((label) => found.get(label) || []).slice(0, most);
 }
+
+/**
+ * The colour round the edge of a picture `width` pixels wide, so a page can sit on a backdrop
+ * that runs on from its own margin. Only the outer band of pixels counts.
+ */
+export function edgeColor(pixels: Uint8ClampedArray, width: number): string {
+  const height = Math.floor(pixels.length / 4 / Math.max(width, 1));
+  if (!width || !height) return "transparent";
+  const band = Math.max(1, Math.round(Math.min(width, height) * 0.02));
+  const step = Math.max(1, Math.floor((width + height) / 512));
+  let [red, green, blue, count] = [0, 0, 0, 0];
+  const add = (x: number, y: number) => {
+    const at = (y * width + x) * 4;
+    red += pixels[at];
+    green += pixels[at + 1];
+    blue += pixels[at + 2];
+    count++;
+  };
+  for (let x = 0; x < width; x += step) for (let y = 0; y < band; y++) add(x, y), add(x, height - 1 - y);
+  for (let y = band; y < height - band; y += step) for (let x = 0; x < band; x++) add(x, y), add(width - 1 - x, y);
+  const part = (sum: number) => Math.round(sum / count);
+  return `rgb(${part(red)} ${part(green)} ${part(blue)})`;
+}

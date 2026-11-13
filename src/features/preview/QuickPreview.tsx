@@ -2,8 +2,12 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import { createEffect, createResource, createSignal, For, lazy, on, onCleanup, onMount, Show } from "solid-js";
 import {
   aiffAudio,
+  archiveTest,
+  archivePassword,
   archiveText,
+  besideText,
   bookChapter,
+  dragEntry,
   fetchCover,
   fetchArchivePicture,
   fetchBigPicture,
@@ -16,6 +20,7 @@ import {
   pictureSize,
   previewRow,
   rowProperties,
+  saveFrame,
   songAudio,
   songInfo,
   startJob,
@@ -37,6 +42,8 @@ import type { BookViewProps } from "./DocView";
 import type { ComicViewProps } from "./ComicView";
 import type { ArchiveViewProps } from "./ArchiveView";
 import type { PlayerProps } from "./Player";
+import type { VideoViewProps } from "./VideoView";
+import { wav, type Track } from "./nowPlaying";
 import "./preview.css";
 
 /** Which row the preview starts on. A reload while it is open moves it on to the new rows. */
@@ -67,6 +74,7 @@ const BookView = lazy(() => import("./DocView").then((module) => ({ default: mod
 const ArchiveView = lazy(() => import("./ArchiveView").then((module) => ({ default: module.ArchiveView })));
 const ComicView = lazy(() => import("./ComicView").then((module) => ({ default: module.ComicView })));
 const PictureView = lazy(() => import("./PictureView").then((module) => ({ default: module.PictureView })));
+const VideoView = lazy(() => import("./VideoView").then((module) => ({ default: module.VideoView })));
 
 /** Files the player plays, for Play next to skip to. */
 const AUDIO = /\.(mid|midi|mp3|m4a|aac|wav|flac|ogg|oga|opus|weba|aiff?|aifc)$/i;
@@ -79,6 +87,11 @@ const MOST_MOVING = 64 * 1024 * 1024;
 const SLIDE_SHOW_MS = 4000;
 /** Sound the window cannot play, which Rust hands over as a WAV. */
 const AIFF = /\.(aiff?|aifc)$/i;
+const SOUND_SETS = /\.sf2$/i;
+const COMICS = /\.cbz$/i;
+/** The queue is the songs among this many rows of the folder. */
+const MOST_QUEUE = 5000;
+const QUEUE_BATCH = 500;
 /** Arrow keys held down skip past rows, so a row has to stay selected this long first. */
 const SETTLE_MS = 120;
 const ICON_DOCK = "\uE90D";
@@ -92,7 +105,6 @@ const BESIDE = 5;
 const LEAST_SIZE = 320;
 const SAVE_SIZE_MS = 300;
 const NEXT_BATCH = 50;
-const NO_TAGS = { title: null, artist: null, album: null };
 const dates = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" });
 
 export function draw(canvas: HTMLCanvasElement, picture: Thumb) {
@@ -273,6 +285,23 @@ export function QuickPreview(props: {
 
   const reader = (at: number, shot: number) => (part?: string) => modelFile(props.at.view, shot, at, part);
 
+  /** The songs of the folder, in list order, and the sound sets there for MIDI files. */
+  async function folderSongs(view: number, shot: number) {
+    const tracks: Track[] = [];
+    const fonts: string[] = [];
+    const count = Math.min(props.at.count(), MOST_QUEUE);
+    for (let at = 0; at < count; at += QUEUE_BATCH) {
+      const rows = await fetchRows(view, shot, at, Math.min(QUEUE_BATCH, count - at));
+      rows.forEach((item, offset) => {
+        if (item.isDir) return;
+        if (AUDIO.test(item.name)) tracks.push({ path: pathOf(item), name: item.name, index: at + offset });
+        else if (SOUND_SETS.test(item.name)) fonts.push(pathOf(item));
+      });
+      if (!rows.length) break;
+    }
+    return { tracks, fonts };
+  }
+
   function player(item: Row, midi: boolean): PlayerProps {
     const { view } = props.at;
     const at = index();
@@ -281,20 +310,35 @@ export function QuickPreview(props: {
       path: pathOf(item),
       name: item.name,
       size: item.size,
-      load: midi || AIFF.test(item.name)
-        ? async () => {
-            const wav = await (midi ? songAudio : aiffAudio)(view, shot, at);
-            return { url: URL.createObjectURL(new Blob([wav], { type: "audio/wav" })), made: true, tags: NO_TAGS };
-          }
+      load: AIFF.test(item.name)
+        ? async () => wav(await aiffAudio(view, shot, at))
         : async () => {
             const [path, tags] = await openAudio(view, shot, at);
             return { url: convertFileSrc(path), made: false, tags };
           },
+      render: midi ? async (playing, font) => wav(await songAudio(view, shot, at, { playing, font })) : undefined,
       info: midi ? () => songInfo(view, shot, at) : undefined,
       cover: midi ? undefined : (edge) => fetchCover(view, shot, at, edge),
+      lyrics: midi || item.isCloud ? undefined : () => besideText(view, shot, at, "lrc"),
+      queue: () => folderSongs(view, shot),
+      onPick: (target) => step(target - index()),
       keys: (handler) => (viewKeys = handler),
       tint: (color) => body.style.setProperty("--player-tint", color ?? "transparent"),
       onNext: () => void nextAudio(),
+    };
+  }
+
+  function video(item: Row): VideoViewProps {
+    const { view } = props.at;
+    const at = index();
+    const shot = snapshot;
+    return {
+      path: pathOf(item),
+      load: async () => convertFileSrc((await openAudio(view, shot, at))[0]),
+      subtitles: async () => (item.isCloud ? null : (await besideText(view, shot, at, "srt")) ?? (await besideText(view, shot, at, "vtt"))),
+      saveFrame: (seconds, png) => saveFrame(view, shot, at, seconds, png),
+      keys: (handler) => (viewKeys = handler),
+      note: setNote,
     };
   }
 
@@ -305,12 +349,15 @@ export function QuickPreview(props: {
     return {
       entries,
       more,
-      picture: (entry, edge) => fetchArchivePicture(view, shot, at, entry, edge),
-      text: (entry) => archiveText(view, shot, at, entry),
-      extract: (only) =>
-        startJob({ kind: "unzip", selection: { view, request: shot, rows: [at] }, ownFolder: false, only }, view).catch(
+      picture: (entry, edge, password) => fetchArchivePicture(view, shot, at, entry, edge, password),
+      text: (entry, password) => archiveText(view, shot, at, entry, password),
+      check: (entry, password) => archivePassword(view, shot, at, entry, password),
+      extract: (only, password) =>
+        startJob({ kind: "unzip", selection: { view, request: shot, rows: [at] }, ownFolder: false, only, password }, view).catch(
           (reason) => void setFailure(String(reason)),
         ),
+      test: (password) => archiveTest(view, shot, at, password),
+      drag: (entry, password) => dragEntry(view, shot, at, entry, password),
       keys: (handler) => (viewKeys = handler),
     };
   }
@@ -325,6 +372,7 @@ export function QuickPreview(props: {
       load: (page, edge) => fetchArchivePicture(view, shot, at, page, edge),
       keys: (handler) => (viewKeys = handler),
       note: setNote,
+      onNextVolume: () => nextOf(COMICS),
     };
   }
 
@@ -489,6 +537,7 @@ export function QuickPreview(props: {
               {(preview.kind === "song" || preview.kind === "audio") && (
                 <Player {...player(row()!, preview.kind === "song")} />
               )}
+              {preview.kind === "video" && <VideoView {...video(row()!)} />}
             </>
           )}
         </Show>

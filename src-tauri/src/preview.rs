@@ -53,6 +53,8 @@ pub enum Preview {
     Song,
     /// A sound file the window plays itself, streamed from disk.
     Audio,
+    /// A film the window plays itself, streamed from disk.
+    Video,
     /// Anything else shows Windows' own picture of it.
     Picture,
 }
@@ -111,6 +113,7 @@ fn inside_of(path: &Path) -> Option<Preview> {
         "glb" | "gltf" | "obj" | "stl" | "usdz" | "usd" | "usda" | "usdc" | "fbx" | "ply" | "3mf" => Some(Preview::Model),
         "mid" | "midi" => Some(Preview::Song),
         "mp3" | "m4a" | "aac" | "wav" | "flac" | "ogg" | "oga" | "opus" | "weba" | "aif" | "aiff" | "aifc" => Some(Preview::Audio),
+        "mp4" | "m4v" | "webm" | "mov" | "mkv" | "ogv" => Some(Preview::Video),
         _ => None,
     }
 }
@@ -137,6 +140,48 @@ pub fn model_file(path: &Path, part: Option<&str>) -> Result<Vec<u8>, String> {
         return Err(format!("Files over {} MB don't show", MODEL_BYTES / 1024 / 1024));
     }
     std::fs::read(&path).map_err(|error| error.to_string())
+}
+
+/// Words that go with a file and sit beside it under its name: a song's lyrics, a film's subtitles.
+const BESIDE: [&str; 3] = ["lrc", "srt", "vtt"];
+const BESIDE_BYTES: u64 = 2 * 1024 * 1024;
+
+/// The text of the file beside `path` with the same name and `extension`, if there is one.
+pub fn beside_text(path: &Path, extension: &str) -> Option<String> {
+    if !BESIDE.contains(&extension) {
+        return None;
+    }
+    let beside = path.with_extension(extension);
+    if thumbs::is_online_only(&beside) || beside.metadata().ok()?.len() > BESIDE_BYTES {
+        return None;
+    }
+    let bytes = std::fs::read(beside).ok()?;
+    Some(String::from_utf8_lossy(strip_bom(&bytes)).into_owned())
+}
+
+const FRAME_BYTES: usize = 64 * 1024 * 1024;
+
+/// Saves a frame of a film as a PNG beside it, named after the film and the moment, and gives
+/// the new file's name. A file already there is never written over.
+pub fn save_frame(film: &Path, seconds: u64, png: &[u8]) -> Result<String, String> {
+    if !png.starts_with(b"\x89PNG\r\n\x1a\n") || png.len() > FRAME_BYTES {
+        return Err("Only a PNG picture can be saved".into());
+    }
+    let folder = film.parent().ok_or("The film has no folder")?;
+    let stem = film.file_stem().unwrap_or_default().to_string_lossy();
+    let moment = format!("{}.{:02}", seconds / 60, seconds % 60);
+    for copy in 1..1000 {
+        let name = if copy == 1 { format!("{stem} at {moment}.png") } else { format!("{stem} at {moment} ({copy}).png") };
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(folder.join(&name)) {
+            Ok(mut file) => {
+                std::io::Write::write_all(&mut file, png).map_err(|error| error.to_string())?;
+                return Ok(name);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    Err("Too many frames of this moment are saved already".into())
 }
 
 fn strip_bom(bytes: &[u8]) -> &[u8] {

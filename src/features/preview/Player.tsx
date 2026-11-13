@@ -1,9 +1,43 @@
-import { createEffect, createSignal, For, onCleanup, Show } from "solid-js";
-import type { SongInfo, Tags, Thumb } from "../../api";
+import { createEffect, createMemo, createSignal, For, onCleanup, Show } from "solid-js";
+import type { Playing, SongInfo, Thumb } from "../../api";
 import { saved, stored } from "../filelist/prefs";
 import { ToolCog } from "../../ui/Controls";
 import { instrumentName } from "./instruments";
-import { playNext, setPlayNext, VIEWER_SETTINGS } from "./viewerPrefs";
+import { channelColor, MidiStage } from "./MidiStage";
+import {
+  audio,
+  now,
+  playing,
+  playOn,
+  queue,
+  setMini,
+  setNow,
+  setQueue,
+  setSleep,
+  setVolume,
+  sleep,
+  SLEEPS,
+  start,
+  stop,
+  titleOf,
+  volume,
+  type Source,
+  type Track,
+} from "./nowPlaying";
+import { lineAt, lyricsOf, type Line } from "./timedText";
+import {
+  falling,
+  lyricsShown,
+  playNext,
+  setFalling,
+  setLyricsShown,
+  setPlayNext,
+  setSoundSet,
+  soundSet,
+  VIEWER_SETTINGS,
+} from "./viewerPrefs";
+
+export type { Source } from "./nowPlaying";
 
 const ICON_PLAY = "";
 const ICON_PAUSE = "";
@@ -11,6 +45,12 @@ const ICON_SONG = "";
 const ICON_LOOP = "";
 const ICON_NEXT = "";
 const ICON_CLEAR = "";
+const ICON_QUEUE = "";
+const ICON_LYRICS = "";
+const ICON_SLEEP = "";
+const ICON_FALL = "";
+const ICON_ACROSS = "";
+const ICON_SOUND = "";
 const SPEEDS = [1, 1.25, 1.5, 2, 0.5, 0.75];
 const STEP_SECONDS = 5;
 const BIG_STEP_SECONDS = 30;
@@ -26,18 +66,20 @@ const WAVEFORM_BARS = 400;
 /** A drag shorter than this is a click that seeks. */
 const DRAG_PX = 4;
 const SHORTEST_SECTION_SECONDS = 0.5;
-const COVER_EDGE = 320;
+const COVER_EDGE = 480;
 const SHOWN_INSTRUMENTS = 8;
+/** A MIDI file is played again this long after the last change to how it plays. */
+const RENDER_MS = 350;
+const TEMPO_STEP = 0.1;
+const SLOWEST = 0.5;
+const FASTEST = 2;
+const MOST_TRANSPOSE = 12;
+const DRUM_CHANNEL = 9;
+const SLEEP_NAMES: Record<string, string> = { 0: "Sleep timer", 15: "Stop in 15 minutes", 30: "Stop in 30 minutes", 60: "Stop in an hour", end: "Stop when this song ends" };
+const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
 
-const [volume, setVolume] = stored("song-volume", (saved("song-volume") as number | null) ?? 1);
 const [speed, setSpeed] = createSignal(1);
-
-/** Where the sound comes from. `made` marks a URL made here, which must be let go of. */
-export interface Source {
-  url: string;
-  made: boolean;
-  tags: Tags;
-}
+const [queueOpen, setQueueOpen] = stored("song-queue", saved("song-queue") === true);
 
 export interface PlayerProps {
   /** The file's full path, which long files remember their place by. */
@@ -47,7 +89,15 @@ export interface PlayerProps {
   load: () => Promise<Source>;
   /** A MIDI file's notes, drawn as a piano roll. */
   info?: () => Promise<SongInfo>;
+  /** A MIDI file played with these settings, through this sound set or the bundled one. */
+  render?: (playing: Playing, font?: string) => Promise<Source>;
   cover?: (edge: number) => Promise<Thumb | null>;
+  /** The `.lrc` file beside the song, if there is one. */
+  lyrics?: () => Promise<string | null>;
+  /** The files of the folder that play, and the sound sets (`.sf2`) there. */
+  queue?: () => Promise<{ tracks: Track[]; fonts: string[] }>;
+  /** Steps the preview to another row of the list. */
+  onPick?: (index: number) => void;
   /** Hands the player's keys to the preview, which passes key presses on first. */
   keys: (handler: ((event: KeyboardEvent) => boolean) | undefined) => void;
   /** A soft color behind the player, taken from the cover. */
@@ -56,18 +106,18 @@ export interface PlayerProps {
   onNext: () => void;
 }
 
-const clock = (seconds: number) => {
+export const clock = (seconds: number) => {
   const whole = Math.max(0, Math.floor(seconds));
   const hours = Math.floor(whole / 3600);
   const rest = `${Math.floor((whole % 3600) / 60)}:${String(whole % 60).padStart(2, "0")}`;
   return hours ? `${hours}:${rest.padStart(5, "0")}` : rest;
 };
 
-function resumes(): Record<string, number> {
+export function resumes(): Record<string, number> {
   return (saved("song-resume") as Record<string, number> | null) ?? {};
 }
 
-function remember(path: string, seconds: number | undefined) {
+export function remember(path: string, seconds: number | undefined) {
   const all = resumes();
   delete all[path];
   if (seconds !== undefined) all[path] = seconds;
@@ -94,8 +144,8 @@ async function waveform(url: string): Promise<Float32Array> {
   return bars.map((bar) => bar / top);
 }
 
-/** The average color of a picture, for the tint behind the player. */
-function averageColor(picture: Thumb) {
+/** The average color of a picture, for the tint behind the player and the glow round the cover. */
+function averageColor(picture: Thumb, alpha: number) {
   let [r, g, b, count] = [0, 0, 0, 0];
   const pixels = picture.pixels;
   for (let at = 0; at < pixels.length; at += 16) {
@@ -105,20 +155,61 @@ function averageColor(picture: Thumb) {
     b += pixels[at + 2];
     count++;
   }
-  return count ? `rgb(${Math.round(r / count)} ${Math.round(g / count)} ${Math.round(b / count)} / 30%)` : undefined;
+  return count ? `rgb(${Math.round(r / count)} ${Math.round(g / count)} ${Math.round(b / count)} / ${alpha}%)` : undefined;
+}
+
+/**
+ * Click on the lane seeks there, and a drag across it loops that part. Shared by the player
+ * and the film viewer.
+ */
+export function laneDrag(
+  lane: HTMLElement,
+  event: PointerEvent,
+  secondsAt: (event: PointerEvent) => number,
+  section: () => [number, number] | undefined,
+  setSection: (part: [number, number] | undefined) => void,
+  seek: (seconds: number) => void,
+) {
+  const startX = event.clientX;
+  const begin = secondsAt(event);
+  let dragging = false;
+  try {
+    lane.setPointerCapture(event.pointerId);
+  } catch {
+    // A pointer that isn't down any more can't be held.
+  }
+  const move = (next: PointerEvent) => {
+    dragging ||= Math.abs(next.clientX - startX) > DRAG_PX;
+    if (dragging) {
+      const end = secondsAt(next);
+      setSection([Math.min(begin, end), Math.max(begin, end)]);
+    }
+  };
+  const up = (next: PointerEvent) => {
+    lane.removeEventListener("pointermove", move);
+    lane.removeEventListener("pointerup", up);
+    const part = section();
+    if (!dragging) seek(secondsAt(next));
+    else if (part && part[1] - part[0] >= SHORTEST_SECTION_SECONDS) seek(part[0]);
+    else setSection(undefined);
+  };
+  lane.addEventListener("pointermove", move);
+  lane.addEventListener("pointerup", up);
 }
 
 /**
  * A player for MIDI and sound files. The lane under the title is the waveform, or the piano roll
- * for MIDI: click it to seek, or drag across it to loop that part. It plays at once and stops
- * when the preview moves on.
+ * for MIDI: click it to seek, or drag across it to loop that part. The sound itself belongs to the
+ * app, so a song goes on playing once the preview closes, as the disc on the sidebar.
  */
 export function Player(live: PlayerProps) {
   // The preview's props follow the row it shows. This player stays with the file it opened on.
   const props = { ...live };
-  const [source, setSource] = createSignal<Source>();
+  const midi = !!props.info;
+  /** The song is already playing, from the disc or from this same file a moment ago. */
+  const kept = now()?.path === props.path ? now() : undefined;
+  const [source, setSource] = createSignal<Source | undefined>(kept?.source);
   const [problem, setProblem] = createSignal<string>();
-  const [playing, setPlaying] = createSignal(false);
   const [time, setTime] = createSignal(0);
   const [length, setLength] = createSignal(0);
   const [loop, setLoop] = createSignal(false);
@@ -127,34 +218,88 @@ export function Player(live: PlayerProps) {
   const [song, setSong] = createSignal<SongInfo>();
   const [resumeAt, setResumeAt] = createSignal<number>();
   const [hover, setHover] = createSignal<number>();
-  let audio!: HTMLAudioElement;
+  const [lyrics, setLyrics] = createSignal<Line[]>([]);
+  const [tracks, setTracks] = createSignal<Track[]>([]);
+  const [fonts, setFonts] = createSignal<string[]>([]);
+  const [settings, setSettings] = createSignal<Playing>(kept?.playing ?? { muted: 0, transpose: 0, speed: 1 });
+  const [rendering, setRendering] = createSignal(false);
+  let root!: HTMLDivElement;
   let lane!: HTMLDivElement;
   let base!: HTMLCanvasElement;
   let played!: HTMLCanvasElement;
+  let lyricBox: HTMLOListElement | undefined;
   let art: HTMLCanvasElement | undefined;
   let gone = false;
   let frame = 0;
   let lastSave = 0;
   let resumeTimer: ReturnType<typeof setTimeout> | undefined;
+  let renderTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Counts renders asked for, so only the newest one's sound is kept. */
+  let renderAsk = 0;
+  /** Where a song played again at another tempo picks up, in its new seconds. */
+  let pendingSeek: number | undefined;
+  /** The cover, until the song it belongs to has started. */
   let coverUrl: string | undefined;
 
-  props
-    .load()
-    .then((loaded) => {
-      if (gone) return loaded.made && URL.revokeObjectURL(loaded.url);
+  const mine = () => now()?.path === props.path;
+
+  /** Hands the cover to the song playing, which shows it on the disc and lets go of it. */
+  function giveCover() {
+    const song = now();
+    if (!coverUrl || !song || song.path !== props.path) return;
+    if (song.cover) URL.revokeObjectURL(coverUrl);
+    else setNow({ ...song, cover: coverUrl });
+    coverUrl = undefined;
+    mediaSession();
+  }
+
+  async function begin(font = soundSet() ?? undefined) {
+    try {
+      const loaded = midi && props.render ? await props.render(settings(), font) : await props.load();
+      if (gone) return void (loaded.made && URL.revokeObjectURL(loaded.url));
+      start({ path: props.path, name: props.name, title: titleOf(props.name, loaded.tags), source: loaded, playing: midi ? settings() : undefined });
       setSource(loaded);
-      if (!props.info && props.size <= WAVEFORM_BYTES) {
-        waveform(loaded.url)
-          .then((found) => gone || setBars(found))
-          .catch(() => {});
+      giveCover();
+    } catch (reason) {
+      if (gone) return;
+      // A sound set that has gone falls back to the bundled one.
+      if (font) {
+        setSoundSet(null);
+        return begin(undefined);
       }
-    })
-    .catch((reason) => gone || setProblem(String(reason)));
+      setProblem(String(reason));
+    }
+  }
+
+  if (kept) setMini(false);
+  else void begin();
+
+  createEffect(() => {
+    const loaded = source();
+    if (!loaded || midi || props.size > WAVEFORM_BYTES) return;
+    waveform(loaded.url)
+      .then((found) => gone || setBars(found))
+      .catch(() => {});
+  });
   props
     .info?.()
     .then((found) => gone || setSong(found))
     .catch(() => {});
-  props.tint(props.info ? "color-mix(in srgb, var(--accent) 22%, transparent)" : undefined);
+  props
+    .lyrics?.()
+    .then((text) => gone || !text || setLyrics(lyricsOf(text)))
+    .catch(() => {});
+  props
+    .queue?.()
+    .then((found) => {
+      if (gone) return;
+      setTracks(found.tracks);
+      setFonts(found.fonts);
+    })
+    .catch(() => {});
+  // The queue goes with the song, so the disc can play on through the folder.
+  createEffect(() => source() && mine() && tracks().length && setQueue(tracks()));
+  props.tint(midi ? "color-mix(in srgb, var(--accent) 22%, transparent)" : undefined);
   props
     .cover?.(Math.ceil(COVER_EDGE * devicePixelRatio))
     .then((picture) => {
@@ -163,11 +308,13 @@ export function Player(live: PlayerProps) {
       art.height = picture.height;
       art.getContext("2d")!.putImageData(new ImageData(picture.pixels, picture.width, picture.height), 0, 0);
       art.dataset.shown = "";
-      props.tint(averageColor(picture));
+      props.tint(averageColor(picture, 30));
+      root.style.setProperty("--player-glow", averageColor(picture, 70) ?? "var(--accent)");
+      if (now()?.path === props.path && now()?.cover) return;
       art.toBlob((blob) => {
         if (!blob || gone) return;
         coverUrl = URL.createObjectURL(blob);
-        mediaSession();
+        giveCover();
       });
     })
     .catch(() => {});
@@ -185,6 +332,14 @@ export function Player(live: PlayerProps) {
     const more = all.length - SHOWN_INSTRUMENTS;
     return more > 1 ? [...all.slice(0, SHOWN_INSTRUMENTS), `${more} more`] : all;
   };
+  /** Song seconds for audio seconds: a MIDI file played faster has fewer of them. */
+  const tempo = () => (midi ? settings().speed : 1);
+  const line = createMemo(() => lineAt(lyrics(), time()));
+  const upNext = () => {
+    const list = queue();
+    const at = list.findIndex((track) => track.path === props.path);
+    return playNext() && at >= 0 ? list[at + 1] : undefined;
+  };
 
   function seek(seconds: number) {
     if (!length()) return;
@@ -197,48 +352,75 @@ export function Player(live: PlayerProps) {
 
   /** Moves the playhead and the played part, keeps a looped section looping, and saves the place. */
   function tick() {
-    const now = audio.currentTime;
+    if (!mine()) return;
+    const at = audio.currentTime;
     const part = section();
-    if (part && playing() && now >= part[1]) audio.currentTime = part[0];
+    if (part && !audio.paused && at >= part[1]) audio.currentTime = part[0];
     setTime(audio.currentTime);
-    lane?.style.setProperty("--at", String(length() ? audio.currentTime / length() : 0));
+    const share = length() ? audio.currentTime / length() : 0;
+    lane?.style.setProperty("--at", String(share));
+    // The cover's glow breathes with how loud the song is where it plays.
+    const found = bars();
+    if (found) root.style.setProperty("--level", String(found[Math.min(found.length - 1, Math.floor(share * found.length))] ?? 0));
     // The start of a file never takes the place of one saved further in.
-    if (length() > RESUME_FROM_SECONDS && now > RESUME_MARGIN_SECONDS && Date.now() - lastSave > RESUME_SAVE_MS) {
+    if (length() > RESUME_FROM_SECONDS && at > RESUME_MARGIN_SECONDS && Date.now() - lastSave > RESUME_SAVE_MS) {
       lastSave = Date.now();
-      remember(props.path, now);
+      remember(props.path, at);
     }
   }
 
   function run() {
+    cancelAnimationFrame(frame);
     tick();
-    if (!audio.paused) frame = requestAnimationFrame(run);
+    if (!audio.paused && !gone) frame = requestAnimationFrame(run);
   }
 
   function onMetadata() {
+    if (!mine()) return;
     setLength(audio.duration);
-    audio.playbackRate = speed();
-    const at = resumes()[props.path];
-    if (audio.duration > RESUME_FROM_SECONDS && at > RESUME_MARGIN_SECONDS && at < audio.duration - RESUME_MARGIN_SECONDS) {
-      setResumeAt(at);
-      resumeTimer = setTimeout(() => setResumeAt(undefined), RESUME_SHOWN_MS);
+    audio.playbackRate = midi ? 1 : speed();
+    if (pendingSeek !== undefined) {
+      audio.currentTime = Math.min(pendingSeek, audio.duration);
+      pendingSeek = undefined;
+    } else if (!kept) {
+      const at = resumes()[props.path];
+      if (audio.duration > RESUME_FROM_SECONDS && at > RESUME_MARGIN_SECONDS && at < audio.duration - RESUME_MARGIN_SECONDS) {
+        setResumeAt(at);
+        resumeTimer = setTimeout(() => setResumeAt(undefined), RESUME_SHOWN_MS);
+      }
     }
     mediaSession();
     drawLane();
   }
 
   function onEnded() {
+    if (!mine()) return;
     if (length() > RESUME_FROM_SECONDS) remember(props.path, undefined);
+    if (sleep() === "end") return setSleep(0);
     if (playNext() && !loop()) props.onNext();
   }
 
+  const listen = (type: keyof HTMLMediaElementEventMap, handler: () => void) => {
+    audio.addEventListener(type, handler);
+    onCleanup(() => audio.removeEventListener(type, handler));
+  };
+  listen("play", run);
+  listen("pause", tick);
+  listen("loadedmetadata", onMetadata);
+  listen("seeked", tick);
+  listen("ended", onEnded);
+  if (kept && audio.readyState >= 1) queueMicrotask(onMetadata);
+  if (kept && !audio.paused) queueMicrotask(run);
+
   function mediaSession() {
-    if (!("mediaSession" in navigator) || gone) return;
+    if (!("mediaSession" in navigator) || gone || !mine()) return;
     const tags = source()?.tags;
+    const cover = now()?.cover;
     navigator.mediaSession.metadata = new MediaMetadata({
       title: title(),
       artist: tags?.artist ?? "",
       album: tags?.album ?? "",
-      artwork: coverUrl ? [{ src: coverUrl }] : [],
+      artwork: cover ? [{ src: cover }] : [],
     });
     const actions: [MediaSessionAction, MediaSessionActionHandler][] = [
       ["play", () => void audio.play()],
@@ -251,6 +433,58 @@ export function Player(live: PlayerProps) {
     for (const [action, handler] of actions) navigator.mediaSession.setActionHandler(action, handler);
   }
 
+  /** Plays the MIDI file again the new way, from the same point of the song. */
+  function replay(next: Playing, font = soundSet() ?? undefined) {
+    setSettings(next);
+    setSection(undefined);
+    clearTimeout(renderTimer);
+    const ask = ++renderAsk;
+    renderTimer = setTimeout(async () => {
+      setRendering(true);
+      try {
+        const loaded = await props.render!(next, font);
+        // A render asked for later wins, even if this one, started first, ends last.
+        if (gone || !mine() || ask !== renderAsk) return void (loaded.made && URL.revokeObjectURL(loaded.url));
+        const songTime = audio.currentTime * (now()?.playing?.speed ?? 1);
+        pendingSeek = songTime / next.speed;
+        start({ ...now()!, source: loaded, playing: next }, !audio.paused);
+        setSource(loaded);
+      } catch (reason) {
+        if (gone || ask !== renderAsk) return;
+        if (font) setSoundSet(null);
+        setProblem(String(reason));
+      } finally {
+        if (!gone && ask === renderAsk) setRendering(false);
+      }
+    }, RENDER_MS);
+  }
+
+  const changeTempo = (by: number) =>
+    replay({ ...settings(), speed: Math.round(Math.min(Math.max(settings().speed + by, SLOWEST), FASTEST) * 10) / 10 });
+  const changeKey = (by: number) =>
+    replay({ ...settings(), transpose: Math.min(Math.max(settings().transpose + by, -MOST_TRANSPOSE), MOST_TRANSPOSE) });
+  const silent = (channel: number) => (settings().muted & (1 << channel)) !== 0;
+
+  /** A click mutes the channel or lets it play again. Shift plays it alone, or everything again. */
+  function onChannel(event: MouseEvent, channel: number) {
+    const all = (song()?.channels ?? []).reduce((bits, [one]) => bits | (1 << one), 0);
+    const alone = all & ~(1 << channel);
+    const muted = event.shiftKey ? (settings().muted === alone ? 0 : alone) : settings().muted ^ (1 << channel);
+    replay({ ...settings(), muted });
+  }
+
+  /** The bundled sound set, then each `.sf2` of this folder, then the one chosen before. */
+  const soundSets = () => [null, ...new Set([...fonts(), ...(soundSet() ? [soundSet()!] : [])])];
+  const soundName = (font: string | null) => (font ? font.split(/[\\/]/).pop()!.replace(/\.sf2$/i, "") : "Built-in sounds");
+  function nextSoundSet() {
+    const all = soundSets();
+    const next = all[(all.indexOf(soundSet()) + 1) % all.length];
+    setSoundSet(next);
+    replay(settings(), next ?? undefined);
+  }
+
+  const nextSleep = () => setSleep(SLEEPS[(SLEEPS.indexOf(sleep()) + 1) % SLEEPS.length]);
+
   props.keys((event) => {
     if (event.ctrlKey || event.altKey || event.target instanceof HTMLInputElement && event.target.type !== "range") return false;
     const step = event.shiftKey ? BIG_STEP_SECONDS : STEP_SECONDS;
@@ -259,7 +493,14 @@ export function Player(live: PlayerProps) {
     else if (key === "ArrowRight") seek(audio.currentTime + step);
     else if (key === "p" || key === "P" || key === "k") toggle();
     else if (key === "l" || key === "L") setLoop(!loop());
+    else if (key === "q" || key === "Q") setQueueOpen(!queueOpen());
+    else if ((key === "y" || key === "Y") && lyrics().length) setLyricsShown(!lyricsShown());
     else if (/^[0-9]$/.test(key)) seek((length() * Number(key)) / 10);
+    else if (midi && (key === "v" || key === "V")) setFalling(!falling());
+    else if (midi && key === "[") changeTempo(-TEMPO_STEP);
+    else if (midi && key === "]") changeTempo(TEMPO_STEP);
+    else if (midi && key === "-") changeKey(-1);
+    else if (midi && (key === "=" || key === "+")) changeKey(1);
     else return false;
     return true;
   });
@@ -268,23 +509,35 @@ export function Player(live: PlayerProps) {
     gone = true;
     cancelAnimationFrame(frame);
     clearTimeout(resumeTimer);
-    if (length() > RESUME_FROM_SECONDS && audio.currentTime > RESUME_MARGIN_SECONDS) remember(props.path, audio.currentTime);
-    audio.pause();
+    clearTimeout(renderTimer);
     props.keys(undefined);
     props.tint(undefined);
-    const made = source();
-    if (made?.made) URL.revokeObjectURL(made.url);
     if (coverUrl) URL.revokeObjectURL(coverUrl);
-    if ("mediaSession" in navigator) navigator.mediaSession.metadata = null;
+    if (!mine()) return;
+    if (length() > RESUME_FROM_SECONDS && audio.currentTime > RESUME_MARGIN_SECONDS) remember(props.path, audio.currentTime);
+    // A song still playing goes on as the disc. One paused is put away.
+    if (audio.paused) stop();
+    else playOn();
   });
 
   createEffect(() => (audio.volume = volume()));
-  createEffect(() => (audio.loop = loop()));
-  createEffect(() => (audio.playbackRate = speed()));
+  createEffect(() => mine() && (audio.loop = loop()));
+  createEffect(() => mine() && (audio.playbackRate = midi ? 1 : speed()));
   createEffect(() => {
     bars();
     song();
+    settings();
     drawLane();
+  });
+  // The line being sung stays in the middle of the lyrics.
+  createEffect(() => {
+    const at = line();
+    const item = lyricBox?.children[at] as HTMLElement | undefined;
+    if (!lyricBox || !item) return;
+    lyricBox.scrollTo({
+      top: item.offsetTop - lyricBox.clientHeight / 2 + item.offsetHeight / 2,
+      behavior: reducedMotion.matches ? "auto" : "smooth",
+    });
   });
 
   /** Draws the lane twice: plainly, and in the accent color for the part already played. */
@@ -311,10 +564,12 @@ export function Player(live: PlayerProps) {
       const [low, high] = notes.reduce(([lo, hi], note) => [Math.min(lo, note[2]), Math.max(hi, note[2])], [127, 0]);
       const rows = high - low + 1;
       const tall = Math.max(scale, Math.min(height / rows, 4 * scale));
-      for (const [start, long, key] of notes) {
-        const x = (start / length()) * width;
+      const seconds = length() * tempo();
+      for (const [start, long, key, channel] of notes) {
+        if (silent(channel)) continue;
+        const x = (start / seconds) * width;
         const y = height - ((key - low + 1) / rows) * (height - tall) - tall / 2;
-        pen.fillRect(x, y, Math.max(scale, (long / length()) * width), tall);
+        pen.fillRect(x, y, Math.max(scale, (long / seconds) * width), tall);
       }
       return;
     }
@@ -337,70 +592,84 @@ export function Player(live: PlayerProps) {
 
   function onLaneDown(event: PointerEvent) {
     if (event.button !== 0 || !length()) return;
-    const startX = event.clientX;
-    const start = secondsAt(event);
-    let dragging = false;
-    try {
-      lane.setPointerCapture(event.pointerId);
-    } catch {
-      // A pointer that isn't down any more can't be held.
-    }
-    const move = (next: PointerEvent) => {
-      dragging ||= Math.abs(next.clientX - startX) > DRAG_PX;
-      if (dragging) {
-        const end = secondsAt(next);
-        setSection([Math.min(start, end), Math.max(start, end)]);
-      }
-    };
-    const up = (next: PointerEvent) => {
-      lane.removeEventListener("pointermove", move);
-      lane.removeEventListener("pointerup", up);
-      const part = section();
-      if (!dragging) seek(secondsAt(next));
-      else if (part && part[1] - part[0] >= SHORTEST_SECTION_SECONDS) seek(part[0]);
-      else setSection(undefined);
-    };
-    lane.addEventListener("pointermove", move);
-    lane.addEventListener("pointerup", up);
+    laneDrag(lane, event, secondsAt, section, setSection, seek);
   }
 
   const percent = (seconds: number) => `${length() ? (seconds / length()) * 100 : 0}%`;
+  const channelName = (channel: number, instrument: number) => (channel === DRUM_CHANNEL ? "Drums" : instrumentName(instrument));
 
   return (
-    <div class="player">
-      <div class="player-art">
-        <span class="song-icon" aria-hidden="true">
-          {ICON_SONG}
-        </span>
-        <Show when={props.cover}>
-          <canvas ref={art} class="player-cover" aria-hidden="true" />
-        </Show>
-      </div>
+    <div
+      ref={root}
+      class="player"
+      data-midi={midi || undefined}
+      data-playing={playing() || undefined}
+      data-lyrics={(lyricsShown() && lyrics().length > 0) || undefined}
+    >
+      <Show
+        when={midi && song()?.notes.length}
+        fallback={
+          <div class="player-art">
+            <span class="song-icon" aria-hidden="true">
+              {ICON_SONG}
+            </span>
+            <Show when={props.cover}>
+              <canvas ref={art} class="player-cover" aria-hidden="true" />
+            </Show>
+          </div>
+        }
+      >
+        <MidiStage
+          notes={song()!.notes}
+          beats={song()!.beats}
+          perBar={song()!.perBar}
+          muted={settings().muted}
+          falling={falling()}
+          time={() => time() * tempo()}
+          playing={playing()}
+        />
+      </Show>
       <div class="player-title">{title()}</div>
       <Show when={subtitle()}>
         <div class="player-sub">{subtitle()}</div>
       </Show>
-      <Show when={instruments().length}>
-        <div class="player-instruments" aria-label="Instruments">
-          <For each={instruments()}>{(name) => <span>{name}</span>}</For>
+      <Show
+        when={midi && song()?.channels.length}
+        fallback={
+          <Show when={instruments().length}>
+            <div class="player-instruments" aria-label="Instruments">
+              <For each={instruments()}>{(name) => <span>{name}</span>}</For>
+            </div>
+          </Show>
+        }
+      >
+        <div class="player-instruments midi-channels" role="group" aria-label="Instruments">
+          <For each={song()!.channels}>
+            {([channel, instrument]) => (
+              <button
+                class="midi-channel"
+                style={{ "--channel": channelColor(channel) }}
+                aria-pressed={!silent(channel)}
+                aria-label={`${silent(channel) ? "Play" : "Mute"} ${channelName(channel, instrument)}. Shift plays it alone`}
+                onClick={(event) => onChannel(event, channel)}
+              >
+                {channelName(channel, instrument)}
+              </button>
+            )}
+          </For>
         </div>
       </Show>
-      <audio
-        ref={audio}
-        src={source()?.url}
-        autoplay
-        onPlay={() => {
-          setPlaying(true);
-          run();
-        }}
-        onPause={() => {
-          setPlaying(false);
-          tick();
-        }}
-        onLoadedMetadata={onMetadata}
-        onSeeked={tick}
-        onEnded={onEnded}
-      />
+      <Show when={lyricsShown() && lyrics().length}>
+        <ol ref={lyricBox} class="player-lyrics" aria-label="Lyrics">
+          <For each={lyrics()}>
+            {(words, at) => (
+              <li aria-current={at() === line() ? "true" : undefined} onClick={() => seek(words.at)}>
+                {words.text || "♪"}
+              </li>
+            )}
+          </For>
+        </ol>
+      </Show>
       <Show
         when={source()}
         fallback={
@@ -419,6 +688,7 @@ export function Player(live: PlayerProps) {
             onCleanup(() => watcher.disconnect());
           }}
           class="player-lane"
+          data-busy={rendering() || undefined}
           role="slider"
           aria-label="Position"
           aria-valuemin="0"
@@ -466,13 +736,48 @@ export function Player(live: PlayerProps) {
               {ICON_CLEAR}
             </button>
           </Show>
-          <button
-            class="strip-icon song-speed"
-            aria-label="Speed"
-            onClick={() => setSpeed(SPEEDS[(SPEEDS.indexOf(speed()) + 1) % SPEEDS.length])}
+          <Show
+            when={midi}
+            fallback={
+              <button
+                class="strip-icon song-speed"
+                aria-label="Speed"
+                onClick={() => setSpeed(SPEEDS[(SPEEDS.indexOf(speed()) + 1) % SPEEDS.length])}
+              >
+                {speed()}×
+              </button>
+            }
           >
-            {speed()}×
-          </button>
+            <span class="midi-step" role="group" aria-label="Tempo">
+              <button class="strip-icon" aria-label="Slower" aria-keyshortcuts="[" disabled={settings().speed <= SLOWEST} onClick={() => changeTempo(-TEMPO_STEP)}>
+                −
+              </button>
+              <span class="midi-value">{Math.round(settings().speed * 100)}%</span>
+              <button class="strip-icon" aria-label="Faster" aria-keyshortcuts="]" disabled={settings().speed >= FASTEST} onClick={() => changeTempo(TEMPO_STEP)}>
+                +
+              </button>
+            </span>
+            <span class="midi-step" role="group" aria-label="Key">
+              <button class="strip-icon" aria-label="Lower key" aria-keyshortcuts="-" disabled={settings().transpose <= -MOST_TRANSPOSE} onClick={() => changeKey(-1)}>
+                ♭
+              </button>
+              <span class="midi-value">{settings().transpose > 0 ? `+${settings().transpose}` : settings().transpose}</span>
+              <button class="strip-icon" aria-label="Higher key" aria-keyshortcuts="=" disabled={settings().transpose >= MOST_TRANSPOSE} onClick={() => changeKey(1)}>
+                ♯
+              </button>
+            </span>
+            <button
+              class="strip-icon"
+              aria-label={falling() ? "Notes run past the keyboard" : "Notes fall onto the keyboard"}
+              aria-keyshortcuts="V"
+              onClick={() => setFalling(!falling())}
+            >
+              {falling() ? ICON_ACROSS : ICON_FALL}
+            </button>
+            <button class="strip-icon" aria-label={`Sound set: ${soundName(soundSet())}`} disabled={soundSets().length < 2} onClick={nextSoundSet}>
+              {ICON_SOUND}
+            </button>
+          </Show>
           <button
             class="strip-icon"
             aria-label="Loop"
@@ -484,6 +789,22 @@ export function Player(live: PlayerProps) {
           </button>
           <button class="strip-icon" aria-label="Play next" aria-pressed={playNext()} onClick={() => setPlayNext(!playNext())}>
             {ICON_NEXT}
+          </button>
+          <Show when={lyrics().length}>
+            <button class="strip-icon" aria-label="Lyrics" aria-keyshortcuts="Y" aria-pressed={lyricsShown()} onClick={() => setLyricsShown(!lyricsShown())}>
+              {ICON_LYRICS}
+            </button>
+          </Show>
+          <Show when={tracks().length > 1}>
+            <button class="strip-icon" aria-label="Songs in this folder" aria-keyshortcuts="Q" aria-pressed={queueOpen()} onClick={() => setQueueOpen(!queueOpen())}>
+              {ICON_QUEUE}
+            </button>
+          </Show>
+          <button class="strip-icon song-sleep" aria-label={SLEEP_NAMES[String(sleep())]} aria-pressed={sleep() !== 0} onClick={nextSleep}>
+            {ICON_SLEEP}
+            <Show when={sleep()}>
+              <span class="song-sleep-badge">{sleep() === "end" ? "♪" : sleep()}</span>
+            </Show>
           </button>
           <input
             class="song-volume"
@@ -498,6 +819,22 @@ export function Player(live: PlayerProps) {
           />
           <ToolCog label="Music settings" items={VIEWER_SETTINGS.Music} />
         </div>
+        <Show when={upNext()}>
+          {(next) => <p class="song-next">Up next: {titleOf(next().name)}</p>}
+        </Show>
+      </Show>
+      <Show when={queueOpen() && tracks().length > 1}>
+        <ol class="song-queue" aria-label="Songs in this folder">
+          <For each={tracks()}>
+            {(track) => (
+              <li>
+                <button aria-current={track.path === props.path ? "true" : undefined} onClick={() => track.path !== props.path && props.onPick?.(track.index)}>
+                  {titleOf(track.name)}
+                </button>
+              </li>
+            )}
+          </For>
+        </ol>
       </Show>
     </div>
   );

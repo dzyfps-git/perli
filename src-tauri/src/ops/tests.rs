@@ -1012,7 +1012,8 @@ fn unzip(archive: &Path, own_folder: bool) -> Job {
     Job::Unzip {
         archives: vec![archive.to_path_buf()],
         own_folder,
-        only: None,
+        only: Vec::new(),
+        password: None,
     }
 }
 
@@ -1060,7 +1061,7 @@ fn one_entry_extracts_beside_the_archive_on_its_own() {
     let entries: [(&str, &[u8]); 4] =
         [("docs/a.txt", b"a"), ("docs/img/b.png", b"b"), ("docs/img/c.png", b"c"), ("docs/imgs.txt", b"not inside img")];
     zip_of(&archive, &entries);
-    let only = |name: &str| Job::Unzip { archives: vec![archive.clone()], own_folder: false, only: Some(name.into()) };
+    let only = |name: &str| Job::Unzip { archives: vec![archive.clone()], own_folder: false, only: vec![name.into()], password: None };
 
     let file = go(only("docs/a.txt"));
     assert_eq!(read(&sandbox.path(r"out\a.txt")), "a");

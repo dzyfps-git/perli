@@ -6,7 +6,7 @@ use std::io::BufReader;
 use std::path::Path;
 use std::sync::Arc;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use rustysynth::{MidiFile, MidiFileSequencer, SoundFont, Synthesizer, SynthesizerSettings};
 
 /// The SoundFont beside perli.exe. Its license is in TimGM6mb-LICENSE.txt beside it.
@@ -22,18 +22,40 @@ const MOST_SECONDS: f64 = 20.0 * 60.0;
 const BLOCK_FRAMES: usize = 4096;
 const WAV_HEADER_BYTES: usize = 44;
 
+/// How a song is played: which channels stay silent (one bit each), how many keys its notes move
+/// up or down, and how fast it goes.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(default)]
+pub struct Playing {
+    pub muted: u16,
+    pub transpose: i8,
+    pub speed: f64,
+}
+
+impl Default for Playing {
+    fn default() -> Self {
+        Self { muted: 0, transpose: 0, speed: 1.0 }
+    }
+}
+
+const SLOWEST: f64 = 0.25;
+const FASTEST: f64 = 4.0;
+
 /// The song as a 16-bit stereo WAV.
-pub fn render(sound_font: &Path, song: &Path) -> Result<Vec<u8>, String> {
+pub fn render(sound_font: &Path, song: &Path, playing: Playing) -> Result<Vec<u8>, String> {
     let font = SoundFont::new(&mut BufReader::new(File::open(sound_font).map_err(|error| error.to_string())?))
         .map_err(|error| format!("The SoundFont can't be read: {error}"))?;
-    let song = MidiFile::new(&mut BufReader::new(File::open(song).map_err(|error| error.to_string())?))
-        .map_err(|error| format!("This MIDI file can't be read: {error}"))?;
-    let seconds = (song.get_length() + TAIL_SECONDS).min(MOST_SECONDS);
+    let mut bytes = std::fs::read(song).map_err(|error| error.to_string())?;
+    patch(&mut bytes, playing.muted, playing.transpose);
+    let song = MidiFile::new(&mut &bytes[..]).map_err(|error| format!("This MIDI file can't be read: {error}"))?;
+    let speed = if playing.speed.is_finite() { playing.speed.clamp(SLOWEST, FASTEST) } else { 1.0 };
+    let seconds = (song.get_length() / speed + TAIL_SECONDS).min(MOST_SECONDS);
     let frames = (seconds * f64::from(RATE)) as usize;
     let synthesizer = Synthesizer::new(&Arc::new(font), &SynthesizerSettings::new(RATE as i32))
         .map_err(|error| error.to_string())?;
     let mut sequencer = MidiFileSequencer::new(synthesizer);
     sequencer.play(&Arc::new(song), false);
+    sequencer.set_speed(speed);
 
     let mut wav = wav_header(frames);
     let (mut left, mut right) = (vec![0.0; BLOCK_FRAMES], vec![0.0; BLOCK_FRAMES]);
@@ -48,6 +70,80 @@ pub fn render(sound_font: &Path, song: &Path) -> Result<Vec<u8>, String> {
         done += count;
     }
     Ok(wav)
+}
+
+/// Silences the muted channels and moves every note but the drums by `transpose` keys. Each
+/// change keeps its byte where it is, so nothing else in the file moves.
+fn patch(bytes: &mut [u8], muted: u16, transpose: i8) {
+    if muted == 0 && transpose == 0 {
+        return;
+    }
+    let word = |bytes: &[u8], at: usize| bytes.get(at..at + 4).map(|piece| u32::from_be_bytes(piece.try_into().unwrap()) as usize);
+    let Some(header) = word(bytes, 4) else { return };
+    let mut at = 8usize.saturating_add(header);
+    while let Some(length) = word(bytes, at + 4) {
+        let end = at.saturating_add(8).saturating_add(length).min(bytes.len());
+        if &bytes[at..at + 4] == b"MTrk" {
+            patch_track(&mut bytes[at + 8..end], muted, transpose);
+        }
+        at = end;
+    }
+}
+
+fn patch_track(body: &mut [u8], muted: u16, transpose: i8) {
+    // A MIDI variable-length number, as `Reader::number` reads it.
+    let number = |body: &[u8], at: &mut usize| -> Option<usize> {
+        let mut value = 0usize;
+        for _ in 0..4 {
+            let byte = *body.get(*at)?;
+            *at += 1;
+            value = (value << 7) | usize::from(byte & 0x7F);
+            if byte & 0x80 == 0 {
+                return Some(value);
+            }
+        }
+        None
+    };
+    let (mut at, mut running) = (0usize, 0u8);
+    while number(body, &mut at).is_some() {
+        let Some(&first) = body.get(at) else { return };
+        // A byte under 0x80 is already the event's first data byte: the status is the last one.
+        let status = if first < 0x80 {
+            running
+        } else {
+            at += 1;
+            first
+        };
+        match status {
+            0xFF => {
+                at += 1;
+                let Some(length) = number(body, &mut at) else { return };
+                at = at.saturating_add(length);
+            }
+            0xF0 | 0xF7 => {
+                let Some(length) = number(body, &mut at) else { return };
+                at = at.saturating_add(length);
+            }
+            0x80..=0xEF => {
+                running = status;
+                let (kind, channel) = (status & 0xF0, status & 0x0F);
+                if matches!(kind, 0x80 | 0x90 | 0xA0) {
+                    if channel != DRUM_CHANNEL {
+                        if let Some(key) = body.get_mut(at) {
+                            *key = (i16::from(*key) + i16::from(transpose)).clamp(0, 127) as u8;
+                        }
+                    }
+                    if kind == 0x90 && muted & (1 << channel) != 0 {
+                        if let Some(loudness) = body.get_mut(at + 1) {
+                            *loudness = 0;
+                        }
+                    }
+                }
+                at += if matches!(kind, 0xC0 | 0xD0) { 1 } else { 2 };
+            }
+            _ => return,
+        }
+    }
 }
 
 fn sample(value: f32) -> [u8; 2] {
@@ -75,18 +171,26 @@ fn wav_header(frames: usize) -> Vec<u8> {
 
 /// What the player shows beside the sound: the song's name, its instruments and its notes.
 #[derive(Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SongInfo {
     title: Option<String>,
     /// General MIDI programs, in the order they first play. Drums are `DRUMS`.
     instruments: Vec<u8>,
+    /// Each channel that plays and the instrument it starts with, in the order they first play.
+    channels: Vec<(u8, u8)>,
     /// Each note as start and length in seconds, key, and channel.
     notes: Vec<(f32, f32, u8, u8)>,
+    /// When each beat falls, in seconds.
+    beats: Vec<f32>,
+    /// How many beats make a bar.
+    per_bar: u8,
 }
 
 pub const DRUMS: u8 = 128;
 const DRUM_CHANNEL: u8 = 9;
 // ponytail: a piano roll past this many notes shows only the first ones.
 const MOST_NOTES: usize = 200_000;
+const MOST_BEATS: usize = 20_000;
 const DEFAULT_TEMPO: f64 = 500_000.0;
 
 enum Event {
@@ -148,18 +252,23 @@ fn read_info(bytes: &[u8]) -> Option<SongInfo> {
     file.take(header.checked_sub(6)?)?;
 
     let mut title = None;
+    let mut meter = None;
     let mut events = Vec::new();
     for track in 0..tracks {
         let (Some(kind), Some(length)) = (file.take(4), file.u32()) else { break };
         let Some(body) = file.take(length as usize).or_else(|| file.bytes.get(file.at..)) else { break };
         if kind == b"MTrk" {
-            read_track(body, &mut events, if track == 0 { Some(&mut title) } else { None });
+            read_track(body, &mut events, if track == 0 { Some(&mut title) } else { None }, &mut meter);
         }
     }
     events.sort_by_key(|(tick, _)| *tick);
 
     let seconds_at = timing(division, &events);
-    let mut info = SongInfo { title, ..SongInfo::default() };
+    // ponytail: the first time signature counts for the whole song. Songs that change it draw
+    // their bar lines off after the change.
+    let per_bar = meter.map_or(4, |(count, power): (u8, u8)| ((u32::from(count) * 4) >> power.min(7)).clamp(1, 255) as u8);
+    let beats = beats(division, &events);
+    let mut info = SongInfo { title, beats, per_bar, ..SongInfo::default() };
     let mut programs = [0u8; 16];
     let mut held: Vec<Vec<(u8, f32)>> = vec![Vec::new(); 16];
     for ((_, event), seconds) in events.iter().zip(seconds_at) {
@@ -170,6 +279,9 @@ fn read_info(bytes: &[u8]) -> Option<SongInfo> {
                 let instrument = if channel == DRUM_CHANNEL { DRUMS } else { programs[usize::from(channel)] };
                 if !info.instruments.contains(&instrument) {
                     info.instruments.push(instrument);
+                }
+                if !info.channels.iter().any(|(known, _)| *known == channel) {
+                    info.channels.push((channel, instrument));
                 }
                 held[usize::from(channel)].push((key, seconds));
             }
@@ -189,7 +301,7 @@ fn read_info(bytes: &[u8]) -> Option<SongInfo> {
     Some(info)
 }
 
-fn read_track(body: &[u8], events: &mut Vec<(u64, Event)>, mut title: Option<&mut Option<String>>) {
+fn read_track(body: &[u8], events: &mut Vec<(u64, Event)>, mut title: Option<&mut Option<String>>, meter: &mut Option<(u8, u8)>) {
     let mut track = Reader { bytes: body, at: 0 };
     let mut tick = 0u64;
     let mut running = 0u8;
@@ -212,6 +324,10 @@ fn read_track(body: &[u8], events: &mut Vec<(u64, Event)>, mut title: Option<&mu
                             let name = String::from_utf8_lossy(name).trim().to_string();
                             *slot = (!name.is_empty()).then_some(name);
                         }
+                        None
+                    }
+                    (0x58, [count, power, ..]) => {
+                        meter.get_or_insert((*count, *power));
                         None
                     }
                     (0x2F, _) => return,
@@ -269,6 +385,35 @@ fn timing(division: u16, events: &[(u64, Event)]) -> Vec<f64> {
         .collect()
 }
 
+/// When each beat falls, in seconds, up to the song's last event.
+fn beats(division: u16, events: &[(u64, Event)]) -> Vec<f32> {
+    if division & 0x8000 != 0 {
+        return Vec::new();
+    }
+    let per_beat = u64::from(division.max(1));
+    let last = events.last().map_or(0, |(tick, _)| *tick);
+    let mut changes = events.iter().filter_map(|(tick, event)| match event {
+        Event::Tempo(tempo) => Some((*tick, f64::from(*tempo))),
+        _ => None,
+    });
+    let mut next = changes.next();
+    let (mut tempo, mut from, mut seconds) = (DEFAULT_TEMPO, 0u64, 0.0f64);
+    let span = |ticks: u64, tempo: f64| ticks as f64 * tempo / 1_000_000.0 / per_beat as f64;
+    let mut found = Vec::new();
+    let mut tick = 0u64;
+    while tick <= last && found.len() < MOST_BEATS {
+        while let Some((at, changed)) = next.filter(|(at, _)| *at <= tick) {
+            seconds += span(at - from, tempo);
+            from = at;
+            tempo = changed;
+            next = changes.next();
+        }
+        found.push((seconds + span(tick - from, tempo)) as f32);
+        tick += per_beat;
+    }
+    found
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -294,17 +439,41 @@ mod tests {
         std::fs::write(&song, one_note()).unwrap();
         let font = Path::new(env!("CARGO_MANIFEST_DIR")).join("resources").join(SOUND_FONT);
 
-        let wav = render(&font, &song).unwrap();
+        let wav = render(&font, &song, Playing::default()).unwrap();
         let frames = ((0.5 + TAIL_SECONDS) * f64::from(RATE)) as usize;
         assert_eq!(wav.len(), WAV_HEADER_BYTES + frames * 4);
+        // Twice as fast is half as long, and a muted channel makes no sound.
+        let fast = render(&font, &song, Playing { speed: 2.0, ..Playing::default() }).unwrap();
+        assert_eq!(fast.len(), WAV_HEADER_BYTES + ((0.25 + TAIL_SECONDS) * f64::from(RATE)) as usize * 4);
+        let silent = render(&font, &song, Playing { muted: 1, ..Playing::default() }).unwrap();
+        assert!(silent[WAV_HEADER_BYTES..].iter().all(|&byte| byte == 0), "the muted channel is silent");
+        let moved = render(&font, &song, Playing { transpose: 12, ..Playing::default() }).unwrap();
+        assert_ne!(moved, wav, "an octave up sounds different");
         assert_eq!(&wav[..4], b"RIFF");
         assert_eq!(u32::from_le_bytes(wav[4..8].try_into().unwrap()) as usize, wav.len() - 8);
         assert!(wav[WAV_HEADER_BYTES..].iter().any(|&byte| byte != 0), "the note makes sound");
 
         std::fs::write(&song, b"not a song").unwrap();
-        assert!(render(&font, &song).unwrap_err().starts_with("This MIDI file"));
+        assert!(render(&font, &song, Playing::default()).unwrap_err().starts_with("This MIDI file"));
         std::fs::write(&song, b"MThd\0\0\0\x06\0\0\0\x01\0\x60MTrk\0\0\0\xff\x90").unwrap();
-        assert!(render(&font, &song).unwrap_err().starts_with("This MIDI file"), "a cut-off song");
+        assert!(render(&font, &song, Playing::default()).unwrap_err().starts_with("This MIDI file"), "a cut-off song");
+    }
+
+    #[test]
+    fn a_patch_moves_notes_and_silences_channels_in_place() {
+        // A note on channel 0, then one on the drums in running status after a drum note-on.
+        let mut song = b"MThd\0\0\0\x06\0\0\0\x01\0\x60MTrk\0\0\0\x13".to_vec();
+        song.extend_from_slice(b"\0\x90\x3C\x64\x60\x80\x3C\0\0\x99\x24\x64\0\x26\x50\0\xFF\x2F\0");
+        let before = song.clone();
+        patch(&mut song, 0, 0);
+        assert_eq!(song, before);
+        patch(&mut song, 1 << 9, 2);
+        let track = &song[22..];
+        assert_eq!(&track[..8], b"\0\x90\x3E\x64\x60\x80\x3E\0", "the note and its end both move");
+        assert_eq!(&track[8..15], b"\0\x99\x24\0\0\x26\0", "drums keep their keys and lose their loudness");
+        assert_eq!(song.len(), before.len());
+        // A file cut short is left as far as it was read.
+        patch(&mut song[..30], 1, 1);
     }
 
     #[test]
@@ -323,6 +492,8 @@ mod tests {
         assert_eq!(info.title.as_deref(), Some("Tune"));
         assert_eq!(info.instruments, [0, 40, DRUMS]);
         assert_eq!(info.notes, [(0.0, 1.0, 60, 0), (1.0, 0.5, 64, 0), (1.5, 0.5, 36, 9)]);
+        assert_eq!(info.channels, [(0, 0), (9, DRUMS)]);
+        assert_eq!((info.beats.as_slice(), info.per_bar), ([0.0, 1.0, 2.0].as_slice(), 4));
         assert!(read_info(b"RIFF").is_none());
         // Cut off in the middle of a track: the notes before the cut stay.
         assert_eq!(read_info(&song[..song.len() - 12]).unwrap().notes.len(), 2);

@@ -1,9 +1,26 @@
-import { createEffect, createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import { createEffect, createSignal, For, onCleanup, onMount, Show, type JSX } from "solid-js";
 import type { BookHeading } from "../../api";
 import { saved, stored } from "../filelist/prefs";
 import { ToolCog } from "../../ui/Controls";
-import { createFind } from "./FindBar";
-import { asSource, contentsOpen, setAsSource, setContentsOpen, VIEWER_SETTINGS } from "./viewerPrefs";
+import { createFind, findIn } from "./FindBar";
+import {
+  asSource,
+  BOOK_THEMES,
+  BOOK_WIDTHS,
+  bookPaged,
+  bookSerif,
+  bookTheme,
+  bookWidth,
+  contentsOpen,
+  keepProgress,
+  setAsSource,
+  setBookPaged,
+  setBookTheme,
+  setBookWidth,
+  setContentsOpen,
+  VIEWER_SETTINGS,
+  type BookWidth,
+} from "./viewerPrefs";
 
 const ICON_CONTENTS = "";
 const ICON_FIND = "";
@@ -31,7 +48,7 @@ interface Line {
 }
 
 /** A side list of where things are, with a marker that travels to the part being read. */
-function Contents(props: { lines: Line[]; active: number; onPick: (at: number) => void }) {
+function Contents(props: { lines: Line[]; active: number; onPick: (at: number) => void; children?: JSX.Element }) {
   let list!: HTMLElement;
   const [marker, setMarker] = createSignal({ top: 0, height: 0 });
   createEffect(() => {
@@ -55,6 +72,7 @@ function Contents(props: { lines: Line[]; active: number; onPick: (at: number) =
           </button>
         )}
       </For>
+      {props.children}
     </nav>
   );
 }
@@ -194,6 +212,47 @@ function keepPlace(path: string, place: Place | undefined) {
   localStorage.setItem("perli-book-places", JSON.stringify(Object.fromEntries(kept)));
 }
 
+interface Mark extends Place {
+  label: string;
+}
+
+interface Highlight {
+  chapter: number;
+  text: string;
+}
+
+/** A reader's own bookmarks and highlights, kept by Perli and never written into the book. */
+interface Notes {
+  marks: Mark[];
+  highlights: Highlight[];
+}
+
+const notesOf = (path: string): Notes => ({ marks: [], highlights: [], ...(saved("book-notes") as Record<string, Notes> | null)?.[path] });
+
+function keepNotes(path: string, notes: Notes) {
+  const all = (saved("book-notes") as Record<string, Notes> | null) ?? {};
+  delete all[path];
+  if (notes.marks.length || notes.highlights.length) all[path] = notes;
+  localStorage.setItem("perli-book-notes", JSON.stringify(Object.fromEntries(Object.entries(all).slice(-MOST_PLACES))));
+}
+
+/** How many words a minute someone reads, for the time left in a chapter. */
+const WORDS_A_MINUTE = 230;
+const MOST_HIGHLIGHT = 600;
+const LABEL_CHARACTERS = 60;
+const WIDTHS = Object.keys(BOOK_WIDTHS) as BookWidth[];
+const WIDTH_NAMES: Record<BookWidth, string> = { narrow: "Narrow lines", medium: "Medium lines", wide: "Wide lines" };
+const THEME_NAMES = { auto: "Theme: as Perli", paper: "Theme: paper", sepia: "Theme: sepia", night: "Theme: night" };
+const ICON_THEME = "";
+const ICON_WIDTH = "";
+const ICON_PAGED = "";
+const ICON_MARK = "";
+const ICON_MARKED = "";
+const ICON_HIGHLIGHT = "";
+const ICON_REMOVE = "";
+
+export const minutesLeft = (words: number, fraction: number) => Math.round((words * (1 - fraction)) / WORDS_A_MINUTE);
+
 export interface BookViewProps {
   path: string;
   title: string;
@@ -207,8 +266,8 @@ export interface BookViewProps {
 }
 
 /**
- * An EPUB a chapter at a time, picking up where it was left. Left and Right turn chapters, and
- * the contents, text size and find are a key away.
+ * An EPUB a chapter at a time, picking up where it was left, in a scroll or page by page. Left
+ * and Right turn pages or chapters. Bookmarks and highlights stay with Perli, never in the book.
  */
 export function BookView(live: BookViewProps) {
   const props = { ...live };
@@ -218,10 +277,15 @@ export function BookView(live: BookViewProps) {
   const [chapter, setChapter] = createSignal(Math.min(start?.chapter ?? 0, props.chapters.length - 1));
   const [fraction, setFraction] = createSignal(0);
   const [resumed, setResumed] = createSignal(!!start && (start.chapter > 0 || start.at > 0.02));
+  const [words, setWords] = createSignal(0);
+  const [notes, setNotes] = createSignal(notesOf(props.path));
+  /** Text picked in the chapter, which can become a highlight. */
+  const [picking, setPicking] = createSignal<{ text: string; x: number; y: number }>();
   const find = createFind(() => article, () => scroller);
   let restore = start?.at ?? 0;
   let turned = 0;
   let saveTimer: ReturnType<typeof setTimeout> | undefined;
+  let wheelAt = 0;
   let gone = false;
 
   const lines = (): (Line & { chapter: number })[] =>
@@ -235,18 +299,59 @@ export function BookView(live: BookViewProps) {
     return found;
   };
   const progress = () => (chapter() + fraction()) / props.chapters.length;
+  const left = () => minutesLeft(words(), fraction());
+  const marked = () => notes().marks.some((mark) => mark.chapter === chapter() && Math.abs(mark.at - fraction()) < 0.01);
 
-  function turn(by: number) {
+  /** Pages a chapter has, in page mode: one column the width of the window each. */
+  const pageWidth = () => scroller.clientWidth;
+  const pageCount = () => Math.max(1, Math.round(scroller.scrollWidth / pageWidth()));
+  const pageAt = () => Math.round(scroller.scrollLeft / pageWidth());
+
+  /** Lays out the chapter: lines of the chosen width, and columns a page wide in page mode. */
+  function layout() {
+    const room = scroller.clientWidth;
+    const pad = Math.max(32, (room - BOOK_WIDTHS[bookWidth()]) / 2);
+    article.style.maxWidth = `${BOOK_WIDTHS[bookWidth()]}px`;
+    if (bookPaged()) {
+      scroller.style.paddingInline = `${pad}px`;
+      article.style.columnWidth = `${room - 2 * pad}px`;
+      article.style.columnGap = `${2 * pad}px`;
+    } else {
+      scroller.style.paddingInline = "";
+      article.style.columnWidth = article.style.columnGap = "";
+    }
+  }
+
+  /** Goes to a place in the chapter, from 0 to 1. */
+  function place(at: number) {
+    if (bookPaged()) scroller.scrollLeft = Math.round(at * (pageCount() - 1)) * pageWidth();
+    else scroller.scrollTop = at * (scroller.scrollHeight - scroller.clientHeight);
+    measure();
+  }
+
+  function turn(by: number, to = 0) {
     const target = chapter() + by;
     if (target < 0 || target >= props.chapters.length) return;
     turned = by;
-    restore = 0;
+    restore = to;
     setChapter(target);
   }
 
+  /** On a page, or on to the next chapter from the last page. */
+  function turnPage(by: number) {
+    if (!bookPaged()) return turn(by);
+    const next = pageAt() + by;
+    if (next < 0) return turn(-1, 1);
+    if (next >= pageCount()) return turn(1);
+    scroller.scrollTo({ left: next * pageWidth(), behavior: reducedMotion.matches ? "auto" : "smooth" });
+  }
+
   function measure() {
-    const room = scroller.scrollHeight - scroller.clientHeight;
-    setFraction(room > 0 ? Math.min(scroller.scrollTop / room, 1) : 1);
+    if (bookPaged()) setFraction(pageCount() > 1 ? Math.min(pageAt() / (pageCount() - 1), 1) : 1);
+    else {
+      const room = scroller.scrollHeight - scroller.clientHeight;
+      setFraction(room > 0 ? Math.min(scroller.scrollTop / room, 1) : 1);
+    }
     clearTimeout(saveTimer);
     saveTimer = setTimeout(save, SAVE_MS);
   }
@@ -254,6 +359,75 @@ export function BookView(live: BookViewProps) {
   function save() {
     const done = chapter() === props.chapters.length - 1 && fraction() > 0.98;
     keepPlace(props.path, chapter() || fraction() > 0.02 ? (done ? undefined : { chapter: chapter(), at: fraction() }) : undefined);
+    keepProgress(props.path, done ? undefined : progress());
+  }
+
+  /** The reader's highlights in the chapter shown, painted over its text. */
+  function paintHighlights() {
+    if (!("highlights" in CSS)) return;
+    const ranges = notes()
+      .highlights.filter((one) => one.chapter === chapter())
+      .flatMap((one) => findIn(article, one.text).slice(0, 1));
+    if (ranges.length) CSS.highlights.set("book-highlight", new Highlight(...ranges));
+    else CSS.highlights.delete("book-highlight");
+  }
+
+  function changeNotes(next: Notes) {
+    setNotes(next);
+    keepNotes(props.path, next);
+    paintHighlights();
+  }
+
+  /** The words at the top of what is shown, to name a bookmark by. */
+  function labelHere() {
+    const box = scroller.getBoundingClientRect();
+    const spot = document.elementFromPoint(box.left + scroller.clientWidth / 2, box.top + 48);
+    const text = (spot && article.contains(spot) ? spot.textContent ?? "" : article.textContent ?? "").trim().replace(/\s+/g, " ");
+    return text.slice(0, LABEL_CHARACTERS) + (text.length > LABEL_CHARACTERS ? "…" : "") || `Chapter ${chapter() + 1}`;
+  }
+
+  function toggleMark() {
+    const all = notes();
+    if (marked()) {
+      changeNotes({ ...all, marks: all.marks.filter((mark) => !(mark.chapter === chapter() && Math.abs(mark.at - fraction()) < 0.01)) });
+      return;
+    }
+    const mark = { chapter: chapter(), at: fraction(), label: labelHere() };
+    changeNotes({ ...all, marks: [...all.marks, mark].sort((a, b) => a.chapter - b.chapter || a.at - b.at) });
+  }
+
+  function highlight() {
+    const text = picking()?.text;
+    if (!text) return;
+    getSelection()?.removeAllRanges();
+    setPicking(undefined);
+    changeNotes({ ...notes(), highlights: [...notes().highlights, { chapter: chapter(), text }] });
+  }
+
+  function goTo(target: Place) {
+    if (target.chapter === chapter()) return place(target.at);
+    turn(target.chapter - chapter(), target.at);
+  }
+
+  /** Text picked inside the chapter offers to become a highlight, beside it. */
+  function onPointerUp() {
+    requestAnimationFrame(() => {
+      const picked = getSelection();
+      const text = picked?.toString().trim() ?? "";
+      if (!picked?.rangeCount || !text || text.length > MOST_HIGHLIGHT || !article.contains(picked.anchorNode)) return setPicking(undefined);
+      const box = picked.getRangeAt(0).getBoundingClientRect();
+      const view = scroller.closest(".doc-view")!.getBoundingClientRect();
+      setPicking({ text, x: box.left + box.width / 2 - view.left, y: box.top - view.top });
+    });
+  }
+
+  /** In page mode, the wheel turns pages, one per push. */
+  function onWheel(event: WheelEvent) {
+    if (!bookPaged() || event.ctrlKey) return;
+    event.preventDefault();
+    if (Date.now() - wheelAt < 350 || Math.abs(event.deltaY) < 4) return;
+    wheelAt = Date.now();
+    turnPage(Math.sign(event.deltaY));
   }
 
   createEffect(() => {
@@ -261,16 +435,19 @@ export function BookView(live: BookViewProps) {
     const by = turned;
     turned = 0;
     find.close();
+    setPicking(undefined);
     props
       .load(props.chapters[at])
       .then((html) => {
         if (gone || at !== chapter()) return;
         article.innerHTML = html;
         props.fill(article);
+        setWords((article.textContent ?? "").split(/\s+/).filter(Boolean).length);
+        layout();
+        paintHighlights();
         requestAnimationFrame(() => {
-          scroller.scrollTop = restore * (scroller.scrollHeight - scroller.clientHeight);
+          place(restore);
           restore = 0;
-          measure();
         });
         if (by && !reducedMotion.matches) {
           article.animate(
@@ -283,6 +460,16 @@ export function BookView(live: BookViewProps) {
         // A chapter left behind, or a book closed, says nothing.
         if (!gone && at === chapter()) props.onFailure(String(reason));
       });
+  });
+
+  // A new width or mode keeps the place in the chapter.
+  createEffect(() => {
+    bookPaged();
+    bookWidth();
+    const at = fraction();
+    if (!article.childElementCount) return;
+    layout();
+    requestAnimationFrame(() => place(at));
   });
 
   createEffect(() =>
@@ -311,9 +498,14 @@ export function BookView(live: BookViewProps) {
     if (find.keys(event)) return true;
     if (!plainKey(event)) return false;
     const key = event.key.toLowerCase();
-    if (key === "arrowleft") turn(-1);
-    else if (key === "arrowright") turn(1);
+    if (key === "arrowleft") turnPage(-1);
+    else if (key === "arrowright") turnPage(1);
+    else if (key === "pagedown" && bookPaged()) turnPage(1);
+    else if (key === "pageup" && bookPaged()) turnPage(-1);
     else if (key === "c") setContentsOpen(!contentsOpen());
+    else if (key === "b") toggleMark();
+    else if (key === "h" && picking()) highlight();
+    else if (key === "p") setBookPaged(!bookPaged());
     else if (key === "+" || key === "=") size(1);
     else if (key === "-") size(-1);
     else return false;
@@ -323,33 +515,121 @@ export function BookView(live: BookViewProps) {
   onMount(() => {
     if (!scroller.closest(".preview-docked")) scroller.focus({ preventScroll: true });
     if (resumed()) setTimeout(() => setResumed(false), RESUME_SHOWN_MS);
+    const watcher = new ResizeObserver(() => {
+      const at = fraction();
+      layout();
+      if (bookPaged()) place(at);
+    });
+    // The border box, since page mode changes the padding, which would wake it again.
+    watcher.observe(scroller, { box: "border-box" });
+    onCleanup(() => watcher.disconnect());
   });
 
   onCleanup(() => {
     gone = true;
     clearTimeout(saveTimer);
     save();
+    if ("highlights" in CSS) CSS.highlights.delete("book-highlight");
     props.keys(undefined);
     props.note(undefined);
     find.close();
   });
 
+  const chapterName = (at: number) => [...lines()].reverse().find((line) => line.chapter <= at)?.title ?? `Chapter ${at + 1}`;
+
   return (
-    <div class="doc-view" data-contents={contentsOpen() || undefined} onClick={onClick}>
+    <div
+      class="doc-view book-view"
+      data-contents={contentsOpen() || undefined}
+      data-theme={bookTheme()}
+      data-serif={bookSerif() || undefined}
+      onClick={onClick}
+    >
       <div class="book-progress" style={{ scale: `${progress()} 1` }} />
-      <Contents lines={lines()} active={active()} onPick={(at) => turn(lines()[at].chapter - chapter())} />
-      <div ref={scroller} class="doc-scroll" tabindex="-1" onScroll={measure}>
+      <Contents lines={lines()} active={active()} onPick={(at) => turn(lines()[at].chapter - chapter())}>
+        <Show when={notes().marks.length}>
+          <p class="book-notes-head">Bookmarks</p>
+          <For each={notes().marks}>
+            {(mark) => (
+              <span class="book-note">
+                <button class="contents-line" onClick={() => goTo(mark)}>
+                  {mark.label}
+                </button>
+                <button
+                  class="book-note-remove"
+                  aria-label="Remove this bookmark"
+                  onClick={() => changeNotes({ ...notes(), marks: notes().marks.filter((one) => one !== mark) })}
+                >
+                  {ICON_REMOVE}
+                </button>
+              </span>
+            )}
+          </For>
+        </Show>
+        <Show when={notes().highlights.length}>
+          <p class="book-notes-head">Highlights</p>
+          <For each={notes().highlights}>
+            {(one) => (
+              <span class="book-note">
+                <button class="contents-line book-highlight-line" aria-description={chapterName(one.chapter)} onClick={() => goTo({ chapter: one.chapter, at: 0 })}>
+                  {one.text}
+                </button>
+                <button
+                  class="book-note-remove"
+                  aria-label="Remove this highlight"
+                  onClick={() => changeNotes({ ...notes(), highlights: notes().highlights.filter((other) => other !== one) })}
+                >
+                  {ICON_REMOVE}
+                </button>
+              </span>
+            )}
+          </For>
+        </Show>
+      </Contents>
+      <div
+        ref={scroller}
+        class="doc-scroll"
+        tabindex="-1"
+        data-paged={bookPaged() || undefined}
+        onScroll={measure}
+        onWheel={onWheel}
+        onPointerUp={onPointerUp}
+      >
         <article ref={article} class="preview-markdown preview-book" style={{ "font-size": `${bookSize()}px` }} />
       </div>
+      <Show when={words() > WORDS_A_MINUTE}>
+        <p class="book-left" aria-live="off">
+          {left() < 1 ? "Less than a minute left in this chapter" : `About ${left()} min left in this chapter`}
+        </p>
+      </Show>
+      <Show when={picking()}>
+        {(at) => (
+          <button class="details-button book-pick" style={{ left: `${at().x}px`, top: `${at().y}px` }} aria-keyshortcuts="H" onClick={highlight}>
+            <span aria-hidden="true">{ICON_HIGHLIGHT}</span> Highlight
+          </button>
+        )}
+      </Show>
       <div class="preview-tools doc-tools" role="toolbar" aria-label="Book">
         {find.bar()}
         <FindButton find={find} />
         <ContentsButton />
+        <button class="strip-icon" aria-label={marked() ? "Remove the bookmark here" : "Bookmark this place"} aria-keyshortcuts="B" aria-pressed={marked()} onClick={toggleMark}>
+          {marked() ? ICON_MARKED : ICON_MARK}
+        </button>
         <button class="strip-icon" aria-label="Smaller text" aria-keyshortcuts="-" disabled={bookSize() <= SIZES[0]} onClick={() => size(-1)}>
           {ICON_SMALLER}
         </button>
         <button class="strip-icon" aria-label="Bigger text" aria-keyshortcuts="+" disabled={bookSize() >= SIZES.at(-1)!} onClick={() => size(1)}>
           {ICON_BIGGER}
+        </button>
+        <button class="strip-icon" aria-label={WIDTH_NAMES[bookWidth()]} onClick={() => setBookWidth(WIDTHS[(WIDTHS.indexOf(bookWidth()) + 1) % WIDTHS.length])}>
+          {ICON_WIDTH}
+        </button>
+        <button class="strip-icon" aria-label={THEME_NAMES[bookTheme()]} onClick={() => setBookTheme(BOOK_THEMES[(BOOK_THEMES.indexOf(bookTheme()) + 1) % BOOK_THEMES.length])}>
+          {ICON_THEME}
+        </button>
+        <button class="strip-icon" aria-label="Page by page" aria-keyshortcuts="P" aria-pressed={bookPaged()} onClick={() => setBookPaged(!bookPaged())}>
+          {ICON_PAGED}
         </button>
         <ToolCog label="Book settings" items={VIEWER_SETTINGS["Documents and books"]} />
       </div>
@@ -361,7 +641,7 @@ export function BookView(live: BookViewProps) {
             onClick={() => {
               setResumed(false);
               turn(-chapter());
-              requestAnimationFrame(() => (scroller.scrollTop = 0));
+              requestAnimationFrame(() => place(0));
             }}
           >
             Start over

@@ -211,12 +211,14 @@ enum Task {
     OwnTemplate { folder: String, name: String },
     SaveTemplate { selection: Selection },
     Zip { selection: Selection },
-    /// `only` names one entry to take out, rather than all of them.
+    /// `only` names the entries to take out, rather than all of them.
     Unzip {
         selection: Selection,
         own_folder: bool,
         #[serde(default)]
-        only: Option<String>,
+        only: Vec<String>,
+        #[serde(default)]
+        password: Option<String>,
     },
     Paste { folder: String },
     /// The last files dropped on the window landed on `folder`.
@@ -289,10 +291,11 @@ impl Task {
             Self::Zip { selection } => Job::Zip {
                 sources: paths(&selection)?,
             },
-            Self::Unzip { selection, own_folder, only } => Job::Unzip {
+            Self::Unzip { selection, own_folder, only, password } => Job::Unzip {
                 archives: paths(&selection)?,
                 own_folder,
                 only,
+                password,
             },
             Self::Paste { folder } => return paste(target(folder)?),
             Self::Drop { folder, action } => {
@@ -1233,17 +1236,90 @@ async fn preview_row(view: u32, request: u64, row: u32, offset: u64, views: Stat
 
 /// A picture inside a comic or a book, `edge` device pixels on its longest side at most.
 #[tauri::command]
-async fn archive_picture(view: u32, request: u64, row: u32, entry: String, edge: u32, views: State<'_, Views>) -> Result<Response, String> {
+async fn archive_picture(
+    view: u32,
+    request: u64,
+    row: u32,
+    entry: String,
+    edge: u32,
+    password: Option<String>,
+    views: State<'_, Views>,
+) -> Result<Response, String> {
     let path = row_path(&views, view, request, row)?;
-    let bytes = blocking(move || inside::picture(&path, &entry, edge)).await?;
+    let bytes = blocking(move || inside::picture(&path, &entry, edge, password.as_deref())).await?;
     Ok(Response::new(bytes))
+}
+
+/// Reads every file of a ZIP back, to learn whether the archive is whole.
+#[tauri::command]
+async fn archive_test(view: u32, request: u64, row: u32, password: Option<String>, views: State<'_, Views>) -> Result<inside::Tested, String> {
+    let path = row_path(&views, view, request, row)?;
+    blocking(move || inside::test(&path, password.as_deref())).await
+}
+
+const DRAG_FOLDER: &str = "perli-drag";
+
+/// Drags one file out of a ZIP: it is taken out to a temporary folder first, as Windows drags files.
+#[tauri::command]
+async fn drag_entry(view: u32, request: u64, row: u32, entry: String, password: Option<String>, views: State<'_, Views>, app: AppHandle) -> Result<(), String> {
+    let path = row_path(&views, view, request, row)?;
+    let taken = blocking(move || {
+        // ponytail: what a drag takes out stays until Perli next starts, since the app it was
+        // dropped on may still be copying after the drop.
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |now| now.as_nanos());
+        let folder = std::env::temp_dir().join(DRAG_FOLDER).join(stamp.to_string());
+        std::fs::create_dir_all(&folder).map_err(|error| error.to_string())?;
+        inside::take_out(&path, &entry, password.as_deref(), &folder)
+    })
+    .await?;
+    drag_out(vec![taken], app).await
+}
+
+/// The words beside a file under its own name: a song's lyrics (`lrc`) or a film's subtitles.
+#[tauri::command]
+async fn beside_text(view: u32, request: u64, row: u32, extension: String, views: State<'_, Views>) -> Result<Option<String>, String> {
+    let path = row_path(&views, view, request, row)?;
+    blocking(move || Ok(preview::beside_text(&path, &extension))).await
+}
+
+/// Saves a frame of a film beside it. The body is the row it belongs to (view and row as u32,
+/// then the snapshot and the moment in seconds as f64, all little-endian) and then the PNG.
+#[tauri::command]
+fn save_frame(request: tauri::ipc::Request<'_>, views: State<'_, Views>) -> Result<String, String> {
+    const HEAD: usize = 24;
+    let tauri::ipc::InvokeBody::Raw(body) = request.body() else {
+        return Err("The frame came without its picture".into());
+    };
+    if body.len() < HEAD {
+        return Err("The frame came without its picture".into());
+    }
+    let word = |at: usize| u32::from_le_bytes(body[at..at + 4].try_into().unwrap());
+    let float = |at: usize| f64::from_le_bytes(body[at..at + 8].try_into().unwrap());
+    let path = row_path(&views, word(0), float(8) as u64, word(4))?;
+    preview::save_frame(&path, float(16).max(0.0) as u64, &body[HEAD..])
+}
+
+/// The file a player asks for: a row of the list, or a path, for a song that plays on after its
+/// list has gone.
+fn media_path(views: &Views, view: u32, request: u64, row: u32, path: Option<PathBuf>) -> Result<PathBuf, String> {
+    match path {
+        Some(path) => Ok(path),
+        None => row_path(views, view, request, row),
+    }
 }
 
 /// The start of a text file inside a ZIP, or nothing if it is not text.
 #[tauri::command]
-async fn archive_text(view: u32, request: u64, row: u32, entry: String, views: State<'_, Views>) -> Result<Option<String>, String> {
+async fn archive_text(view: u32, request: u64, row: u32, entry: String, password: Option<String>, views: State<'_, Views>) -> Result<Option<String>, String> {
     let path = row_path(&views, view, request, row)?;
-    blocking(move || inside::text(&path, &entry)).await
+    blocking(move || inside::text(&path, &entry, password.as_deref())).await
+}
+
+/// Whether `password` opens the locked `entry`, read all the way through.
+#[tauri::command]
+async fn archive_password(view: u32, request: u64, row: u32, entry: String, password: String, views: State<'_, Views>) -> Result<(), String> {
+    let path = row_path(&views, view, request, row)?;
+    blocking(move || inside::check_password(&path, &entry, &password)).await
 }
 
 /// One chapter of a book, made safe to show.
@@ -1261,16 +1337,32 @@ async fn model_file(view: u32, request: u64, row: u32, part: Option<String>, vie
     Ok(Response::new(bytes))
 }
 
-/// A MIDI file played through the bundled SoundFont, as one WAV.
+/// A MIDI file as one WAV, played through the bundled SoundFont or, with `font`, through a
+/// `.sf2` file of the user's own.
 #[tauri::command]
-async fn song_audio(view: u32, request: u64, row: u32, app: AppHandle, views: State<'_, Views>) -> Result<Response, String> {
-    let path = row_path(&views, view, request, row)?;
-    let font = app
-        .path()
-        .resolve(midi::SOUND_FONT, tauri::path::BaseDirectory::Resource)
-        .map_err(|error| error.to_string())?;
+#[allow(clippy::too_many_arguments)]
+async fn song_audio(
+    view: u32,
+    request: u64,
+    row: u32,
+    path: Option<PathBuf>,
+    playing: Option<midi::Playing>,
+    font: Option<PathBuf>,
+    app: AppHandle,
+    views: State<'_, Views>,
+) -> Result<Response, String> {
+    let path = media_path(&views, view, request, row, path)?;
+    let own = font.filter(|font| font.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("sf2")));
+    let font = match own {
+        Some(font) => font,
+        None => app
+            .path()
+            .resolve(midi::SOUND_FONT, tauri::path::BaseDirectory::Resource)
+            .map_err(|error| error.to_string())?,
+    };
+    let playing = playing.unwrap_or_default();
     // A broken file can trip the synthesizer's own checks.
-    let render = move || std::panic::catch_unwind(|| midi::render(&font, &path));
+    let render = move || std::panic::catch_unwind(|| midi::render(&font, &path, playing));
     let wav = blocking(move || render().unwrap_or_else(|_| Err("This MIDI file can't be read".into()))).await?;
     Ok(Response::new(wav))
 }
@@ -1285,8 +1377,15 @@ async fn song_info(view: u32, request: u64, row: u32, views: State<'_, Views>) -
 /// A sound file's tags, and its path for the window to stream it. Only this file opens to the
 /// window, and only once the user previews it.
 #[tauri::command]
-async fn open_audio(view: u32, request: u64, row: u32, app: AppHandle, views: State<'_, Views>) -> Result<(String, preview::Tags), String> {
-    let path = row_path(&views, view, request, row)?;
+async fn open_audio(
+    view: u32,
+    request: u64,
+    row: u32,
+    path: Option<PathBuf>,
+    app: AppHandle,
+    views: State<'_, Views>,
+) -> Result<(String, preview::Tags), String> {
+    let path = media_path(&views, view, request, row, path)?;
     // ponytail: files stay open to the window for the session, as a scope can't take one back
     // and allow it again later. Fine while only the window's own code asks for them.
     app.asset_protocol_scope().allow_file(&path).map_err(|error| error.to_string())?;
@@ -1297,8 +1396,8 @@ async fn open_audio(view: u32, request: u64, row: u32, app: AppHandle, views: St
 
 /// An AIFF file as a WAV, which the window can play.
 #[tauri::command]
-async fn aiff_audio(view: u32, request: u64, row: u32, views: State<'_, Views>) -> Result<Response, String> {
-    let path = row_path(&views, view, request, row)?;
+async fn aiff_audio(view: u32, request: u64, row: u32, path: Option<PathBuf>, views: State<'_, Views>) -> Result<Response, String> {
+    let path = media_path(&views, view, request, row, path)?;
     let wav = blocking(move || sound::aiff_to_wav(&sound::read_aiff(&path)?)).await?;
     Ok(Response::new(wav))
 }
@@ -1734,6 +1833,8 @@ fn main() {
         .manage(Scans::default())
         .manage(Preload(Mutex::new(preload)))
         .setup(move |app| {
+            // What earlier drags out of a ZIP left behind.
+            let _ = std::fs::remove_dir_all(std::env::temp_dir().join(DRAG_FOLDER));
             if let Some(door) = door {
                 let asked = app.handle().clone();
                 door.listen(move |ask| {
@@ -1822,6 +1923,11 @@ fn main() {
             big_picture,
             picture_size,
             archive_text,
+            archive_password,
+            archive_test,
+            drag_entry,
+            beside_text,
+            save_frame,
             picture_file,
             preview_row,
             archive_picture,

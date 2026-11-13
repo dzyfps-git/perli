@@ -5,7 +5,7 @@
 use std::cmp::Ordering;
 use std::fs::File;
 use std::io::{BufReader, Read};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::{Reader, XmlVersion};
@@ -18,6 +18,7 @@ use windows::Win32::Graphics::Imaging::{
 };
 use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
 use windows::Win32::UI::Shell::StrCmpLogicalW;
+use zip::result::ZipError;
 use zip::ZipArchive;
 
 use crate::ops::Com;
@@ -43,6 +44,45 @@ pub struct Entry {
     pub folder: bool,
     /// As the archive wrote it, which is the time where it was made.
     pub modified: Option<String>,
+    /// Protected by a password.
+    pub locked: bool,
+}
+
+/// What the UI looks for to ask for the password again.
+pub const WRONG_PASSWORD: &str = "Wrong password";
+
+/// ponytail: the `zip` crate is built without `aes-crypto`, to keep the installer small; turn
+/// it on if AES-locked ZIPs turn out to be common.
+const AES_LOCKED: &str = "This ZIP is locked with AES, which Perli can't open yet.";
+
+fn reason(error: ZipError) -> String {
+    match error {
+        ZipError::InvalidPassword => WRONG_PASSWORD.into(),
+        ZipError::UnsupportedArchive(text) if text.starts_with("AES") => AES_LOCKED.into(),
+        other => other.to_string(),
+    }
+}
+
+/// A wrong ZipCrypto password passes its one-byte check about once in 256 tries, and then the
+/// file reads as garbage: a broken compressed stream, or a checksum that does not match.
+/// ponytail: a locked file that is damaged reads as a wrong password too; only the password
+/// check in the UI comes through here.
+fn read_failed(error: std::io::Error, password: Option<&str>) -> String {
+    use std::io::ErrorKind::{InvalidData, InvalidInput};
+    if password.is_some() && matches!(error.kind(), InvalidData | InvalidInput) {
+        WRONG_PASSWORD.into()
+    } else {
+        error.to_string()
+    }
+}
+
+/// One entry, opened with the password if it has one.
+fn entry<'a>(zip: &'a mut Zip, name: &str, password: Option<&str>) -> Result<zip::read::ZipFile<'a, BufReader<File>>, String> {
+    match password {
+        Some(password) => zip.by_name_decrypt(name, password.as_bytes()),
+        None => zip.by_name(name),
+    }
+    .map_err(reason)
 }
 
 #[derive(Debug, PartialEq, Serialize)]
@@ -84,7 +124,7 @@ pub fn entries(path: &Path) -> Result<(Vec<Entry>, bool), String> {
             format!("{year}-{month:02}-{day:02} {:02}:{:02}", time.hour(), time.minute())
         });
         let name = entry.name().map_err(|error| error.to_string())?.into_owned();
-        list.push(Entry { name, size: entry.size(), folder: entry.is_dir(), modified });
+        list.push(Entry { name, size: entry.size(), folder: entry.is_dir(), modified, locked: entry.encrypted() });
     }
     Ok((list, zip.len() > MOST_ENTRIES))
 }
@@ -110,17 +150,30 @@ pub fn pages(path: &Path) -> Result<Vec<String>, String> {
 
 /// The start of a text file inside the archive, for a look without taking it out. `None` if it
 /// is not text.
-pub fn text(path: &Path, name: &str) -> Result<Option<String>, String> {
+pub fn text(path: &Path, name: &str, password: Option<&str>) -> Result<Option<String>, String> {
     let mut zip = open(path)?;
-    let entry = zip.by_name(name).map_err(|error| error.to_string())?;
+    let entry = entry(&mut zip, name, password)?;
     let mut bytes = Vec::new();
-    entry.take(MOST_TEXT_BYTES).read_to_end(&mut bytes).map_err(|error| error.to_string())?;
+    entry.take(MOST_TEXT_BYTES).read_to_end(&mut bytes).map_err(|error| read_failed(error, password))?;
     let body = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&bytes);
     Ok(crate::preview::as_text(body, true).map(str::to_string))
 }
 
+/// Reads all of a locked file, so its checksum proves `password`. A wrong one can pass the quick
+/// header check of ZipCrypto and show only once the file is read through.
+pub fn check_password(path: &Path, name: &str, password: &str) -> Result<(), String> {
+    let mut zip = open(path)?;
+    let mut entry = entry(&mut zip, name, Some(password))?;
+    std::io::copy(&mut entry, &mut std::io::sink()).map_err(|error| read_failed(error, Some(password)))?;
+    Ok(())
+}
+
 fn read_entry(zip: &mut Zip, name: &str, most: u64) -> Result<Vec<u8>, String> {
-    let entry = zip.by_name(name).map_err(|error| error.to_string())?;
+    read_locked(zip, name, most, None)
+}
+
+fn read_locked(zip: &mut Zip, name: &str, most: u64, password: Option<&str>) -> Result<Vec<u8>, String> {
+    let entry = entry(zip, name, password)?;
     if entry.size() > most {
         return Err(format!("{name} is too big to show"));
     }
@@ -131,9 +184,111 @@ fn read_entry(zip: &mut Zip, name: &str, most: u64) -> Result<Vec<u8>, String> {
 
 /// One picture inside an archive, `edge` pixels on its longest side at most, in the format
 /// `thumbs::read` describes.
-pub fn picture(path: &Path, name: &str, edge: u32) -> Result<Vec<u8>, String> {
-    let bytes = read_entry(&mut open(path)?, name, MOST_PICTURE_BYTES)?;
+pub fn picture(path: &Path, name: &str, edge: u32, password: Option<&str>) -> Result<Vec<u8>, String> {
+    let bytes = read_locked(&mut open(path)?, name, MOST_PICTURE_BYTES, password)?;
     decode(&bytes, edge.clamp(1, MOST_EDGE)).map_err(|error| error.message())
+}
+
+/// What a test of an archive found: how many files read back whole, which did not, and how many
+/// stayed locked for want of a password.
+#[derive(Debug, PartialEq, Serialize)]
+pub struct Tested {
+    pub sound: u32,
+    pub damaged: Vec<String>,
+    pub locked: u32,
+}
+
+/// Reads every file of a ZIP to its end, which checks each against the checksum the archive keeps.
+pub fn test(path: &Path, password: Option<&str>) -> Result<Tested, String> {
+    let mut zip = open(path)?;
+    let mut found = Tested { sound: 0, damaged: Vec::new(), locked: 0 };
+    for index in 0..zip.len() {
+        let (name, folder, locked) = match zip.by_index_data(index) {
+            Ok(entry) => (entry.name().map(|name| name.into_owned()).unwrap_or_default(), entry.is_dir(), entry.encrypted()),
+            Err(error) => return Err(error.to_string()),
+        };
+        if folder {
+            continue;
+        }
+        if locked && password.is_none() {
+            found.locked += 1;
+            continue;
+        }
+        let read = match password.filter(|_| locked) {
+            Some(password) => zip.by_index_decrypt(index, password.as_bytes()),
+            None => zip.by_index(index),
+        }
+        .map_err(reason)
+        .and_then(|mut entry| std::io::copy(&mut entry, &mut std::io::sink()).map_err(|error| error.to_string()));
+        match read {
+            Ok(_) => found.sound += 1,
+            Err(wrong) if wrong == WRONG_PASSWORD => return Err(wrong),
+            Err(_) => found.damaged.push(name),
+        }
+    }
+    Ok(found)
+}
+
+/// Writes one file of a ZIP into `folder` under its own name, for a drag out of the preview.
+pub fn take_out(path: &Path, name: &str, password: Option<&str>, folder: &Path) -> Result<PathBuf, String> {
+    let mut zip = open(path)?;
+    let mut entry = entry(&mut zip, name, password)?;
+    let own = entry.enclosed_name().and_then(|inside| inside.file_name().map(PathBuf::from)).ok_or("This name in the archive isn't safe to use")?;
+    if entry.is_dir() {
+        return Err("Only a file can be dragged out".into());
+    }
+    let target = folder.join(own);
+    let mut file = File::create(&target).map_err(|error| error.to_string())?;
+    std::io::copy(&mut entry, &mut file).map_err(|error| error.to_string())?;
+    Ok(target)
+}
+
+/// Whether the list shows this file's own cover in place of an icon.
+pub fn has_cover(path: &Path) -> bool {
+    matches!(path.extension().map(|extension| extension.to_string_lossy().to_lowercase()).as_deref(), Some("epub" | "cbz"))
+}
+
+/// A book's cover or a comic's first page, in the format `thumbs::read` describes.
+pub fn cover(path: &Path, edge: u32) -> Option<Vec<u8>> {
+    let name = if path.extension()?.eq_ignore_ascii_case("cbz") {
+        pages(path).ok()?.into_iter().next()?
+    } else {
+        book_cover(&mut open(path).ok()?)?
+    };
+    picture(path, &name, edge, None).ok()
+}
+
+/// The picture a book names as its cover: marked as one, pointed to by the old `cover` note, or
+/// failing both, the first picture with "cover" in its name.
+fn book_cover(zip: &mut Zip) -> Option<String> {
+    let (package, index) = package(zip).ok()?;
+    let mut reader = Reader::from_str(&index);
+    let (mut noted, mut marked, mut pictures) = (None, None, Vec::new());
+    loop {
+        match reader.read_event().ok()? {
+            Event::Start(start) | Event::Empty(start) => match start.local_name().as_ref() {
+                "meta" if attribute(&start, "name").as_deref() == Some("cover") => noted = attribute(&start, "content"),
+                "item" => {
+                    let (Some(id), Some(href)) = (attribute(&start, "id"), attribute(&start, "href")) else { continue };
+                    if attribute(&start, "properties").is_some_and(|properties| properties.split(' ').any(|one| one == "cover-image")) {
+                        marked = Some(href.clone());
+                    }
+                    if attribute(&start, "media-type").is_some_and(|kind| kind.starts_with("image/")) {
+                        pictures.push((id, href));
+                    }
+                }
+                _ => {}
+            },
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    let by_note = noted.and_then(|id| pictures.iter().find(|(item, _)| *item == id)).map(|(_, href)| href.clone());
+    let by_name = || {
+        let named = |text: &str| text.to_lowercase().contains("cover");
+        pictures.iter().find(|(id, href)| named(id) || named(href)).map(|(_, href)| href.clone())
+    };
+    marked.or(by_note).or_else(by_name).map(|href| resolve(&package, &href))
 }
 
 /// Windows' own imaging reads the picture, so every format Windows can show works.
@@ -260,7 +415,13 @@ fn entity(name: &str) -> Option<&'static str> {
 /// Reads the book's own index: where its parts are, and the order they are read in.
 pub fn book(path: &Path) -> Result<Book, String> {
     let mut zip = open(path)?;
-    let container = read_entry(&mut zip, "META-INF/container.xml", MOST_CHAPTER_BYTES)?;
+    let (package, index) = package(&mut zip)?;
+    read_book(&mut zip, &package, &index)
+}
+
+/// The book's index file: its name inside the archive, and its text.
+fn package(zip: &mut Zip) -> Result<(String, String), String> {
+    let container = read_entry(zip, "META-INF/container.xml", MOST_CHAPTER_BYTES)?;
     let container = String::from_utf8_lossy(&container);
     let mut reader = Reader::from_str(&container);
     let mut package = None;
@@ -275,9 +436,12 @@ pub fn book(path: &Path) -> Result<Book, String> {
         }
     }
     let package = package.ok_or("This book has no index")?;
-    let index = read_entry(&mut zip, &package, MOST_CHAPTER_BYTES)?;
-    let index = String::from_utf8_lossy(&index);
-    let mut reader = Reader::from_str(&index);
+    let index = read_entry(zip, &package, MOST_CHAPTER_BYTES)?;
+    Ok((package, String::from_utf8_lossy(&index).into_owned()))
+}
+
+fn read_book(zip: &mut Zip, package: &str, index: &str) -> Result<Book, String> {
+    let mut reader = Reader::from_str(index);
     let (mut title, mut in_title) = (String::new(), false);
     let mut items = Vec::new();
     let mut order = Vec::new();
@@ -292,7 +456,7 @@ pub fn book(path: &Path) -> Result<Book, String> {
                 "item" => {
                     if let (Some(id), Some(href)) = (attribute(&start, "id"), attribute(&start, "href")) {
                         if attribute(&start, "properties").is_some_and(|properties| properties.split(' ').any(|one| one == "nav")) {
-                            nav = Some(resolve(&package, &href));
+                            nav = Some(resolve(package, &href));
                         }
                         items.push((id, href));
                     }
@@ -307,17 +471,17 @@ pub fn book(path: &Path) -> Result<Book, String> {
     }
     // Only chapters that can be read count: there, small enough, and not locked. A book with none
     // shows as the archive it is.
-    let locked = locked(&mut zip);
+    let locked = locked(zip);
     let chapters: Vec<String> = order
         .iter()
         .filter_map(|id| items.iter().find(|(item, _)| item == id))
-        .map(|(_, href)| resolve(&package, href))
+        .map(|(_, href)| resolve(package, href))
         .filter(|name| !locked.contains(name) && zip.by_name(name).is_ok_and(|entry| entry.size() <= MOST_CHAPTER_BYTES))
         .collect();
-    let ncx = ncx_id.and_then(|id| items.iter().find(|(item, _)| *item == id)).map(|(_, href)| resolve(&package, href));
+    let ncx = ncx_id.and_then(|id| items.iter().find(|(item, _)| *item == id)).map(|(_, href)| resolve(package, href));
     // A book with a broken contents page still reads, just without it.
     let contents = match nav.or(ncx) {
-        Some(file) => read_entry(&mut zip, &file, MOST_CHAPTER_BYTES)
+        Some(file) => read_entry(zip, &file, MOST_CHAPTER_BYTES)
             .map(|source| contents_of(&file, &String::from_utf8_lossy(&source), &chapters))
             .unwrap_or_default(),
         None => Vec::new(),
@@ -553,10 +717,65 @@ mod tests {
     #[test]
     fn a_text_file_inside_reads_without_its_mark_and_anything_else_does_not() {
         let path = archive("look.zip", &[("notes/a.txt", b"\xEF\xBB\xBFhello"), ("b.bin", b"\x00\x01\x02")]);
-        assert_eq!(text(&path, "notes/a.txt").unwrap().as_deref(), Some("hello"));
-        assert_eq!(text(&path, "b.bin").unwrap(), None);
-        assert!(text(&path, "gone.txt").is_err());
+        assert_eq!(text(&path, "notes/a.txt", None).unwrap().as_deref(), Some("hello"));
+        assert_eq!(text(&path, "b.bin", None).unwrap(), None);
+        assert!(text(&path, "gone.txt", None).is_err());
+        assert_eq!(test(&path, None).unwrap(), Tested { sound: 2, damaged: vec![], locked: 0 });
+        let folder = std::env::temp_dir().join(format!("perli-inside-out-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let out = take_out(&path, "notes/a.txt", None, &folder).unwrap();
+        assert_eq!(out, folder.join("a.txt"));
+        assert_eq!(std::fs::read(&out).unwrap(), b"\xEF\xBB\xBFhello");
+        std::fs::remove_dir_all(folder).unwrap();
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn a_locked_file_opens_with_its_password_only() {
+        use zip::unstable::write::FileOptionsExt;
+        let path = std::env::temp_dir().join(format!("perli-inside-{}-locked.zip", std::process::id()));
+        let mut zip = ZipWriter::new(File::create(&path).unwrap());
+        zip.start_file("secret.txt", SimpleFileOptions::default().with_deprecated_encryption(b"open sesame").unwrap()).unwrap();
+        zip.write_all(b"treasure").unwrap();
+        zip.start_file("plain.txt", SimpleFileOptions::default()).unwrap();
+        zip.write_all(b"plain").unwrap();
+        zip.finish().unwrap();
+
+        let (list, _) = entries(&path).unwrap();
+        assert_eq!(list.iter().map(|entry| entry.locked).collect::<Vec<_>>(), [true, false]);
+        assert!(text(&path, "secret.txt", None).is_err());
+        assert_eq!(text(&path, "secret.txt", Some("open sesame")).unwrap().as_deref(), Some("treasure"));
+        // Some wrong passwords get past the one-byte check, and the checksum has to catch them.
+        let mut zip = open(&path).unwrap();
+        let lucky = (0..5000).map(|n| format!("wrong {n}")).find(|tried| zip.by_name_decrypt("secret.txt", tried.as_bytes()).is_ok()).unwrap();
+        assert_eq!(text(&path, "secret.txt", Some(&lucky)), Err(WRONG_PASSWORD.to_string()));
+        assert_eq!(text(&path, "secret.txt", Some("nope")), Err(WRONG_PASSWORD.to_string()));
+        assert_eq!(reason(ZipError::UnsupportedArchive("AES encrypted files cannot be decrypted without the aes-crypto feature.")), AES_LOCKED);
+        assert_eq!(test(&path, None).unwrap(), Tested { sound: 1, damaged: vec![], locked: 1 });
+        assert_eq!(test(&path, Some("open sesame")).unwrap(), Tested { sound: 2, damaged: vec![], locked: 0 });
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn a_book_names_its_cover_three_ways() {
+        let container: &[u8] = br#"<container><rootfiles><rootfile full-path="OEBPS/content.opf"/></rootfiles></container>"#;
+        let cover_of = |name: &str, package: &str| {
+            let files: [(&str, &[u8]); 2] = [("META-INF/container.xml", container), ("OEBPS/content.opf", package.as_bytes())];
+            let path = archive(name, &files);
+            let found = book_cover(&mut open(&path).unwrap());
+            std::fs::remove_file(path).unwrap();
+            found
+        };
+        let marked = r#"<package><manifest><item id="a" href="img/a.jpg" media-type="image/jpeg"/>
+            <item id="b" href="img/b.jpg" media-type="image/jpeg" properties="cover-image"/></manifest></package>"#;
+        assert_eq!(cover_of("c1.epub", marked).as_deref(), Some("OEBPS/img/b.jpg"));
+        let noted = r#"<package><metadata><meta name="cover" content="a"/></metadata><manifest>
+            <item id="x" href="img/x.jpg" media-type="image/jpeg"/><item id="a" href="img/a.jpg" media-type="image/jpeg"/></manifest></package>"#;
+        assert_eq!(cover_of("c2.epub", noted).as_deref(), Some("OEBPS/img/a.jpg"));
+        let named = r#"<package><manifest><item id="x" href="one.xhtml" media-type="application/xhtml+xml"/>
+            <item id="y" href="Cover.png" media-type="image/png"/></manifest></package>"#;
+        assert_eq!(cover_of("c3.epub", named).as_deref(), Some("OEBPS/Cover.png"));
+        assert_eq!(cover_of("c4.epub", "<package><manifest/></package>"), None);
     }
 
     #[test]
@@ -662,10 +881,12 @@ mod tests {
         ];
         let path = archive("comic.cbz", &files);
         assert_eq!(pages(&path).unwrap(), ["p2.bmp", "p10.bmp", "sub/p1.bmp"]);
-        let bytes = picture(&path, "p2.bmp", 100).unwrap();
+        let bytes = picture(&path, "p2.bmp", 100, None).unwrap();
         assert_eq!(&bytes[..8], &[2, 0, 0, 0, 1, 0, 0, 0]);
         assert_eq!(&bytes[8..], &[255, 0, 0, 255, 0, 0, 255, 255]);
-        assert!(picture(&path, "notes.txt", 100).is_err());
+        assert!(picture(&path, "notes.txt", 100, None).is_err());
+        assert_eq!(cover(&path, 100).unwrap(), bytes, "a comic's cover is its first page");
+        assert!(has_cover(&path) && !has_cover(Path::new("a.zip")));
         let (list, more) = entries(&path).unwrap();
         assert_eq!((list.len(), more), (5, false));
         assert_eq!((list[0].name.as_str(), list[0].size, list[0].folder), ("p10.bmp", bmp.len() as u64, false));

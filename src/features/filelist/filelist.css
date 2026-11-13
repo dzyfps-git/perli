@@ -899,3 +899,14 @@ html[data-blurred] :is(.empty-float, .empty-shadow) {
 .hover-card[data-pinned] .hover-card-text {
   overflow: auto;
 }
+
+/* A book or comic part read: a thin bar along the bottom of its icon. */
+.file-icon[data-read]::after {
+  content: "";
+  position: absolute;
+  inset: auto auto 0 0;
+  width: calc(var(--read) * 100%);
+  height: 2px;
+  border-radius: 1px;
+  background: var(--accent);
+}

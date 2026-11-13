@@ -139,6 +139,11 @@ pub fn is_online_only(path: &Path) -> bool {
 /// Its own picture if it has one, or else the icon of its type, unless `own` asks for its own
 /// picture only. A file in the cloud stays there, so it only gets a picture Windows already has.
 fn picture(path: &Path, edge: i32, own: bool) -> Result<Vec<u8>> {
+    // Windows draws no cover for a book or a comic, so theirs are read from the file. One with
+    // no cover keeps Perli's own icon.
+    if crate::inside::has_cover(path) && !is_online_only(path) {
+        return crate::inside::cover(path, edge as u32).ok_or_else(|| windows::Win32::Foundation::E_FAIL.into());
+    }
     let factory: IShellItemImageFactory = shell_item(path)?.cast()?;
     let size = SIZE { cx: edge, cy: edge };
     let first = match (is_online_only(path), own) {
