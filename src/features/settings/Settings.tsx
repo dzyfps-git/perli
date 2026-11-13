@@ -66,7 +66,7 @@ import {
   type Backdrop,
   type Theme,
 } from "./appearance";
-import { missingTags, packed, settingsOf, storageKey, unpacked } from "./backup";
+import { missingTags, packed, remapTags, settingsOf, staleSettings, storageKey, unpacked } from "./backup";
 import { type Palette } from "./palettes";
 import { fitsSearch } from "./search";
 import {
@@ -150,6 +150,8 @@ export function Settings(props: {
   const [backupNote, setBackupNote] = createSignal<string>();
   const [hidden, setHidden] = createSignal<SectionId[]>([]);
   const [current, setCurrent] = createSignal<SectionId>("look");
+  // Closing drops the page and its empty search box, so a search's hidden parts go with it.
+  createEffect(on(() => props.open, (open) => open || setHidden([])));
   /** What the pointer is over, which the small window tries on. */
   const [tryTheme, setTryTheme] = createSignal<Theme>();
   const [tryAccent, setTryAccent] = createSignal<Accent>();
@@ -248,7 +250,7 @@ export function Settings(props: {
   async function saveBackup() {
     try {
       const prefs = settingsOf(Object.entries(localStorage));
-      const tags = (await listTags()).map(({ name, color }) => ({ name, color }));
+      const tags = (await listTags()).map(({ name, color, id }) => ({ name, color, id }));
       if (await exportSettings(packed({ prefs, tags }))) setBackupNote("Settings saved.");
     } catch (failure) {
       setBackupNote(String(failure));
@@ -260,8 +262,12 @@ export function Settings(props: {
     try {
       const text = await importSettings();
       if (text === null) return;
-      const { prefs, tags } = unpacked(text);
+      const { prefs: saved, tags } = unpacked(text);
       for (const tag of missingTags(tags, await listTags())) await createTag(tag.name, tag.color);
+      const prefs = remapTags(saved, tags, await listTags());
+      // A setting the file lacks was at its start value when saved, so it goes back to that.
+      const current = settingsOf(Object.entries(localStorage));
+      for (const name of staleSettings(current, prefs)) localStorage.removeItem(storageKey(name));
       for (const [name, value] of Object.entries(prefs)) localStorage.setItem(storageKey(name), value);
       await props.onBeforeUpdate();
       location.reload();

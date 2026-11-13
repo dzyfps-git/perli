@@ -38,6 +38,7 @@ impl Run<'_> {
         };
         if stat.is_folder() {
             let Some(entries) = self.attempt(path, None, |_| sys::read_dir(path))? else {
+                self.unread.push(path.to_path_buf());
                 return Ok(None);
             };
             let mut children = Vec::with_capacity(entries.len());
@@ -71,6 +72,8 @@ impl Run<'_> {
                 nodes.push(node);
             }
         }
+        // A delete has no "try again".
+        self.unread.clear();
         Ok(nodes)
     }
 
