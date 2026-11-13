@@ -3,8 +3,8 @@ import { expandPath, isFile, openFile, type SearchScope } from "../../api";
 import { ariaKeys } from "../keys/keybinds";
 import { looksLikeName, readTyped } from "../reach/lists";
 import type { Layout } from "../filelist/layout";
-import { showHidden } from "../filelist/prefs";
-import type { FolderView } from "../navigation/folderView";
+import { forgetSearch, recentSearches, rememberSearch, showHidden } from "../filelist/prefs";
+import { FLAT_QUERY, type FolderView } from "../navigation/folderView";
 import { isBin, toCrumbs, typedPath } from "../navigation/path";
 import { lookOf } from "../sidebar/saved";
 import { tagColor } from "../tags/tags";
@@ -20,6 +20,8 @@ const ICON_SHOWN = "\uE7B3";
 const ICON_HIDDEN = "\uED1A";
 const ICON_FILTER = "\uE71C";
 const ICON_CHEVRON = "\uE76C";
+
+const ICON_FORGET = "";
 
 /** The color a folder wears, which its crumb takes on too. */
 function lookColor(path: string) {
@@ -75,6 +77,11 @@ export function PathBar(props: {
   let list!: HTMLOListElement;
   let searchBox!: HTMLInputElement;
   let searchTimer: number | undefined;
+  /** The recent searches show under the box while it is focused and empty. */
+  const [recentOpen, setRecentOpen] = createSignal(false);
+  /** The recent search the arrow keys are on, or -1 for none. */
+  const [recentAt, setRecentAt] = createSignal(-1);
+  const recents = () => (recentOpen() ? recentSearches() : []);
 
   // Narrow panes clip the crumbs, and the current folder must stay visible.
   function revealCurrent() {
@@ -179,18 +186,50 @@ export function PathBar(props: {
 
   function onSearchInput() {
     window.clearTimeout(searchTimer);
+    setRecentOpen(!searchBox.value);
+    setRecentAt(-1);
     searchTimer = window.setTimeout(() => props.view.search(searchBox.value), SEARCH_WAIT_MS);
   }
 
+  /** A search the user moved on from is one worth offering again. */
+  function keepSearch() {
+    const text = searchBox.value.trim();
+    if (text && text !== FLAT_QUERY) rememberSearch(text);
+  }
+
+  function searchAgain(text: string) {
+    window.clearTimeout(searchTimer);
+    searchBox.value = text;
+    setRecentOpen(false);
+    props.view.search(text);
+    rememberSearch(text);
+  }
+
   function onSearchKey(event: KeyboardEvent) {
-    if (event.key === "Escape") {
+    const offered = recents();
+    const step = event.key === "ArrowDown" ? 1 : event.key === "ArrowUp" ? -1 : 0;
+    if (event.key === "Escape" && offered.length > 0) {
+      event.stopPropagation();
+      setRecentOpen(false);
+    } else if (event.key === "Escape") {
       event.stopPropagation();
       window.clearTimeout(searchTimer);
       searchBox.value = "";
       props.view.search("");
       focusList();
+    } else if (step && offered.length > 0) {
+      event.preventDefault();
+      setRecentAt(((recentAt() + 1 + step + offered.length + 1) % (offered.length + 1)) - 1);
+    } else if (event.key === "Enter" && offered[recentAt()]) {
+      event.preventDefault();
+      searchAgain(offered[recentAt()]);
+    } else if (event.key === "Delete" && offered[recentAt()] && !searchBox.value) {
+      event.preventDefault();
+      forgetSearch(offered[recentAt()]);
+      setRecentAt(Math.min(recentAt(), recentSearches().length - 1));
     } else if (event.key === "Enter" || event.key === "ArrowDown") {
       event.preventDefault();
+      keepSearch();
       focusList();
     }
   }
@@ -340,9 +379,10 @@ export function PathBar(props: {
       </Show>
       <button
         class="nav-button filter-button"
-        aria-label="Filter"
+        aria-label="Quick filters"
         aria-keyshortcuts={ariaKeys("filter")}
         aria-pressed={props.view.filtered()}
+        aria-expanded={props.view.chipsShown()}
         onClick={props.onFilter}
       >
         {ICON_FILTER}
@@ -350,19 +390,64 @@ export function PathBar(props: {
       <span class="search-status" aria-live="polite">
         {searchStatus()}
       </span>
-      <input
-        ref={searchBox}
-        class="search-input"
-        aria-label="Search this folder"
-        aria-keyshortcuts={ariaKeys("search")}
-        placeholder="Search"
-        spellcheck={false}
-        hidden={props.view.isBin()}
-        value={props.view.query()}
-        onInput={onSearchInput}
-        onKeyDown={onSearchKey}
-        onContextMenu={props.onInputMenu}
-      />
+      <div class="search-field" hidden={props.view.isBin()}>
+        <input
+          ref={searchBox}
+          class="search-input"
+          role="combobox"
+          aria-label="Search this folder"
+          aria-keyshortcuts={ariaKeys("search")}
+          aria-expanded={recents().length > 0}
+          aria-controls={`search-recents-${props.view.id}`}
+          aria-activedescendant={recentAt() >= 0 ? `search-recent-${props.view.id}-${recentAt()}` : undefined}
+          placeholder="Search"
+          spellcheck={false}
+          value={props.view.query()}
+          onInput={onSearchInput}
+          onKeyDown={onSearchKey}
+          onContextMenu={props.onInputMenu}
+          onFocus={() => setRecentOpen(!searchBox.value)}
+          onBlur={() => {
+            setRecentOpen(false);
+            setRecentAt(-1);
+            keepSearch();
+          }}
+        />
+        <Show when={recents().length > 0}>
+          <ul id={`search-recents-${props.view.id}`} class="path-offers search-recents" role="listbox" aria-label="Recent searches">
+            <li class="search-recents-title" role="presentation">
+              Recent searches
+            </li>
+            <For each={recents()}>
+              {(text, at) => (
+                <li
+                  id={`search-recent-${props.view.id}-${at()}`}
+                  class="path-offer"
+                  role="option"
+                  aria-selected={at() === recentAt()}
+                  onPointerMove={() => setRecentAt(at())}
+                  // The box keeps the focus, or its blur would close this first.
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={() => searchAgain(text)}
+                >
+                  <span class="path-offer-label">{text}</span>
+                  <button
+                    class="search-recent-forget"
+                    tabIndex={-1}
+                    aria-label={`Forget “${text}”`}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      forgetSearch(text);
+                    }}
+                  >
+                    {ICON_FORGET}
+                  </button>
+                </li>
+              )}
+            </For>
+          </ul>
+        </Show>
+      </div>
       <Show when={props.view.query()}>
         <div class="scope-pill" role="radiogroup" aria-label="Where to search">
           <For each={SCOPES}>

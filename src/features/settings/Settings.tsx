@@ -26,6 +26,8 @@ import {
   setSelectionBar,
   setStatusBar,
   setWindowsIcons,
+  showHidden,
+  showSystem,
   statusBar,
   windowsIcons,
   type DateForm,
@@ -131,6 +133,7 @@ export function Settings(props: {
   shown: boolean;
   onClose: () => void;
   onToggleSizes: () => void;
+  onToggleSystem: () => void;
   onTagsChanged: () => void;
   onDeleteTag: (tag: Tag) => void;
   /** Saves what must survive Perli ending for an update. */
@@ -550,6 +553,12 @@ export function Settings(props: {
               note="The Size column fills in as Perli walks each folder you open. Links are not followed, and cloud files stay in the cloud."
               checked={folderSizes()}
               onChange={props.onToggleSizes}
+            />
+            <Switch
+              label="Show protected system files"
+              note="Windows keeps these out of sight even when hidden files show, because changing them can stop it from starting. They come with hidden files, faded and with a lock."
+              checked={showHidden() && showSystem()}
+              onChange={props.onToggleSystem}
             />
             <h4>Copying</h4>
             <Switch

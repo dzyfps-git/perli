@@ -285,7 +285,7 @@
     flex: 1 1 calc(100% - 124px);
   }
 
-  .search-input {
+  .search-field {
     flex: 1 1 80px;
     margin-left: 0;
   }
@@ -398,4 +398,198 @@
 
 .crumb[data-look]:hover {
   background: color-mix(in srgb, var(--look-color) 14%, var(--surface-hover));
+}
+
+/* Quick filters: a row of soft chips under the path bar, each one tap. */
+.filter-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-1) var(--space-3) var(--space-2);
+  border-bottom: 1px solid var(--border);
+  animation: filter-chips-in 320ms var(--spring);
+}
+
+@keyframes filter-chips-in {
+  from {
+    opacity: 0;
+    translate: 0 -8px;
+  }
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  height: 24px;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 12px;
+  white-space: nowrap;
+  transition:
+    background var(--motion),
+    color var(--motion),
+    border-color var(--motion),
+    scale 320ms var(--spring);
+}
+
+.chip:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.chip:active {
+  scale: 0.94;
+}
+
+.chip[aria-pressed="true"] {
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  background: var(--surface-selected);
+  color: var(--text);
+}
+
+.chip:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.chip-icon {
+  justify-content: center;
+  width: 24px;
+  padding: 0;
+  font-family: var(--font-icons);
+  font-size: 11px;
+}
+
+.chip-clear:hover {
+  color: var(--danger);
+}
+
+.chip-gap {
+  width: 1px;
+  height: 14px;
+  margin: 0 var(--space-1);
+  background: var(--border);
+}
+
+.chip-since {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.chip-since .date-field {
+  height: 24px;
+  border-radius: 999px;
+}
+
+.chip-since .date-field input {
+  width: 86px;
+  font-size: 12px;
+}
+
+.chip-count {
+  margin-left: var(--space-1);
+  color: var(--text-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .filter-chips {
+    animation: none;
+  }
+
+  .chip:active {
+    scale: none;
+  }
+}
+
+/* The searches made lately, under the empty search box. */
+.search-field {
+  position: relative;
+  display: flex;
+  flex: 0 1 180px;
+  min-width: 80px;
+  margin-left: var(--space-2);
+}
+
+.search-field[hidden] {
+  display: none;
+}
+
+.search-field .search-input {
+  flex: 1;
+  min-width: 0;
+  margin-left: 0;
+}
+
+.search-recents {
+  inset: calc(100% + 4px) auto auto 0;
+  width: max(100%, 240px);
+}
+
+.search-recents-title {
+  padding: 4px var(--space-2) 2px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.search-recent-forget {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  font: 9px / 1 var(--font-icons);
+  opacity: 0;
+  transition: opacity var(--motion);
+}
+
+.path-offer:hover .search-recent-forget,
+.path-offer[aria-selected="true"] .search-recent-forget {
+  opacity: 1;
+}
+
+.search-recent-forget:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+/* Select by pattern: the rows behind light up as it is typed. */
+.pattern-label {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.pattern-input {
+  flex: 0 1 220px;
+  min-width: 100px;
+  height: 24px;
+  padding: 0 var(--space-2);
+  border: 0;
+  border-radius: 999px;
+  background: var(--surface-hover);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  caret-color: var(--accent);
+  user-select: text;
+}
+
+.pattern-input:focus {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.pattern-end {
+  flex: 1;
 }

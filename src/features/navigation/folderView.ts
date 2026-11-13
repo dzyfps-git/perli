@@ -20,11 +20,14 @@ import {
   inlineFolders,
   lastLayout,
   lastSort,
+  rememberedFilter,
   rememberedSort,
+  rememberFilter,
   rememberSort,
   setLastLayout,
   setLastSort,
   showHidden,
+  showSystem,
 } from "../filelist/prefs";
 import type { SavedPane } from "../tabs/session";
 import { isBin, nextTrail, parentOf, samePath } from "./path";
@@ -111,8 +114,12 @@ export function createFolderView(id: number, saved?: SavedPane) {
   const [searchAsked, setSearchAsked] = createSignal(0);
   /** How far from the folder a search looks. */
   const [scope, setScopeValue] = createSignal<SearchScope>("below");
-  /** Stays with the folder until the view goes to another one. */
+  /** Stays with the folder until the view goes to another one, unless the user pinned it there. */
   const [filterForm, setFilterFormValue] = createSignal(NO_FILTER);
+  /** The row of filter chips under the path bar, which a search shows too. */
+  const [chipsOpen, setChipsOpen] = createSignal(false);
+  /** A search reads small text files too. */
+  const [inside, setInsideValue] = createSignal(false);
   /** Folders opened in place, whose rows show under them. They last until the view goes elsewhere. */
   const [expanded, setExpanded] = createSignal<string[]>([]);
   /** The one row selected in the list, for the details panel. */
@@ -125,8 +132,9 @@ export function createFolderView(id: number, saved?: SavedPane) {
   let reloadLater: ReadAgain | undefined;
   let list: ListHandle | undefined;
   let savedOpened = false;
-  /** Whether the search walked hidden folders. */
-  let walkedHidden = false;
+  /** Which folders the user chose not to see the search walked, as hidden and system. */
+  let walkedSight = "";
+  const sight = () => `${showHidden()} ${showSystem()}`;
 
   /** Only the list with its arrows shows folders opened in place, and can close them again. */
   const nests = () => layout() === "list" && inlineFolders();
@@ -140,6 +148,7 @@ export function createFolderView(id: number, saved?: SavedPane) {
     ...shownSort(),
     group: query() || isBin(target) ? "mixed" : grouping(),
     showHidden: showHidden(),
+    showSystem: showSystem(),
     // Rows of a search carry no tags, so a tag would leave none of them.
     filter: { ...toFilter(filterForm()), tags: query() ? [] : filterForm().tags },
     expanded: query() || isBin(target) || !nests() ? [] : expanded(),
@@ -149,6 +158,7 @@ export function createFolderView(id: number, saved?: SavedPane) {
     ...wanted,
     group: isBin(target) ? "mixed" : grouping(),
     showHidden: showHidden(),
+    showSystem: showSystem(),
     filter: toFilter(form),
     expanded: samePath(path(), target) && !isBin(target) && nests() ? expanded() : [],
   });
@@ -200,7 +210,8 @@ export function createFolderView(id: number, saved?: SavedPane) {
     const searched = query();
     const request = ++latestRequest;
     const folderSort = arrivalSort(target);
-    const form = samePath(path(), target) ? filterForm() : NO_FILTER;
+    // Only a folder already open has a form of its own. A restored one reads its pinned filter.
+    const form = samePath(folder()?.path, target) ? filterForm() : (rememberedFilter(target) ?? NO_FILTER);
     opening = true;
     try {
       const wanted = openingOrder(target, folderSort ?? sort(), form);
@@ -215,6 +226,7 @@ export function createFolderView(id: number, saved?: SavedPane) {
         }
         if (folderSort) setSortValue(folderSort);
         setFilterFormValue(form);
+        if (filterActive(form)) setChipsOpen(true);
         if (!samePath(path(), opened.path)) setExpanded([]);
         show(opened);
       });
@@ -244,13 +256,13 @@ export function createFolderView(id: number, saved?: SavedPane) {
 
     // Rows of a search have no names to go by, because one name can be in many folders.
     const { top, step } = wanted;
-    const search = query() ? { step, query: query(), scope: scope() } : null;
+    const search = query() ? { step, query: query(), scope: scope(), inside: inside() } : null;
     const select = search ? [] : wanted.select;
     const request = ++latestRequest;
     opening = true;
     if (search && step !== "grown") {
       setWalk("going");
-      walkedHidden = showHidden();
+      walkedSight = sight();
     }
     try {
       const reloaded = await reloadView(
@@ -302,6 +314,26 @@ export function createFolderView(id: number, saved?: SavedPane) {
     if (query()) readAgain({ select: [], rename: false, step: "start", top: true });
   }
 
+  function setInside(next: boolean) {
+    setInsideValue(next);
+    if (query()) readAgain({ select: [], rename: false, step: "start", top: true });
+  }
+
+  /** Whether the shown folder opens with its filter each time. */
+  const filterPinned = () => {
+    const shown = folder()?.path;
+    return !!shown && !query() && rememberedFilter(shown) !== undefined;
+  };
+
+  /** A pinned filter follows each change. One cleared away is unpinned with it. */
+  function setFilterForm(form: typeof NO_FILTER) {
+    const shown = folder()?.path;
+    if (shown && filterPinned()) rememberFilter(shown, filterActive(form) ? form : undefined);
+    setFilterFormValue(form);
+    if (filterActive(form)) setChipsOpen(true);
+    rearrange();
+  }
+
   function searchGrew(walked: SearchWalk) {
     if (!query()) return;
     setWalk(walked);
@@ -318,7 +350,7 @@ export function createFolderView(id: number, saved?: SavedPane) {
     const current = folder();
     if (!current) return;
     // A search found no rows in hidden folders unless it walked them.
-    if (query() && showHidden() !== walkedHidden) return reload();
+    if (query() && sight() !== walkedSight) return reload();
 
     const request = ++latestRequest;
     try {
@@ -433,12 +465,20 @@ export function createFolderView(id: number, saved?: SavedPane) {
     },
     scanFolder,
     searchAsked,
+    inside,
+    setInside,
     filterForm,
     filtered: () => filterActive(filterForm()),
-    setFilterForm(form: typeof NO_FILTER) {
-      setFilterFormValue(form);
-      rearrange();
+    setFilterForm,
+    filterPinned,
+    /** Keeps the filter for the shown folder, so it comes back each time the folder opens. */
+    pinFilter(on: boolean) {
+      const shown = folder()?.path;
+      if (shown) rememberFilter(shown, on && filterActive(filterForm()) ? filterForm() : undefined);
     },
+    /** A search has kind, size and date to narrow it as well, so the chips come with it. */
+    chipsShown: () => chipsOpen() || !!query(),
+    toggleChips: () => setChipsOpen(!chipsOpen()),
     /** A filter must not go on asking for a tag that is gone. */
     forgetTag(id: number) {
       const form = filterForm();

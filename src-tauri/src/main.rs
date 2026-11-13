@@ -392,8 +392,11 @@ struct Opened {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct Arranged {
     count: usize,
+    /// The system switch changes what the hidden switch would show.
+    hidden_count: usize,
     /// The rows the UI had selected, at their new positions.
     selected: Vec<u32>,
 }
@@ -602,6 +605,7 @@ async fn arrange_view(
         let listing = before.clone().arranged(order);
         let arranged = Arranged {
             count: listing.len(),
+            hidden_count: listing.hidden_count(),
             selected: listing.carried_rows(&before, &selected),
         };
         (listing, arranged)
@@ -1660,6 +1664,13 @@ fn rows_matching(view: u32, request: u64, pattern: String, views: State<'_, View
     views.read(&selection, |listing, _| listing.matching(&pattern))
 }
 
+/// The rows that fit `filter`, for picking all of one kind, tag or day.
+#[tauri::command]
+fn rows_where(view: u32, request: u64, filter: folder::Filter, views: State<'_, Views>) -> Result<Vec<u32>, String> {
+    let selection = Selection { view, request, rows: Vec::new() };
+    views.read(&selection, |listing, _| listing.fitting(&filter))
+}
+
 /// Adds up the folders in `path`, and says so as totals come in.
 #[tauri::command]
 fn scan_sizes(view: u32, path: PathBuf, scans: State<'_, Scans>, app: AppHandle) {
@@ -1714,8 +1725,9 @@ async fn own_templates() -> Vec<String> {
 
 /// The folders inside one, for a path crumb's menu.
 #[tauri::command]
-async fn subfolders(path: PathBuf, show_hidden: bool) -> Result<Vec<String>, String> {
-    blocking(move || folder::subfolders(&path, show_hidden).map_err(|error| error.to_string())).await
+async fn subfolders(path: PathBuf, show_hidden: bool, show_system: bool) -> Result<Vec<String>, String> {
+    let sight = folder::Sight { hidden: show_hidden, system: show_system };
+    blocking(move || folder::subfolders(&path, sight).map_err(|error| error.to_string())).await
 }
 
 #[tauri::command]
@@ -2062,6 +2074,7 @@ fn main() {
             keep_on_device,
             common_tags,
             rows_matching,
+            rows_where,
             selection_size,
             windows_accent,
             scan_sizes,

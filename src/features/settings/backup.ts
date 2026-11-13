@@ -65,6 +65,13 @@ const TAG_HOLDERS: Record<string, (value: unknown, map: (ids: number[]) => numbe
     Array.isArray(list)
       ? list.map((smart) => (Array.isArray(smart?.filter?.tags) ? { ...smart, filter: { ...smart.filter, tags: map(smart.filter.tags) } } : smart))
       : list,
+  // Filters pinned to folders, keyed by folder.
+  "folder-filters": (forms, map) =>
+    forms && typeof forms === "object" && !Array.isArray(forms)
+      ? Object.fromEntries(
+          Object.entries(forms).map(([folder, form]) => [folder, Array.isArray(form?.tags) ? { ...form, tags: map(form.tags) } : form]),
+        )
+      : forms,
 };
 
 /**

@@ -2,6 +2,7 @@ import { createSignal } from "solid-js";
 import type { Grouping, Sort, SortKey } from "../../api";
 import { movedColumn, restoreColumns, type Column } from "./columns";
 import type { Layout } from "./layout";
+import { NO_FILTER, type FilterForm } from "./filter";
 import { folderKey, remembered, type SortMemory } from "./sortMemory";
 
 export function saved(key: string): unknown {
@@ -23,6 +24,8 @@ export function stored<T>(key: string, start: T) {
 
 export const [columns, setColumns] = stored<Column[]>("columns", restoreColumns(saved("columns")));
 export const [showHidden, setShowHidden] = stored("show-hidden", saved("show-hidden") === true);
+/** Windows' own protected files. They only show with hidden files too. */
+export const [showSystem, setShowSystem] = stored("show-system", saved("show-system") === true);
 export const [grouping, setGrouping] = stored<Grouping>(
   "grouping",
   (saved("grouping") as Grouping | null) ?? "foldersFirst",
@@ -84,6 +87,37 @@ export const rememberSort = (path: string, sort: Sort) => setSortMemory(remember
 
 /** Every folder goes back to the sort new panes start with. */
 export const forgetSorts = () => setSortMemory({});
+
+/** Filters the user pinned to a folder, as typed, so they come back each time it opens. */
+const [filterMemory, setFilterMemory] = stored<Record<string, FilterForm>>(
+  "folder-filters",
+  (saved("folder-filters") as Record<string, FilterForm> | null) ?? {},
+);
+
+/** Old saved forms may lack newer parts. */
+export const rememberedFilter = (path: string): FilterForm | undefined => {
+  const form = filterMemory()[folderKey(path)];
+  return form && { ...NO_FILTER, ...form };
+};
+
+/** No form unpins it. */
+export const rememberFilter = (path: string, form: FilterForm | undefined) =>
+  setFilterMemory(remembered(filterMemory(), path, form));
+
+const MAX_RECENT_SEARCHES = 8;
+
+export const [recentSearches, setRecentSearches] = stored<string[]>(
+  "recent-searches",
+  (saved("recent-searches") as string[] | null) ?? [],
+);
+
+/** Newest first, each once whatever its case. */
+export function rememberSearch(text: string) {
+  const others = recentSearches().filter((other) => other.toLowerCase() !== text.toLowerCase());
+  setRecentSearches([text, ...others].slice(0, MAX_RECENT_SEARCHES));
+}
+
+export const forgetSearch = (text: string) => setRecentSearches(recentSearches().filter((other) => other !== text));
 
 export const moveColumn = (id: SortKey, target: SortKey) => setColumns(movedColumn(columns(), id, target));
 

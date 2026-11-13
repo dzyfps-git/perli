@@ -255,9 +255,77 @@
   text-overflow: ellipsis;
 }
 
+/* Hidden rows look ghosted: see-through and drained of color. Windows' own files fade further and wear a lock. */
 .file-row[data-hidden] .file-name,
 .file-row[data-hidden] .file-icon {
   opacity: 55%;
+}
+
+.file-row[data-hidden] .file-icon {
+  filter: grayscale(0.7);
+}
+
+.file-row[data-hidden] .file-meta {
+  opacity: 70%;
+}
+
+.file-row[data-system] .file-name,
+.file-row[data-system] .file-icon {
+  opacity: 42%;
+}
+
+.file-row[data-system] .file-name::after {
+  content: "\E72E";
+  margin-left: 6px;
+  font: 10px / 1 var(--font-icons);
+}
+
+/* What typing looks for, in a soft bubble that fades once the pause starts it over. */
+.type-bubble {
+  position: absolute;
+  inset: auto auto 44px 50%;
+  z-index: 4;
+  min-width: 32px;
+  margin: 0;
+  padding: 4px 14px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--overlay-tint);
+  box-shadow: var(--shadow);
+  color: var(--text);
+  font-size: 15px;
+  text-align: center;
+  white-space: pre;
+  backdrop-filter: var(--blur);
+  opacity: 0;
+  translate: -50% 8px;
+  scale: 0.9;
+  pointer-events: none;
+  transition:
+    opacity 400ms ease-out,
+    translate 400ms var(--spring),
+    scale 400ms var(--spring),
+    color var(--motion);
+}
+
+.type-bubble-on {
+  opacity: 1;
+  translate: -50% 0;
+  scale: 1;
+  transition-duration: 120ms, 320ms, 320ms, 150ms;
+}
+
+.type-bubble[data-missed] {
+  color: var(--text-muted);
+  text-decoration: line-through color-mix(in srgb, var(--danger) 60%, transparent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .type-bubble {
+    translate: -50% 0;
+    scale: 1;
+    transition: opacity 200ms ease-out;
+  }
 }
 
 /* Marked to move on the next paste. */

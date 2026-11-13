@@ -1,84 +1,116 @@
 import { createSignal, onMount } from "solid-js";
 import { rowsMatching } from "../../api";
-import { openSheet } from "../../ui/sheet";
 import type { FolderView } from "../navigation/folderView";
-import "../settings/settings.css";
-import "../fileops/fileops.css";
 
-/** Selects the rows whose names fit a pattern, such as `*.jpg;*.png`, in place of the selection. */
+const ICON_CLOSE = "";
+
+/**
+ * A bar under the path bar that selects the rows whose names fit a pattern, such as
+ * `*.jpg;*.png`, as it is typed, so the list behind lights up. Enter keeps the selection and
+ * Escape puts the old one back. Invert takes the rows that don't fit, or with no pattern, the
+ * rows that weren't selected.
+ */
 export function SelectPattern(props: { view: FolderView; onClose: () => void }) {
-  const [pattern, setPattern] = createSignal("");
   const [count, setCount] = createSignal(0);
   const [failure, setFailure] = createSignal<string>();
-  let dialog!: HTMLDialogElement;
+  const [invert, setInvert] = createSignal(false);
+  const before = props.view.list()?.selection();
   let input!: HTMLInputElement;
   let latest = 0;
-  let close!: ReturnType<typeof openSheet>;
 
-  /** The rows that fit now. The folder may have reloaded behind the dialog. */
-  function rows(text: string) {
-    const request = props.view.folder()?.request;
-    return request === undefined || !text.trim() ? Promise.resolve([]) : rowsMatching(props.view.id, request, text);
+  /** The folder may have reloaded since the bar opened, and then the old rows mean nothing. */
+  const request = () => props.view.folder()?.request;
+  const beforeRows = () => (before && before.request === request() ? before.rows : []);
+
+  function others(rows: number[]) {
+    const kept = new Set(rows);
+    const all = props.view.folder()?.count ?? 0;
+    return Array.from({ length: all }, (_, row) => row).filter((row) => !kept.has(row));
   }
 
-  // An older answer must not cover a newer one, so each count knows its turn.
-  async function onInput() {
+  /** The newest match in flight, which Done waits for. */
+  let lighting: Promise<void> = Promise.resolve();
+  const light = () => (lighting = match());
+
+  // An older answer must not cover a newer one, so each one knows its turn.
+  async function match() {
     const turn = ++latest;
-    setPattern(input.value);
+    const text = input.value;
+    const shown = request();
     try {
-      const found = await rows(input.value);
+      const fit = text.trim() && shown !== undefined ? await rowsMatching(props.view.id, shown, text) : beforeRows();
       if (turn !== latest) return;
-      setCount(found.length);
+      const rows = invert() ? others(fit) : fit;
+      props.view.list()?.select(rows);
+      setCount(rows.length);
       setFailure(undefined);
     } catch (reason) {
       if (turn === latest) setFailure(String(reason));
     }
   }
 
-  async function confirm() {
-    try {
-      const found = await rows(pattern());
-      if (found.length === 0) return;
-      close(() => {
-        props.view.list()?.select(found);
-        props.view.list()?.focus();
-      });
-    } catch (reason) {
-      setFailure(String(reason));
-    }
+  let closing = false;
+  async function close(keep: boolean) {
+    if (closing) return;
+    closing = true;
+    // Done keeps what the last words typed select, even if their answer is still on its way.
+    if (keep) await lighting;
+    latest++;
+    if (!keep) props.view.list()?.select(beforeRows());
+    props.onClose();
+    props.view.list()?.focus();
   }
 
   onMount(() => {
-    close = openSheet(dialog);
+    setCount(beforeRows().length);
     input.focus();
   });
 
   return (
-    <dialog
-      ref={dialog}
-      class="settings confirm"
+    <div
+      class="filter-chips pattern-bar"
+      role="search"
       aria-label="Select by pattern"
-      onClose={props.onClose}
       onKeyDown={(event) => {
-        if (event.key === "Enter" && event.target instanceof HTMLInputElement) confirm();
+        if (event.key === "Escape") {
+          event.stopPropagation();
+          close(false);
+        } else if (event.key === "Enter" && event.target === input) {
+          event.preventDefault();
+          close(true);
+        }
       }}
     >
-      <h2>Select by pattern</h2>
-      <div class="rename-fields filter-one">
-        <label class="rename-field">
-          Names, such as *.jpg;*.png
-          <input ref={input} spellcheck={false} onInput={onInput} />
-        </label>
-      </div>
-      <p class="confirm-summary">{failure() ?? `${count().toLocaleString()} fit.`}</p>
-      <div class="confirm-buttons">
-        <button class="job-choice" onClick={() => close()}>
-          Cancel
-        </button>
-        <button class="job-choice" disabled={count() === 0} onClick={confirm}>
-          Select
-        </button>
-      </div>
-    </dialog>
+      <span class="pattern-label">Select</span>
+      <input
+        ref={input}
+        class="pattern-input"
+        aria-label="Names to select, such as *.jpg;*.png"
+        placeholder="*.jpg;*.png"
+        spellcheck={false}
+        onInput={light}
+      />
+      <button
+        class="chip"
+        aria-label="Select the rows that don't fit instead"
+        aria-pressed={invert()}
+        onClick={() => {
+          setInvert(!invert());
+          light();
+        }}
+      >
+        Invert
+      </button>
+      <span class="chip-count" aria-live="polite">
+        {failure() ?? `${count().toLocaleString()} selected`}
+      </span>
+      <span class="pattern-end" />
+      <button class="chip" aria-label="Keep this selection" onClick={() => close(true)}>
+        Done
+      </button>
+      <button class="chip chip-icon" aria-label="Put the old selection back" onClick={() => close(false)}>
+        <span aria-hidden="true">{ICON_CLOSE}</span>
+      </button>
+    </div>
   );
 }

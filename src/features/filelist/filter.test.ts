@@ -1,6 +1,19 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { filterActive, NO_FILTER, parseSize, sizesAreGood, toFilter } from "./filter.ts";
+import {
+  filterActive,
+  hasSince,
+  hasTypes,
+  NO_FILTER,
+  parseSize,
+  sinceDay,
+  sizesAreGood,
+  toFilter,
+  toggleKinds,
+  toggleMinSize,
+  toggleSince,
+  toggleTypes,
+} from "./filter.ts";
 
 test("sizes read in any unit and case", () => {
   assert.equal(parseSize("512"), 512);
@@ -39,4 +52,39 @@ test("only a form that asks for something is active", () => {
   assert.equal(filterActive({ ...NO_FILTER, kinds: "files" }), true);
   assert.equal(filterActive({ ...NO_FILTER, maxSize: "0" }), true);
   assert.equal(filterActive({ ...NO_FILTER, tags: [3] }), true);
+});
+
+
+test("a week starts on Monday and a year on the first of January", () => {
+  const thursday = new Date(2026, 10, 12, 15, 30);
+  assert.equal(sinceDay("today", thursday), "2026-11-12");
+  assert.equal(sinceDay("week", thursday), "2026-11-09");
+  assert.equal(sinceDay("week", new Date(2026, 10, 15)), "2026-11-09");
+  assert.equal(sinceDay("year", thursday), "2026-01-01");
+});
+
+test("a type chip adds its types and takes them away, keeping typed ones", () => {
+  const typed = { ...NO_FILTER, types: "txt" };
+  const on = toggleTypes(typed, ["png", "jpg"]);
+  assert.equal(on.types, "txt png jpg");
+  assert.ok(hasTypes(on, ["jpg", "png"]));
+  assert.equal(toggleTypes(on, ["png", "jpg"]).types, "txt");
+});
+
+test("folders and types rule each other out", () => {
+  const folders = toggleKinds({ ...NO_FILTER, types: "png" }, "folders");
+  assert.deepEqual([folders.kinds, folders.types], ["folders", ""]);
+  assert.equal(toggleTypes(folders, ["png"]).kinds, "all");
+  assert.equal(toggleKinds(folders, "folders").kinds, "all");
+});
+
+test("size and date chips turn off when pressed again", () => {
+  const big = toggleMinSize(NO_FILTER, "100 MB");
+  assert.equal(big.minSize, "100 MB");
+  assert.equal(toggleMinSize({ ...NO_FILTER, minSize: "100mb" }, "100 MB").minSize, "");
+  const now = new Date(2026, 10, 12);
+  const today = toggleSince({ ...NO_FILTER, to: "2026-12-01" }, "today", now);
+  assert.deepEqual([today.from, today.to], ["2026-11-12", ""]);
+  assert.ok(hasSince(today, "today", now));
+  assert.equal(toggleSince(today, "today", now).from, "");
 });

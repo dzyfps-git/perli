@@ -1,4 +1,4 @@
-const PAUSE_MS = 1000;
+export const PAUSE_MS = 1000;
 
 export interface Jump {
   prefix: string;

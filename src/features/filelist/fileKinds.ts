@@ -112,6 +112,9 @@ export function kindOf(name: string, isDir: boolean): Kind {
 
 export const hasPicture = (kind: Kind) => PICTURED.has(kind);
 
+/** The extensions that make a file this kind. Folders and plain files have none. */
+export const extensionsOf = (kind: Kind) => KINDS[kind][2].split(" ").filter(Boolean);
+
 const color = (hue: number) =>
   hue === PLAIN
     ? "var(--text-muted)"
