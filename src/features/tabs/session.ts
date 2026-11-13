@@ -5,6 +5,8 @@ export interface SavedPane {
   path: string;
   sort: Sort;
   layout: Layout;
+  /** Folders opened in place, by full path. */
+  expanded?: string[];
 }
 
 export interface SavedTab {
@@ -34,7 +36,8 @@ function cleanPane(pane: Partial<SavedPane> | null): SavedPane[] {
   const sort: Sort = SORT_KEYS.includes(pane.sort?.key as string)
     ? { key: pane.sort!.key, descending: pane.sort!.descending === true }
     : { key: "name", descending: false };
-  return [{ path: pane.path, sort, layout: pane.layout === "grid" ? "grid" : "list" }];
+  const expanded = Array.isArray(pane.expanded) ? pane.expanded.filter((folder) => typeof folder === "string") : [];
+  return [{ path: pane.path, sort, layout: pane.layout === "grid" ? "grid" : "list", ...(expanded.length > 0 ? { expanded } : {}) }];
 }
 
 function inRange(index: unknown, count: number) {
