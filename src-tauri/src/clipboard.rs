@@ -81,7 +81,7 @@ fn png_format() -> u32 {
     unsafe { RegisterClipboardFormatW(w!("PNG")) }
 }
 
-fn encode(paths: &[PathBuf]) -> Vec<u8> {
+pub fn encode(paths: &[PathBuf]) -> Vec<u8> {
     let mut bytes = vec![0; size_of::<DROPFILES>()];
     bytes[..4].copy_from_slice(&(size_of::<DROPFILES>() as u32).to_le_bytes());
     bytes[WIDE_FLAG_OFFSET] = 1;
@@ -108,7 +108,8 @@ pub fn decode(bytes: &[u8]) -> Option<Vec<PathBuf>> {
     Some(names.map(|name| OsString::from_wide(name).into()).collect())
 }
 
-unsafe fn put(format: u32, bytes: &[u8]) -> Result<()> {
+/// `bytes` in memory Windows can hand between programs. The caller owns it.
+pub unsafe fn global(bytes: &[u8]) -> Result<HGLOBAL> {
     let memory = GlobalAlloc(GMEM_MOVEABLE, bytes.len())?;
     let target = GlobalLock(memory);
     if target.is_null() {
@@ -119,6 +120,11 @@ unsafe fn put(format: u32, bytes: &[u8]) -> Result<()> {
     ptr::copy_nonoverlapping(bytes.as_ptr(), target.cast(), bytes.len());
     // Reports an error once the lock count reaches zero, which is the normal outcome.
     let _ = GlobalUnlock(memory);
+    Ok(memory)
+}
+
+unsafe fn put(format: u32, bytes: &[u8]) -> Result<()> {
+    let memory = global(bytes)?;
     // The clipboard owns the memory once this works.
     if let Err(error) = SetClipboardData(format, Some(HANDLE(memory.0))) {
         let _ = GlobalFree(Some(memory));
