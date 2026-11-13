@@ -277,7 +277,11 @@ export interface Thumb {
 }
 
 /** What a Windows menu or Properties window is for. */
-export type ShellTarget = { kind: "rows"; selection: Selection } | { kind: "folder"; path: string };
+/** `paths` outlives a reload of the folder, which `rows` don't. */
+export type ShellTarget =
+  | { kind: "rows"; selection: Selection }
+  | { kind: "folder"; path: string }
+  | { kind: "paths"; paths: string[] };
 
 const HEADER_BYTES = 34;
 const TAG_BYTES = 4;
@@ -454,8 +458,14 @@ export const measureSelection = (selection: Selection) => invoke<Measured>("meas
 
 export const binSummary = () => invoke<Measured>("bin_summary");
 
+/** Fired on `window` once Perli puts files on the clipboard. */
+export const CLIPBOARD_SET = "perli-clipboard-set";
+
 export const setClipboard = (selection: Selection, cut: boolean) =>
-  invoke<{ names: string[]; sequence: number }>("set_clipboard", { selection, cut });
+  invoke<{ names: string[]; sequence: number }>("set_clipboard", { selection, cut }).then((set) => {
+    window.dispatchEvent(new Event(CLIPBOARD_SET));
+    return set;
+  });
 
 export const cancelCut = (sequence: number) => invoke<void>("cancel_cut", { sequence });
 
@@ -477,11 +487,11 @@ export const editTag = (id: number, name: string, color: number) => invoke<void>
 export const deleteTag = (id: number) => invoke<void>("delete_tag", { id });
 
 /** Puts `tag` on the selected rows, or takes it off. */
-export const setTag = (selection: Selection, tag: number, on: boolean) =>
-  invoke<void>("set_tag", { selection, tag, on });
+export const setTag = (target: ShellTarget, tag: number, on: boolean) =>
+  invoke<void>("set_tag", { target, tag, on });
 
 /** The tags all the selected rows have. */
-export const commonTags = (selection: Selection) => invoke<number[]>("common_tags", { selection });
+export const commonTags = (target: ShellTarget) => invoke<number[]>("common_tags", { target });
 
 /** The rows whose names fit `pattern`, such as `*.jpg;*.png`. */
 export const rowsMatching = (view: number, request: number, pattern: string) =>
@@ -605,6 +615,9 @@ export interface OpenAsk {
 
 export const onOpenAsked = (handler: (ask: OpenAsk) => void) =>
   listen<OpenAsk>("open-asked", (event) => handler(event.payload));
+
+/** Asks that came before the UI listened. Call once `onOpenAsked` is set; later ones are events. */
+export const asksWaiting = () => invoke<OpenAsk[]>("asks_waiting");
 
 /** Brings the window to the front. */
 export const comeForward = () => invoke<void>("come_forward");
