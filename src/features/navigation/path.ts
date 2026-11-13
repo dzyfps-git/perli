@@ -91,6 +91,26 @@ export function followed(from: string, to: string, other: string) {
   return toCrumbs(other).at(-1 - levels)?.path;
 }
 
+/** The same folder, as Perli writes it once opened: either slash, and no slash at the end. */
+export function sameFolder(a: string, b: string) {
+  const plain = (path: string) => {
+    const slashed = path.replaceAll("/", "\\").toLowerCase();
+    const trimmed = slashed.replace(/\\+$/, "");
+    return trimmed.endsWith(":") ? `${trimmed}\\` : trimmed;
+  };
+  return plain(a) === plain(b);
+}
+
+/**
+ * Where a linked pane goes when the other arrives at `to` from `from`, or nowhere. `going` is
+ * where the tab itself was taking the mover: arriving there is the tab's doing, not the user's,
+ * so it leads nowhere. `other` is where the other pane is, or is on its way to.
+ */
+export function followTarget(from: string, to: string, going: string | undefined, linked: boolean, other: string | undefined) {
+  if (going !== undefined && sameFolder(going, to)) return undefined;
+  return linked && other ? followed(from, to, other) : undefined;
+}
+
 /**
  * The deepest path to show in the path bar. Going up keeps the folders you came
  * from, so you can jump back into them. Going anywhere else starts a new trail.

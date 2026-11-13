@@ -2,7 +2,7 @@ import { createEffect, createSignal } from "solid-js";
 import { closeView, openWindow } from "../../api";
 import { morph } from "../../ui/morph";
 import { createFolderView, type FolderView } from "../navigation/folderView";
-import { followed, samePath } from "../navigation/path";
+import { followTarget } from "../navigation/path";
 import type { SavedPane, SavedTab, Session } from "./session";
 import { cycled, EVEN_SPLIT, moved, nextActive, otherPane, pinnedFirst, snapped } from "./tabList";
 
@@ -43,11 +43,9 @@ function createTab(views: FolderView[], startSwapped = false, saved: Layout = {}
   const follow = (mover: FolderView) => (from: string, to: string) => {
     const going = led.get(mover);
     led.delete(mover);
-    if (going !== undefined && samePath(going, to)) return;
     const other = otherPane(panes(), mover);
     // A pane still on its way follows from where it is going.
-    const there = other && (led.get(other) ?? other.path());
-    const target = linked() && there ? followed(from, to, there) : undefined;
+    const target = followTarget(from, to, going, linked(), other && (led.get(other) ?? other.path()));
     if (other && target) lead(other, target, true);
   };
   const listen = (list: FolderView[]) => {
