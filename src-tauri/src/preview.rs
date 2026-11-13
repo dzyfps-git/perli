@@ -4,7 +4,9 @@
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 
 use pulldown_cmark::{html, CowStr, Event, Options, Parser, Tag, TagEnd};
 use serde::Serialize;
@@ -302,13 +304,21 @@ pub fn properties(path: &Path) -> windows::core::Result<Vec<(&'static str, Strin
     Ok(found)
 }
 
-static LATEST_HASH: AtomicU64 = AtomicU64::new(0);
+static HASH_TICKETS: AtomicU64 = AtomicU64::new(0);
+/// The latest ticket of each lane.
+static LATEST_HASH: Mutex<Option<HashMap<u32, u64>>> = Mutex::new(None);
+
+/// Properties' lane. A details panel uses its view's id.
+pub const PROPERTIES_LANE: u32 = u32::MAX;
+
+fn latest_in(lane: u32) -> u64 {
+    LATEST_HASH.lock().unwrap().get_or_insert_default().get(&lane).copied().unwrap_or(0)
+}
 
 /// The file's checksum by `algorithm` (md5, sha1, sha256 or sha512) in lowercase hex, through
-/// Windows' own crypto. `None` once a newer checksum was asked for, because only one is ever shown.
-// ponytail: one checksum at a time for the whole app, which fits one details panel. A ticket per
-// view would let two panels hash side by side.
-pub fn hash(path: &Path, algorithm: &str) -> std::io::Result<Option<String>> {
+/// Windows' own crypto. `None` once a newer checksum was asked for in the same `lane`: each place
+/// that shows one has its own, so one never cancels another's.
+pub fn hash(path: &Path, algorithm: &str, lane: u32) -> std::io::Result<Option<String>> {
     let (handle, length) = match algorithm {
         "md5" => (BCRYPT_MD5_ALG_HANDLE, 16),
         "sha1" => (BCRYPT_SHA1_ALG_HANDLE, 20),
@@ -316,14 +326,15 @@ pub fn hash(path: &Path, algorithm: &str) -> std::io::Result<Option<String>> {
         "sha512" => (BCRYPT_SHA512_ALG_HANDLE, 64),
         _ => return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Unknown checksum kind")),
     };
-    let ticket = LATEST_HASH.fetch_add(1, Ordering::SeqCst) + 1;
+    let ticket = HASH_TICKETS.fetch_add(1, Ordering::SeqCst) + 1;
+    LATEST_HASH.lock().unwrap().get_or_insert_default().insert(lane, ticket);
     let mut file = File::open(path)?;
     let mut hash = BCRYPT_HASH_HANDLE::default();
     unsafe { BCryptCreateHash(handle, &raw mut hash, None, None, 0) }.ok()?;
     let digest = (|| {
         let mut buffer = vec![0; HASH_BYTES];
         loop {
-            if LATEST_HASH.load(Ordering::SeqCst) != ticket {
+            if latest_in(lane) != ticket {
                 return Ok(None);
             }
             let count = file.read(&mut buffer)?;
@@ -449,9 +460,9 @@ mod tests {
                  2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f",
             ),
         ] {
-            assert_eq!(hash(&file, kind).unwrap().unwrap(), known, "{kind}");
+            assert_eq!(hash(&file, kind, 0).unwrap().unwrap(), known, "{kind}");
         }
-        assert!(hash(&file, "crc").is_err());
+        assert!(hash(&file, "crc", 0).is_err());
         fs::remove_dir_all(folder).unwrap();
     }
 
