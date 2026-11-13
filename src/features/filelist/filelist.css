@@ -1149,11 +1149,6 @@ html[data-blurred] :is(.empty-float, .empty-shadow) {
   pointer-events: none;
 }
 
-/* A column read from the files' own properties has no order to sort by. */
-.column-title[data-plain] .column-button {
-  cursor: default;
-}
-
 /* A folder tile wearing a stack of what is inside keeps a small folder mark in its corner. */
 .file-row[data-stack][data-thumb] .file-icon::after {
   content: "\E8B7";

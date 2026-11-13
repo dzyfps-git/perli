@@ -52,10 +52,12 @@ export interface Tag {
 }
 
 export type SortKey = "name" | "modified" | "created" | "type" | "size" | "location";
+/** The extra columns, read from each file's own properties. */
+export type PropKey = "artist" | "album" | "length" | "taken" | "dimensions";
 
 export interface Sort {
   /** `found` is the order a search found its rows in, which no column stands for. */
-  key: SortKey | "found" | "tags";
+  key: SortKey | PropKey | "found" | "tags";
   descending: boolean;
 }
 

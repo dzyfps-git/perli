@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use serde::{Deserialize, Serialize};
 use windows::core::{Result, HSTRING, PCWSTR};
@@ -58,7 +58,32 @@ pub enum SortKey {
     Found,
     /// Rows of one tag sit together, and rows with none go last.
     Tags,
+    /// The extra columns, read from each file's own properties.
+    Artist,
+    Album,
+    Length,
+    Taken,
+    Dimensions,
 }
+
+impl SortKey {
+    /// The Windows property an extra column shows, as `preview::props_of` reads it.
+    fn property(self) -> Option<&'static str> {
+        Some(match self {
+            Self::Artist => "System.Music.Artist",
+            Self::Album => "System.Music.AlbumTitle",
+            Self::Length => "System.Media.Duration",
+            Self::Taken => "date:System.Photo.DateTaken",
+            Self::Dimensions => "System.Image.Dimensions",
+            _ => return None,
+        })
+    }
+}
+
+/// Property values read for sorting, by path and property, with the file's modified time they
+/// were read at. Emptied when it gets this big.
+static SORT_PROPS: Mutex<Option<HashMap<(PathBuf, &'static str), (u64, Option<String>)>>> = Mutex::new(None);
+const MOST_SORT_PROPS: usize = 200_000;
 
 /// Where folders go among files.
 #[derive(Clone, Copy, Default, Deserialize, PartialEq)]
@@ -535,7 +560,7 @@ impl Listing {
             SortKey::Type => type_ranks(entries),
             SortKey::Size if sizes::any() => self.sizes(),
             SortKey::Tags => self.tag_ranks(places),
-            _ => Vec::new(),
+            key => key.property().map(|name| self.prop_ranks(name)).unwrap_or_default(),
         };
         let mut groups = Vec::new();
         // Grouped rows leave folders opened in place, which the UI doesn't offer then.
@@ -695,6 +720,60 @@ impl Listing {
 
     fn tags_of(&self, entry: u32) -> &[u32] {
         self.tags.get(&entry).map_or(&[], |tags| tags)
+    }
+
+    /// Where each entry goes in a sort by the property `name`. Rows without one go last. Values
+    /// are read once per file and kept until the file changes, so a reload reads only what is new.
+    fn prop_ranks(&self, name: &'static str) -> Vec<u64> {
+        let paths: Vec<PathBuf> = (0..self.entries.len())
+            .map(|entry| match &self.bin {
+                Some(bin) => bin.items[entry].item.clone(),
+                None => self.full_path(entry),
+            })
+            .collect();
+        let mut values: Vec<Option<Option<String>>> = vec![None; paths.len()];
+        {
+            let mut kept = SORT_PROPS.lock().unwrap_or_else(PoisonError::into_inner);
+            let kept = kept.get_or_insert_default();
+            for (entry, path) in paths.iter().enumerate() {
+                let modified = self.entries[entry].modified;
+                if let Some((at, value)) = kept.get(&(path.clone(), name)) {
+                    values[entry] = (*at == modified).then(|| value.clone());
+                }
+            }
+        }
+        // Folders have none of these, and Windows takes a while to say so.
+        let missing: Vec<usize> = (0..paths.len()).filter(|&entry| values[entry].is_none() && !self.entries[entry].is_dir).collect();
+        let read = crate::preview::props_of(&missing.iter().map(|&entry| paths[entry].clone()).collect::<Vec<_>>(), &[name.to_string()]);
+        {
+            let mut kept = SORT_PROPS.lock().unwrap_or_else(PoisonError::into_inner);
+            let kept = kept.get_or_insert_default();
+            if kept.len() > MOST_SORT_PROPS {
+                kept.clear();
+            }
+            for (&entry, mut value) in missing.iter().zip(read) {
+                let value = value.pop().flatten();
+                kept.insert((paths[entry].clone(), name), (self.entries[entry].modified, value.clone()));
+                values[entry] = Some(value);
+            }
+        }
+
+        let texts: Vec<Option<Vec<u16>>> = values
+            .into_iter()
+            .map(|value| value.flatten().map(|text| text.encode_utf16().chain([0]).collect()))
+            .collect();
+        let mut by_value: Vec<usize> = (0..texts.len()).filter(|&entry| texts[entry].is_some()).collect();
+        by_value.sort_by(|&a, &b| natural(texts[a].as_ref().unwrap(), texts[b].as_ref().unwrap()));
+        let mut ranks = vec![u64::MAX; texts.len()];
+        let mut rank = 0;
+        for (at, &entry) in by_value.iter().enumerate() {
+            // Equal values share a rank, so the name decides between them.
+            if at > 0 && natural(texts[by_value[at - 1]].as_ref().unwrap(), texts[entry].as_ref().unwrap()) != Ordering::Equal {
+                rank += 1;
+            }
+            ranks[entry] = rank;
+        }
+        ranks
     }
 
     /// Where each entry goes in a sort by tag: by whichever of its tags comes first in `places`.
@@ -959,12 +1038,24 @@ fn compare(
         Grouping::Mixed => Ordering::Equal,
     };
     groups.then_with(|| {
+        // Rows an extra column has nothing for go last, whichever way the column sorts.
+        let blank = |row: u32| ranks[row as usize] == u64::MAX;
+        if order.key.property().is_some() && blank(first) != blank(second) {
+            return blank(first).cmp(&blank(second));
+        }
         let by_key = match order.key {
             SortKey::Name => natural(&a.name, &b.name),
             SortKey::Modified => a.modified.cmp(&b.modified),
             SortKey::Created => a.created.cmp(&b.created),
             SortKey::Size if ranks.is_empty() => a.size.cmp(&b.size),
-            SortKey::Type | SortKey::Size | SortKey::Tags => ranks[first as usize].cmp(&ranks[second as usize]),
+            SortKey::Type
+            | SortKey::Size
+            | SortKey::Tags
+            | SortKey::Artist
+            | SortKey::Album
+            | SortKey::Length
+            | SortKey::Taken
+            | SortKey::Dimensions => ranks[first as usize].cmp(&ranks[second as usize]),
             SortKey::Location => natural(location_of(locations, first), location_of(locations, second)),
             SortKey::Found => first.cmp(&second),
         };
@@ -1464,6 +1555,38 @@ mod tests {
             ..Listing::default()
         }
         .arrange(order)
+    }
+
+    /// A 24-bit BMP of `width` by `height` black pixels.
+    fn bmp(width: u32, height: u32) -> Vec<u8> {
+        let row = (width * 3).div_ceil(4) * 4;
+        let pixels = row * height;
+        let mut bytes = b"BM".to_vec();
+        for value in [54 + pixels, 0, 54, 40, width, height] {
+            bytes.extend(value.to_le_bytes());
+        }
+        bytes.extend(1u16.to_le_bytes());
+        bytes.extend(24u16.to_le_bytes());
+        for value in [0, pixels, 2835, 2835, 0, 0] {
+            bytes.extend(value.to_le_bytes());
+        }
+        bytes.resize(bytes.len() + pixels as usize, 0);
+        bytes
+    }
+
+    #[test]
+    fn an_extra_column_sorts_by_its_value_and_rows_without_one_go_last() {
+        let folder = TempFolder::new("prop-sort");
+        for (name, width) in [("a.bmp", 30), ("b.bmp", 4), ("c.bmp", 120)] {
+            fs::write(folder.0.join(name), bmp(width, 2)).unwrap();
+        }
+        fs::write(folder.0.join("d.txt"), "").unwrap();
+        fs::create_dir(folder.0.join("e")).unwrap();
+        let by = |descending| Order { key: SortKey::Dimensions, descending, group: Grouping::Mixed, ..Order::default() };
+
+        assert_eq!(sorted(&folder, by(false)), ["b.bmp", "a.bmp", "c.bmp", "d.txt", "e"]);
+        // Read again from what was kept, the other way round.
+        assert_eq!(sorted(&folder, by(true))[..3], ["c.bmp", "a.bmp", "b.bmp"]);
     }
 
     #[test]

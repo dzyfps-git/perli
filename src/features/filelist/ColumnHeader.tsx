@@ -1,6 +1,6 @@
 import { createMemo, createSignal, For, Index, Show } from "solid-js";
-import type { Grouping, Sort, SortKey } from "../../api";
-import { dragTarget, isProp, MIN_COLUMN_WIDTH, type Column, type ColumnId, type ColumnSet } from "./columns";
+import type { Grouping, Sort } from "../../api";
+import { dragTarget, MIN_COLUMN_WIDTH, type Column, type ColumnId, type ColumnSet } from "./columns";
 import { MAX_TILE, MIN_TILE, TILE_STEP } from "./layout";
 import { grouping, moveColumn, setColumnWidth, setTileSize, tileSize, toggleColumn } from "./prefs";
 
@@ -57,7 +57,7 @@ export function ColumnHeader(props: {
   /** The columns can't be moved, resized, added or removed, and grouping doesn't apply. */
   fixed: boolean;
   sort: Sort;
-  onSort: (key: SortKey) => void;
+  onSort: (key: ColumnId) => void;
   onMenu: (event: MouseEvent) => void;
   onGroup: () => void;
   /** A double click on a column's edge, to make it as wide as what it shows. */
@@ -104,11 +104,10 @@ export function ColumnHeader(props: {
 
   const removable = (id: ColumnId) => editing() && id !== "name";
 
-  /** A column read from the files' own properties has no order to sort by. */
   function clickTitle(id: ColumnId) {
     if (dragged) return;
     if (removable(id)) toggleColumn(props.set, id);
-    else if (!isProp(id)) props.onSort(id);
+    else props.onSort(id);
   }
 
   return (
@@ -129,7 +128,6 @@ export function ColumnHeader(props: {
             <div
               class="column-title"
               classList={{ "column-size": column().id === "size" }}
-              data-plain={isProp(column().id) ? "" : undefined}
             >
               <button
                 class="column-button"
@@ -185,14 +183,14 @@ export function SortStrip(props: {
   columns: Column[];
   fixed: boolean;
   sort: Sort;
-  onSort: (key: SortKey) => void;
+  onSort: (key: ColumnId) => void;
   onGroup: () => void;
 }) {
   return (
     <div class="column-strip sort-strip" role="group" aria-label="Sort">
-      <For each={props.columns.filter((column) => !isProp(column.id))}>
+      <For each={props.columns}>
         {(column) => (
-          <button class="column-button" onClick={() => !isProp(column.id) && props.onSort(column.id)}>
+          <button class="column-button" onClick={() => props.onSort(column.id)}>
             {column.label}
             <span class="column-arrow" hidden={props.sort.key !== column.id}>
               {props.sort.descending ? ICON_DESCENDING : ICON_ASCENDING}

@@ -341,7 +341,7 @@ export function FileList(props: {
   active: boolean;
   layout: Layout;
   sort: Sort;
-  onSort: (key: SortKey) => void;
+  onSort: (key: ColumnId) => void;
   /** The pointer dragged the selected rows far enough to start a real file drag. */
   onDragOut: () => void;
   onOpen: (row: Row, toSide: boolean) => void;
