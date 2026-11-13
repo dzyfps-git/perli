@@ -285,10 +285,13 @@ export function Sidebar(props: {
     rememberRecent() ? recentFiles(RECENT_COUNT).then(setRecent).catch(console.error) : setRecent([]);
   createEffect(on(rememberRecent, readRecent, { defer: true }));
 
+  /** Servers are remembered as recent places, so with those off none shows or is asked about. */
+  const shownServers = () => (rememberRecent() ? servers() : []);
+
   /** Each place answers on its own, and an old answer shows until a new one comes. */
   function readReach() {
     const drives = places()?.drives.filter((drive) => drive.network).map((drive) => drive.path) ?? [];
-    for (const path of [...servers(), ...drives]) {
+    for (const path of [...shownServers(), ...drives]) {
       if (askingReach.has(path)) continue;
       askingReach.add(path);
       reachable(path)
@@ -297,7 +300,7 @@ export function Sidebar(props: {
         .finally(() => askingReach.delete(path));
     }
   }
-  createEffect(on(servers, readReach, { defer: true }));
+  createEffect(on(shownServers, readReach, { defer: true }));
 
   /** A sync app's own folder icon, read once per folder. */
   function readPictures() {
@@ -580,9 +583,9 @@ export function Sidebar(props: {
           </For>
         </Section>
       </Show>
-      <Show when={servers().length}>
+      <Show when={shownServers().length}>
         <Section id="network" label="Network">
-          <For each={servers()}>
+          <For each={shownServers()}>
             {(server) => (
               <Place
                 view={props.view}

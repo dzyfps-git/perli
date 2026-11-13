@@ -358,6 +358,7 @@ export function createFolderView(id: number, saved?: SavedPane) {
       );
       if (request === latestRequest) {
         setError(undefined);
+        failedAt = undefined;
         const rename = !search && wanted.rename;
         const reveal = select.length > 0 && !wanted.still;
         setFolder({ ...current, request, ...reloaded, reveal, rename, top, rearranged: false, scrollTo: undefined });
@@ -365,6 +366,8 @@ export function createFolderView(id: number, saved?: SavedPane) {
       }
     } catch (failure) {
       if (request === latestRequest) {
+        // This error is the shown folder's, so Try again reads it again.
+        failedAt = undefined;
         setError(String(failure));
         setWalk("done");
       }
@@ -442,7 +445,10 @@ export function createFolderView(id: number, saved?: SavedPane) {
       const arranged = await arrangeView(id, request, current.request, order(), rows);
       if (request === latestRequest) show({ ...current, request, ...arranged, rearranged: true });
     } catch (failure) {
-      if (request === latestRequest) setError(String(failure));
+      if (request === latestRequest) {
+        failedAt = undefined;
+        setError(String(failure));
+      }
     }
   }
 

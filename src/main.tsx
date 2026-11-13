@@ -21,6 +21,10 @@ const [places, setPlaces] = stored<Record<string, WindowPlace>>(
  */
 async function keepPlace() {
   const appWindow = getCurrentWindow();
+  /** The size is the inside, as `setSize` takes it, or the frame would be added again at each start. */
+  const bounds = async () => ({ ...(await appWindow.outerPosition()), ...(await appWindow.innerSize()) });
+  /** Where the window goes back to from maximized. */
+  let normal: { x: number; y: number; width: number; height: number } | undefined;
   try {
     if ((await startState()).newWindow) return void (await appWindow.show());
     const screens = await availableMonitors();
@@ -28,12 +32,15 @@ async function keepPlace() {
     if (place && onAScreen(place, screens)) {
       await appWindow.setSize(new PhysicalSize(place.width, place.height));
       await appWindow.setPosition(new PhysicalPosition(place.x, place.y));
+      normal = { x: place.x, y: place.y, width: place.width, height: place.height };
       if (place.maximized) await appWindow.maximize();
     }
   } catch (failure) {
     console.error(failure);
   }
   await appWindow.show();
+  // A first start has no place yet: the one Windows gave is the one to go back to.
+  if (!normal && !(await appWindow.isMaximized())) normal = await bounds();
 
   let timer = 0;
   const note = () => {
@@ -42,10 +49,10 @@ async function keepPlace() {
       if (await appWindow.isMinimized()) return;
       const key = screensKey(await availableMonitors());
       const maximized = await appWindow.isMaximized();
-      const before = places()[key];
-      // A maximized window keeps the place it goes back to. The size is the inside, as `setSize`
-      // takes it, or the frame would be added again at each start.
-      const box = maximized && before ? before : { ...(await appWindow.outerPosition()), ...(await appWindow.innerSize()) };
+      if (!maximized) normal = await bounds();
+      // A maximized window keeps the place it goes back to, never its maximized size.
+      const box = normal ?? places()[key];
+      if (!box) return;
       const { x, y, width, height } = box;
       setPlaces({ ...places(), [key]: { x, y, width, height, maximized } });
     }, SETTLE_MS);
