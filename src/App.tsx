@@ -800,8 +800,9 @@ export function App() {
     const selection = actions.selected(view);
     if (!tag || !selection) return;
     try {
-      const common = await commonTags(selection);
-      await setTag(selection, tag.id, !common.includes(tag.id));
+      const rows = { kind: "rows", selection } as const;
+      const common = await commonTags(rows);
+      await setTag(rows, tag.id, !common.includes(tag.id));
       showTagChange();
     } catch (failure) {
       jobs.report(failure);
