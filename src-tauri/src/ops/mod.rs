@@ -417,14 +417,19 @@ impl<'a> Run<'a> {
     }
 
     /// Counts, before anything moves, how many of `sources` would meet their own name in
-    /// `folder`. Only the picks themselves, not what is inside them.
+    /// `folder` and how many are new. A folder that meets a folder merges, so what is inside
+    /// counts instead, as far down as both sides go. A new folder counts as one.
     fn count_clashes(&mut self, sources: &[PathBuf], folder: &Path) {
-        let taken = sources
-            .iter()
-            .filter(|source| source.parent() != Some(folder))
-            .filter(|source| matches!(sys::stat(&folder.join(transfer::file_name(source))), Ok(Some(_))))
-            .count() as u64;
-        self.tally = (taken, sources.len() as u64 - taken);
+        let mut tally = (0, 0);
+        let go_on = || self.control.proceed();
+        for source in sources {
+            if source.parent() == Some(folder) {
+                tally.1 += 1;
+            } else {
+                count_clash(source, &folder.join(transfer::file_name(source)), &mut tally, &go_on);
+            }
+        }
+        self.tally = tally;
     }
 
     // ponytail: no admin route for templates, as the shell's new item can't carry their content.
@@ -647,6 +652,26 @@ impl<'a> Run<'a> {
 }
 
 /// Adds the apps holding a file to what Windows said about it.
+/// Adds `source` to `tally` as a clash or a fresh name at `target`. Two folders merge, so their
+/// names are counted one level down instead, and so on. Stops when `go_on` says so.
+fn count_clash(source: &Path, target: &Path, tally: &mut (u64, u64), go_on: &dyn Fn() -> bool) {
+    let Ok(Some(there)) = sys::stat(target) else {
+        tally.1 += 1;
+        return;
+    };
+    let both_folders = there.is_folder() && matches!(sys::stat(source), Ok(Some(stat)) if stat.is_folder());
+    if !both_folders {
+        tally.0 += 1;
+        return;
+    }
+    for (name, _) in sys::read_dir(source).unwrap_or_default() {
+        if !go_on() {
+            return;
+        }
+        count_clash(&source.join(&name), &target.join(&name), tally, go_on);
+    }
+}
+
 fn with_users(message: &str, users: &[String]) -> String {
     if users.is_empty() {
         return message.to_string();

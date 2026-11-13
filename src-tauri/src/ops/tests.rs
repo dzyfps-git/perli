@@ -730,6 +730,23 @@ fn a_conflict_says_how_many_names_are_taken_and_how_many_are_free() {
 }
 
 #[test]
+fn the_conflict_count_looks_inside_folders_that_merge() {
+    let sandbox = Sandbox::new();
+    for name in ["a", "b", "c"] {
+        sandbox.file(&format!(r"from\pics\{name}"), "new");
+    }
+    sandbox.file(r"to\pics\a", "old");
+    let host = Script::always(Answer::Skip);
+    run_with(Job::Copy { sources: vec![sandbox.path(r"from\pics")], folder: sandbox.path("to") }, &host);
+
+    let first = host.questions.borrow_mut().drain(..).next();
+    match first {
+        Some(Question::Conflict { clashes, fresh, .. }) => assert_eq!((clashes, fresh), (1, 2)),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
 fn a_copy_lists_what_it_skipped_after_a_problem_for_a_later_try() {
     let sandbox = Sandbox::new();
     let locked = sandbox.file(r"from\locked.txt", "x");
