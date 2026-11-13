@@ -156,10 +156,10 @@ export function createShellItems(
         if (!selection) return [];
         await refreshTags();
         // A drive with no file IDs says so when a tag is chosen.
-        const common = await commonTags(selection).catch((): number[] => []);
+        const common = await commonTags({ kind: "rows", selection }).catch((): number[] => []);
         const toggle = (id: number) =>
           withRows(view, async (rows) => {
-            await setTag(rows, id, !common.includes(id));
+            await setTag({ kind: "rows", selection: rows }, id, !common.includes(id));
             changed();
           });
         return [

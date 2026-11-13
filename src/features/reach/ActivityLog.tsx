@@ -1,5 +1,5 @@
-import { createResource, For, onMount, Show } from "solid-js";
-import { activity, type Activity } from "../../api";
+import { createResource, For, onCleanup, onMount, Show } from "solid-js";
+import { activity, onJobEvent, type Activity } from "../../api";
 import { ago } from "../../ui/dates";
 import { openSheet } from "../../ui/sheet";
 import { dayOf } from "./lists";
@@ -37,8 +37,10 @@ export function ActivityLog(props: {
 
   const newer = (step: Activity) => (steps() ?? []).findIndex((other) => other.id === step.id);
 
-  // The log changes when the job ends, a moment after it was asked for.
-  const change = (ask: Promise<unknown>) => ask.then(() => setTimeout(refetch, 250)).catch(() => undefined);
+  // The log changes when a job ends, which can be long after it was asked for.
+  const change = (ask: Promise<unknown>) => ask.catch(() => undefined);
+  const listening = onJobEvent((event) => event.kind === "finished" && refetch());
+  onCleanup(() => listening.then((stop) => stop()));
 
   onMount(() => {
     close = openSheet(dialog);
