@@ -12,6 +12,10 @@ export interface Opened {
   count: number;
   /** Hidden entries in the folder, shown or not. */
   hiddenCount: number;
+  /** The rows under each header, in order. Empty when the rows are not grouped. */
+  groups: Group[];
+  /** The biggest size a row shows, which the size bars measure against. */
+  largest: number;
   loadMs: number;
   /** Rows to select straight away, when this is a new order of the same folder. */
   selected?: number[];
@@ -57,6 +61,29 @@ export interface Sort {
 
 export type Grouping = "foldersFirst" | "filesFirst" | "mixed";
 
+/** What rows gather under headers by. `folder` is where a search found each one. */
+export type GroupBy = "none" | "date" | "kind" | "size" | "tag" | "folder";
+
+/** Rows under one header. */
+export interface Group {
+  /** A date edge's or kind's place, a size word, a tag's id, a folder's path, or "folders",
+   *  "other", "older" or "none" for the rest. */
+  key: string;
+  start: number;
+  /** The rows that show, none while folded. */
+  count: number;
+  total: number;
+}
+
+/** What a new order of the same rows tells the list. */
+export interface Arranged {
+  count: number;
+  hiddenCount: number;
+  groups: Group[];
+  largest: number;
+  selected: number[];
+}
+
 /** Conditions a view's rows must all meet. */
 export interface Filter {
   /** Part of the name, in any case. */
@@ -83,6 +110,13 @@ export interface Order extends Sort {
   filter: Filter;
   /** Folders whose rows show under them, by full path. */
   expanded?: string[];
+  groupBy?: GroupBy;
+  /** Where each date group starts, newest first, in milliseconds since 1970. */
+  groupEdges?: number[];
+  /** The extensions of each kind group, in order. */
+  groupKinds?: string[][];
+  /** Groups whose rows are out of sight, by key. */
+  folded?: string[];
 }
 
 export interface Start {
@@ -423,7 +457,7 @@ export const arrangeView = (
   order: Order,
   selected: number[],
 ) =>
-  invoke<{ count: number; hiddenCount: number; selected: number[] }>("arrange_view", { view, request, shown, order, selected });
+  invoke<Arranged>("arrange_view", { view, request, shown, order, selected });
 
 /**
  * Reads the shown folder again. `select` names the new selection, or `selected` rows keep theirs.
@@ -437,9 +471,9 @@ export const reloadView = (
   order: Order,
   selected: number[],
   select: string[],
-  search: { step: SearchStep; query: string; scope: SearchScope; inside: boolean } | null,
+  search: { step: SearchStep; query: string; scope: SearchScope; inside: boolean; depth: number | null } | null,
 ) =>
-  invoke<{ count: number; hiddenCount: number; selected: number[] }>("reload_view", {
+  invoke<Arranged>("reload_view", {
     view,
     request,
     shown,
@@ -584,6 +618,17 @@ export const rowsMatching = (view: number, request: number, pattern: string) =>
 /** The rows that fit `filter`, for picking all of one kind, tag or day. */
 export const rowsWhere = (view: number, request: number, filter: Filter) =>
   invoke<number[]>("rows_where", { view, request, filter });
+
+/** How many rows fit `filter`, to tell a folder of songs or pictures by. */
+export const countWhere = (view: number, request: number, filter: Filter) =>
+  invoke<number>("count_where", { view, request, filter });
+
+/** What `names` read for each of `rows`, as Windows shows them. A `date:` name gives milliseconds. */
+export const rowProps = (view: number, request: number, rows: number[], names: string[]) =>
+  invoke<(string | null)[][]>("row_props", { view, request, rows, names });
+
+/** A few pictures right inside `path`, for its tile to show a stack of. */
+export const folderPictures = (path: string) => invoke<string[]>("folder_pictures", { path });
 
 /** The bytes of the selected files, from the listing alone. Folders count as nothing. */
 export const selectionSize = (selection: Selection) => invoke<number>("selection_size", { selection });

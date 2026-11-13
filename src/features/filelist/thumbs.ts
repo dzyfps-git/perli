@@ -37,7 +37,7 @@ function remember(key: string, thumb: Thumb | null) {
  * before the ones they scrolled past. Rows no longer `wanted` are never fetched.
  */
 export function createThumbLoader(
-  fetch: (index: number) => Promise<Thumb | null>,
+  fetch: (index: number, key: string) => Promise<Thumb | null>,
   wanted: (index: number, key: string) => boolean,
   ready: (index: number, key: string) => void,
 ) {
@@ -55,7 +55,7 @@ export function createThumbLoader(
         continue;
       }
       running++;
-      fetch(index)
+      fetch(index, key)
         .then((thumb) => {
           remember(key, thumb);
           const now = asked.get(key)!;

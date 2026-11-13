@@ -18,7 +18,7 @@ use windows::core::Result;
 
 #[cfg(test)]
 use crate::folder::Filter;
-use crate::folder::{self, Entry, Found, Listing, Order, Sight, SortKey};
+use crate::folder::{self, Entry, Found, GroupBy, Listing, Order, Sight, SortKey};
 use crate::network;
 use crate::ops::sys::{self, Stat};
 use crate::tags;
@@ -63,6 +63,8 @@ struct Query {
     every_file: bool,
     /// Text files whose content holds the text fit too.
     inside: bool,
+    /// How many parts the path of the deepest folder read may have.
+    deepest: usize,
 }
 
 impl Query {
@@ -72,7 +74,12 @@ impl Query {
             letters: text.chars().map(lower).collect(),
             every_file: text == EVERY_FILE,
             inside: false,
+            deepest: usize::MAX,
         }
+    }
+
+    fn reaches(&self, folder: &Path) -> bool {
+        folder.components().count() <= self.deepest
     }
 
     fn is_in(&self, entry: &Entry, folder: &Path) -> bool {
@@ -296,6 +303,9 @@ impl Search {
             if self.stopped() {
                 return;
             }
+            if !query.reaches(&folder) {
+                continue;
+            }
             let location: Arc<[u16]> = folder::null_terminated(&folder).into();
             // A folder that can't be read has nothing to show, which is no reason to stop.
             let _ = read_folder(&folder, sight, &mut below, |entry| {
@@ -354,6 +364,9 @@ pub struct Asked {
     /// Look in the content of text files as well as at names.
     #[serde(default)]
     pub inside: bool,
+    /// How many folders deep to look, where 1 is the folder itself. None is all the way.
+    #[serde(default)]
+    pub depth: Option<u32>,
 }
 
 /// The top of the drive or share `folder` is on.
@@ -403,9 +416,10 @@ fn tagged(name: &str, scope: Scope, folder: &Path) -> Found {
     found
 }
 
-/// A filter can leave so few rows that scrolling never asks for more.
+/// A filter can leave so few rows that scrolling never asks for more. Groups count every row
+/// they hold, and a folded one shows none, so scrolling can't ask for those either.
 fn needs_every_row(order: &Order) -> bool {
-    order.key != SortKey::Found || order.filter.is_active()
+    order.key != SortKey::Found || order.filter.is_active() || order.group_by != GroupBy::None
 }
 
 /// The search of each view that has one.
@@ -467,7 +481,8 @@ impl Searches {
             Scope::Drive | Scope::Drives => root_of(&shown_folder),
             Scope::Below | Scope::Folder => shown_folder,
         };
-        let query = Query { inside: asked.inside, ..Query::new(&asked.query) };
+        let deepest = asked.depth.map_or(usize::MAX, |depth| folder.components().count() + depth.max(1) as usize - 1);
+        let query = Query { inside: asked.inside, deepest, ..Query::new(&asked.query) };
         let (first, mut below) = read_top(&folder, &query, order.sight())?;
         match asked.scope {
             Scope::Folder => below.clear(),
@@ -557,7 +572,7 @@ mod tests {
         let report = move |done| {
             let _ = reports.send(done);
         };
-        let asked = Asked { step: Step::Start, query: query.to_string(), scope: Scope::Below, inside: false };
+        let asked = Asked { step: Step::Start, query: query.to_string(), scope: Scope::Below, inside: false, depth: None };
         (searches.rows(1, asked, tree.path(), order, report).unwrap(), heard)
     }
 
@@ -566,13 +581,33 @@ mod tests {
         let tree = Tree::new("scope");
         let searches = Searches::default();
         let (reports, heard) = mpsc::channel();
-        let asked = Asked { step: Step::Start, query: "report".to_string(), scope: Scope::Folder, inside: false };
+        let asked = Asked { step: Step::Start, query: "report".to_string(), scope: Scope::Folder, inside: false, depth: None };
         let report = move |walk| {
             let _ = reports.send(walk);
         };
         searches.rows(1, asked, tree.path(), found_order(), report).unwrap();
         wait_until_done(&heard);
         assert_eq!(grown(&searches, &tree, found_order()).len(), 1);
+    }
+
+    #[test]
+    fn a_flat_view_goes_only_as_deep_as_asked() {
+        let tree = Tree::new("depth");
+        let searches = Searches::default();
+        let deep = |depth| {
+            let (reports, heard) = mpsc::channel();
+            let asked = Asked { step: Step::Start, query: EVERY_FILE.to_string(), scope: Scope::Below, inside: false, depth };
+            let report = move |walk| {
+                let _ = reports.send(walk);
+            };
+            searches.rows(1, asked, tree.path(), found_order(), report).unwrap();
+            wait_until_done(&heard);
+            grown(&searches, &tree, found_order()).len()
+        };
+
+        assert_eq!(deep(Some(1)), 2);
+        assert_eq!(deep(Some(2)), 3);
+        assert_eq!(deep(None), 5);
     }
 
     #[test]
@@ -583,7 +618,7 @@ mod tests {
     }
 
     fn grown(searches: &Searches, tree: &Tree, order: Order) -> Listing {
-        let asked = Asked { step: Step::Grown, query: String::new(), scope: Scope::Below, inside: false };
+        let asked = Asked { step: Step::Grown, query: String::new(), scope: Scope::Below, inside: false, depth: None };
         searches.rows(1, asked, tree.path(), order, |_| ()).unwrap()
     }
 
@@ -743,7 +778,7 @@ mod tests {
 
         fs::rename(tree.0.join(r"deep\inner\plain.txt"), tree.0.join(r"deep\inner\plainer.txt")).unwrap();
         let (reports, heard) = mpsc::channel();
-        let asked = Asked { step: Step::Again, query: "plain".to_string(), scope: Scope::Below, inside: false };
+        let asked = Asked { step: Step::Again, query: "plain".to_string(), scope: Scope::Below, inside: false, depth: None };
         let report = move |done| {
             let _ = reports.send(done);
         };
@@ -853,6 +888,11 @@ mod tests {
         searches.arranged(1, &Order { filter, ..found_order() });
         assert_eq!(search.room(), usize::MAX);
 
+        let grouped = Arc::new(Search::new(Found::default(), AHEAD));
+        searches.all().insert(2, grouped.clone());
+        searches.arranged(2, &Order { group_by: GroupBy::Kind, ..found_order() });
+        assert_eq!(grouped.room(), usize::MAX);
+
         let tree = Tree::new("order");
         let (_, heard) = start(&searches, &tree, "report", Order::default());
         wait_until_done(&heard);
@@ -867,7 +907,7 @@ mod tests {
         wait_until_done(&heard);
         searches.reached(1, AHEAD);
 
-        let asked = Asked { step: Step::Again, query: "report".to_string(), scope: Scope::Below, inside: false };
+        let asked = Asked { step: Step::Again, query: "report".to_string(), scope: Scope::Below, inside: false, depth: None };
         searches.rows(1, asked, tree.path(), found_order(), |_| ()).unwrap();
 
         assert_eq!(searches.all()[&1].room(), AHEAD * 2);
@@ -913,7 +953,7 @@ mod tests {
         let report = move |walk| {
             let _ = reports.send(walk);
         };
-        let asked = |inside| Asked { step: Step::Start, query: "harbour".to_string(), scope: Scope::Below, inside };
+        let asked = |inside| Asked { step: Step::Start, query: "harbour".to_string(), scope: Scope::Below, inside, depth: None };
 
         searches.rows(1, asked(true), tree.path(), found_order(), report).unwrap();
         wait_until_done(&heard);
@@ -927,7 +967,7 @@ mod tests {
         let tree = Tree::new("sort");
         let searches = Searches::default();
         let missing = tree.0.join("nope");
-        let asked = Asked { step: Step::Start, query: "a".to_string(), scope: Scope::Below, inside: false };
+        let asked = Asked { step: Step::Start, query: "a".to_string(), scope: Scope::Below, inside: false, depth: None };
         assert!(searches.rows(1, asked, missing.to_str().unwrap(), found_order(), |_| ()).is_err());
 
         let (_, heard) = start(&searches, &tree, "report", found_order());

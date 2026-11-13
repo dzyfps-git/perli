@@ -9,6 +9,7 @@ import {
   nextGrouping,
   nextSort,
   restoreColumns,
+  startColumns,
   typeLabel,
 } from "./columns.ts";
 
@@ -84,6 +85,13 @@ test("restoreColumns keeps saved widths and ignores unknown columns", () => {
   assert.equal(restored.find((column) => column.id === "size")?.visible, false);
   assert.equal(restored.length, DEFAULT_COLUMNS.length);
   assert.deepEqual(restoreColumns("broken"), DEFAULT_COLUMNS);
+});
+
+test("a folder of songs puts artist and length before size, and keeps the rest to add", () => {
+  const music = startColumns("music");
+  assert.equal(ids(music.filter((column) => column.visible)), "name,modified,artist,length,size");
+  assert.equal(music.length, 10);
+  assert.equal(ids(restoreColumns(undefined, startColumns("pictures")).filter((column) => column.visible)), "name,modified,taken,dimensions,size");
 });
 
 test("restoreColumns never hides the name column", () => {

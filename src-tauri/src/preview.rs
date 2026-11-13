@@ -3,7 +3,7 @@
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
@@ -365,6 +365,22 @@ pub fn tags(path: &Path) -> Tags {
         artist: shown(&store, "System.Music.Artist"),
         album: shown(&store, "System.Music.AlbumTitle"),
     }
+}
+
+/// What `names` read for each of `paths`, as Windows shows them, for the list's extra columns. A
+/// name that starts with `date:` is a date, read as milliseconds since 1970 so the UI writes it
+/// its own way.
+pub fn props_of(paths: &[PathBuf], names: &[String]) -> Vec<Vec<Option<String>>> {
+    let _com = Com::enter();
+    let read = |store: &IPropertyStore, name: &String| match name.strip_prefix("date:") {
+        Some(name) => date(store, name).map(|ms| ms.to_string()),
+        None => shown(store, name),
+    };
+    let each = |path: &PathBuf| match store_of(path) {
+        Some(store) => names.iter().map(|name| read(&store, name)).collect(),
+        None => vec![None; names.len()],
+    };
+    paths.iter().map(each).collect()
 }
 
 /// What a batch rename's name tokens read from one item. Dates are milliseconds since 1970,

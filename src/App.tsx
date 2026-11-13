@@ -69,14 +69,19 @@ import { DisconnectDrive, MapDrive } from "./features/dialogs/NetworkDrives";
 import { Properties } from "./features/dialogs/Properties";
 import { NO_FILTER, toFilter } from "./features/filelist/filter";
 import { FilterChips } from "./features/pathbar/FilterChips";
-import { BIN_COLUMNS, nextGrouping, nextSort, SEARCH_COLUMNS } from "./features/filelist/columns";
+import { BIN_COLUMNS, FLAT_COLUMNS, isProp, nextGrouping, nextSort, SEARCH_COLUMNS } from "./features/filelist/columns";
+import { GROUP_CHOICES, groupLabel } from "./features/filelist/groups";
 import type { Empty } from "./features/filelist/EmptyState";
 import { FileList } from "./features/filelist/FileList";
 import { FilterDialog } from "./features/filelist/FilterDialog";
 import { clampTile, isLargestTile, isSmallestTile, TILE_STEP, type Layout } from "./features/filelist/layout";
 import {
-  columns,
+  columnsOf,
   detailsPanel,
+  pictureWall,
+  setPictureWall,
+  setSizeBars,
+  sizeBars,
   previewPane,
   setPreviewPane,
   inlineFolders,
@@ -108,7 +113,7 @@ import {
 } from "./features/filelist/prefs";
 import { SelectPattern } from "./features/filelist/SelectPattern";
 import { FLAT_QUERY, type FolderView, type RowAt } from "./features/navigation/folderView";
-import { BIN_PATH, isBin, isDriveRoot, join, parentOf, baseName, samePath } from "./features/navigation/path";
+import { BIN_PATH, isBin, isDriveRoot, join, parentOf, baseName, relativeTo, samePath } from "./features/navigation/path";
 import { Palette, type Command } from "./features/palette/Palette";
 import { PathBar, type Suggested, type Suggestion } from "./features/pathbar/PathBar";
 import { commandFor, keyText } from "./features/keys/keybinds";
@@ -244,7 +249,30 @@ const blockBrowserZoom = (event: WheelEvent) => event.ctrlKey && event.preventDe
 const trackWindowFocus = (event: FocusEvent) =>
   document.documentElement.toggleAttribute("data-blurred", event.type === "blur");
 /** The columns a view keeps to itself, which the user can't change. */
-const ownColumns = (view: FolderView) => (view.isBin() ? BIN_COLUMNS : view.query() ? SEARCH_COLUMNS : undefined);
+const ownColumns = (view: FolderView) =>
+  view.isBin() ? BIN_COLUMNS : view.query() === FLAT_QUERY ? FLAT_COLUMNS : view.query() ? SEARCH_COLUMNS : undefined;
+/** A folder's kept columns, or the ones a search or the bin always has. */
+const shownColumns = (view: FolderView) => ownColumns(view) ?? columnsOf(view.columnSet());
+
+/** What a view's rows can gather under headers by. Only rows from many folders have a folder each. */
+function groupByItems(view: FolderView) {
+  const groups = view.folder()?.groups ?? [];
+  const openKey = groups.find((group) => !view.folded().includes(group.key))?.key;
+  const foldedKey = groups.find((group) => view.folded().includes(group.key))?.key;
+  return [
+    ...GROUP_CHOICES.filter(({ by }) => by !== "folder" || !!view.query() || view.isBin()).map(({ by, label }) => ({
+      label,
+      checked: view.groupBy() === by,
+      action: () => view.setGroupBy(by),
+    })),
+    ...(groups.length > 0
+      ? [
+          { label: "Fold all groups", divider: true, disabled: !openKey, action: () => openKey && view.toggleFold(openKey, true) },
+          { label: "Open all groups", disabled: !foldedKey, action: () => foldedKey && view.toggleFold(foldedKey, true) },
+        ]
+      : []),
+  ];
+}
 const rowPath = (view: FolderView, row: Row) => join(row.location || view.folder()!.path, row.name);
 const toggleFlat = (view: FolderView) => view.search(view.query() === FLAT_QUERY ? "" : FLAT_QUERY);
 
@@ -856,15 +884,16 @@ export function App() {
     });
   }
 
-  function showHeaderMenu(event: MouseEvent) {
+  function showHeaderMenu(event: MouseEvent, view: FolderView) {
     event.preventDefault();
-    const items = columns().map((column) => ({
+    const set = view.columnSet();
+    const items = columnsOf(set).map((column) => ({
       label: column.label,
       checked: column.visible,
       disabled: column.id === "name",
-      action: () => toggleColumn(column.id),
+      action: () => toggleColumn(set, column.id),
     }));
-    setMenu({ x: event.clientX, y: event.clientY, items });
+    setMenu({ x: event.clientX, y: event.clientY, items: [...items, { label: "Group by", divider: true, items: groupByItems(view) }] });
   }
 
   function showInputMenu(event: MouseEvent) {
@@ -984,12 +1013,13 @@ export function App() {
         disabled: isSmallestTile(tileSize()),
         action: () => setTileSize(clampTile(tileSize() - TILE_STEP)),
       },
+      { label: "Picture folders as a wall", checked: pictureWall(), action: () => setPictureWall(!pictureWall()) },
     ];
     const own = ownColumns(view);
     const sortItems = own
       ? [
           ...(view.query() ? [sortItem("Best match", "found")] : []),
-          ...own.map((column) => sortItem(column.label, column.id)),
+          ...own.flatMap((column) => (isProp(column.id) ? [] : [sortItem(column.label, column.id)])),
         ]
       : [
           sortItem("Name", "name"),
@@ -1011,9 +1041,11 @@ export function App() {
           { label: "Details panel", checked: detailsPanel(), action: toggleDetails },
           { label: "Preview pane", checked: previewPane(), action: () => setPreviewPane(!previewPane()) },
           { label: "Status bar", checked: statusBar(), action: () => setStatusBar(!statusBar()) },
+          { label: "Size bars", checked: sizeBars(), action: () => setSizeBars(!sizeBars()) },
           { label: "Keep sidebar open", checked: sidebarOpen(), action: toggleSidebar },
         ],
       },
+      { label: "Group by", items: groupByItems(view) },
       {
         label: "Sort by",
         items: [
@@ -1507,6 +1539,12 @@ export function App() {
           ? [{ label: "Save as smart folder", icon: ICON_SMART, run: () => saveSmart(view) }]
           : []),
         { label: statusBar() ? "Hide status bar" : "Always show status bar", run: () => setStatusBar(!statusBar()) },
+        ...groupByItems(view).map((item) => ({
+          label: item.label === "No groups" ? "Show without groups" : item.label.endsWith("groups") ? item.label : `Group by ${item.label.toLowerCase()}`,
+          run: item.action,
+        })),
+        { label: sizeBars() ? "Hide size bars" : "Show size bars", run: () => setSizeBars(!sizeBars()) },
+        { label: pictureWall() ? "Picture folders with names" : "Picture folders as a wall", run: () => setPictureWall(!pictureWall()) },
         ...BACKDROPS.map(({ id, label }) => ({ label: `Window backdrop: ${label}`, run: () => setBackdrop(id) })),
         ...SCALES.map((scale) => ({
           label: `Text and interface size: ${Math.round(scale * 100)}%`,
@@ -1687,11 +1725,28 @@ export function App() {
                 rename={view.folder()!.rename}
                 top={view.folder()!.top}
                 thumbs={!view.isBin()}
-                columns={ownColumns(view) ?? columns()}
+                columns={shownColumns(view)}
+                columnSet={view.columnSet()}
                 fixedColumns={ownColumns(view) !== undefined}
+                groups={view.folder()!.groups}
+                largest={view.folder()!.largest}
+                groupLabel={(key) =>
+                  groupLabel(view.groupBy(), key, new Date(), {
+                    tag: (id) => allTags().find((known) => known.id === id)?.name,
+                    folder: (path) => relativeTo(view.folder()!.path, path) || "This folder",
+                  })
+                }
+                onFold={view.toggleFold}
+                paths={view.query() === FLAT_QUERY}
+                wall={pictureWall() && view.columnSet() === "pictures"}
                 cut={view.query() ? undefined : cutNames(view.folder()!.path)}
                 expanded={view.expanded()}
-                onExpand={inlineFolders() && !view.query() && !view.isBin() ? (path) => void view.toggleExpand(path) : undefined}
+                // Rows gathered under headers can't also nest under their folders.
+                onExpand={
+                  inlineFolders() && !view.query() && !view.isBin() && view.groupBy() === "none"
+                    ? (path) => void view.toggleExpand(path)
+                    : undefined
+                }
                 synced={!view.query() && inCloud(view.folder()!.path)}
                 empty={emptyState(view)}
                 match={view.query() === FLAT_QUERY ? undefined : view.query()}
@@ -1707,7 +1762,7 @@ export function App() {
                   if (tag) view.search(tagQuery(tag.name));
                 }}
                 onBackgroundMenu={(event) => showBackgroundMenu(event, view)}
-                onHeaderMenu={(event) => (ownColumns(view) ? event.preventDefault() : showHeaderMenu(event))}
+                onHeaderMenu={(event) => (ownColumns(view) ? event.preventDefault() : showHeaderMenu(event, view))}
                 onGroup={cycleGrouping}
                 onRename={(selection, name) => actions.rename(view, selection, name)}
                 onEditEnd={view.editEnded}

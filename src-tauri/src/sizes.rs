@@ -1,6 +1,7 @@
 //! Folder totals, which Windows keeps nowhere, so a thread adds them up. Only runs when asked.
 
 use std::collections::HashMap;
+use std::fs;
 use std::mem;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -12,6 +13,7 @@ use serde::Serialize;
 
 use crate::folder::Entry;
 use crate::ops::sys::{self, Stat};
+use crate::session;
 
 const REPORT_GAP: Duration = Duration::from_secs(1);
 /// The disk map hears of the folders weighed so far this often.
@@ -19,7 +21,35 @@ const MAP_GAP: Duration = Duration::from_millis(200);
 
 // ponytail: grows with every folder looked at and each total stays until the next scan. Dropping
 // the least recently used would cap it.
-static KNOWN: LazyLock<RwLock<HashMap<PathBuf, u64>>> = LazyLock::new(RwLock::default);
+static KNOWN: LazyLock<RwLock<HashMap<PathBuf, u64>>> = LazyLock::new(|| RwLock::new(load()));
+
+/// Where totals wait between sessions.
+const SAVED: &str = "folder-sizes.json";
+
+/// The last session's totals, which stand until a scan adds those folders up again. Tests start
+/// from none, and leave the user's own alone.
+fn load() -> HashMap<PathBuf, u64> {
+    let text = session::data_file(SAVED).filter(|_| !cfg!(test)).and_then(|file| fs::read_to_string(file).ok());
+    text.and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default()
+}
+
+/// Writes under the lock, so a `forget` can't land between reading the totals and writing them.
+/// No totals means forgotten, so there is no file to bring back.
+// ponytail: writes every total each time, which a big map pays for once a second while a scan runs.
+fn save() {
+    let Some(file) = session::data_file(SAVED).filter(|_| !cfg!(test)) else { return };
+    let known = KNOWN.read().unwrap_or_else(PoisonError::into_inner);
+    if known.is_empty() {
+        return;
+    }
+    // The first scan can come before anything else made Perli's folder.
+    if let Some(folder) = file.parent() {
+        let _ = fs::create_dir_all(folder);
+    }
+    if let Ok(text) = serde_json::to_string(&*known) {
+        let _ = fs::write(file, text);
+    }
+}
 
 fn key(path: &Path) -> PathBuf {
     path.to_string_lossy().to_lowercase().into()
@@ -35,7 +65,11 @@ pub fn of(path: &Path) -> Option<u64> {
 }
 
 pub fn forget() {
-    KNOWN.write().unwrap_or_else(PoisonError::into_inner).clear();
+    let mut known = KNOWN.write().unwrap_or_else(PoisonError::into_inner);
+    known.clear();
+    if let Some(file) = session::data_file(SAVED).filter(|_| !cfg!(test)) {
+        let _ = fs::remove_file(file);
+    }
 }
 
 /// Calls `visit` for each entry of `folder`, with whether it is a real folder to walk into. A
@@ -78,22 +112,28 @@ fn scan(folder: &Path, stop: &AtomicBool, report: impl Fn()) {
     let mut reported = Instant::now();
     for found in folders {
         let Some(bytes) = total(&found, stop) else {
+            // A stopped scan keeps the totals it finished.
+            save();
             return;
         };
         {
             let mut known = KNOWN.write().unwrap_or_else(PoisonError::into_inner);
             // Checked under the lock: `forget` stops scans before it clears, so no total lands after.
             if stop.load(Ordering::SeqCst) {
+                drop(known);
+                save();
                 return;
             }
             known.insert(key(&found), bytes);
         }
         if reported.elapsed() >= REPORT_GAP {
             report();
+            save();
             reported = Instant::now();
         }
     }
     report();
+    save();
 }
 
 /// One thing right inside a folder, with all the bytes under it, for the disk map.

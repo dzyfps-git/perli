@@ -8,7 +8,7 @@ use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use windows::core::{Result, HSTRING, PCWSTR};
 use windows::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_OFFLINE, FILE_ATTRIBUTE_PINNED,
@@ -68,6 +68,56 @@ pub enum Grouping {
     FoldersFirst,
     FilesFirst,
     Mixed,
+}
+
+/// What rows gather under headers by. `None` lists them with no headers.
+#[derive(Clone, Copy, Default, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum GroupBy {
+    #[default]
+    None,
+    Date,
+    Kind,
+    Size,
+    Tag,
+    /// Where a search found each row.
+    Folder,
+}
+
+/// Explorer's size groups, largest first: a file goes in the first one it is bigger than.
+const SIZE_GROUPS: [(&str, u64); 6] = [
+    ("gigantic", 4 << 30),
+    ("huge", 1 << 30),
+    ("large", 128 << 20),
+    ("medium", 1 << 20),
+    ("small", 16 << 10),
+    ("tiny", 0),
+];
+
+/// Rows under one header.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Group {
+    /// What the UI names it by: the place of a date edge or a kind, a size word, a tag's id, a
+    /// folder's path. "folders", "other", "older" and "none" stand for the rest.
+    pub key: String,
+    /// Its first row.
+    pub start: u32,
+    /// The rows that show, which is none while it is folded.
+    pub count: u32,
+    pub total: u32,
+}
+
+/// What the UI needs to lay out a listing, besides its rows.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Shape {
+    pub count: usize,
+    /// The system switch changes what the hidden switch would show.
+    pub hidden_count: usize,
+    pub groups: Vec<Group>,
+    /// The biggest size a row shows, which the size bars measure against.
+    pub largest: u64,
 }
 
 /// What a filter lets through, of files and folders.
@@ -143,6 +193,18 @@ pub struct Order {
     /// Folders whose rows show under them, by full path. Only a read looks at these.
     #[serde(default)]
     pub expanded: Vec<String>,
+    #[serde(default)]
+    pub group_by: GroupBy,
+    /// Where each date group starts, newest first, in milliseconds since 1970. A row goes in the
+    /// first one it is not older than, so the UI keeps the calendar and its time zone.
+    #[serde(default)]
+    pub group_edges: Vec<i64>,
+    /// The extensions of each kind group, in order. Folders come before them and the rest after.
+    #[serde(default)]
+    pub group_kinds: Vec<Vec<String>>,
+    /// Groups whose rows are out of sight, by key.
+    #[serde(default)]
+    pub folded: Vec<String>,
 }
 
 impl Order {
@@ -355,6 +417,7 @@ pub struct Listing {
     /// Only entries that have tags are here, so normal rows stay small.
     tags: Arc<tags::Tagged>,
     visible: Vec<u32>,
+    groups: Vec<Group>,
     order: Order,
 }
 
@@ -467,8 +530,15 @@ impl Listing {
             SortKey::Tags => self.tag_ranks(&tags::places()),
             _ => Vec::new(),
         };
-        if parents.is_empty() {
-            visible.sort_unstable_by(|&a, &b| compare(entries, locations, &ranks, a, b, &order));
+        let grouped = order.group_by != GroupBy::None;
+        let (group_of, group_keys) = self.group_places(&order);
+        let group = |row: u32| group_of[row as usize];
+        // Grouped rows leave folders opened in place, which the UI doesn't offer then.
+        if parents.is_empty() || grouped {
+            visible.sort_unstable_by(|&a, &b| {
+                let by_group = if grouped { group(a).cmp(&group(b)) } else { Ordering::Equal };
+                by_group.then_with(|| compare(entries, locations, &ranks, a, b, &order))
+            });
         } else {
             // Each folder's rows are sorted among themselves and follow it.
             // ponytail: a row whose folder the filter leaves out goes with it. Search finds those.
@@ -490,9 +560,104 @@ impl Listing {
                 next.extend(inside.remove(&row).unwrap_or_default());
             }
         }
+        let mut groups = Vec::new();
+        if grouped {
+            let mut kept = Vec::with_capacity(visible.len());
+            for run in visible.chunk_by(|&a, &b| group(a) == group(b)) {
+                let key = group_keys[group(run[0]) as usize].clone();
+                let folded = order.folded.contains(&key);
+                let total = run.len() as u32;
+                groups.push(Group { key, start: kept.len() as u32, count: if folded { 0 } else { total }, total });
+                if !folded {
+                    kept.extend_from_slice(run);
+                }
+            }
+            visible = kept;
+        }
         self.visible = visible;
+        self.groups = groups;
         self.order = order;
         self
+    }
+
+    /// Each entry's group, as a place in the keys that is also where the group goes.
+    fn group_places(&self, order: &Order) -> (Vec<u32>, Vec<String>) {
+        let numbered = |count: usize| (0..count).map(|at| at.to_string()).collect::<Vec<_>>();
+        let each = |place: &dyn Fn(usize) -> usize| (0..self.entries.len()).map(|entry| place(entry) as u32).collect::<Vec<u32>>();
+        match order.group_by {
+            GroupBy::None => (Vec::new(), Vec::new()),
+            GroupBy::Date => {
+                let edges: Vec<u64> = order.group_edges.iter().map(|&edge| ticks(edge)).collect();
+                let place = |entry: usize| {
+                    let modified = self.entries[entry].modified;
+                    edges.iter().position(|&edge| modified >= edge).unwrap_or(edges.len())
+                };
+                let mut keys = numbered(edges.len());
+                keys.push("older".into());
+                (each(&place), keys)
+            }
+            GroupBy::Kind => {
+                let kinds = &order.group_kinds;
+                let place = |entry: usize| {
+                    let row = &self.entries[entry];
+                    if row.is_dir {
+                        return 0;
+                    }
+                    let extension = row.extension_text();
+                    kinds.iter().position(|kind| kind.contains(&extension)).map_or(kinds.len() + 1, |at| at + 1)
+                };
+                let mut keys = vec!["folders".to_string()];
+                keys.extend(numbered(kinds.len()));
+                keys.push("other".into());
+                (each(&place), keys)
+            }
+            GroupBy::Size => {
+                let place = |entry: usize| {
+                    let row = &self.entries[entry];
+                    // A folder nobody added up has no size to go by.
+                    let size = if row.is_dir { sizes::any().then(|| sizes::of(&self.full_path(entry))).flatten() } else { Some(row.size) };
+                    let Some(size) = size else { return 0 };
+                    1 + SIZE_GROUPS.iter().position(|&(_, least)| size > least).unwrap_or(SIZE_GROUPS.len())
+                };
+                let mut keys = vec!["folders".to_string()];
+                keys.extend(SIZE_GROUPS.iter().map(|(name, _)| name.to_string()));
+                keys.push("empty".into());
+                (each(&place), keys)
+            }
+            GroupBy::Tag => {
+                // ponytail: a row with many tags goes under the first one only. Explorer repeats it
+                // under each, which would need rows that stand in more than one place.
+                let places = tags::places();
+                let mut ids: Vec<u32> = places.keys().copied().collect();
+                ids.sort_unstable_by_key(|id| places[id]);
+                let place = |entry: usize| {
+                    let ranks = self.tags_of(entry as u32).iter().filter_map(|tag| places.get(tag));
+                    ranks.min().map_or(ids.len(), |&rank| rank as usize)
+                };
+                let mut keys: Vec<String> = ids.iter().map(u32::to_string).collect();
+                keys.push("none".into());
+                (each(&place), keys)
+            }
+            GroupBy::Folder => {
+                let locations = self.locations();
+                let mut folders: Vec<&[u16]> = (0..self.entries.len() as u32).map(|entry| location_of(locations, entry)).collect();
+                folders.sort_unstable_by(|a, b| natural(a, b));
+                folders.dedup();
+                let places: HashMap<&[u16], usize> = folders.iter().enumerate().map(|(at, &folder)| (folder, at)).collect();
+                let place = |entry: usize| places[location_of(locations, entry as u32)];
+                let keys = folders.iter().map(|folder| String::from_utf16_lossy(&folder[..folder.len() - 1])).collect();
+                (each(&place), keys)
+            }
+        }
+    }
+
+    pub fn shape(&self) -> Shape {
+        Shape {
+            count: self.len(),
+            hidden_count: self.hidden_count(),
+            groups: self.groups.clone(),
+            largest: self.visible.iter().map(|&row| self.size_of(row as usize)).max().unwrap_or(0),
+        }
     }
 
     /// What the Size column shows for one entry.
@@ -794,6 +959,26 @@ fn natural(a: &[u16], b: &[u16]) -> Ordering {
     unsafe { StrCmpLogicalW(PCWSTR(a.as_ptr()), PCWSTR(b.as_ptr())) }.cmp(&0)
 }
 
+/// What a folder tile can show a stack of.
+const PICTURE_TYPES: [&str; 10] = ["jpg", "jpeg", "png", "gif", "webp", "bmp", "heic", "avif", "tif", "tiff"];
+
+/// Up to `most` pictures right inside `folder`, in the order Windows lists them. Hidden ones stay
+/// out, and so do ones in the cloud, which reading would fetch.
+pub fn pictures_in(folder: &Path, most: usize) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let _ = ops::sys::each_entry(&ops::sys::extended(&folder.join("*")), |data| {
+        if found.len() == most {
+            return;
+        }
+        if let Some(entry) = Entry::from_find_data(data) {
+            if !entry.is_dir && !entry.hidden && !entry.cloud && PICTURE_TYPES.contains(&entry.extension_text().as_str()) {
+                found.push(folder.join(entry.file_name()));
+            }
+        }
+    });
+    found
+}
+
 /// The names of the folders right inside `path`, in Explorer's order, for a path crumb's menu.
 pub fn subfolders(path: &Path, sight: Sight) -> std::io::Result<Vec<String>> {
     use std::os::windows::fs::MetadataExt;
@@ -894,6 +1079,59 @@ mod tests {
         assert_eq!(Listing::read(path, order(false, true)).unwrap().hidden_count(), 2);
         let listing = Listing::read(path, order(true, true)).unwrap();
         assert_eq!(listing.encode_rows(0, 1)[32], FLAG_HIDDEN | FLAG_SYSTEM);
+    }
+
+    #[test]
+    fn groups_gather_rows_and_a_folded_one_keeps_only_its_count() {
+        let folder = TempFolder::new("groups");
+        fs::write(folder.0.join("a.txt"), "words").unwrap();
+        fs::write(folder.0.join("b.png"), "").unwrap();
+        fs::write(folder.0.join("c.png"), [0; 20 << 10]).unwrap();
+        fs::create_dir(folder.0.join("sub")).unwrap();
+        let path = folder.0.to_str().unwrap();
+        let by = |group_by, folded: &[&str]| Order {
+            group_by,
+            group_kinds: vec![vec!["png".into()], vec!["txt".into()]],
+            group_edges: vec![i64::MAX / 20_000, 0],
+            folded: folded.iter().map(|key| key.to_string()).collect(),
+            ..Order::default()
+        };
+        let keys = |listing: &Listing| listing.groups.iter().map(|group| (group.key.clone(), group.start, group.count, group.total)).collect::<Vec<_>>();
+        let key = |text: &str| text.to_string();
+
+        let kinds = Listing::read(path, by(GroupBy::Kind, &[])).unwrap();
+        assert_eq!(names(&kinds), ["sub", "b.png", "c.png", "a.txt"]);
+        assert_eq!(keys(&kinds), [(key("folders"), 0, 1, 1), (key("0"), 1, 2, 2), (key("1"), 3, 1, 1)]);
+
+        let folded = Listing::read(path, by(GroupBy::Kind, &["0"])).unwrap();
+        assert_eq!(names(&folded), ["sub", "a.txt"]);
+        assert_eq!(keys(&folded), [(key("folders"), 0, 1, 1), (key("0"), 1, 0, 2), (key("1"), 1, 1, 1)]);
+
+        let sizes = Listing::read(path, by(GroupBy::Size, &[])).unwrap();
+        assert_eq!(names(&sizes), ["sub", "c.png", "a.txt", "b.png"]);
+        let words: Vec<String> = sizes.groups.iter().map(|group| group.key.clone()).collect();
+        assert_eq!(words, ["folders", "small", "tiny", "empty"]);
+        assert_eq!(sizes.shape().largest, 20 << 10);
+
+        // No row is from the far future, and every one is newer than 1970.
+        let dates = Listing::read(path, by(GroupBy::Date, &[])).unwrap();
+        assert_eq!(keys(&dates), [(key("1"), 0, 4, 4)]);
+
+        let plain = Listing::read(path, Order::default()).unwrap();
+        assert!(plain.shape().groups.is_empty());
+    }
+
+    #[test]
+    fn a_folder_tile_stacks_its_first_pictures_but_no_hidden_ones() {
+        let folder = TempFolder::new("stack");
+        for name in ["a.jpg", "b.txt", "c.PNG", "d.gif", "e.webp"] {
+            fs::write(folder.0.join(name), "").unwrap();
+        }
+        fs::create_dir(folder.0.join("f.png")).unwrap();
+        hide(&folder.0.join("a.jpg"));
+
+        let names: Vec<_> = pictures_in(&folder.0, 2).iter().map(|path| path.file_name().unwrap().to_owned()).collect();
+        assert_eq!(names, ["c.PNG", "d.gif"]);
     }
 
     #[test]

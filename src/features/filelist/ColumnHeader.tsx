@@ -1,6 +1,6 @@
 import { createMemo, createSignal, For, Index, Show } from "solid-js";
 import type { Grouping, Sort, SortKey } from "../../api";
-import { dragTarget, MIN_COLUMN_WIDTH, type Column } from "./columns";
+import { dragTarget, isProp, MIN_COLUMN_WIDTH, type Column, type ColumnId, type ColumnSet } from "./columns";
 import { MAX_TILE, MIN_TILE, TILE_STEP } from "./layout";
 import { grouping, moveColumn, setColumnWidth, setTileSize, tileSize, toggleColumn } from "./prefs";
 
@@ -35,12 +35,12 @@ function GroupToggle(props: { onChange: () => void }) {
 }
 
 /** The name column flexes, so every other column resizes from its left edge. */
-function startResize(event: PointerEvent, column: Column) {
+function startResize(event: PointerEvent, column: Column, set: ColumnSet) {
   event.preventDefault();
   const handle = event.currentTarget as HTMLElement;
   const startX = event.clientX;
   const move = (moved: PointerEvent) =>
-    setColumnWidth(column.id, Math.max(MIN_COLUMN_WIDTH, column.width + startX - moved.clientX));
+    setColumnWidth(set, column.id, Math.max(MIN_COLUMN_WIDTH, column.width + startX - moved.clientX));
 
   handle.setPointerCapture(event.pointerId);
   handle.addEventListener("pointermove", move);
@@ -52,12 +52,16 @@ function startResize(event: PointerEvent, column: Column) {
 export function ColumnHeader(props: {
   ref: (element: HTMLDivElement) => void;
   columns: Column[];
+  /** Which kept set of columns these are, which moves and widths change. */
+  set: ColumnSet;
   /** The columns can't be moved, resized, added or removed, and grouping doesn't apply. */
   fixed: boolean;
   sort: Sort;
   onSort: (key: SortKey) => void;
   onMenu: (event: MouseEvent) => void;
   onGroup: () => void;
+  /** A double click on a column's edge, to make it as wide as what it shows. */
+  onFit: (id: ColumnId) => void;
 }) {
   const visible = createMemo(() => props.columns.filter((column) => column.visible));
   const addable = createMemo(() => props.columns.filter((column) => !column.visible));
@@ -65,17 +69,17 @@ export function ColumnHeader(props: {
   let header!: HTMLDivElement;
   let dragged = false;
 
-  function dragTo(id: SortKey, x: number) {
+  function dragTo(id: ColumnId, x: number) {
     const middles = [...header.children].map((title) => {
       const { left, width } = title.getBoundingClientRect();
       return left + width / 2;
     });
     const titles = visible();
     const target = titles[dragTarget(middles, titles.findIndex((column) => column.id === id), x)];
-    if (target) moveColumn(id, target.id);
+    if (target) moveColumn(props.set, id, target.id);
   }
 
-  function startDrag(event: PointerEvent, id: SortKey) {
+  function startDrag(event: PointerEvent, id: ColumnId) {
     dragged = false;
     if (props.fixed || id === "name" || event.button !== 0) return;
     const button = event.currentTarget as HTMLElement;
@@ -98,12 +102,13 @@ export function ColumnHeader(props: {
     );
   }
 
-  const removable = (id: SortKey) => editing() && id !== "name";
+  const removable = (id: ColumnId) => editing() && id !== "name";
 
-  function clickTitle(id: SortKey) {
+  /** A column read from the files' own properties has no order to sort by. */
+  function clickTitle(id: ColumnId) {
     if (dragged) return;
-    if (removable(id)) toggleColumn(id);
-    else props.onSort(id);
+    if (removable(id)) toggleColumn(props.set, id);
+    else if (!isProp(id)) props.onSort(id);
   }
 
   return (
@@ -121,7 +126,11 @@ export function ColumnHeader(props: {
         {/* Index keeps each title in place during a resize, which would lose the drag otherwise. */}
         <Index each={visible()}>
           {(column) => (
-            <div class="column-title" classList={{ "column-size": column().id === "size" }}>
+            <div
+              class="column-title"
+              classList={{ "column-size": column().id === "size" }}
+              data-plain={isProp(column().id) ? "" : undefined}
+            >
               <button
                 class="column-button"
                 aria-label={removable(column().id) ? `Remove ${column().label} column` : undefined}
@@ -138,7 +147,7 @@ export function ColumnHeader(props: {
                   {!props.fixed && <GroupToggle onChange={props.onGroup} />}
                   <For each={editing() ? addable() : []}>
                     {(extra) => (
-                      <button class="column-ghost" onClick={() => toggleColumn(extra.id)}>
+                      <button class="column-ghost" onClick={() => toggleColumn(props.set, extra.id)}>
                         {extra.label}
                       </button>
                     )}
@@ -149,7 +158,8 @@ export function ColumnHeader(props: {
                 <div
                   class="column-resize"
                   role="presentation"
-                  onPointerDown={(event) => startResize(event, column())}
+                  onPointerDown={(event) => startResize(event, column(), props.set)}
+                  onDblClick={() => props.onFit(column().id)}
                 />
               )}
             </div>
@@ -180,9 +190,9 @@ export function SortStrip(props: {
 }) {
   return (
     <div class="column-strip sort-strip" role="group" aria-label="Sort">
-      <For each={props.columns}>
+      <For each={props.columns.filter((column) => !isProp(column.id))}>
         {(column) => (
-          <button class="column-button" onClick={() => props.onSort(column.id)}>
+          <button class="column-button" onClick={() => !isProp(column.id) && props.onSort(column.id)}>
             {column.label}
             <span class="column-arrow" hidden={props.sort.key !== column.id}>
               {props.sort.descending ? ICON_DESCENDING : ICON_ASCENDING}

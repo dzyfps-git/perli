@@ -1,9 +1,11 @@
 import { batch, createSignal, untrack } from "solid-js";
 import {
   arrangeView,
+  countWhere,
   openFolder,
   reloadView,
   scanSizes,
+  type GroupBy,
   type Opened,
   type Order,
   type SearchScope,
@@ -14,6 +16,9 @@ import {
 } from "../../api";
 import { filterActive, NO_FILTER, toFilter } from "../filelist/filter";
 import type { Layout } from "../filelist/layout";
+import type { ColumnSet } from "../filelist/columns";
+import { extensionsOf, type Kind } from "../filelist/fileKinds";
+import { dateGroups, KIND_GROUPS } from "../filelist/groups";
 import {
   folderSizes,
   grouping,
@@ -21,8 +26,10 @@ import {
   lastLayout,
   lastSort,
   rememberedFilter,
+  rememberedGroup,
   rememberedSort,
   rememberFilter,
+  rememberGroup,
   rememberSort,
   setLastLayout,
   setLastSort,
@@ -41,6 +48,14 @@ const BIN_SORT: Sort = { key: "modified", descending: true };
 const SEARCH_SORT: Sort = { key: "found", descending: false };
 /** Asks a search for every file, which makes a flat view of the folder. */
 export const FLAT_QUERY = "*";
+/** A folder is one of songs or pictures when at least this share of its files are. */
+const SET_SHARE = 0.6;
+/** The extensions of each kind group, as the listing sorts them in. */
+const GROUP_KINDS = KIND_GROUPS.map((group) => group.kinds.flatMap(extensionsOf));
+
+/** The filter that keeps only files of `kinds`, for counting them. */
+const onlyKinds = (kinds: Kind[]) => ({ ...toFilter(NO_FILTER), kinds: "files" as const, extensions: kinds.flatMap(extensionsOf) });
+
 /** Weakest first. Each covers the ones before it, so one read can stand for all that waited. */
 const SEARCH_STEPS: SearchStep[] = ["grown", "again", "start"];
 
@@ -122,6 +137,15 @@ export function createFolderView(id: number, saved?: SavedPane) {
   const [inside, setInsideValue] = createSignal(false);
   /** Folders opened in place, whose rows show under them. They last until the view goes elsewhere. */
   const [expanded, setExpanded] = createSignal<string[]>([]);
+  /** What the folder's rows gather under headers by, and a search's, which the folder keeps apart. */
+  const [groupBy, setGroupByValue] = createSignal<GroupBy>(saved ? rememberedGroup(saved.path) : "none");
+  const [searchGroupBy, setSearchGroupBy] = createSignal<GroupBy>("none");
+  /** Groups whose rows are out of sight, by key. They open again when the view goes elsewhere. */
+  const [folded, setFolded] = createSignal<string[]>([]);
+  /** How many folders deep a flat view goes. None is all the way. */
+  const [depth, setDepthValue] = createSignal<number | null>(null);
+  /** The columns that suit the folder: its songs' or pictures' own, or the plain ones. */
+  const [columnSet, setColumnSet] = createSignal<ColumnSet>("plain");
   /** The one row selected in the list, for the details panel. */
   const [cursor, setCursor] = createSignal<RowAt | undefined>(undefined, {
     equals: (a, b) => a?.snapshot === b?.snapshot && a?.index === b?.index,
@@ -142,6 +166,15 @@ export function createFolderView(id: number, saved?: SavedPane) {
   /** The folder shown, or the saved one that has not been opened yet. */
   const path = () => folder()?.path ?? saved?.path;
   const shownSort = () => (query() ? searchSort() : sort());
+  const shownGroupBy = () => (query() ? searchGroupBy() : groupBy());
+  /** What the listing needs to gather rows under headers. The dates are worked out here, where
+   *  the calendar and the time zone are. */
+  const grouped = (by: GroupBy, foldedKeys: string[]) => ({
+    groupBy: by,
+    groupEdges: by === "date" ? dateGroups(new Date()).map((group) => group.from) : [],
+    groupKinds: by === "kind" ? GROUP_KINDS : [],
+    folded: by === "none" ? [] : foldedKeys,
+  });
   // Date order is the point of the Recycle Bin, and a search's order is how well rows fit, so
   // folders don't jump ahead in either.
   const order = (target = path()): Order => ({
@@ -151,16 +184,19 @@ export function createFolderView(id: number, saved?: SavedPane) {
     showSystem: showSystem(),
     // Rows of a search carry no tags, so a tag would leave none of them.
     filter: { ...toFilter(filterForm()), tags: query() ? [] : filterForm().tags },
-    expanded: query() || isBin(target) || !nests() ? [] : expanded(),
+    // Grouped rows don't nest, so the folders opened in place close.
+    expanded: query() || isBin(target) || shownGroupBy() !== "none" || !nests() ? [] : expanded(),
+    ...grouped(shownGroupBy(), folded()),
   });
   /** A folder opens in its own order, even from a search. */
-  const openingOrder = (target: string, wanted: Sort, form: typeof NO_FILTER): Order => ({
+  const openingOrder = (target: string, wanted: Sort, form: typeof NO_FILTER, by: GroupBy): Order => ({
     ...wanted,
     group: isBin(target) ? "mixed" : grouping(),
     showHidden: showHidden(),
     showSystem: showSystem(),
     filter: toFilter(form),
-    expanded: samePath(path(), target) && !isBin(target) && nests() ? expanded() : [],
+    expanded: samePath(path(), target) && !isBin(target) && by === "none" && nests() ? expanded() : [],
+    ...grouped(by, samePath(path(), target) ? folded() : []),
   });
   /** Row numbers mean nothing outside the snapshot they came from. */
   const selectedRows = (snapshot: number) => {
@@ -199,6 +235,15 @@ export function createFolderView(id: number, saved?: SavedPane) {
     else if (rearrangeAfterOpen) rearrange();
   }
 
+  /** A folder that is mostly songs or pictures gets their columns. A search keeps its own. */
+  async function noteColumnSet(opened: Opened) {
+    const ask = (kinds: Kind[]) => countWhere(id, opened.request, onlyKinds(kinds));
+    const files = await countWhere(id, opened.request, { ...toFilter(NO_FILTER), kinds: "files" });
+    const [songs, pictures] = files === 0 ? [0, 0] : await Promise.all([ask(["audio"]), ask(["picture"])]);
+    if (folder()?.request !== opened.request) return;
+    setColumnSet(songs >= files * SET_SHARE && files > 0 ? "music" : pictures >= files * SET_SHARE && files > 0 ? "pictures" : "plain");
+  }
+
   /** Adds up the folders shown, if the user wants that. */
   function scanFolder() {
     const shown = folder()?.path;
@@ -212,9 +257,10 @@ export function createFolderView(id: number, saved?: SavedPane) {
     const folderSort = arrivalSort(target);
     // Only a folder already open has a form of its own. A restored one reads its pinned filter.
     const form = samePath(folder()?.path, target) ? filterForm() : (rememberedFilter(target) ?? NO_FILTER);
+    const by = samePath(path(), target) ? groupBy() : rememberedGroup(target);
     opening = true;
     try {
-      const wanted = openingOrder(target, folderSort ?? sort(), form);
+      const wanted = openingOrder(target, folderSort ?? sort(), form, by);
       const opened = await openFolder(id, request, folder()?.request ?? 0, target, wanted);
       if (request !== latestRequest) return undefined;
       setError(undefined);
@@ -227,11 +273,17 @@ export function createFolderView(id: number, saved?: SavedPane) {
         if (folderSort) setSortValue(folderSort);
         setFilterFormValue(form);
         if (filterActive(form)) setChipsOpen(true);
-        if (!samePath(path(), opened.path)) setExpanded([]);
+        if (!samePath(path(), opened.path)) {
+          setExpanded([]);
+          setFolded([]);
+        }
+        setGroupByValue(by);
         show(opened);
       });
       setTrail(nextTrail(trail(), opened.path));
       scanFolder();
+      if (isBin(opened.path)) setColumnSet("plain");
+      else noteColumnSet(opened).catch(console.error);
       return opened;
     } catch (failure) {
       if (request === latestRequest) setError(String(failure));
@@ -256,7 +308,7 @@ export function createFolderView(id: number, saved?: SavedPane) {
 
     // Rows of a search have no names to go by, because one name can be in many folders.
     const { top, step } = wanted;
-    const search = query() ? { step, query: query(), scope: scope(), inside: inside() } : null;
+    const search = query() ? { step, query: query(), scope: scope(), inside: inside(), depth: query() === FLAT_QUERY ? depth() : null } : null;
     const select = search ? [] : wanted.select;
     const request = ++latestRequest;
     opening = true;
@@ -302,6 +354,8 @@ export function createFolderView(id: number, saved?: SavedPane) {
   function search(text: string) {
     if (text === query() || isBin(path())) return;
     if (!query()) setSearchSort(SEARCH_SORT);
+    // Groups of the folder mean nothing to a search, and the other way round.
+    if (!query() || !text) setFolded([]);
     setQuery(text);
     if (!text) setWalk("done");
     readAgain({ select: [], rename: false, step: "start", top: true });
@@ -372,6 +426,32 @@ export function createFolderView(id: number, saved?: SavedPane) {
     // Its sorts make no sense for normal folders, so new panes must not pick them up.
     if (!isBin(path)) setLastSort(next);
     if (path) rememberSort(path, next);
+    rearrange();
+  }
+
+  /** A folder keeps how it is grouped. Rows that nest under their folders can't be grouped, so
+   *  those folders close, which needs a new read. */
+  function setGroupBy(next: GroupBy) {
+    setFolded([]);
+    if (query()) {
+      setSearchGroupBy(next);
+      return rearrange();
+    }
+    setGroupByValue(next);
+    const shown = folder()?.path;
+    if (shown && !isBin(shown)) rememberGroup(shown, next);
+    if (next !== "none" && expanded().length > 0) {
+      setExpanded([]);
+      return reload();
+    }
+    rearrange();
+  }
+
+  /** Folds a group away or opens it. `every` does the same to all of them, as this one goes. */
+  function toggleFold(key: string, every = false) {
+    const open = !folded().includes(key);
+    const keys = every ? (folder()?.groups ?? []).map((group) => group.key) : [key];
+    setFolded(open ? [...new Set([...folded(), ...keys])] : folded().filter((other) => !keys.includes(other)));
     rearrange();
   }
 
@@ -494,6 +574,17 @@ export function createFolderView(id: number, saved?: SavedPane) {
     },
     list: () => list,
     expanded,
+    groupBy: shownGroupBy,
+    setGroupBy,
+    folded,
+    toggleFold,
+    columnSet,
+    /** How many folders deep the flat view goes, or null for all the way. */
+    depth,
+    setDepth(next: number | null) {
+      setDepthValue(next);
+      if (query() === FLAT_QUERY) readAgain({ select: [], rename: false, step: "start", top: true });
+    },
     collapseAll,
     /** Opens `folder` in place, under its row, or closes it and every folder opened inside it. */
     toggleExpand(folder: string) {

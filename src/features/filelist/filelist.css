@@ -1002,3 +1002,179 @@ html[data-blurred] :is(.empty-float, .empty-shadow) {
   border-radius: 1px;
   background: var(--accent);
 }
+
+/* Group headers: a glass strip with a pill that folds the rows under it. The one held at the top
+   stays over the rows as they scroll under it, so they blur through. */
+.group-heads {
+  position: absolute;
+  inset: 0 0 auto 0;
+  z-index: 1;
+  height: 0;
+}
+
+.group-stuck {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  height: 0;
+}
+
+.group-head {
+  position: absolute;
+  inset: 0 0 auto 0;
+  display: flex;
+  align-items: center;
+  min-width: var(--columns-min, 0);
+  height: var(--group-head);
+  padding: 0 calc(var(--space-4) - 6px);
+  pointer-events: none;
+}
+
+.group-head[data-held] {
+  border-bottom: 1px solid var(--border);
+  background: var(--overlay-tint);
+  backdrop-filter: var(--blur);
+}
+
+.group-fold {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  height: 24px;
+  padding: 0 var(--space-3) 0 6px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  pointer-events: auto;
+  transition:
+    background-color var(--motion),
+    scale var(--motion-spring);
+}
+
+.group-fold:hover {
+  background: var(--surface-hover);
+}
+
+.group-fold:active {
+  scale: 0.96;
+}
+
+.group-fold:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.group-twist {
+  display: inline-grid;
+  place-items: center;
+  width: 12px;
+  color: var(--text-muted);
+  font: 8px / 1 var(--font-icons);
+  rotate: 90deg;
+  transition: rotate var(--motion-spring);
+}
+
+.group-twist::before {
+  content: "\E76C";
+}
+
+.group-fold[aria-expanded="false"] .group-twist {
+  rotate: 0deg;
+}
+
+.group-count {
+  color: var(--text-muted);
+  font-weight: normal;
+  font-variant-numeric: tabular-nums;
+}
+
+.group-fold[aria-expanded="false"] .group-label {
+  color: var(--text-muted);
+}
+
+/* Size bars: a soft bar behind each size, as long as its share of the biggest. It grows from the
+   right, where the size's text sits. */
+.file-size {
+  position: relative;
+}
+
+.file-size::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  right: -4px;
+  z-index: -1;
+  width: calc(var(--size-share, 0) * (100% + 8px));
+  height: 20px;
+  border-radius: 6px;
+  background: linear-gradient(to left, color-mix(in oklch, var(--accent) 34%, transparent), color-mix(in oklch, var(--accent) 12%, transparent));
+  translate: 0 -50%;
+  pointer-events: none;
+}
+
+/* A column read from the files' own properties has no order to sort by. */
+.column-title[data-plain] .column-button {
+  cursor: default;
+}
+
+/* A folder tile wearing a stack of what is inside keeps a small folder mark in its corner. */
+.file-row[data-stack][data-thumb] .file-icon::after {
+  content: "\E8B7";
+  position: absolute;
+  inset: auto 6% 6% auto;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  background: var(--overlay-tint);
+  box-shadow: var(--shadow);
+  backdrop-filter: var(--blur);
+  color: var(--kind-color, var(--text-muted));
+  font: 12px / 1 var(--font-icons);
+}
+
+/* A wall of pictures: square tiles edge to edge, no names, each picture filling its tile. */
+.file-grid[data-wall] .file-row {
+  padding: 1px;
+  border-width: 1px;
+  border-radius: 3px;
+}
+
+.file-grid[data-wall] .file-icon {
+  border-radius: 2px;
+}
+
+.file-grid[data-wall] .file-thumb {
+  object-fit: cover;
+}
+
+/* The name stays for screen readers. */
+.file-grid[data-wall] .file-name {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+}
+
+.file-grid[data-wall] .file-row[aria-selected="true"] .file-icon {
+  outline: 3px solid var(--accent);
+  outline-offset: -3px;
+}
+
+.file-grid[data-wall] .file-marker {
+  border-width: 1px;
+  border-radius: 3px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .group-fold,
+  .group-twist {
+    transition: none;
+  }
+}

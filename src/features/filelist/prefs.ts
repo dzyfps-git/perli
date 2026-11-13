@@ -1,6 +1,6 @@
 import { createSignal } from "solid-js";
-import type { Grouping, Sort, SortKey } from "../../api";
-import { movedColumn, restoreColumns, type Column } from "./columns";
+import type { GroupBy, Grouping, Sort } from "../../api";
+import { movedColumn, restoreColumns, startColumns, type Column, type ColumnId, type ColumnSet } from "./columns";
 import type { Layout } from "./layout";
 import { NO_FILTER, type FilterForm } from "./filter";
 import { folderKey, remembered, type SortMemory } from "./sortMemory";
@@ -22,7 +22,14 @@ export function stored<T>(key: string, start: T) {
   return [value, set] as const;
 }
 
-export const [columns, setColumns] = stored<Column[]>("columns", restoreColumns(saved("columns")));
+/** Each set of columns is kept on its own, so a folder of songs keeps its artist column. */
+function columnStore(set: ColumnSet) {
+  const key = set === "plain" ? "columns" : `columns-${set}`;
+  return stored<Column[]>(key, restoreColumns(saved(key), startColumns(set)));
+}
+const COLUMN_SETS = { plain: columnStore("plain"), music: columnStore("music"), pictures: columnStore("pictures") };
+export const columnsOf = (set: ColumnSet) => COLUMN_SETS[set][0]();
+const setColumnsOf = (set: ColumnSet, next: Column[]) => COLUMN_SETS[set][1](next);
 export const [showHidden, setShowHidden] = stored("show-hidden", saved("show-hidden") === true);
 /** Windows' own protected files. They only show with hidden files too. */
 export const [showSystem, setShowSystem] = stored("show-system", saved("show-system") === true);
@@ -30,6 +37,10 @@ export const [grouping, setGrouping] = stored<Grouping>(
   "grouping",
   (saved("grouping") as Grouping | null) ?? "foldersFirst",
 );
+/** Soft bars behind the Size column, as long as each row's share of the biggest. */
+export const [sizeBars, setSizeBars] = stored("size-bars", saved("size-bars") !== false);
+/** Picture folders in the grid show an even wall of pictures, edge to edge, with no names. */
+export const [pictureWall, setPictureWall] = stored("picture-wall", saved("picture-wall") === true);
 /** Costs a walk of every folder opened, so it waits to be asked for. */
 export const [folderSizes, setFolderSizes] = stored("folder-sizes", saved("folder-sizes") === true);
 /** Read each copied file back and compare it with its original. Slower, so off at first. */
@@ -119,14 +130,28 @@ export function rememberSearch(text: string) {
 
 export const forgetSearch = (text: string) => setRecentSearches(recentSearches().filter((other) => other !== text));
 
-export const moveColumn = (id: SortKey, target: SortKey) => setColumns(movedColumn(columns(), id, target));
+/** How each folder's rows gather under headers, where the user chose that. */
+const [groupMemory, setGroupMemory] = stored<Record<string, GroupBy>>(
+  "folder-groups",
+  (saved("folder-groups") as Record<string, GroupBy> | null) ?? {},
+);
 
-export function setColumnWidth(id: SortKey, width: number) {
-  setColumns(columns().map((column) => (column.id === id ? { ...column, width } : column)));
+export const rememberedGroup = (path: string): GroupBy => groupMemory()[folderKey(path)] ?? "none";
+
+/** No groups is where every folder starts, so it needs no keeping. */
+export const rememberGroup = (path: string, by: GroupBy) =>
+  setGroupMemory(remembered(groupMemory(), path, by === "none" ? undefined : by));
+
+export const moveColumn = (set: ColumnSet, id: ColumnId, target: ColumnId) =>
+  setColumnsOf(set, movedColumn(columnsOf(set), id, target));
+
+export function setColumnWidth(set: ColumnSet, id: ColumnId, width: number) {
+  setColumnsOf(set, columnsOf(set).map((column) => (column.id === id ? { ...column, width } : column)));
 }
 
-export function toggleColumn(id: SortKey) {
-  setColumns(
-    columns().map((column) => (column.id === id ? { ...column, visible: !column.visible } : column)),
+export function toggleColumn(set: ColumnSet, id: ColumnId) {
+  setColumnsOf(
+    set,
+    columnsOf(set).map((column) => (column.id === id ? { ...column, visible: !column.visible } : column)),
   );
 }

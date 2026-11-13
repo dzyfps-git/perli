@@ -16,6 +16,10 @@ import {
   inlineFolders,
   setInlineFolders,
   openInWindow,
+  pictureWall,
+  setPictureWall,
+  setSizeBars,
+  sizeBars,
   ROW_HEIGHTS,
   rowDensity,
   selectionBar,
@@ -553,6 +557,18 @@ export function Settings(props: {
               note="The Size column fills in as Perli walks each folder you open. Links are not followed, and cloud files stay in the cloud."
               checked={folderSizes()}
               onChange={props.onToggleSizes}
+            />
+            <Switch
+              label="Show size bars"
+              note="A soft bar behind each size shows how big it is beside the biggest in the folder."
+              checked={sizeBars()}
+              onChange={setSizeBars}
+            />
+            <Switch
+              label="Show picture folders as a wall"
+              note="In the grid, a folder of pictures shows them as even tiles edge to edge, with no names under them."
+              checked={pictureWall()}
+              onChange={setPictureWall}
             />
             <Switch
               label="Show protected system files"

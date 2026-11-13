@@ -380,23 +380,25 @@ struct Preload(Mutex<Option<(String, JoinHandle<ReadResult>)>>);
 
 type ReadResult = windows::core::Result<folder::Listing>;
 
+/// How many pictures a folder tile stacks.
+const FOLDER_STACK: usize = 3;
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Opened {
     /// Names this folder's rows in later `rows` calls.
     request: u64,
     path: String,
-    count: usize,
-    hidden_count: usize,
+    #[serde(flatten)]
+    shape: folder::Shape,
     load_ms: f64,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Arranged {
-    count: usize,
-    /// The system switch changes what the hidden switch would show.
-    hidden_count: usize,
+    #[serde(flatten)]
+    shape: folder::Shape,
     /// The rows the UI had selected, at their new positions.
     selected: Vec<u32>,
 }
@@ -404,8 +406,8 @@ struct Arranged {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Reloaded {
-    count: usize,
-    hidden_count: usize,
+    #[serde(flatten)]
+    shape: folder::Shape,
     /// The rows to select in the new read.
     selected: Vec<u32>,
 }
@@ -557,8 +559,7 @@ async fn open_folder(
     let opened = Opened {
         request,
         path: resolved,
-        count: listing.len(),
-        hidden_count: listing.hidden_count(),
+        shape: listing.shape(),
         load_ms: started.elapsed().as_secs_f64() * 1000.0,
     };
     let mut views = views.0.write().unwrap_or_else(|error| error.into_inner());
@@ -604,8 +605,7 @@ async fn arrange_view(
     let (listing, arranged) = async_runtime::spawn_blocking(move || {
         let listing = before.clone().arranged(order);
         let arranged = Arranged {
-            count: listing.len(),
-            hidden_count: listing.hidden_count(),
+            shape: listing.shape(),
             selected: listing.carried_rows(&before, &selected),
         };
         (listing, arranged)
@@ -667,8 +667,7 @@ async fn reload_view(
         };
         listing.map(|listing| {
             let reloaded = Reloaded {
-                count: listing.len(),
-                hidden_count: listing.hidden_count(),
+                shape: listing.shape(),
                 selected: listing.rows_keyed(&keys),
             };
             (listing, reloaded)
@@ -1671,6 +1670,26 @@ fn rows_where(view: u32, request: u64, filter: folder::Filter, views: State<'_, 
     views.read(&selection, |listing, _| listing.fitting(&filter))
 }
 
+/// How many rows fit `filter`, to tell a folder of songs or pictures by.
+#[tauri::command]
+fn count_where(view: u32, request: u64, filter: folder::Filter, views: State<'_, Views>) -> Result<usize, String> {
+    let selection = Selection { view, request, rows: Vec::new() };
+    views.read(&selection, |listing, _| listing.fitting(&filter).len())
+}
+
+/// What the extra columns show for `rows`, such as a song's artist or when a picture was taken.
+#[tauri::command]
+async fn row_props(view: u32, request: u64, rows: Vec<u32>, names: Vec<String>, views: State<'_, Views>) -> Result<Vec<Vec<Option<String>>>, String> {
+    let paths = views.read(&Selection { view, request, rows }, folder::Listing::paths)?;
+    blocking(move || Ok(preview::props_of(&paths, &names))).await
+}
+
+/// A few pictures right inside `path`, for a folder tile to show a stack of.
+#[tauri::command]
+async fn folder_pictures(path: PathBuf) -> Result<Vec<PathBuf>, String> {
+    blocking(move || Ok(folder::pictures_in(&path, FOLDER_STACK))).await
+}
+
 /// Adds up the folders in `path`, and says so as totals come in.
 #[tauri::command]
 fn scan_sizes(view: u32, path: PathBuf, scans: State<'_, Scans>, app: AppHandle) {
@@ -2075,6 +2094,9 @@ fn main() {
             common_tags,
             rows_matching,
             rows_where,
+            count_where,
+            row_props,
+            folder_pictures,
             selection_size,
             windows_accent,
             scan_sizes,
