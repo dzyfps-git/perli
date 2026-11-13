@@ -58,6 +58,15 @@ const CANCEL_CHECK: Duration = Duration::from_millis(50);
 #[derive(Default)]
 struct PendingUpdate(Mutex<Option<tauri_plugin_updater::Update>>);
 
+/// Folders later starts handed over before the UI listened for them. `None` once it listens.
+struct Inbox(Mutex<Option<Vec<launch::Ask>>>);
+
+impl Default for Inbox {
+    fn default() -> Self {
+        Self(Mutex::new(Some(Vec::new())))
+    }
+}
+
 /// What a newer release offers.
 #[derive(Serialize)]
 struct UpdateOffer {
@@ -404,6 +413,13 @@ impl Start {
 #[tauri::command]
 fn start_state(start: State<'_, Start>) -> Start {
     start.inner().clone()
+}
+
+/// Called once the UI listens for "open-asked": hands over what came before, and from then on
+/// each ask goes out as an event.
+#[tauri::command]
+fn asks_waiting(inbox: State<'_, Inbox>) -> Vec<launch::Ask> {
+    inbox.0.lock().unwrap().take().unwrap_or_default()
 }
 
 #[tauri::command]
@@ -1361,10 +1377,12 @@ fn come_forward(window: tauri::WebviewWindow) {
 fn open_window(folder: String, select: Vec<String>) -> Result<(), String> {
     let mut start = Command::new(std::env::current_exe().map_err(|error| error.to_string())?);
     start.arg("--new-window");
-    match select.first() {
-        Some(name) => start.arg("--select").arg(Path::new(&folder).join(name)),
-        None => start.arg("--directory").arg(&folder),
-    };
+    if select.is_empty() {
+        start.arg("--directory").arg(&folder);
+    }
+    for name in &select {
+        start.arg("--select").arg(Path::new(&folder).join(name));
+    }
     start.spawn().map(|_| ()).map_err(|error| error.to_string())
 }
 
@@ -1442,6 +1460,7 @@ fn main() {
         .manage(Views::default())
         .manage(Jobs::loading_history())
         .manage(Closing::default())
+        .manage(Inbox::default())
         .manage(PendingUpdate::default())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(Watches::default())
@@ -1453,7 +1472,13 @@ fn main() {
             if let Some(door) = door {
                 let asked = app.handle().clone();
                 door.listen(move |ask| {
-                    let _ = asked.emit("open-asked", ask);
+                    // Held while sending, so an ask can't slip between the UI's take and its event.
+                    let inbox = asked.state::<Inbox>();
+                    let mut inbox = inbox.0.lock().unwrap();
+                    match inbox.as_mut() {
+                        Some(waiting) => waiting.push(ask),
+                        None => drop(asked.emit("open-asked", ask)),
+                    }
                 });
             }
             watch::start(app.handle().clone());
@@ -1465,6 +1490,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             start_state,
+            asks_waiting,
             save_session,
             list_places,
             drive_space,
