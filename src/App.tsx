@@ -518,6 +518,8 @@ export function App() {
   };
   // The folders seen lately are places to drop on and to move to.
   createEffect(() => noteFolder(tabs.activeView().folder()?.path));
+  // With the arrows turned off, nothing could close a folder opened in place.
+  createEffect(on(inlineFolders, (on) => on || tabs.allViews().forEach((view) => view.collapseAll()), { defer: true }));
   const toggleSidebar = () => setSidebarOpen(!sidebarOpen());
 
   const networkItems = (): MenuItem[] => [
