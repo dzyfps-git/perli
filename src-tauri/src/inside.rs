@@ -63,17 +63,36 @@ fn reason(error: ZipError) -> String {
     }
 }
 
+/// Said of a locked file whose password reads others of the archive whole.
+const DAMAGED_LOCKED: &str = "This file is damaged in the archive. The password is right.";
+
 /// A wrong ZipCrypto password passes its one-byte check about once in 256 tries, and then the
-/// file reads as garbage: a broken compressed stream, or a checksum that does not match.
-/// ponytail: a locked file that is damaged reads as a wrong password too; only the password
-/// check in the UI comes through here.
-fn read_failed(error: std::io::Error, password: Option<&str>) -> String {
+/// file reads as garbage: a broken compressed stream, or a checksum that does not match. A right
+/// password on a damaged file reads the same way, so another locked file of the archive tells
+/// them apart: if the password reads that one whole, it is right.
+fn read_failed(error: std::io::Error, path: &Path, name: &str, password: Option<&str>) -> String {
     use std::io::ErrorKind::{InvalidData, InvalidInput};
-    if password.is_some() && matches!(error.kind(), InvalidData | InvalidInput) {
-        WRONG_PASSWORD.into()
-    } else {
-        error.to_string()
+    match password.filter(|_| matches!(error.kind(), InvalidData | InvalidInput)) {
+        Some(password) if opens_another(path, name, password) => DAMAGED_LOCKED.into(),
+        Some(_) => WRONG_PASSWORD.into(),
+        None => error.to_string(),
     }
+}
+
+/// Whether `password` reads the smallest other locked file of the archive whole.
+// ponytail: tries one other file. If that one is damaged too, the password reads as wrong.
+fn opens_another(path: &Path, name: &str, password: &str) -> bool {
+    let Ok(mut zip) = open(path) else { return false };
+    let smallest = (0..zip.len())
+        .filter_map(|index| {
+            let entry = zip.by_index_data(index).ok()?;
+            let other = entry.encrypted() && !entry.is_dir() && entry.name().ok()?.as_ref() != name;
+            other.then(|| (entry.size(), index))
+        })
+        .min();
+    let Some((_, index)) = smallest else { return false };
+    zip.by_index_decrypt(index, password.as_bytes())
+        .is_ok_and(|mut entry| std::io::copy(&mut entry, &mut std::io::sink()).is_ok())
 }
 
 /// One entry, opened with the password if it has one.
@@ -154,7 +173,7 @@ pub fn text(path: &Path, name: &str, password: Option<&str>) -> Result<Option<St
     let mut zip = open(path)?;
     let entry = entry(&mut zip, name, password)?;
     let mut bytes = Vec::new();
-    entry.take(MOST_TEXT_BYTES).read_to_end(&mut bytes).map_err(|error| read_failed(error, password))?;
+    entry.take(MOST_TEXT_BYTES).read_to_end(&mut bytes).map_err(|error| read_failed(error, path, name, password))?;
     let body = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&bytes);
     Ok(crate::preview::as_text(body, true).map(str::to_string))
 }
@@ -164,7 +183,7 @@ pub fn text(path: &Path, name: &str, password: Option<&str>) -> Result<Option<St
 pub fn check_password(path: &Path, name: &str, password: &str) -> Result<(), String> {
     let mut zip = open(path)?;
     let mut entry = entry(&mut zip, name, Some(password))?;
-    std::io::copy(&mut entry, &mut std::io::sink()).map_err(|error| read_failed(error, Some(password)))?;
+    std::io::copy(&mut entry, &mut std::io::sink()).map_err(|error| read_failed(error, path, name, Some(password)))?;
     Ok(())
 }
 
@@ -753,6 +772,31 @@ mod tests {
         assert_eq!(reason(ZipError::UnsupportedArchive("AES encrypted files cannot be decrypted without the aes-crypto feature.")), AES_LOCKED);
         assert_eq!(test(&path, None).unwrap(), Tested { sound: 1, damaged: vec![], locked: 1 });
         assert_eq!(test(&path, Some("open sesame")).unwrap(), Tested { sound: 2, damaged: vec![], locked: 0 });
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn a_damaged_locked_file_says_so_when_the_password_opens_another() {
+        use zip::unstable::write::FileOptionsExt;
+        let path = std::env::temp_dir().join(format!("perli-inside-{}-damaged.zip", std::process::id()));
+        let mut zip = ZipWriter::new(File::create(&path).unwrap());
+        let locked = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored).with_deprecated_encryption(b"key").unwrap();
+        for name in ["a.txt", "b.txt"] {
+            zip.start_file(name, locked).unwrap();
+            zip.write_all(b"some words to keep").unwrap();
+        }
+        zip.finish().unwrap();
+        // The first byte of a.txt's own data, after its header and the 12 bytes of the lock.
+        let mut bytes = std::fs::read(&path).unwrap();
+        let field = |at: usize| u16::from_le_bytes([bytes[at], bytes[at + 1]]) as usize;
+        let data = 30 + field(26) + field(28) + 12;
+        bytes[data] ^= 0xFF;
+        std::fs::write(&path, bytes).unwrap();
+
+        assert_eq!(text(&path, "a.txt", Some("key")), Err(DAMAGED_LOCKED.to_string()));
+        assert_eq!(check_password(&path, "a.txt", "key"), Err(DAMAGED_LOCKED.to_string()));
+        assert_eq!(text(&path, "a.txt", Some("nope")), Err(WRONG_PASSWORD.to_string()));
+        assert_eq!(text(&path, "b.txt", Some("key")).unwrap().as_deref(), Some("some words to keep"));
         std::fs::remove_file(path).unwrap();
     }
 
