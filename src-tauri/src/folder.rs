@@ -82,7 +82,8 @@ impl SortKey {
 
 /// Property values read for sorting, by path and property, with the file's modified time they
 /// were read at. Emptied when it gets this big.
-static SORT_PROPS: Mutex<Option<HashMap<(PathBuf, &'static str), (u64, Option<String>)>>> = Mutex::new(None);
+type PropCache = HashMap<(PathBuf, &'static str), (u64, Option<String>)>;
+static SORT_PROPS: Mutex<Option<PropCache>> = Mutex::new(None);
 const MOST_SORT_PROPS: usize = 200_000;
 
 /// Where folders go among files.
