@@ -368,8 +368,14 @@ export const measureSelection = (selection: Selection) => invoke<Measured>("meas
 
 export const binSummary = () => invoke<Measured>("bin_summary");
 
+/** Fired on `window` once Perli puts files on the clipboard. */
+export const CLIPBOARD_SET = "perli-clipboard-set";
+
 export const setClipboard = (selection: Selection, cut: boolean) =>
-  invoke<{ names: string[]; sequence: number }>("set_clipboard", { selection, cut });
+  invoke<{ names: string[]; sequence: number }>("set_clipboard", { selection, cut }).then((set) => {
+    window.dispatchEvent(new Event(CLIPBOARD_SET));
+    return set;
+  });
 
 export const cancelCut = (sequence: number) => invoke<void>("cancel_cut", { sequence });
 
