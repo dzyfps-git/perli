@@ -761,6 +761,10 @@ export const fetchArchivePicture = (view: number, request: number, row: number, 
   invoke<ArrayBuffer>("archive_picture", { view, request, row, entry, edge, password: password ?? null }).then(decodeThumb);
 
 /** The start of a text file inside a ZIP, or null if it is not text. */
+/** Fails with the wrong-password message unless `password` opens all of `entry`. */
+export const archivePassword = (view: number, request: number, row: number, entry: string, password: string) =>
+  invoke<void>("archive_password", { view, request, row, entry, password });
+
 export const archiveText = (view: number, request: number, row: number, entry: string, password?: string) =>
   invoke<string | null>("archive_text", { view, request, row, entry, password: password ?? null });
 

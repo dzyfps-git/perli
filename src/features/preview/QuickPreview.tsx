@@ -3,6 +3,7 @@ import { createEffect, createResource, createSignal, For, lazy, on, onCleanup, o
 import {
   aiffAudio,
   archiveTest,
+  archivePassword,
   archiveText,
   besideText,
   bookChapter,
@@ -350,6 +351,7 @@ export function QuickPreview(props: {
       more,
       picture: (entry, edge, password) => fetchArchivePicture(view, shot, at, entry, edge, password),
       text: (entry, password) => archiveText(view, shot, at, entry, password),
+      check: (entry, password) => archivePassword(view, shot, at, entry, password),
       extract: (only, password) =>
         startJob({ kind: "unzip", selection: { view, request: shot, rows: [at] }, ownFolder: false, only, password }, view).catch(
           (reason) => void setFailure(String(reason)),

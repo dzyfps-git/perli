@@ -1315,6 +1315,13 @@ async fn archive_text(view: u32, request: u64, row: u32, entry: String, password
     blocking(move || inside::text(&path, &entry, password.as_deref())).await
 }
 
+/// Whether `password` opens the locked `entry`, read all the way through.
+#[tauri::command]
+async fn archive_password(view: u32, request: u64, row: u32, entry: String, password: String, views: State<'_, Views>) -> Result<(), String> {
+    let path = row_path(&views, view, request, row)?;
+    blocking(move || inside::check_password(&path, &entry, &password)).await
+}
+
 /// One chapter of a book, made safe to show.
 #[tauri::command]
 async fn book_chapter(view: u32, request: u64, row: u32, entry: String, views: State<'_, Views>) -> Result<String, String> {
@@ -1916,6 +1923,7 @@ fn main() {
             big_picture,
             picture_size,
             archive_text,
+            archive_password,
             archive_test,
             drag_entry,
             beside_text,
