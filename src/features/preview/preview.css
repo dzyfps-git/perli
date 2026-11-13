@@ -1537,3 +1537,73 @@
 .doc-scroll:focus {
   outline: none;
 }
+
+/* The preview beside the list. It is the same preview, without the dialog's dress. */
+.preview-dock {
+  display: flex;
+  flex: none;
+  width: clamp(280px, 36%, 560px);
+  min-width: 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  animation: details-in var(--motion-slide);
+}
+
+.panes-swapped .preview-dock {
+  order: -1;
+}
+
+.preview-dock > .details-empty {
+  display: flex;
+  flex: 1;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin: var(--space-3);
+}
+
+.quick-preview.preview-docked {
+  position: static;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  background: none;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  backdrop-filter: none;
+  animation: none;
+}
+
+.preview-dock-button {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  margin-left: auto;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text-muted);
+  font: 12px / 1 var(--font-icons);
+  transition:
+    background-color var(--motion),
+    color var(--motion);
+}
+
+.preview-dock-button:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.preview-dock-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .preview-dock {
+    animation: none;
+  }
+}

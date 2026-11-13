@@ -1,0 +1,180 @@
+/* What fills a folder, as circles that sit together like cells. */
+.disk-map {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  width: min(820px, 92vw);
+  height: min(640px, 88vh);
+}
+
+.disk-map:not([open]) {
+  display: none;
+}
+
+.disk-map-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.disk-map-title {
+  flex: 1;
+  min-width: 0;
+}
+
+.disk-map-title h2 {
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.disk-map-title .settings-note {
+  margin: 0;
+}
+
+.disk-map-up,
+.disk-map-open {
+  flex: none;
+  height: 30px;
+  padding: 0 var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  transition: background-color var(--motion);
+}
+
+.disk-map-up {
+  width: 30px;
+  padding: 0;
+  font: 12px / 1 var(--font-icons);
+}
+
+.disk-map-up:disabled {
+  opacity: 0.4;
+}
+
+:is(.disk-map-up, .disk-map-open):not(:disabled):hover {
+  background: var(--surface-hover);
+}
+
+:is(.disk-map-up, .disk-map-open, .disk-cell):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.disk-map-stage {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-large);
+  background: color-mix(in srgb, var(--surface) 60%, transparent);
+}
+
+.disk-map-filter {
+  position: absolute;
+  width: 0;
+  height: 0;
+}
+
+/* The filter melts circles that touch into one another, the way drops do. */
+.disk-map-goo {
+  position: absolute;
+  inset: 0;
+  filter: url("#disk-map-goo");
+}
+
+.disk-blob,
+.disk-cell {
+  position: absolute;
+  top: 0;
+  left: 0;
+  border-radius: 50%;
+}
+
+.disk-blob {
+  background: color-mix(in oklch, var(--text-muted) calc(62% - var(--rank) * 34%), var(--surface));
+  animation: disk-blob-in var(--motion-spring) backwards;
+}
+
+.disk-blob[data-folder] {
+  background: color-mix(in oklch, var(--accent) calc(92% - var(--rank) * 56%), var(--surface));
+}
+
+/* Still being added up: the cells breathe. */
+.disk-map-stage[data-measuring] .disk-map-goo {
+  animation: disk-breathe 1.6s ease-in-out infinite alternate;
+}
+
+.disk-cell {
+  display: grid;
+  place-content: center;
+  gap: 1px;
+  padding: 0 6px;
+  overflow: hidden;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 11px;
+  line-height: 1.2;
+  text-align: center;
+  cursor: default;
+  transition: box-shadow var(--motion);
+}
+
+.disk-cell[data-folder] {
+  cursor: pointer;
+}
+
+.disk-cell:hover {
+  box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--text) 55%, transparent);
+}
+
+.disk-cell-name {
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.disk-cell-size {
+  opacity: 0.75;
+  font-size: 10px;
+}
+
+.disk-map-empty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  margin: 0;
+  color: var(--text-muted);
+}
+
+@keyframes disk-blob-in {
+  from {
+    scale: 0;
+  }
+}
+
+@keyframes disk-breathe {
+  to {
+    opacity: 0.7;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .disk-blob,
+  .disk-map-stage[data-measuring] .disk-map-goo {
+    animation: none;
+  }
+
+  .disk-cell {
+    transition: none;
+  }
+}

@@ -116,8 +116,9 @@ export function MarkdownView(live: { html: string; fill: (article: HTMLElement) 
     article.innerHTML = props.html;
     props.fill(article);
     setHeadings([...article.querySelectorAll<HTMLElement>("h1, h2, h3")]);
-    // Page Down and the other scrolling keys move the document itself.
-    scroller.focus({ preventScroll: true });
+    // Page Down and the other scrolling keys move the document itself, except in the docked pane,
+    // where the file list keeps the keys.
+    if (!scroller.closest(".preview-docked")) scroller.focus({ preventScroll: true });
   });
 
   onCleanup(() => {
@@ -290,7 +291,7 @@ export function BookView(live: BookViewProps) {
   });
 
   onMount(() => {
-    scroller.focus({ preventScroll: true });
+    if (!scroller.closest(".preview-docked")) scroller.focus({ preventScroll: true });
     if (resumed()) setTimeout(() => setResumed(false), RESUME_SHOWN_MS);
   });
 

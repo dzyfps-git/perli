@@ -109,7 +109,7 @@ fn inside_of(path: &Path) -> Option<Preview> {
         },
         "glb" | "gltf" | "obj" | "stl" | "usdz" | "usd" | "usda" | "usdc" | "fbx" | "ply" | "3mf" => Some(Preview::Model),
         "mid" | "midi" => Some(Preview::Song),
-        "mp3" | "m4a" | "aac" | "wav" | "flac" | "ogg" | "oga" | "opus" | "weba" => Some(Preview::Audio),
+        "mp3" | "m4a" | "aac" | "wav" | "flac" | "ogg" | "oga" | "opus" | "weba" | "aif" | "aiff" | "aifc" => Some(Preview::Audio),
         _ => None,
     }
 }

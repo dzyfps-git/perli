@@ -147,7 +147,8 @@ export function TextView(live: TextViewProps) {
 
   onMount(() => {
     void add(props.first.text).then(fill);
-    scroller.focus({ preventScroll: true });
+    // Beside the list, the list keeps the keys.
+    if (!scroller.closest(".preview-docked")) scroller.focus({ preventScroll: true });
   });
 
   onCleanup(() => {

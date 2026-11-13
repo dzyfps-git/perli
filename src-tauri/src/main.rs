@@ -3,6 +3,7 @@
 mod clipboard;
 mod default_app;
 mod explorer;
+mod filedialog;
 mod drag;
 mod folder;
 mod jobs;
@@ -23,6 +24,7 @@ mod session;
 mod shell;
 mod sizes;
 mod snap;
+mod sound;
 mod tags;
 mod templates;
 mod thumbs;
@@ -1293,10 +1295,26 @@ async fn open_audio(view: u32, request: u64, row: u32, app: AppHandle, views: St
     Ok((shown, tags))
 }
 
+/// An AIFF file as a WAV, which the window can play.
+#[tauri::command]
+async fn aiff_audio(view: u32, request: u64, row: u32, views: State<'_, Views>) -> Result<Response, String> {
+    let path = row_path(&views, view, request, row)?;
+    let wav = blocking(move || sound::aiff_to_wav(&sound::read_aiff(&path)?)).await?;
+    Ok(Response::new(wav))
+}
+
 /// A song's album cover, or nothing if it has none of its own.
 #[tauri::command]
 async fn cover(view: u32, request: u64, row: u32, edge: u32, views: State<'_, Views>) -> Result<Response, String> {
     let path = row_path(&views, view, request, row)?;
+    // Windows shows no picture for a FLAC, so its own is read from the file.
+    if path.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("flac")) && !thumbs::is_online_only(&path) {
+        let from = path.clone();
+        let own = blocking(move || Ok(sound::flac_cover(&from).and_then(|bytes| inside::decode(&bytes, edge.clamp(1, 2048)).ok()))).await?;
+        if let Some(picture) = own {
+            return Ok(Response::new(picture));
+        }
+    }
     Ok(Response::new(thumbs::cover(path, edge).await))
 }
 
@@ -1444,6 +1462,34 @@ fn scan_sizes(view: u32, path: PathBuf, scans: State<'_, Scans>, app: AppHandle)
     scans.start(view, path, move || {
         let _ = app.emit("sizes-grew", view);
     });
+}
+
+/// Experimental: makes another app's Open or Save dialog go to `folder`. Answers with its title.
+#[tauri::command]
+async fn send_to_file_dialog(folder: PathBuf) -> Result<String, String> {
+    blocking(move || filedialog::go_to(&folder)).await
+}
+
+/// What the disk map hears as a folder is weighed.
+#[derive(Clone, Serialize)]
+struct MapGrew {
+    ticket: u32,
+    cells: Vec<sizes::Cell>,
+    done: bool,
+}
+
+/// Weighs everything right inside `path` for the disk map. `ticket` comes back with each answer,
+/// so the map can tell them from those of a folder it has left.
+#[tauri::command]
+fn map_folder(path: PathBuf, ticket: u32, app: AppHandle) {
+    sizes::map(path, move |cells, done| {
+        let _ = app.emit("map-grew", MapGrew { ticket, cells, done });
+    });
+}
+
+#[tauri::command]
+fn stop_map() {
+    sizes::stop_map();
 }
 
 #[tauri::command]
@@ -1777,6 +1823,7 @@ fn main() {
             song_audio,
             song_info,
             open_audio,
+            aiff_audio,
             cover,
             open_link,
             row_properties,
@@ -1799,6 +1846,9 @@ fn main() {
             windows_accent,
             scan_sizes,
             stop_sizes,
+            map_folder,
+            send_to_file_dialog,
+            stop_map,
             drop_choices,
             own_templates,
             templates_folder,

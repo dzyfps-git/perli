@@ -134,6 +134,9 @@ pub struct Order {
     pub show_hidden: bool,
     #[serde(default)]
     pub filter: Filter,
+    /// Folders whose rows show under them, by full path. Only a read looks at these.
+    #[serde(default)]
+    pub expanded: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -315,11 +318,16 @@ pub struct Listing {
     bin: Option<Arc<Bin>>,
     /// Where a search found each of `entries`. Empty for a plain folder.
     found_in: Arc<Vec<Arc<[u16]>>>,
+    /// With folders opened in place: the entry each one sits under, or `TOP`. Empty otherwise.
+    parents: Arc<Vec<u32>>,
     /// Only entries that have tags are here, so normal rows stay small.
     tags: Arc<tags::Tagged>,
     visible: Vec<u32>,
     order: Order,
 }
+
+/// The parent of an entry that sits in the folder itself.
+const TOP: u32 = u32::MAX;
 
 /// A server's shares as rows.
 pub fn read_shares(server: &str) -> Result<Vec<Entry>> {
@@ -332,17 +340,41 @@ impl Listing {
             return Self::read_bin(order);
         }
         let full = resolve(path)?;
-        let (entries, tagged) = if network::is_server(&full) {
+        let (mut entries, mut tagged) = if network::is_server(&full) {
             (read_shares(&full)?, tags::Tagged::new())
         } else {
             let entries = read_entries(&full)?;
             let tagged = tags::in_folder(Path::new(&full), &entries);
             (entries, tagged)
         };
+        let (mut parents, mut found_in) = (Vec::new(), Vec::new());
+        if !order.expanded.is_empty() && !network::is_server(&full) {
+            parents = vec![TOP; entries.len()];
+            found_in = vec![Arc::from(null_terminated(Path::new(&full))); entries.len()];
+            // What an opened folder holds goes on the end, so the folders in it get their turn too.
+            let mut at = 0;
+            while at < entries.len() {
+                let location: &[u16] = &found_in[at];
+                let path = PathBuf::from(OsString::from_wide(&location[..location.len() - 1])).join(entries[at].file_name());
+                let text = path.to_string_lossy();
+                let open = entries[at].is_dir && order.expanded.iter().any(|folder| folder.eq_ignore_ascii_case(&text));
+                // One that cannot be read shows closed.
+                if let Some(inside) = open.then(|| read_entries(&text).ok()).flatten() {
+                    let after = entries.len() as u32;
+                    tagged.extend(tags::in_folder(&path, &inside).into_iter().map(|(row, tags)| (row + after, tags)));
+                    parents.resize(entries.len() + inside.len(), at as u32);
+                    found_in.resize(entries.len() + inside.len(), Arc::from(null_terminated(&path)));
+                    entries.extend(inside);
+                }
+                at += 1;
+            }
+        }
         let listing = Self {
             folder: full.into(),
             entries: Arc::new(entries),
             tags: Arc::new(tagged),
+            found_in: Arc::new(found_in),
+            parents: Arc::new(parents),
             ..Self::default()
         };
         Ok(listing.arrange(order))
@@ -395,13 +427,36 @@ impl Listing {
         };
         let mut visible: Vec<u32> = (0..entries.len() as u32).filter(|&row| fits(row)).collect();
         let locations = self.locations();
+        let parents = &self.parents;
         let ranks = match order.key {
             SortKey::Type => type_ranks(entries),
             SortKey::Size if sizes::any() => self.sizes(),
             SortKey::Tags => self.tag_ranks(&tags::places()),
             _ => Vec::new(),
         };
-        visible.sort_unstable_by(|&a, &b| compare(entries, locations, &ranks, a, b, &order));
+        if parents.is_empty() {
+            visible.sort_unstable_by(|&a, &b| compare(entries, locations, &ranks, a, b, &order));
+        } else {
+            // Each folder's rows are sorted among themselves and follow it.
+            // ponytail: a row whose folder the filter leaves out goes with it. Search finds those.
+            let mut kept = vec![false; entries.len()];
+            let mut inside: HashMap<u32, Vec<u32>> = HashMap::new();
+            for row in visible.drain(..) {
+                let parent = parents[row as usize];
+                if parent == TOP || kept[parent as usize] {
+                    kept[row as usize] = true;
+                    inside.entry(parent).or_default().push(row);
+                }
+            }
+            for rows in inside.values_mut() {
+                rows.sort_unstable_by(|&a, &b| compare(entries, locations, &ranks, b, a, &order));
+            }
+            let mut next = inside.remove(&TOP).unwrap_or_default();
+            while let Some(row) = next.pop() {
+                visible.push(row);
+                next.extend(inside.remove(&row).unwrap_or_default());
+            }
+        }
         self.visible = visible;
         self.order = order;
         self
@@ -511,7 +566,9 @@ impl Listing {
     fn key(&self, entry: usize) -> Vec<u16> {
         match &self.bin {
             Some(bin) => bin.items[entry].item.as_os_str().encode_wide().collect(),
-            None if self.found_in.is_empty() => self.entries[entry].name().to_vec(),
+            None if self.parents.get(entry).is_none_or(|&parent| parent == TOP) && (self.found_in.is_empty() || !self.parents.is_empty()) => {
+                self.entries[entry].name().to_vec()
+            }
             None => self.full_path(entry).as_os_str().encode_wide().collect(),
         }
     }
@@ -584,7 +641,9 @@ impl Listing {
             let cloud = if row.cloud { FLAG_CLOUD } else { 0 };
             let pinned = if row.pinned { FLAG_PINNED } else { 0 };
             let custom = if row.custom { FLAG_CUSTOM } else { 0 };
-            let location = location_of(self.locations(), entry);
+            // A row of the folder itself has no place of its own to name.
+            let top = self.parents.get(entry as usize) == Some(&TOP);
+            let location = if top { &[0][..] } else { location_of(self.locations(), entry) };
             let location = &location[..location.len() - 1];
             bytes.extend((row.name().len() as u32 * 2).to_le_bytes());
             bytes.extend(self.size_of(entry as usize).to_le_bytes());
@@ -829,6 +888,45 @@ mod tests {
         let photo = |name: &String| name.ends_with(".jpg") || name.ends_with(".jpeg");
         let first = names.iter().position(photo).unwrap();
         assert!(photo(&names[first + 1]), "{names:?}");
+    }
+
+    #[test]
+    fn an_opened_folder_shows_its_rows_under_it_in_the_same_order() {
+        let folder = TempFolder::new("tree");
+        let path = |name: &str| folder.0.join(name);
+        for made in ["apple", "apple/core", "apple/skin", "banana"] {
+            fs::create_dir(path(made)).unwrap();
+        }
+        for file in ["apple/b.txt", "apple/a.txt", "apple/core/seed.txt", "banana/unseen.txt", "cherry.txt"] {
+            fs::write(path(file), "").unwrap();
+        }
+        let open = |names: &[&str], descending| Order {
+            expanded: names.iter().map(|name| path(name).to_string_lossy().to_uppercase().replace('/', "\\")).collect(),
+            descending,
+            ..Order::default()
+        };
+
+        assert_eq!(sorted(&folder, open(&["apple"], false)), ["apple", "core", "skin", "a.txt", "b.txt", "banana", "cherry.txt"]);
+        let deep = Listing::read(folder.0.to_str().unwrap(), open(&["apple", "apple/core"], false)).unwrap();
+        assert_eq!(names(&deep), ["apple", "core", "seed.txt", "skin", "a.txt", "b.txt", "banana", "cherry.txt"]);
+        assert_eq!(deep.paths(&[2]), [path("apple").join("core").join("seed.txt")]);
+        assert_eq!(deep.keys(&[0])[0], "apple".encode_utf16().collect::<Vec<_>>(), "a row of the folder goes by its name");
+        assert_eq!(deep.rows_keyed(&deep.keys(&[2, 7])), [2, 7]);
+        assert_eq!(
+            names(&deep.clone().arranged(open(&["apple", "apple/core"], true))),
+            ["banana", "apple", "skin", "core", "seed.txt", "b.txt", "a.txt", "cherry.txt"],
+            "a new sort needs no new read"
+        );
+        // A folder opened inside one that is closed stays out of sight.
+        assert_eq!(sorted(&folder, open(&["apple/core"], false)), ["apple", "banana", "cherry.txt"]);
+
+        let named = |name: &str| Order { filter: Filter { name: name.into(), ..Filter::default() }, ..open(&["apple"], false) };
+        assert_eq!(sorted(&folder, named("a")), ["apple", "a.txt", "banana"]);
+        assert_eq!(sorted(&folder, named("txt")), ["cherry.txt"], "rows go with the folder they are in");
+
+        let rows = deep.encode_rows(0, 3);
+        let location_bytes = |at: usize| u32::from_le_bytes(rows[at..at + 4].try_into().unwrap());
+        assert_eq!(location_bytes(4 + 29), 0, "a row of the folder names no place");
     }
 
     #[test]

@@ -91,7 +91,13 @@ interface PooledRow {
   thumbKey?: string;
   /** The lit letters of a search in its name. */
   matches?: Range[];
+  /** The arrow that opens a folder in place, made when the list first needs one. */
+  twist?: HTMLSpanElement;
 }
+
+/** How far a row moves in for each folder it is inside of, and the room its arrow takes. */
+const INDENT = 16;
+const TWIST_ROOM = 18;
 
 /** Every list's lit search letters, drawn by CSS without touching the rows' text. */
 const nameMatches = new Highlight();
@@ -203,6 +209,10 @@ export function FileList(props: {
   fixedColumns: boolean;
   /** Names waiting to move, which fade. */
   cut?: Set<string>;
+  /** Folders opened in place, by full path. */
+  expanded?: string[];
+  /** Opens a folder in place or closes it. Left out where rows cannot nest: a search, the Recycle Bin. */
+  onExpand?: (path: string) => void;
   /** The folder is kept by a sync app, so a row with no cloud mark is here in full. */
   synced?: boolean;
   /** What stands in for the rows when there are none. */
@@ -360,6 +370,24 @@ export function FileList(props: {
     pooled.element.toggleAttribute("data-focused", focused);
   }
 
+  /** Whether folders open in place here. */
+  const nests = () => props.layout === "list" && props.onExpand !== undefined;
+  /** How many folders opened in place a row sits inside. */
+  const depthOf = (row: Row) => (nests() && row.location ? relativeTo(props.folder, row.location).split("\\").length : 0);
+  const isOpen = (row: Row) => {
+    const path = join(row.location || props.folder, row.name);
+    return row.isDir && !!props.expanded?.some((folder) => samePath(folder, path));
+  };
+
+  /** The arrow of a row, in front of its icon. A file has an empty one, so the icons line up. */
+  function twistOf(pooled: PooledRow, row: Row | undefined) {
+    const twist = (pooled.twist ??= Object.assign(document.createElement("span"), { className: "file-twist" }));
+    twist.setAttribute("aria-hidden", "true");
+    twist.toggleAttribute("data-none", !row?.isDir);
+    twist.toggleAttribute("data-open", !!row && isOpen(row));
+    return twist;
+  }
+
   function fill(pooled: PooledRow, index: number, row: Row | undefined) {
     if (pooled.index !== index) {
       pooled.index = index;
@@ -372,7 +400,13 @@ export function FileList(props: {
     pooled.element.toggleAttribute("data-empty", !row);
     pooled.element.toggleAttribute("data-folder", row?.isDir ?? false);
     pooled.element.toggleAttribute("data-hidden", row?.isHidden ?? false);
-    pooled.element.toggleAttribute("data-cut", !!row && !!props.cut?.has(row.name));
+    pooled.element.toggleAttribute("data-cut", !!row && !row.location && !!props.cut?.has(row.name));
+    // A drop on a folder row has to know where that folder is.
+    if (row?.location) pooled.element.dataset.location = row.location;
+    else delete pooled.element.dataset.location;
+    pooled.element.style.setProperty("--depth", String(row ? depthOf(row) : 0));
+    if (row?.isDir && nests()) pooled.element.setAttribute("aria-expanded", String(isOpen(row)));
+    else pooled.element.removeAttribute("aria-expanded");
     pooled.element.toggleAttribute("data-cloud", row?.isCloud ?? false);
     pooled.element.toggleAttribute("data-pinned", row?.isPinned ?? false);
     const synced = !!props.synced && !!row && !row.isCloud && !row.isPinned;
@@ -396,6 +430,7 @@ export function FileList(props: {
       if (cell.id === "name") {
         if (row) cell.element.prepend(...row.tags.flatMap(tagDot));
         if (inList) cell.element.prepend(pooled.icon);
+        if (nests()) cell.element.prepend(twistOf(pooled, row));
         if (row && inList && rowDensity() === "roomy") cell.element.dataset.sub = subText(row);
         else delete cell.element.dataset.sub;
       } else if (row && (cell.id === "modified" || cell.id === "created")) {
@@ -620,8 +655,47 @@ export function FileList(props: {
     return !!box && event.clientX - box.left < PICK_CORNER && event.clientY - box.top < PICK_CORNER;
   }
 
+  /** Opens the folder at `index` in place, or closes it. */
+  function toggleFolder(index: number) {
+    const row = rowAt(index);
+    if (row?.isDir) props.onExpand?.(join(row.location || props.folder, row.name));
+  }
+
+  /** The row of the folder that the row at `index` sits inside, if it is loaded. */
+  function parentIndex(index: number) {
+    const row = rowAt(index);
+    if (!row?.location) return -1;
+    for (let at = index - 1; at >= 0; at--) {
+      const other = rowAt(at);
+      if (!other) return -1;
+      if (other.isDir && samePath(join(other.location || props.folder, other.name), row.location)) return at;
+    }
+    return -1;
+  }
+
+  /** Right opens a folder or steps into it. Left closes it or goes to the folder it is in. */
+  function treeTarget(key: string, focused: number) {
+    const row = nests() && focused >= 0 ? rowAt(focused) : undefined;
+    if (!row) return undefined;
+    if (key === "ArrowRight" && row.isDir) {
+      if (isOpen(row)) return Math.min(focused + 1, props.count - 1);
+      toggleFolder(focused);
+      return focused;
+    }
+    if (key === "ArrowLeft") {
+      if (isOpen(row)) {
+        toggleFolder(focused);
+        return focused;
+      }
+      const parent = parentIndex(focused);
+      return parent >= 0 ? parent : undefined;
+    }
+    return undefined;
+  }
+
   function onClick(event: MouseEvent) {
     const index = indexFromEvent(event);
+    if (index >= 0 && (event.target as HTMLElement).closest(".file-twist")) return toggleFolder(index);
     if (index < 0) selection.clear();
     else if (event.shiftKey) selection.extendTo(index, event.ctrlKey);
     else if (event.ctrlKey || onPicker(event)) selection.toggle(index);
@@ -637,7 +711,7 @@ export function FileList(props: {
   function onPointerDown(event: PointerEvent) {
     hideCard();
     const index = indexFromEvent(event);
-    const onRow = event.button === 0 && index >= 0 && !(event.target as HTMLElement).closest("input");
+    const onRow = event.button === 0 && index >= 0 && !(event.target as HTMLElement).closest("input, .file-twist");
     press = onRow ? { x: event.clientX, y: event.clientY, index } : undefined;
   }
 
@@ -801,7 +875,8 @@ export function FileList(props: {
     const { element } = sample;
     const inList = props.layout === "list";
     // In the list the icon shares the name's cell, and the editor starts after it.
-    const iconRoom = inList ? sample.icon.offsetWidth + ICON_GAP : 0;
+    const twistRoom = nests() ? TWIST_ROOM + depthOf(row) * INDENT : 0;
+    const iconRoom = inList ? sample.icon.offsetWidth + ICON_GAP + twistRoom : 0;
     const middle = inList && rowDensity() === "roomy" ? ROOMY_LINE / 2 : cell.offsetHeight / 2;
     setEditor({
       index,
@@ -895,7 +970,8 @@ export function FileList(props: {
     const focused = selection.focused();
     const pageRows = Math.max(1, Math.floor(grid.clientHeight / itemHeight) - 1);
     const shape = { count: props.count, perRow, pageRows };
-    const target = props.count > 0 ? moveTarget(event.key, focused, shape) : undefined;
+    const plain = !event.shiftKey && !event.ctrlKey;
+    const target = props.count > 0 ? ((plain ? treeTarget(event.key, focused) : undefined) ?? moveTarget(event.key, focused, shape)) : undefined;
 
     if (target !== undefined) {
       if (event.shiftKey) selection.extendTo(target, false);
@@ -994,7 +1070,7 @@ export function FileList(props: {
 
   createEffect(
     on(
-      [typesLearned, () => props.cut, () => props.match, () => props.synced, tags, allLooks, windowsIcons, dateForm],
+      [typesLearned, () => props.cut, () => props.match, () => props.synced, tags, allLooks, windowsIcons, dateForm, nests],
       () => {
         for (const pooled of pool) pooled.filled = false;
         paint();
@@ -1058,6 +1134,7 @@ export function FileList(props: {
         ref={grid}
         class="file-grid"
         data-layout={props.layout}
+        data-nests={nests() ? "" : undefined}
         data-density={rowDensity()}
         style={{ "--row-height": `${rowHeight()}px` }}
         role="grid"
@@ -1066,7 +1143,9 @@ export function FileList(props: {
         tabindex="0"
         onScroll={onScroll}
         onClick={onClick}
-        onDblClick={(event) => openIndex(indexFromEvent(event), event.ctrlKey)}
+        onDblClick={(event) =>
+          (event.target as HTMLElement).closest(".file-twist") || openIndex(indexFromEvent(event), event.ctrlKey)
+        }
         onAuxClick={onMiddleClick}
         // Left alone, the middle button starts the browser's own scrolling.
         onMouseDown={(event) => event.button === 1 && event.preventDefault()}

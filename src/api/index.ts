@@ -77,6 +77,8 @@ export interface Order extends Sort {
   group: Grouping;
   showHidden: boolean;
   filter: Filter;
+  /** Folders whose rows show under them, by full path. */
+  expanded?: string[];
 }
 
 export interface Start {
@@ -525,6 +527,23 @@ export const scanSizes = (view: number, path: string) => invoke<void>("scan_size
 /** Stops every scan and forgets the totals. */
 export const stopSizes = () => invoke<void>("stop_sizes");
 
+/** Experimental. Makes another app's Open or Save dialog go to `folder`, and gives the dialog's title. */
+export const sendToFileDialog = (folder: string) => invoke<string>("send_to_file_dialog", { folder });
+
+/** One thing right inside a folder, with all the bytes under it. */
+export interface MapCell {
+  name: string;
+  bytes: number;
+  folder: boolean;
+}
+
+/** Weighs what is in `path` for the disk map. Answers come through `onMapGrew` with `ticket`. */
+export const mapFolder = (path: string, ticket: number) => invoke<void>("map_folder", { path, ticket });
+export const stopMap = () => invoke<void>("stop_map");
+/** `cells` are new or have grown. `done` says they were the last. */
+export const onMapGrew = (handler: (grew: { ticket: number; cells: MapCell[]; done: boolean }) => void) =>
+  listen<{ ticket: number; cells: MapCell[]; done: boolean }>("map-grew", (event) => handler(event.payload));
+
 export const onSizesGrew = (handler: (view: number) => void) =>
   listen<number>("sizes-grew", (event) => handler(event.payload));
 
@@ -764,6 +783,10 @@ export const openAudio = (view: number, request: number, row: number) =>
 /** A song's own album cover, or null if it has none. */
 export const fetchCover = (view: number, request: number, row: number, edge: number) =>
   invoke<ArrayBuffer>("cover", { view, request, row, edge }).then(decodeThumb);
+
+/** An AIFF file as one WAV, since the window plays no AIFF. */
+export const aiffAudio = (view: number, request: number, row: number) =>
+  invoke<ArrayBuffer>("aiff_audio", { view, request, row });
 
 /** A MIDI file played through the bundled SoundFont, as one WAV. */
 export const songAudio = (view: number, request: number, row: number) =>
