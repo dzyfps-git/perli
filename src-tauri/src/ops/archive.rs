@@ -10,19 +10,34 @@ use std::path::{Component, Path, PathBuf};
 use windows::core::{Error, Result};
 use windows::Win32::Foundation::{E_FAIL, SYSTEMTIME};
 use zip::result::ZipError;
-use zip::write::SimpleFileOptions;
+use zip::unstable::write::FileOptionsExt;
+use zip::write::{FileOptions, SimpleFileOptions};
 use zip::{CompressionMethod, DateTime, ZipArchive, ZipWriter};
 
 use super::sys::{self, Stat};
 use super::transfer::{file_name, Plan};
 use super::tree::Node;
-use super::{names, Done, Flow, Run, Stopped};
+use super::{names, Done, Flow, Run, Stopped, ZipLevel};
 
 const CHUNK: usize = 256 * 1024;
 const NO_PASSWORDS: &str = "This file is protected by a password. Preview the ZIP to unlock it and take it out.";
 const UNSAFE_NAME: &str = "This name in the archive isn't safe to use, so Perli left it out.";
 
 type Writer<'a> = ZipWriter<BufWriter<&'a mut File>>;
+/// What each file is written with. `'k` is the password's.
+type Options<'k> = FileOptions<'k, 'static, ()>;
+
+impl ZipLevel {
+    fn options<'k>(self) -> Options<'k> {
+        let deflated = Options::default().compression_method(CompressionMethod::Deflated);
+        match self {
+            Self::Store => Options::default().compression_method(CompressionMethod::Stored),
+            Self::Fast => deflated.compression_level(Some(1)),
+            Self::Normal => deflated,
+            Self::Best => deflated.compression_level(Some(9)),
+        }
+    }
+}
 
 fn failed(error: impl ToString) -> Error {
     Error::new(E_FAIL, error.to_string())
@@ -137,7 +152,14 @@ fn key(path: &Path) -> String {
 }
 
 impl Run<'_> {
-    pub(super) fn zip(&mut self, sources: Vec<PathBuf>) -> Flow {
+    /// A password locks each file with ZipCrypto, which every unzip tool opens. AES would need the
+    /// `aes-crypto` feature, kept out to keep the installer small.
+    pub(super) fn zip(&mut self, sources: Vec<PathBuf>, level: ZipLevel, password: Option<&str>) -> Flow {
+        let plain = level.options();
+        let files = match password.filter(|password| !password.is_empty()) {
+            Some(password) => plain.with_deprecated_encryption(password.as_bytes()).unwrap_or(plain),
+            None => plain,
+        };
         let nodes = self.scan_all(&sources)?;
         let Some(first) = nodes.first() else {
             return Ok(());
@@ -149,7 +171,7 @@ impl Run<'_> {
         let (items, bytes) = (self.progress.items, self.progress.bytes);
         let written = self.attempt(&spot, None, |run| {
             (run.progress.items, run.progress.bytes) = (items, bytes);
-            sys::fill_new(&temp, |file| run.write_archive(file, &nodes))
+            sys::fill_new(&temp, |file| run.write_archive(file, &nodes, files))
         })?;
         if written.is_none() {
             return Ok(());
@@ -166,14 +188,14 @@ impl Run<'_> {
         Ok(())
     }
 
-    fn write_archive(&mut self, file: &mut File, nodes: &[Node]) -> io::Result<()> {
+    fn write_archive(&mut self, file: &mut File, nodes: &[Node], files: Options<'_>) -> io::Result<()> {
         let mut zip = ZipWriter::new(BufWriter::new(&mut *file));
         let mut used = HashSet::new();
         let stopped = |Stopped| io::Error::from(io::ErrorKind::Interrupted);
         for node in nodes {
             let name = name_of(node);
             if used.insert(name.to_lowercase()) {
-                self.add_node(&mut zip, node, &name).map_err(stopped)?;
+                self.add_node(&mut zip, node, &name, files).map_err(stopped)?;
             } else {
                 // Search rows come from many folders, and an archive's top level is one.
                 self.refuse(&node.path, "Another item in this archive has the same name.").map_err(stopped)?;
@@ -186,29 +208,28 @@ impl Run<'_> {
         file.set_len(end)
     }
 
-    fn add_node(&mut self, zip: &mut Writer<'_>, node: &Node, name: &str) -> Flow {
+    fn add_node(&mut self, zip: &mut Writer<'_>, node: &Node, name: &str, files: Options<'_>) -> Flow {
         let time = zip_time(node.stat.modified).unwrap_or_default();
-        let options = SimpleFileOptions::default()
-            .compression_method(CompressionMethod::Deflated)
-            .last_modified_time(time);
+        // A folder holds no data, so it needs no squeezing and no lock.
+        let options = SimpleFileOptions::default().last_modified_time(time);
         if node.stat.is_link() {
             // ponytail: links stay out, as what they lead to is not part of what was picked.
             self.step(1, 0);
             return Ok(());
         }
         let Some(children) = &node.children else {
-            let options = options.large_file(node.stat.size >= u64::from(u32::MAX));
+            let options = files.last_modified_time(time).large_file(node.stat.size >= u64::from(u32::MAX));
             return self.add_file(zip, node, name, options);
         };
         self.attempt(&node.path, None, |_| zip.add_directory(name, options).map_err(from_zip))?;
         self.step(1, 0);
         for child in children {
-            self.add_node(zip, child, &format!("{name}/{}", name_of(child)))?;
+            self.add_node(zip, child, &format!("{name}/{}", name_of(child)), files)?;
         }
         Ok(())
     }
 
-    fn add_file(&mut self, zip: &mut Writer<'_>, node: &Node, name: &str, options: SimpleFileOptions) -> Flow {
+    fn add_file(&mut self, zip: &mut Writer<'_>, node: &Node, name: &str, options: Options<'_>) -> Flow {
         let base = self.progress.bytes;
         self.attempt(&node.path, None, |run| {
             let mut source = reading(&node.path).map_err(from_io)?;
@@ -243,24 +264,25 @@ impl Run<'_> {
 
     /// With `only`, just those entries come out, each as if its own folder were the top.
     /// One inside a folder also picked comes out with that folder, not again on its own.
-    pub(super) fn unzip(&mut self, archives: Vec<PathBuf>, own_folder: bool, only: &[String], password: Option<&str>) -> Flow {
+    pub(super) fn unzip(&mut self, archives: Vec<PathBuf>, own_folder: bool, smart: bool, only: &[String], password: Option<&str>) -> Flow {
         self.add_total(archives.len() as u64, 0);
         for archive in archives {
             if only.is_empty() {
-                self.unzip_one(&archive, own_folder, None, password)?;
+                self.unzip_one(&archive, own_folder, smart, None, password)?;
             }
             for name in outermost(only) {
-                self.unzip_one(&archive, own_folder, Some(name), password)?;
+                self.unzip_one(&archive, own_folder, false, Some(name), password)?;
             }
             self.step(1, 0);
         }
         Ok(())
     }
 
-    fn unzip_one(&mut self, archive: &Path, own_folder: bool, only: Option<&str>, password: Option<&str>) -> Flow {
+    fn unzip_one(&mut self, archive: &Path, own_folder: bool, smart: bool, only: Option<&str>, password: Option<&str>) -> Flow {
         let Some(mut zip) = self.attempt(archive, None, |_| open_archive(archive))? else {
             return Ok(());
         };
+        let own_folder = own_folder || (smart && tops(&zip) > 1);
         let folder = sys::parent(archive);
         let zone = sys::read_zone(archive);
         let mut landing = Landing::new(folder.clone(), Some(archive.to_path_buf()), zone);
@@ -412,6 +434,12 @@ impl Run<'_> {
 
 /// What an entry calls itself, for telling the user about it. Only ever shown.
 /// True if entry `index` is `name` itself or lies inside the folder `name`.
+/// How many items sit at the archive's top, counting a folder once however much it holds.
+fn tops(zip: &ZipArchive<BufReader<File>>) -> usize {
+    let first = |name: &str| name.split(['/', '\\']).find(|part| !part.is_empty()).map(str::to_lowercase);
+    zip.file_names().flatten().filter_map(|name| first(&name)).collect::<HashSet<_>>().len()
+}
+
 fn is_under(zip: &ZipArchive<BufReader<File>>, index: usize, name: &str) -> bool {
     let Ok(entry) = zip.by_index_data(index) else { return false };
     let Ok(own) = entry.name() else { return false };

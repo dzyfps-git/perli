@@ -9,6 +9,10 @@ import {
   dateForm,
   folderSizes,
   hoverCards,
+  onePerDrive,
+  setOnePerDrive,
+  setVerifyCopies,
+  verifyCopies,
   inlineFolders,
   setInlineFolders,
   openInWindow,
@@ -476,7 +480,7 @@ export function Settings(props: {
           <section
             class="settings-section"
             data-section="files"
-            data-words="rows density compact cozy roomy height icons windows list status bar count selected items hover cards preview tooltip picture folder sizes space disk dates ago iso modified selection actions keyboard shortcuts keys"
+            data-words="rows density compact cozy roomy height icons windows list status bar count selected items hover cards preview tooltip picture folder sizes space disk dates ago iso modified selection actions keyboard shortcuts keys copy copying verify check queue drive turn"
           >
             <h3>Files</h3>
             <h4 id="settings-rows">Row height</h4>
@@ -546,6 +550,19 @@ export function Settings(props: {
               note="The Size column fills in as Perli walks each folder you open. Links are not followed, and cloud files stay in the cloud."
               checked={folderSizes()}
               onChange={props.onToggleSizes}
+            />
+            <h4>Copying</h4>
+            <Switch
+              label="Check each copy against its original"
+              note="Every copied file is read back and compared. A copy that doesn't match is reported, to try again. It takes about twice as long."
+              checked={verifyCopies()}
+              onChange={setVerifyCopies}
+            />
+            <Switch
+              label="One copy at a time per drive"
+              note="A copy to or from a drive that is busy waits its turn. Its card says what it waits for, and Start now runs it anyway."
+              checked={onePerDrive()}
+              onChange={setOnePerDrive}
             />
             <h4>Keyboard</h4>
             <div class="settings-chips">

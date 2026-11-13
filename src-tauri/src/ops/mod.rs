@@ -23,7 +23,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use serde::{Deserialize, Serialize};
 use windows::core::{Error, Result};
 
-pub use bin::{read as read_bin, BinItem};
+pub use bin::{limit as bin_limit, read as read_bin, BinItem};
 pub use incoming::{offers_files, Incoming};
 pub use names::{check_rename, check_renames};
 pub use shell::{shell_item, Com};
@@ -44,11 +44,12 @@ pub enum Job {
     Gather { sources: Vec<PathBuf>, folder: PathBuf, name: Option<String> },
     Template { folder: PathBuf, template: Template },
     Shortcut { sources: Vec<PathBuf>, folder: PathBuf },
-    /// A new archive beside the first source.
-    Zip { sources: Vec<PathBuf> },
-    /// Each archive beside itself, loose or in a new folder of its own. With `only`, just that
-    /// entry of each, a file or a folder with all it holds, lands beside the archive.
-    Unzip { archives: Vec<PathBuf>, own_folder: bool, only: Vec<String>, password: Option<String> },
+    /// A new archive beside the first source, its files locked with `password` if there is one.
+    Zip { sources: Vec<PathBuf>, level: ZipLevel, password: Option<String> },
+    /// Each archive beside itself, loose or in a new folder of its own. `smart` gives an archive
+    /// its own folder only when more than one item sits at its top. With `only`, just that entry
+    /// of each, a file or a folder with all it holds, lands beside the archive.
+    Unzip { archives: Vec<PathBuf>, own_folder: bool, smart: bool, only: Vec<String>, password: Option<String> },
     /// Files dragged in with no paths of their own.
     Receive { incoming: Incoming, folder: PathBuf },
     Recycle { paths: Vec<PathBuf> },
@@ -57,6 +58,18 @@ pub enum Job {
     Purge { items: Vec<BinItem> },
     Empty,
     Undo { records: Vec<Done> },
+}
+
+/// How hard a new archive squeezes its files.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum ZipLevel {
+    /// Kept as they are, which is quickest for photos and films that squeeze no further.
+    Store,
+    Fast,
+    #[default]
+    Normal,
+    Best,
 }
 
 /// A new file of a type Windows knows, such as a blank spreadsheet.
@@ -178,6 +191,11 @@ pub trait Host {
 
     /// The job is about to move `source` to `staged`, which then holds the only copy of it.
     fn staged(&self, _staged: &Path, _source: &Path) {}
+
+    /// Reads each copied file back and compares it with its original.
+    fn verify_copies(&self) -> bool {
+        false
+    }
 }
 
 /// Pauses or cancels a running job from another thread.
@@ -252,7 +270,17 @@ pub struct Outcome {
     pub touched: BTreeSet<PathBuf>,
     /// Sources a move left alone because they changed while it ran.
     pub kept: Vec<PathBuf>,
+    /// What a copy or a move skipped after a problem, to try again later.
+    pub failed: Vec<Failed>,
     pub cancelled: bool,
+}
+
+/// One item a copy or a move skipped after a problem, and the folder it was going to.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Failed {
+    pub source: PathBuf,
+    pub folder: PathBuf,
+    pub moving: bool,
 }
 
 struct Run<'a> {
@@ -263,6 +291,10 @@ struct Run<'a> {
     done: Vec<Done>,
     touched: BTreeSet<PathBuf>,
     kept: Vec<PathBuf>,
+    failed: Vec<Failed>,
+    /// Folders a scan was told to skip because they couldn't be listed, until a copy or move
+    /// records each as skipped with where it was going.
+    unread: Vec<PathBuf>,
     /// Folders a merge moved everything out of, children first.
     emptied: Vec<PathBuf>,
     elevated: Vec<Elevated>,
@@ -283,6 +315,8 @@ impl<'a> Run<'a> {
             done: Vec::new(),
             touched: BTreeSet::new(),
             kept: Vec::new(),
+            failed: Vec::new(),
+            unread: Vec::new(),
             emptied: Vec::new(),
             elevated: Vec::new(),
             undoing: false,
@@ -301,8 +335,10 @@ impl<'a> Run<'a> {
             Job::Gather { sources, folder, name } => self.gather(sources, &folder, name.as_deref()),
             Job::Template { folder, template } => self.new_from(&folder, &template),
             Job::Shortcut { sources, folder } => self.shortcuts(&sources, &folder),
-            Job::Zip { sources } => self.zip(sources),
-            Job::Unzip { archives, own_folder, only, password } => self.unzip(archives, own_folder, &only, password.as_deref()),
+            Job::Zip { sources, level, password } => self.zip(sources, level, password.as_deref()),
+            Job::Unzip { archives, own_folder, smart, only, password } => {
+                self.unzip(archives, own_folder, smart, &only, password.as_deref())
+            }
             Job::Receive { incoming, folder } => self.receive(incoming, &folder),
             Job::Recycle { paths } => {
                 self.add_total(paths.len() as u64, 0);
@@ -588,7 +624,24 @@ impl<'a> Run<'a> {
             done: self.done,
             touched: self.touched,
             kept: self.kept,
+            failed: self.failed,
             cancelled,
+        }
+    }
+
+    /// Records each folder under `source` that its scan skipped, as going where `target` puts it.
+    fn note_unread(&mut self, source: &Path, target: &Path, moving: bool) {
+        let handed = self.elevated.len();
+        for path in mem::take(&mut self.unread) {
+            let inside = path.strip_prefix(source).unwrap_or(Path::new(""));
+            self.note_skip(&path, &target.join(inside), moving, handed);
+        }
+    }
+
+    /// `attempt` gave nothing back. Unless the work went to the admin run, the user skipped it.
+    fn note_skip(&mut self, source: &Path, target: &Path, moving: bool, handed: usize) {
+        if self.elevated.len() == handed {
+            self.failed.push(Failed { source: source.to_path_buf(), folder: sys::parent(target), moving });
         }
     }
 }
@@ -605,8 +658,14 @@ fn with_users(message: &str, users: &[String]) -> String {
 pub fn run(job: Job, host: &dyn Host, control: &Arc<Control>) -> Outcome {
     let _com = shell::Com::enter();
     let mut run = Run::new(host, control);
+    // A restore or an undo moves things too, but has no "try again" of its own.
+    let retries = matches!(job, Job::Copy { .. } | Job::Move { .. });
     let worked = run.job(job).and_then(|()| run.finish_elevated());
-    run.finish(worked.is_err() || control.cancelled())
+    let mut outcome = run.finish(worked.is_err() || control.cancelled());
+    if !retries {
+        outcome.failed.clear();
+    }
+    outcome
 }
 
 /// The records to reverse, newest first, in batches of one kind that can run together. A move

@@ -1,5 +1,6 @@
 import { createEffect, createSignal, For, on, onCleanup, onMount, Show, type JSX } from "solid-js";
 import {
+  binUsage,
   driveSpace,
   ejectDrive,
   listPlaces,
@@ -73,6 +74,10 @@ function Place(props: {
   wave?: boolean;
   /** Set for a drive that can be ejected. */
   onEject?: () => void;
+  /** How full, from 0 to 1, as a ring round the icon. */
+  ring?: number;
+  /** Said on hover, after the label. */
+  about?: string;
 }) {
   const used = () => (props.space ? 1 - props.space.free / props.space.total : 0);
   return (
@@ -83,8 +88,15 @@ function Place(props: {
         aria-current={samePath(props.view.folder()?.path, props.path) ? "location" : undefined}
         onClick={() => (props.onOpen ? props.onOpen() : props.view.open(props.path))}
         onContextMenu={(event) => props.onMenu(event, props.path)}
+        aria-label={props.about ? `${props.label}, ${props.about}` : undefined}
       >
-        <span class="place-icon" aria-hidden="true" style={{ color: props.color }}>
+        <span
+          class="place-icon"
+          aria-hidden="true"
+          data-ring={props.ring === undefined ? undefined : ""}
+          data-full={props.ring !== undefined && props.ring >= FULL_SHARE ? "" : undefined}
+          style={{ color: props.color, "--ring": props.ring }}
+        >
           {props.icon}
         </span>
         <span class="place-label">{props.label}</span>
@@ -154,6 +166,8 @@ export function Sidebar(props: {
   const [places, setPlaces] = createSignal<Places>();
   const [spaces, setSpaces] = createSignal<Record<string, DriveSpace>>({});
   const [recent, setRecent] = createSignal<Recent[]>([]);
+  const [bin, setBin] = createSignal<{ size: number; limit: number | null }>();
+  const readBin = () => binUsage().then(setBin).catch(console.error);
   const asking = new Set<string>();
   /** The drives whose bars are making a wave. */
   const [waving, setWaving] = createSignal<string[]>([]);
@@ -196,6 +210,7 @@ export function Sidebar(props: {
         const drives = (places()?.drives ?? [])
           .map((drive) => drive.path)
           .filter((path) => job?.folders.some((folder) => folder.toLowerCase().startsWith(path.toLowerCase())));
+        readBin();
         if (drives.length === 0) return;
         readSpaces();
         setWaving(drives);
@@ -214,6 +229,7 @@ export function Sidebar(props: {
   const onFocus = () => {
     readPlaces();
     readRecent();
+    readBin();
   };
   const readPlaces = () =>
     listPlaces()
@@ -228,6 +244,7 @@ export function Sidebar(props: {
   onMount(() => {
     readPlaces();
     readRecent();
+    readBin();
     window.addEventListener("focus", onFocus);
   });
   onCleanup(() => {
@@ -286,7 +303,15 @@ export function Sidebar(props: {
           )}
         </For>
         <Show when={places()}>
-          <Place view={props.view} path={BIN_PATH} label="Recycle Bin" icon={ICON_BIN} onMenu={props.onMenu} />
+          <Place
+            view={props.view}
+            path={BIN_PATH}
+            label="Recycle Bin"
+            icon={ICON_BIN}
+            onMenu={props.onMenu}
+            ring={bin()?.limit ? Math.min(1, bin()!.size / bin()!.limit!) : undefined}
+            about={bin() && (bin()!.limit ? `${formatSize(bin()!.size)} of ${formatSize(bin()!.limit!)}` : formatSize(bin()!.size))}
+          />
         </Show>
       </Section>
       <Show when={smartFolders().length}>

@@ -29,6 +29,10 @@ export const [grouping, setGrouping] = stored<Grouping>(
 );
 /** Costs a walk of every folder opened, so it waits to be asked for. */
 export const [folderSizes, setFolderSizes] = stored("folder-sizes", saved("folder-sizes") === true);
+/** Read each copied file back and compare it with its original. Slower, so off at first. */
+export const [verifyCopies, setVerifyCopies] = stored("verify-copies", saved("verify-copies") === true);
+/** Copies to or from one drive wait their turn, which a hard disk likes better than all at once. */
+export const [onePerDrive, setOnePerDrive] = stored("one-per-drive", saved("one-per-drive") === true);
 export const [tileSize, setTileSize] = stored("tile-size", (saved("tile-size") as number | null) ?? 112);
 /** What new panes start with. Each pane then keeps its own. */
 export const [lastSort, setLastSort] = stored<Sort>(

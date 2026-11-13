@@ -10,7 +10,8 @@ use windows::core::{Error, Result, HSTRING, PWSTR};
 use windows::Win32::Foundation::{CloseHandle, LocalFree, HANDLE, HLOCAL};
 use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
 use windows::Win32::Security::{GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER};
-use windows::Win32::Storage::FileSystem::{GetDriveTypeW, GetLogicalDrives};
+use windows::Win32::Storage::FileSystem::{GetDriveTypeW, GetLogicalDrives, GetVolumeNameForVolumeMountPointW};
+use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows::Win32::System::WindowsProgramming::{DRIVE_FIXED, DRIVE_REMOVABLE};
 
@@ -101,16 +102,38 @@ fn user_sid() -> Result<String> {
 /// Everything in this user's bin on every fixed and removable drive.
 pub fn read() -> Result<Vec<BinItem>> {
     let sid = user_sid()?;
+    Ok(roots().flat_map(|root| read_root(&Path::new(&root).join("$Recycle.Bin").join(&sid))).collect())
+}
+
+/// The drives that have a bin: fixed and removable ones, as `C:\`.
+fn roots() -> impl Iterator<Item = String> {
     let drives = unsafe { GetLogicalDrives() };
-    let mut items = Vec::new();
-    for letter in (0..26).filter(|bit| drives & (1 << bit) != 0) {
-        let root = format!(r"{}:\", char::from(b'A' + letter));
-        let kind = unsafe { GetDriveTypeW(&HSTRING::from(&root)) };
-        if kind == DRIVE_FIXED || kind == DRIVE_REMOVABLE {
-            items.extend(read_root(&Path::new(&root).join("$Recycle.Bin").join(&sid)));
-        }
-    }
-    Ok(items)
+    (0..26u8)
+        .filter(move |bit| drives & (1 << bit) != 0)
+        .map(|letter| format!(r"{}:\", char::from(b'A' + letter)))
+        .filter(|root| {
+            let kind = unsafe { GetDriveTypeW(&HSTRING::from(root)) };
+            kind == DRIVE_FIXED || kind == DRIVE_REMOVABLE
+        })
+}
+
+/// The most the bin holds on the drives there now, in bytes. Windows keeps each volume's limit
+/// in MB under that volume's id, and has none for a drive whose bin was never set up.
+pub fn limit() -> Option<u64> {
+    const VOLUMES: &str = r"Software\Microsoft\Windows\CurrentVersion\Explorer\BitBucket\Volume";
+    let megabytes: u64 = roots()
+        .filter_map(|root| {
+            let mut name = [0u16; 64];
+            unsafe { GetVolumeNameForVolumeMountPointW(&HSTRING::from(&root), &mut name) }.ok()?;
+            let name = String::from_utf16_lossy(&name);
+            // `\\?\Volume{…}\` keeps its limit under the key `{…}`.
+            let id = &name[name.find('{')?..=name.find('}')?];
+            let key = format!(r"{VOLUMES}\{id}");
+            let bytes = crate::registry::read_value(HKEY_CURRENT_USER, &key, Some("MaxCapacity"), RRF_RT_REG_DWORD)?;
+            Some(u64::from(u32::from_le_bytes(bytes.get(..4)?.try_into().ok()?)))
+        })
+        .sum();
+    (megabytes > 0).then_some(megabytes * 1024 * 1024)
 }
 
 impl Run<'_> {

@@ -94,7 +94,8 @@ html[data-backdrop="solid"] body {
 
   .place-label,
   .place-heading,
-  .settings-label {
+  .settings-label,
+  .cut-label {
     opacity: 0;
     transition: opacity var(--motion) 220ms;
   }
@@ -146,8 +147,15 @@ html[data-backdrop="solid"] body {
 
   .place-label,
   .place-heading,
-  .settings-label {
+  .settings-label,
+  .cut-label {
     opacity: 1;
+    transition-delay: 70ms;
+  }
+
+  /* The words say how many; the badge is for the rail. */
+  .cut-count {
+    opacity: 0;
     transition-delay: 70ms;
   }
 

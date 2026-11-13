@@ -213,22 +213,34 @@ enum Task {
     /// A new file from the text or picture on the clipboard, never its files.
     FromClipboard { folder: String },
     SaveTemplate { selection: Selection },
-    Zip { selection: Selection },
+    Zip {
+        selection: Selection,
+        #[serde(default)]
+        level: ops::ZipLevel,
+        #[serde(default)]
+        password: Option<String>,
+    },
     /// `only` names the entries to take out, rather than all of them.
     Unzip {
         selection: Selection,
         own_folder: bool,
+        #[serde(default)]
+        smart: bool,
         #[serde(default)]
         only: Vec<String>,
         #[serde(default)]
         password: Option<String>,
     },
     Paste { folder: String },
+    /// Shortcuts to the files on the clipboard, which stay where they are, cut or not.
+    PasteShortcut { folder: String },
     /// The last files dropped on the window landed on `folder`.
     Drop { folder: String, action: Option<DropAction> },
     Recycle { selection: Selection },
     Delete { selection: Selection },
     Restore { selection: Selection },
+    /// Puts deleted items back somewhere other than where they came from.
+    RestoreTo { selection: Selection, folder: String },
     Purge { selection: Selection },
     Empty,
 }
@@ -296,16 +308,24 @@ impl Task {
                 sources: paths(&selection)?,
                 folder: templates::own_folder()?,
             },
-            Self::Zip { selection } => Job::Zip {
+            Self::Zip { selection, level, password } => Job::Zip {
                 sources: paths(&selection)?,
+                level,
+                password,
             },
-            Self::Unzip { selection, own_folder, only, password } => Job::Unzip {
+            Self::Unzip { selection, own_folder, smart, only, password } => Job::Unzip {
                 archives: paths(&selection)?,
                 own_folder,
+                smart,
                 only,
                 password,
             },
             Self::Paste { folder } => return paste(target(folder)?),
+            Self::PasteShortcut { folder } => {
+                let files = clipboard::read().map_err(|error| error.message())?;
+                let files = files.ok_or("The clipboard holds no files")?;
+                Job::Shortcut { sources: files.paths, folder: target(folder)? }
+            }
             Self::Drop { folder, action } => {
                 return Ok(drags.job(Path::new(&target(folder)?), action).map(Plan::from));
             }
@@ -318,6 +338,14 @@ impl Task {
             Self::Restore { selection } => Job::Restore {
                 items: items(&selection)?,
             },
+            Self::RestoreTo { selection, folder } => {
+                let folder = target(folder)?;
+                let mut items = items(&selection)?;
+                for item in &mut items {
+                    item.original = folder.join(item.original.file_name().unwrap_or_default());
+                }
+                Job::Restore { items }
+            }
             Self::Purge { selection } => Job::Purge {
                 items: items(&selection)?,
             },
@@ -389,6 +417,8 @@ struct Measured {
 struct Clipped {
     /// The names on the clipboard, which the UI fades while they wait to move.
     names: Vec<String>,
+    /// The full paths, which a search's rows need since they come from many folders.
+    paths: Vec<String>,
     sequence: u32,
 }
 
@@ -730,6 +760,22 @@ fn resume_job(id: u64, jobs: State<'_, Jobs>) {
 }
 
 #[tauri::command]
+fn set_job_options(verify: bool, one_per_drive: bool, jobs: State<'_, Jobs>) {
+    jobs.set_options(verify, one_per_drive);
+}
+
+#[tauri::command]
+fn start_job_now(id: u64, jobs: State<'_, Jobs>) {
+    jobs.start_now(id);
+}
+
+/// What the start found of jobs a crash cut short, told once.
+#[tauri::command]
+async fn take_sweep_report() -> Result<parts::Swept, String> {
+    blocking(|| Ok(parts::take_report())).await
+}
+
+#[tauri::command]
 fn cancel_job(id: u64, jobs: State<'_, Jobs>) {
     jobs.cancel(id);
 }
@@ -830,6 +876,7 @@ async fn set_clipboard(
     clipboard::write(&paths, cut, jobs::owner(&app)).map_err(|error| error.message())?;
     Ok(Clipped {
         names,
+        paths: paths.iter().map(|path| path.to_string_lossy().into_owned()).collect(),
         sequence: clipboard::sequence(),
     })
 }
@@ -848,6 +895,29 @@ fn clipboard_sequence() -> u32 {
 #[tauri::command]
 fn clipboard_can_paste() -> bool {
     clipboard::can_paste()
+}
+
+/// How full the Recycle Bin is, for the ring on its place. `limit` is missing where Windows
+/// keeps none.
+#[derive(Serialize)]
+struct BinUsage {
+    size: u64,
+    limit: Option<u64>,
+}
+
+#[tauri::command]
+async fn bin_usage() -> Result<BinUsage, String> {
+    off_main(|| {
+        let size = ops::read_bin()?.iter().map(|item| item.size).sum();
+        Ok(BinUsage { size, limit: ops::bin_limit() })
+    })
+    .await
+}
+
+/// Files, rather than text or a picture, which only a shortcut can point at.
+#[tauri::command]
+fn clipboard_has_files() -> bool {
+    clipboard::has_files()
 }
 
 /// The clipboard holds text or a picture, which can become a new file.
@@ -1016,6 +1086,12 @@ async fn open_paths_with(paths: Vec<PathBuf>, app: String) -> Result<(), String>
 #[tauri::command]
 async fn open_paths_with_exe(paths: Vec<PathBuf>, exe: PathBuf) -> Result<(), String> {
     off_main(move || menus::open_with_exe(paths, exe)).await
+}
+
+#[tauri::command]
+async fn pick_folder(app: AppHandle) -> Result<Option<String>, String> {
+    let main = jobs::owner(&app);
+    off_main(move || menus::pick_folder(main)).await
 }
 
 /// Windows' file picker for an app. Nothing when the user backs out.
@@ -1815,7 +1891,7 @@ fn main() {
         thread::spawn(move || pose_for(folder));
     }
     thread::spawn(default_app::heal);
-    thread::spawn(parts::sweep);
+    parts::start_sweep();
     let start = Start::read(ask);
     let preload = start.first_folder().map(|(path, order)| {
         let reader = path.clone();
@@ -1913,6 +1989,11 @@ fn main() {
             clipboard_sequence,
             clipboard_can_paste,
             clipboard_has_content,
+            clipboard_has_files,
+            bin_usage,
+            set_job_options,
+            start_job_now,
+            take_sweep_report,
             rows,
             find_row,
             close_view,
@@ -1923,6 +2004,7 @@ fn main() {
             open_paths_with,
             open_paths_with_exe,
             browse_app,
+            pick_folder,
             eject_drive,
             open_device,
             export_settings,

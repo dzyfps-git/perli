@@ -53,6 +53,43 @@ export function secondsLeft(progress: Progress, rate: Rate) {
   return Math.max(0, (total - work(progress.bytes, progress.items)) / rate.pace);
 }
 
+/** How many speed readings a card keeps for its line. */
+export const SPEED_SAMPLES = 40;
+
+/** The newest readings, oldest first. */
+export const withSpeed = (speeds: number[], speed: number) => [...speeds, speed].slice(-SPEED_SAMPLES);
+
+/** The speeds as SVG polyline points across `width`, the fastest at the top. */
+export function speedLine(speeds: number[], width: number, height: number) {
+  const top = Math.max(...speeds);
+  if (speeds.length < 2 || top <= 0) return "";
+  const step = width / (speeds.length - 1);
+  return speeds.map((speed, at) => `${+(at * step).toFixed(1)},${+(height - (speed / top) * height).toFixed(1)}`).join(" ");
+}
+
+/** What a finished job does next: nothing, open its folder, or eject its drive. */
+export type Then = "none" | "open" | "eject";
+
+/** The next choice on a card's "when done" chip. Eject is there only for a drive that can go. */
+export function nextThen(then: Then, ejects: boolean): Then {
+  if (then === "none") return "open";
+  if (then === "open" && ejects) return "eject";
+  return "none";
+}
+
+const counted = (count: number, one: string, many: string) => (count === 1 ? `1 ${one}` : `${count} ${many}`);
+
+/** What the start put right after Perli closed in the middle of a job, or "" for nothing. */
+export function sweptText(putBack: number, cleaned: number) {
+  const parts = [
+    putBack > 0 ? `${counted(putBack, "moved file was", "moved files were")} put back where ${putBack === 1 ? "it was" : "they were"}` : "",
+    cleaned > 0 ? `unfinished copies were cleared from ${counted(cleaned, "folder", "folders")}` : "",
+  ].filter(Boolean);
+  if (parts.length === 0) return "";
+  const text = parts.join(", and ");
+  return `${text[0].toUpperCase()}${text.slice(1)}.`;
+}
+
 export function formatSeconds(seconds: number) {
   if (seconds < SECONDS_PER_MINUTE) return `${Math.ceil(seconds)} s`;
   if (seconds < SECONDS_PER_HOUR) return `${Math.ceil(seconds / SECONDS_PER_MINUTE)} min`;

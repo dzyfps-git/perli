@@ -7,6 +7,9 @@ use std::mem;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use windows::core::Error;
+use windows::Win32::Foundation::ERROR_FILE_CORRUPT;
+
 use super::sys::{self, Stat};
 use super::tree::Node;
 use super::{names, Answer, Done, Elevated, Facts, Flow, Key, Question, Run};
@@ -106,7 +109,9 @@ impl Run<'_> {
             let Some(stat) = self.check_source(&source, &identity)? else {
                 continue;
             };
-            if let Some(node) = self.scan(&source, stat)? {
+            let scanned = self.scan(&source, stat)?;
+            self.note_unread(&source, &folder.join(source.file_name().unwrap_or_default()), false);
+            if let Some(node) = scanned {
                 self.add_total(node.items, node.bytes);
                 nodes.push(node);
             }
@@ -212,8 +217,12 @@ impl Run<'_> {
         match &plan {
             Plan::Skip => self.step(1, 0),
             Plan::Merge(folder) => {
-                let listed = self.attempt(source, None, |_| sys::read_dir(source))?;
-                let entries = listed.unwrap_or_default();
+                let Some(entries) = self.attempt(source, None, |_| sys::read_dir(source))? else {
+                    // Left where it is, and offered again with the skipped items.
+                    self.note_skip(source, folder, true, self.elevated.len());
+                    self.step(1, 0);
+                    return Ok(());
+                };
                 self.add_total(entries.len() as u64, 0);
                 for (name, stat) in entries {
                     self.move_item(&source.join(&name), stat, &folder.join(&name), crossing)?;
@@ -271,6 +280,7 @@ impl Run<'_> {
 
     /// Tells a rename that worked from one that needs the slower way across drives.
     fn first_rename(&mut self, from: &Path, to: &Path, elevated: Elevated) -> Flow<Renamed> {
+        let handed = self.elevated.len();
         let mut other_drive = false;
         let renamed = self.attempt(from, Some(elevated), |_| match sys::move_path(from, to) {
             Err(error) if sys::is_cross_drive(&error) => {
@@ -282,7 +292,10 @@ impl Run<'_> {
         Ok(match renamed {
             Some(()) if other_drive => Renamed::OtherDrive,
             Some(()) => Renamed::Done,
-            None => Renamed::Skipped,
+            None => {
+                self.note_skip(from, to, true, handed);
+                Renamed::Skipped
+            }
         })
     }
 
@@ -291,7 +304,11 @@ impl Run<'_> {
     fn cross_drives(&mut self, crossing: Vec<Crossing>) -> Flow {
         let mut nodes = Vec::with_capacity(crossing.len());
         for Crossing { source, stat, plan } in crossing {
-            if let Some(node) = self.scan(&source, stat)? {
+            let scanned = self.scan(&source, stat)?;
+            if let Plan::Write(target) | Plan::Replace(target) | Plan::Merge(target) = &plan {
+                self.note_unread(&source, target, true);
+            }
+            if let Some(node) = scanned {
                 // `move_all` already counted the item itself.
                 self.add_total(node.items - 1, node.bytes);
                 nodes.push((node, plan));
@@ -418,10 +435,12 @@ impl Run<'_> {
     fn place_folder(&mut self, node: &mut Node, target: &Path, moving: bool) -> Flow {
         let elevated = Self::elevated_copy(node, target, moving);
         let stat = node.stat;
+        let handed = self.elevated.len();
         let made = self.attempt(&node.path.clone(), Some(elevated), |_| {
             sys::create_dir_like(target, stat)
         })?;
         if made.is_none() {
+            self.note_skip(&node.path.clone(), target, moving, handed);
             self.step(node.items, node.bytes);
             return Ok(());
         }
@@ -474,11 +493,26 @@ impl Run<'_> {
         let base = self.progress.bytes;
         let path = node.path.clone();
         let elevated = Self::elevated_copy(node, target, moving);
+        let handed = self.elevated.len();
+        let verify = self.host.verify_copies();
         let copied = self.attempt(&path, Some(elevated), |run| {
-            sys::copy_file(&path, &temp, moving, |bytes| run.copied(base + bytes))
+            sys::copy_file(&path, &temp, moving, |bytes| run.copied(base + bytes))?;
+            // A retry copies again from the start, into the same temp name, so a copy that
+            // fails its check or can't be read back goes first.
+            let checked = if verify { sys::same_bytes(&path, &temp, &|| run.control.proceed()) } else { Ok(true) };
+            if !matches!(checked, Ok(true)) {
+                let _ = sys::delete_file(&temp);
+            }
+            if !checked? {
+                return Err(Error::new(ERROR_FILE_CORRUPT.to_hresult(), "The copy doesn't match the original."));
+            }
+            Ok(())
         });
         if !matches!(copied, Ok(Some(()))) {
             let _ = sys::delete_file(&temp);
+        }
+        if matches!(copied, Ok(None)) {
+            self.note_skip(&path, target, moving, handed);
         }
         let landed = match copied? {
             Some(()) => {

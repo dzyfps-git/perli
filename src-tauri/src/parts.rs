@@ -6,6 +6,10 @@
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::thread::{self, JoinHandle};
+
+use serde::Serialize;
 
 use crate::ops::{self, sys};
 use crate::session;
@@ -71,9 +75,32 @@ fn restore(staged: &Path, source: &Path) -> bool {
     }
 }
 
+/// What the sweep at start found from a run that ended without finishing its jobs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Swept {
+    /// Originals a move had staged, back where they were.
+    pub put_back: u32,
+    /// Folders cleared of partial copies.
+    pub cleaned: u32,
+}
+
+/// The sweep running at start, which the UI asks about once it shows.
+static SWEEP: Mutex<Option<JoinHandle<Swept>>> = Mutex::new(None);
+
+pub fn start_sweep() {
+    *SWEEP.lock().unwrap_or_else(|error| error.into_inner()) = Some(thread::spawn(sweep));
+}
+
+/// What the sweep did, once. Waits for it if it is still going.
+pub fn take_report() -> Swept {
+    let sweep = SWEEP.lock().unwrap_or_else(|error| error.into_inner()).take();
+    sweep.and_then(|sweep| sweep.join().ok()).unwrap_or_default()
+}
+
 /// Handles every line of `list`. False if a drive is away or a staged file could not go back,
 /// so that the list can wait.
-fn clean(list: &Path, process: u32) -> bool {
+fn clean(list: &Path, process: u32, swept: &mut Swept) -> bool {
     let Ok(text) = fs::read_to_string(list) else {
         return false;
     };
@@ -83,10 +110,17 @@ fn clean(list: &Path, process: u32) -> bool {
     let mut finished = true;
     for line in lines {
         finished &= match line.split_once(STAGED) {
-            Some((staged, source)) => restore(Path::new(staged), Path::new(source)),
+            Some((staged, source)) => {
+                let waiting = matches!(sys::stat(Path::new(staged)), Ok(Some(_)));
+                let restored = restore(Path::new(staged), Path::new(source));
+                swept.put_back += u32::from(waiting && restored);
+                restored
+            }
             None => {
                 let folder = Path::new(line);
-                ops::remove_leftovers(folder, process).is_ok() || drive_is_here(folder)
+                let cleared = ops::remove_leftovers(folder, process).is_ok();
+                swept.cleaned += u32::from(cleared);
+                cleared || drive_is_here(folder)
             }
         };
     }
@@ -94,17 +128,19 @@ fn clean(list: &Path, process: u32) -> bool {
 }
 
 /// Runs at start, off the main thread.
-pub fn sweep() {
+fn sweep() -> Swept {
+    let mut swept = Swept::default();
     let lists = session::data_file(FOLDER).and_then(|folder| fs::read_dir(folder).ok());
     for entry in lists.into_iter().flatten().flatten() {
         let name = entry.file_name();
         let Some(process) = name.to_str().and_then(process_of) else {
             continue;
         };
-        if !sys::is_running(process) && clean(&entry.path(), process) {
+        if !sys::is_running(process) && clean(&entry.path(), process, &mut swept) {
             let _ = fs::remove_file(entry.path());
         }
     }
+    swept
 }
 
 #[cfg(test)]
@@ -133,14 +169,17 @@ mod tests {
         // Its folder went away too, and a gone staged file is simply done.
         fs::write(&staged, "original").unwrap();
         assert!(staged_waiting(&line));
-        assert!(clean(&list, 1));
+        let mut swept = Swept::default();
+        assert!(clean(&list, 1, &mut swept));
         assert_eq!(fs::read_to_string(&source).unwrap(), "original");
+        assert_eq!(swept, Swept { put_back: 1, cleaned: 0 });
         assert!(!staged_waiting(&line));
-        assert!(clean(&list, 1));
+        assert!(clean(&list, 1, &mut swept));
+        assert_eq!(swept.put_back, 1, "a staged file already gone was not put back");
 
         fs::write(&source, "newer").unwrap();
         fs::write(&staged, "original").unwrap();
-        assert!(clean(&list, 1));
+        assert!(clean(&list, 1, &mut Swept::default()));
         assert_eq!(fs::read_to_string(&source).unwrap(), "newer");
         assert!(!staged.exists());
         let names = fs::read_dir(&from).unwrap().count();
@@ -157,14 +196,14 @@ mod tests {
         let gone = folder.join("gone");
 
         fs::write(&list, format!("{}\n", gone.display())).unwrap();
-        assert!(clean(&list, 1));
+        assert!(clean(&list, 1, &mut Swept::default()));
 
         let free = (b'P'..=b'Z')
             .map(|letter| format!("{}:\\", char::from(letter)))
             .find(|drive| !Path::new(drive).exists())
             .unwrap();
         fs::write(&list, format!("{free}folder\n")).unwrap();
-        assert!(!clean(&list, 1));
+        assert!(!clean(&list, 1, &mut Swept::default()));
 
         fs::remove_dir_all(&folder).unwrap();
     }

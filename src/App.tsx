@@ -3,6 +3,10 @@ import { createEffect, createSignal, For, on, onCleanup, onMount, Show } from "s
 import {
   cancelJobsAndClose,
   clipboardCanPaste,
+  clipboardHasFiles,
+  pickFolder,
+  setJobOptions,
+  takeSweepReport,
   clipboardText,
   deleteTag,
   disconnectDrive,
@@ -48,6 +52,7 @@ import {
 } from "./api";
 import { createFileActions } from "./features/fileops/actions";
 import { BatchRename, type RenameRequest } from "./features/fileops/BatchRename";
+import { ZipOptions, type ZipRequest } from "./features/fileops/ZipOptions";
 import { followFileDrag } from "./features/fileops/fileDrag";
 import { checkCut, cutNames, takeBackCut } from "./features/fileops/clipboard";
 import { ConfirmDelete, type DeleteRequest } from "./features/fileops/ConfirmDelete";
@@ -93,6 +98,8 @@ import {
   showHidden,
   tileSize,
   toggleColumn,
+  verifyCopies,
+  onePerDrive,
 } from "./features/filelist/prefs";
 import { SelectPattern } from "./features/filelist/SelectPattern";
 import { FLAT_QUERY, type FolderView, type RowAt } from "./features/navigation/folderView";
@@ -121,6 +128,8 @@ import { Shelf } from "./features/reach/Shelf";
 import { DetailsPanel } from "./features/preview/DetailsPanel";
 import { PreviewDock, QuickPreview, type PreviewAt } from "./features/preview/QuickPreview";
 import { MiniPlayer } from "./features/preview/MiniPlayer";
+import { CutChip } from "./features/fileops/CutChip";
+import { sweptText } from "./features/fileops/progress";
 import { now } from "./features/preview/nowPlaying";
 import { BACKDROPS, SCALES, setBackdrop, setUiScale } from "./features/settings/appearance";
 import { Settings } from "./features/settings/Settings";
@@ -350,8 +359,14 @@ export function App() {
   createEffect(
     on([tabs.active, () => tabs.activeView().arrival()], () => setSettingsShown(false), { defer: true }),
   );
-  const jobs = createJobs(tabs.allViews);
-  const actions = createFileActions(jobs, setDeleting, () => tabs.active().other(), setRenaming);
+  const jobs = createJobs(tabs.allViews, {
+    open: (folder) => void tabs.activeView().open(folder),
+    // A drive Windows can eject is one the sidebar shows with its eject button.
+    ejectRoot: (path) =>
+      places()?.drives.find((drive) => drive.removable && path.toLowerCase().startsWith(drive.path.toLowerCase()))?.path,
+  });
+  const [zipping, setZipping] = createSignal<ZipRequest>();
+  const actions = createFileActions(jobs, setDeleting, () => tabs.active().other(), setRenaming, setZipping);
   const shell = createShellItems(jobs, actions, {
     properties: (target, at) => setShowingProperties({ target, at }),
     pickApp: setPickingApp,
@@ -379,6 +394,8 @@ export function App() {
       });
     return saving;
   }
+
+  createEffect(() => setJobOptions(verifyCopies(), onePerDrive()).catch(console.error));
 
   createEffect(() => {
     const session = keepSession() ? tabs.session() : undefined;
@@ -670,6 +687,11 @@ export function App() {
     });
   }
 
+  /** Back to the cut files, picked, so a paste elsewhere or a Delete can follow. */
+  async function showCut(view: FolderView, folder: string, names: string[]) {
+    if (await view.open(folder)) await view.reload(names);
+  }
+
   /** Shows the file among its neighbours, the way Explorer's Open file location does. */
   async function showInFolder(view: FolderView, path: string) {
     const folder = parentOf(path);
@@ -730,13 +752,14 @@ export function App() {
     if (view.isBin()) {
       const items = [
         { label: "Restore", action: () => actions.restore(view) },
+        { label: "Restore to", items: restorePlaces(view) },
         { label: "Delete permanently", action: () => actions.remove(view, true) },
       ];
       return setMenu({ x, y, items });
     }
 
     const path = rowPath(view, row);
-    const [canPaste, toolItems] = await Promise.all([clipboardCanPaste(), shell.fileToolItems(view, row)]);
+    const [canPaste, toolItems] = await Promise.all([clipboardCanPaste(), shell.fileToolItems(view, row, { x, y })]);
     const items: MenuItem[] = [
       { label: "Open", action: () => openRow(view, row, false) },
       { label: "Quick preview", action: () => previewSelected(view) },
@@ -759,6 +782,7 @@ export function App() {
       { label: "Delete", action: () => actions.remove(view, false) },
       { label: "Duplicate", divider: true, keys: keyText("duplicate"), action: () => duplicate(view) },
       { label: "Copy path", action: () => copyPath(view) },
+      { label: "Copy name", action: () => quietly(copyName(view)) },
       { label: "New folder with selection", action: () => gather(view) },
       { label: "Put on the shelf", action: () => putOnShelf(view) },
       ...(kindOf(row.name, row.isDir) === "picture"
@@ -995,6 +1019,7 @@ export function App() {
         ]
       : [
           { label: "Paste", disabled: !(await clipboardCanPaste()), action: () => actions.paste(view) },
+          { label: "Paste as shortcut", disabled: !(await clipboardHasFiles()), action: () => actions.pasteShortcut(view) },
           { label: "New…", action: () => setMaking({ view, x, y }) },
           { label: "Search here", action: () => view.askSearch() },
           { label: "Select by pattern…", action: () => setSelectingPattern(view) },
@@ -1103,7 +1128,16 @@ export function App() {
     if (!selection) return;
     const paths = await selectionPaths(selection);
     await navigator.clipboard.writeText(paths.join("\n"));
-    jobs.notify(paths.length === 1 ? "Path copied" : `${paths.length} paths copied`, paths[0]);
+    jobs.notify(paths.length === 1 ? "Path copied" : `${paths.length} paths copied`, paths[0], true);
+  }
+
+  /** Just the names, one to a line, for a list or a message. */
+  async function copyName(view: FolderView) {
+    const selection = picked(view);
+    if (!selection) return;
+    const names = (await selectionPaths(selection)).map(baseName);
+    await navigator.clipboard.writeText(names.join("\n"));
+    jobs.notify(names.length === 1 ? "Name copied" : `${names.length} names copied`, names[0], true);
   }
 
   function gather(view: FolderView) {
@@ -1231,6 +1265,29 @@ export function App() {
   };
 
   /** What the bar over a selection offers. A menu opens under its own button. */
+  /** Where deleted items can go instead of back: the other pane, pinned and recent folders, or
+   * any folder from Windows' picker. */
+  function restorePlaces(view: FolderView): MenuItem[] {
+    const other = tabs.active().other();
+    const otherPath = other && !other.isBin() ? other.folder()?.path : undefined;
+    const seen = new Set<string>();
+    const place = (path: string, divider: boolean): MenuItem[] => {
+      if (seen.has(path.toLowerCase()) || isBin(path)) return [];
+      seen.add(path.toLowerCase());
+      return [{ label: baseName(path) || path, divider, action: () => actions.restoreTo(view, path) }];
+    };
+    const choose = () =>
+      pickFolder()
+        .then((folder) => folder && actions.restoreTo(view, folder))
+        .catch(jobs.report);
+    return [
+      { label: "Choose a folder…", action: choose },
+      ...(otherPath ? place(otherPath, true) : []),
+      ...pinned().flatMap((path, at) => place(path, at === 0)),
+      ...recentFolders().flatMap((path, at) => place(path, at === 0)),
+    ];
+  }
+
   function barItems(view: FolderView): BarItem[] {
     const item = (label: string, run: BarItem["run"], id?: string): BarItem => ({
       label,
@@ -1245,6 +1302,7 @@ export function App() {
     if (view.isBin()) {
       return [
         item("Restore", () => actions.restore(view)),
+        item("Restore to", (anchor) => under(anchor, restorePlaces(view))),
         item("Delete permanently", () => actions.remove(view, true), "deleteForGood"),
       ];
     }
@@ -1355,6 +1413,10 @@ export function App() {
       ? []
       : [
           { label: "Compress to ZIP", run: () => actions.compress(view) },
+          { label: "Compress with options…", run: () => actions.compress(view, { x: innerWidth / 2 - 180, y: innerHeight / 3 }) },
+          { label: "Extract", run: () => actions.extract(view, false, true) },
+          { label: "Paste as shortcut", run: () => actions.pasteShortcut(view) },
+          { label: "Copy name", run: () => quietly(copyName(view)) },
           { label: "Extract here", run: () => actions.extract(view, false) },
           { label: "Extract to own folder", run: () => actions.extract(view, true) },
           { label: "Save as template", run: () => actions.saveTemplate(view) },
@@ -1475,6 +1537,13 @@ export function App() {
     window.addEventListener("focus", checkCut);
     refreshTags();
     startUpdates();
+    // Perli closed in the middle of a job last time, and the start put things right.
+    takeSweepReport()
+      .then(({ putBack, cleaned }) => {
+        const text = sweptText(putBack, cleaned);
+        if (text) jobs.notify("Perli closed before its jobs finished", text);
+      })
+      .catch(console.error);
     const start = await startState();
     home = start.home ?? home;
     const session = start.folder ? undefined : parseSession(start.session);
@@ -1622,6 +1691,7 @@ export function App() {
           report={jobs.report}
         />
         <MiniPlayer onOpen={() => void backToPlayer().catch(jobs.report)} />
+        <CutChip onShow={(folder, names) => quietly(showCut(tabs.activeView(), folder, names))} />
         <button
           class="settings-button"
           aria-label={updateState() === "ready" ? "Settings, update ready" : "Settings"}
@@ -1719,6 +1789,9 @@ export function App() {
       </Show>
       <Show when={renaming()} keyed>
         {(request) => <BatchRename request={request} onClose={() => setRenaming(undefined)} />}
+      </Show>
+      <Show when={zipping()} keyed>
+        {(request) => <ZipOptions request={request} onClose={() => setZipping(undefined)} />}
       </Show>
       <Show when={filtering()} keyed>
         {(view) => <FilterDialog view={view} onClose={() => setFiltering(undefined)} onSave={() => saveSmart(view)} />}

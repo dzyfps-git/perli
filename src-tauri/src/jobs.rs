@@ -3,10 +3,10 @@
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::clipboard;
-use crate::ops::{self, Answer, Control, Done, Host, Job, Outcome, Progress, Question, Reply};
+use crate::ops::{self, Answer, Control, Done, Failed, Host, Job, Outcome, Progress, Question, Reply};
 use crate::{parts, session};
 
 /// Scanning goes one call deeper per folder level, and paths allow about 16,000 levels.
@@ -26,6 +26,8 @@ const UNDO_LIMIT: usize = 100;
 const UNDO_FILE: &str = "undo.json";
 /// Selecting more new items than this helps nobody, and sending them all is slow.
 const SELECT_LIMIT: usize = 10_000;
+/// How often a job waiting for its drive looks again, for a cancel or a "Start now".
+const TURN_CHECK: Duration = Duration::from_millis(250);
 const CANCEL: Reply = Reply {
     answer: Answer::Cancel,
     all: false,
@@ -75,6 +77,12 @@ enum Change {
         recycle: bool,
         /// An undo, whose rows go back to where they were.
         back: bool,
+        /// The folder the job fills, for what to do when it is done.
+        target: Option<String>,
+    },
+    /// The job waits for another to finish on these drives. Empty once it starts.
+    Waiting {
+        drives: Vec<String>,
     },
     Progress(Progress),
     Asked {
@@ -84,12 +92,28 @@ enum Change {
         touched: Vec<String>,
         created: Vec<String>,
         kept: Vec<String>,
+        failed: Vec<Retry>,
         cancelled: bool,
         /// The undo step this job added.
         step: Option<u64>,
         #[serde(flatten)]
         undoable: Undoable,
     },
+}
+
+/// What a copy or a move skipped, which the UI can try again.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Retry {
+    source: String,
+    folder: String,
+    moving: bool,
+}
+
+impl From<&Failed> for Retry {
+    fn from(failed: &Failed) -> Self {
+        Self { source: text(&failed.source), folder: text(&failed.folder), moving: failed.moving }
+    }
 }
 
 /// What Undo and Redo can do now.
@@ -116,6 +140,8 @@ struct Entry {
     control: Arc<Control>,
     /// Takes the answer to the question on screen.
     waiting: Mutex<Option<Sender<Reply>>>,
+    /// The user would rather not wait for the drive.
+    go_now: AtomicBool,
 }
 
 impl Entry {
@@ -348,6 +374,12 @@ pub struct Jobs {
     undo: Mutex<UndoLog>,
     /// Reads the saved log off the main thread, so a big one can't slow the start.
     loading: Mutex<Option<JoinHandle<UndoLog>>>,
+    /// How many running copy-like jobs use each drive.
+    busy: Mutex<HashMap<String, usize>>,
+    freed: Condvar,
+    /// The user's settings: read back every copy, and one copy-like job per drive at a time.
+    verify: AtomicBool,
+    one_per_drive: AtomicBool,
 }
 
 impl Jobs {
@@ -436,6 +468,100 @@ impl Jobs {
         if let Some(entry) = self.entry(id) {
             entry.reply(reply);
         }
+    }
+
+    pub fn set_options(&self, verify: bool, one_per_drive: bool) {
+        self.verify.store(verify, Ordering::Relaxed);
+        self.one_per_drive.store(one_per_drive, Ordering::Relaxed);
+        self.freed.notify_all();
+    }
+
+    /// A job waiting for its drive starts anyway.
+    pub fn start_now(&self, id: u64) {
+        if let Some(entry) = self.entry(id) {
+            entry.go_now.store(true, Ordering::Relaxed);
+            self.freed.notify_all();
+        }
+    }
+
+    /// Waits until no other job uses `drives`, when the user asked for one at a time. `waiting`
+    /// hears which drives hold it up, once.
+    fn take_turn(&self, entry: &Entry, drives: Vec<String>, waiting: impl Fn(Vec<String>)) -> Turn<'_> {
+        let mut busy = lock(&self.busy);
+        let mut told = false;
+        loop {
+            let blocked: Vec<String> = drives.iter().filter(|drive| busy.contains_key(*drive)).cloned().collect();
+            let queued = self.one_per_drive.load(Ordering::Relaxed);
+            if !queued || blocked.is_empty() || entry.go_now.load(Ordering::Relaxed) || entry.control.cancelled() {
+                break;
+            }
+            if !told {
+                waiting(blocked);
+                told = true;
+            }
+            busy = self.freed.wait_timeout(busy, TURN_CHECK).unwrap_or_else(|error| error.into_inner()).0;
+        }
+        for drive in &drives {
+            *busy.entry(drive.clone()).or_default() += 1;
+        }
+        drop(busy);
+        if told {
+            waiting(Vec::new());
+        }
+        Turn { jobs: self, drives }
+    }
+}
+
+/// A job's hold on its drives, let go when it ends.
+struct Turn<'a> {
+    jobs: &'a Jobs,
+    drives: Vec<String>,
+}
+
+impl Drop for Turn<'_> {
+    fn drop(&mut self) {
+        let mut busy = lock(&self.jobs.busy);
+        for drive in &self.drives {
+            if let Some(count) = busy.get_mut(drive) {
+                *count -= 1;
+                if *count == 0 {
+                    busy.remove(drive);
+                }
+            }
+        }
+        self.jobs.freed.notify_all();
+    }
+}
+
+/// The drives a job reads and writes in bulk, as `C:` or `\\server\share`. A move within one
+/// drive only renames, and other jobs are quick, so they take no turn.
+fn drives_of(job: &Job) -> Vec<String> {
+    let drive = |path: &Path| match path.components().next() {
+        Some(Component::Prefix(prefix)) => Some(prefix.as_os_str().to_string_lossy().to_uppercase()),
+        _ => None,
+    };
+    let paths: Vec<&Path> = match job {
+        Job::Copy { sources, folder } => sources.iter().map(PathBuf::as_path).chain([folder.as_path()]).collect(),
+        Job::Move { sources, folder } if sources.iter().all(|source| drive(source) == drive(folder)) => Vec::new(),
+        Job::Move { sources, folder } => sources.iter().map(PathBuf::as_path).chain([folder.as_path()]).collect(),
+        Job::Zip { sources: paths, .. } | Job::Unzip { archives: paths, .. } => paths.iter().map(PathBuf::as_path).collect(),
+        Job::Receive { folder, .. } => vec![folder.as_path()],
+        _ => Vec::new(),
+    };
+    let mut drives: Vec<String> = paths.into_iter().filter_map(drive).collect();
+    drives.sort();
+    drives.dedup();
+    drives
+}
+
+/// The folder a job fills, for "open it when done".
+fn target_of(job: &Job) -> Option<String> {
+    match job {
+        Job::Copy { folder, .. } | Job::Move { folder, .. } | Job::Receive { folder, .. } => Some(text(folder)),
+        Job::Zip { sources: paths, .. } | Job::Unzip { archives: paths, .. } => {
+            paths.first().map(|path| text(&ops::sys::parent(path)))
+        }
+        _ => None,
     }
 }
 
@@ -528,11 +654,14 @@ impl Bridge {
             new_item: matches!(plan.job, Job::New { .. } | Job::Gather { .. } | Job::Template { .. } | Job::Zip { .. }),
             recycle: matches!(plan.job, Job::Recycle { .. }),
             back: matches!(plan.history, History::Undo),
+            target: target_of(&plan.job),
         });
 
-        let outcome = ops::run(plan.job, self, &self.entry.control);
-
         let jobs = self.app.state::<Jobs>();
+        let turn = jobs.take_turn(&self.entry, drives_of(&plan.job), |drives| self.send(Change::Waiting { drives }));
+        let outcome = ops::run(plan.job, self, &self.entry.control);
+        drop(turn);
+
         parts::forget(self.id);
         if let (Some(seen), false) = (plan.cut, outcome.cancelled) {
             let _ = clipboard::clear_if_unchanged(seen);
@@ -542,6 +671,7 @@ impl Bridge {
             done,
             touched,
             kept,
+            failed,
             cancelled,
         } = outcome;
         let mut log = jobs.log();
@@ -555,6 +685,7 @@ impl Bridge {
             touched: touched.iter().map(|path| text(path)).collect(),
             created,
             kept: kept.iter().map(|path| text(path)).collect(),
+            failed: failed.iter().take(SELECT_LIMIT).map(Retry::from).collect(),
             cancelled,
             step,
             undoable,
@@ -593,6 +724,10 @@ impl Host for Bridge {
 
     fn staged(&self, staged: &Path, source: &Path) {
         parts::note_staged(self.id, staged, source);
+    }
+
+    fn verify_copies(&self) -> bool {
+        self.app.state::<Jobs>().verify.load(Ordering::Relaxed)
     }
 }
 
@@ -640,7 +775,7 @@ fn title(job: &Job) -> String {
         Job::Gather { sources, .. } => listed("Moving into a new folder", sources),
         Job::New { .. } | Job::Template { .. } => "Creating a file".to_string(),
         Job::Shortcut { sources, .. } => listed("Linking to", sources),
-        Job::Zip { sources } => listed("Compressing", sources),
+        Job::Zip { sources, .. } => listed("Compressing", sources),
         Job::Unzip { archives, .. } => listed("Extracting", archives),
         Job::Receive { .. } => "Copying dragged files".to_string(),
         Job::Recycle { paths } => listed("Recycling", paths),
@@ -883,6 +1018,41 @@ mod tests {
     }
 
     #[test]
+    fn only_bulk_jobs_take_a_turn_on_their_drives() {
+        let paths = |list: &[&str]| list.iter().map(PathBuf::from).collect::<Vec<_>>();
+        let copy = Job::Copy { sources: paths(&[r"c:\a\x.txt", r"D:\b"]), folder: PathBuf::from(r"D:\to") };
+        assert_eq!(drives_of(&copy), ["C:", "D:"]);
+        let rename = Job::Move { sources: paths(&[r"C:\a\x.txt"]), folder: PathBuf::from(r"C:\to") };
+        assert!(drives_of(&rename).is_empty(), "a move on one drive only renames");
+        let across = Job::Move { sources: paths(&[r"C:\a\x.txt"]), folder: PathBuf::from(r"\\nas\share\to") };
+        assert_eq!(drives_of(&across), ["C:", r"\\NAS\SHARE"]);
+        assert!(drives_of(&Job::Recycle { paths: paths(&[r"C:\a"]) }).is_empty());
+        assert_eq!(target_of(&copy).as_deref(), Some(r"D:\to"));
+    }
+
+    #[test]
+    fn a_second_job_on_a_drive_waits_until_the_first_lets_go() {
+        let jobs = Arc::new(Jobs::default());
+        jobs.set_options(false, true);
+        let first = Entry::default();
+        let turn = jobs.take_turn(&first, vec!["D:".into()], |_| panic!("nothing holds D: yet"));
+
+        let (heard, hear) = mpsc::channel();
+        let waiter = {
+            let jobs = jobs.clone();
+            thread::spawn(move || {
+                let second = Entry::default();
+                let _turn = jobs.take_turn(&second, vec!["D:".into()], |drives| heard.send(drives).unwrap());
+            })
+        };
+        assert_eq!(hear.recv().unwrap(), ["D:"]);
+        drop(turn);
+        assert!(hear.recv().unwrap().is_empty(), "it says when it starts");
+        waiter.join().unwrap();
+        assert!(lock(&jobs.busy).is_empty());
+    }
+
+    #[test]
     fn events_reach_the_ui_flat_and_camel_cased() {
         let event = Event {
             id: 7,
@@ -890,6 +1060,7 @@ mod tests {
                 touched: Vec::new(),
                 created: Vec::new(),
                 kept: Vec::new(),
+                failed: Vec::new(),
                 cancelled: false,
                 step: None,
                 undoable: Undoable {

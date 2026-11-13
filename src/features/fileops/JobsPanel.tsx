@@ -3,7 +3,7 @@ import { fetchPictureFile, filetimeToMs, type Answer, type Facts, type Question,
 import { formatSize } from "../../ui/format";
 import { baseName } from "../navigation/path";
 import type { JobCard, Jobs } from "./jobs";
-import { formatSeconds, fraction, secondsLeft } from "./progress";
+import { formatSeconds, fraction, secondsLeft, speedLine } from "./progress";
 import "./fileops.css";
 
 const ICON_PAUSE = "";
@@ -75,8 +75,22 @@ function questionText(question: Question) {
   return `${baseName(question.path)}: ${question.message}`;
 }
 
+const SPEED_WIDTH = 100;
+const SPEED_HEIGHT = 14;
+
+/** "the job on D:", or "the jobs on C: and D:". */
+const waitText = (drives: string[]) =>
+  drives.length === 1 ? `Waiting for the job on ${drives[0]}` : `Waiting for the jobs on ${drives.slice(0, -1).join(", ")} and ${drives.at(-1)}`;
+
+function thenText(card: JobCard, jobs: Jobs) {
+  if (card.then === "open") return "Then open the folder";
+  if (card.then === "eject") return `Then eject ${jobs.ejectRoot(card)?.replace(/\\$/, "") ?? "the drive"}`;
+  return "Then nothing";
+}
+
 function factsText(card: JobCard) {
   const { progress, rate, paused } = card;
+  if (card.waiting) return waitText(card.waiting);
   if (!progress) return "Getting ready";
   const done =
     progress.totalBytes > 0
@@ -167,10 +181,30 @@ function Card(props: { card: JobCard; jobs: Jobs }) {
                 style={{ transform: `scaleX(${card.progress ? fraction(card.progress) : 0})` }}
               />
             </span>
-            <p class="job-facts">{factsText(card)}</p>
-            <Show when={card.progress?.current}>
-              {(current) => <p class="job-facts job-current">{baseName(current())}</p>}
+            {/* How the speed went, so a stall or a slow patch reads at a glance. */}
+            <Show when={speedLine(card.speeds, SPEED_WIDTH, SPEED_HEIGHT)}>
+              {(points) => (
+                <svg class="job-speed" viewBox={`0 0 ${SPEED_WIDTH} ${SPEED_HEIGHT}`} preserveAspectRatio="none" aria-hidden="true">
+                  <polyline points={points()} />
+                </svg>
+              )}
             </Show>
+            <p class="job-facts">{factsText(card)}</p>
+            <Show when={card.progress?.current && !card.waiting}>
+              <p class="job-facts job-current">{baseName(card.progress!.current)}</p>
+            </Show>
+            <div class="job-choices">
+              <Show when={card.waiting}>
+                <button class="job-choice" onClick={() => jobs.startNow(card.id)}>
+                  Start now
+                </button>
+              </Show>
+              <Show when={card.target}>
+                <button class="job-choice job-then" data-then={card.then} onClick={() => jobs.cycleThen(card)}>
+                  {thenText(card, jobs)}
+                </button>
+              </Show>
+            </div>
           </>
         }
       >
@@ -190,6 +224,19 @@ function Card(props: { card: JobCard; jobs: Jobs }) {
               <ul class="job-kept">
                 <For each={shownKept()}>{(path) => <li class="job-current">{baseName(path)}</li>}</For>
               </ul>
+            </Show>
+            <Show when={ended().failed.length > 0}>
+              <p class="job-facts">
+                {ended().failed.length === 1 ? "1 item was skipped:" : `${ended().failed.length} items were skipped:`}
+              </p>
+              <ul class="job-kept">
+                <For each={ended().failed.slice(0, KEPT_SHOWN)}>{(item) => <li class="job-current">{baseName(item.source)}</li>}</For>
+              </ul>
+              <div class="job-choices">
+                <button class="job-choice" onClick={() => jobs.retry(card)}>
+                  Try again
+                </button>
+              </div>
             </Show>
             <Show when={jobs.canUndo(card)}>
               <div class="job-choices">

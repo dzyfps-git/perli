@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use windows::core::{Error, Owned, Result, HSTRING, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{
-    ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_LOCK_VIOLATION,
+    ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_CANCELLED, ERROR_FILE_NOT_FOUND, ERROR_LOCK_VIOLATION,
     ERROR_MORE_DATA, ERROR_NOT_SAME_DEVICE, ERROR_NO_MORE_FILES, ERROR_PATH_NOT_FOUND,
     ERROR_SHARING_VIOLATION, ERROR_SUCCESS, E_UNEXPECTED, FILETIME, GENERIC_WRITE, HANDLE,
     STILL_ACTIVE, SYSTEMTIME,
@@ -438,6 +438,32 @@ pub fn write_new(path: &Path, bytes: &[u8]) -> Result<()> {
 
 /// Makes a file that must not exist yet. If `fill` fails the file goes again, because nothing
 /// records it and it would block a retry under the same name.
+/// True if both files hold the same bytes, read again from the disk.
+/// `go_on` is asked between pieces: it waits out a pause, and false stops the check.
+pub fn same_bytes(a: &Path, b: &Path, go_on: &dyn Fn() -> bool) -> Result<bool> {
+    use std::io::Read;
+    const CHUNK: usize = 1 << 20;
+    let open = |path: &Path| File::open(PathBuf::from(extended(path).to_os_string()));
+    let (mut a, mut b) = (open(a)?, open(b)?);
+    if a.metadata()?.len() != b.metadata()?.len() {
+        return Ok(false);
+    }
+    let (mut left, mut right) = (vec![0; CHUNK], vec![0; CHUNK]);
+    loop {
+        if !go_on() {
+            return Err(Error::new(ERROR_CANCELLED.to_hresult(), "Cancelled"));
+        }
+        let read = a.read(&mut left)?;
+        if read == 0 {
+            return Ok(true);
+        }
+        b.read_exact(&mut right[..read])?;
+        if left[..read] != right[..read] {
+            return Ok(false);
+        }
+    }
+}
+
 pub(super) fn fill_new(path: &Path, fill: impl FnOnce(&mut File) -> std::io::Result<()>) -> Result<()> {
     guard(path);
     let target = PathBuf::from(extended(path).to_os_string());

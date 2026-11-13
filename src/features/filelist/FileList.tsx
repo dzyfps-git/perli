@@ -14,7 +14,8 @@ import { ColumnHeader, SortStrip } from "./ColumnHeader";
 import { formatSize } from "../../ui/format";
 import { tagColor, tagNames, tags } from "../tags/tags";
 import type { ListHandle, RowAt } from "../navigation/folderView";
-import { join, parentOf, relativeTo, samePath } from "../navigation/path";
+import { isBin, join, parentOf, relativeTo, samePath } from "../navigation/path";
+import { dayOf } from "../reach/lists";
 import { allLooks, lookOf } from "../sidebar/saved";
 import { EmptyState, type Empty } from "./EmptyState";
 import { HoverCard, type CardAsk } from "./HoverCard";
@@ -412,6 +413,8 @@ export function FileList(props: {
     pooled.element.toggleAttribute("data-focused", focused);
   }
 
+  const byDay = () => props.layout === "list" && props.sort.key === "modified" && isBin(props.folder);
+
   /** Whether folders open in place here. */
   const nests = () => props.layout === "list" && props.onExpand !== undefined;
   /** How many folders opened in place a row sits inside. */
@@ -443,6 +446,12 @@ export function FileList(props: {
     pooled.element.toggleAttribute("data-folder", row?.isDir ?? false);
     pooled.element.toggleAttribute("data-hidden", row?.isHidden ?? false);
     pooled.element.toggleAttribute("data-cut", !!row && !row.location && !!props.cut?.has(row.name));
+    // The bin by date deleted reads in days: a small label where one day gives way to the next.
+    // ponytail: a row whose neighbour above is not loaded yet goes without, until it refills.
+    const day = row && byDay() ? dayOf(row.modified, Date.now()) : undefined;
+    const above = day && index > 0 ? rowAt(index - 1) : undefined;
+    if (day && (index === 0 || (above && dayOf(above.modified, Date.now()) !== day))) pooled.element.dataset.day = day;
+    else delete pooled.element.dataset.day;
     // A drop on a folder row has to know where that folder is.
     if (row?.location) pooled.element.dataset.location = row.location;
     else delete pooled.element.dataset.location;

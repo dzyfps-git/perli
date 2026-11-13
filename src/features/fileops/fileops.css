@@ -117,6 +117,33 @@
   background: var(--border);
 }
 
+/* The speed so far, faint under the bar. */
+.job-speed {
+  display: block;
+  width: 100%;
+  height: 14px;
+  margin: calc(-1 * var(--space-1)) 0 var(--space-1);
+  overflow: visible;
+}
+
+.job-speed polyline {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 1.5;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
+  opacity: 0.6;
+}
+
+/* What happens once the job is done, a chip that steps through its choices. */
+.job-then[data-then="none"] {
+  color: var(--text-muted);
+}
+
+.job-then:not([data-then="none"]) {
+  border-color: var(--accent);
+}
+
 .job-fill {
   display: block;
   height: 100%;
@@ -628,6 +655,59 @@
   text-align: center;
 }
 
+/* What letting go would do, in a word under the deck. */
+.drag-effect {
+  position: absolute;
+  inset: calc(100% + 6px) auto auto 50%;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--overlay-tint);
+  box-shadow: var(--shadow);
+  backdrop-filter: var(--blur);
+  color: var(--text);
+  font-size: 11px;
+  white-space: nowrap;
+  translate: -50% 0;
+  animation: drag-deck-in var(--motion-spring);
+}
+
+.drag-effect::before {
+  color: var(--accent);
+  font: 11px var(--font-icons);
+}
+
+.drag-effect[data-effect="move"]::before {
+  content: "\E8DE";
+}
+
+.drag-effect[data-effect="copy"]::before {
+  content: "\E8C8";
+}
+
+.drag-effect[data-effect="link"]::before {
+  content: "\E71B";
+}
+
+.drag-effect[data-effect="bin"]::before {
+  content: "\E74D";
+}
+
+/* A folder row or tab that the drag rests on fills with the accent, and opens once full. */
+[data-drop-opening] {
+  animation: drop-opening 700ms ease-in forwards;
+}
+
+@keyframes drop-opening {
+  to {
+    background-color: color-mix(in srgb, var(--accent) 22%, transparent);
+    box-shadow: 0 0 14px color-mix(in srgb, var(--accent) 35%, transparent);
+  }
+}
+
 @keyframes drag-deck-in {
   from {
     scale: 0.5;
@@ -672,8 +752,14 @@
 
 @media (prefers-reduced-motion: reduce) {
   .drag-deck,
+  .drag-effect,
   .job-thread[data-done] {
     animation: none;
+  }
+
+  [data-drop-opening] {
+    animation: none;
+    background-color: color-mix(in srgb, var(--accent) 22%, transparent);
   }
 
   .job-thread[data-done] {
@@ -849,6 +935,158 @@
   .new-gallery,
   .new-tile,
   .file-editor-extensions {
+    animation: none;
+  }
+}
+
+/* The small popover that asks how hard to squeeze a new ZIP, and for a password. */
+.new-gallery.zip-options {
+  width: min(340px, calc(100vw - 16px));
+  padding: var(--space-2) var(--space-3) var(--space-3);
+}
+
+.zip-options h3 {
+  margin: var(--space-1) 0 var(--space-2);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.zip-levels {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: var(--space-1);
+}
+
+.zip-level[aria-checked="true"] {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 16%, var(--surface));
+}
+
+.zip-note {
+  min-height: 2.6em;
+  margin: var(--space-1) 0 var(--space-2);
+  color: var(--text-muted);
+  font-size: 11.5px;
+}
+
+.zip-password-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.zip-password-row input {
+  flex: 1;
+}
+
+/* Cut files waiting for a paste, on the sidebar: the rail shows the scissors and a count, the
+   open sidebar says it in words. A long sidebar scrolls, so it stays in sight at the foot, as
+   the mini player does. */
+.cut-chip {
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: var(--space-2);
+  height: var(--row-height);
+  padding: 0 var(--space-2);
+  border: 0;
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+  color: var(--text-muted);
+  font: inherit;
+  text-align: left;
+  animation: mini-in var(--motion-spring) 250ms backwards;
+  transition:
+    background var(--motion),
+    color var(--motion);
+}
+
+/* Laid over its own ground, so the rows scrolling under it never show through. */
+.cut-chip:hover {
+  background-image: linear-gradient(var(--surface-hover), var(--surface-hover));
+  color: var(--text);
+}
+
+/* Both at the foot: the player stands on the chip. */
+.mini-player:has(+ .cut-chip) {
+  bottom: calc(var(--row-height) + var(--space-1));
+}
+
+.cut-chip:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.cut-icon {
+  color: var(--accent);
+  font: 14px var(--font-icons);
+}
+
+.cut-count {
+  position: absolute;
+  inset: 3px auto auto 19px;
+  min-width: 14px;
+  height: 14px;
+  padding: 0 3px;
+  box-sizing: border-box;
+  border-radius: 7px;
+  background: var(--accent-line);
+  color: var(--surface);
+  font-size: 9.5px;
+  font-weight: 600;
+  line-height: 14px;
+  text-align: center;
+  transition: opacity var(--motion) 220ms;
+}
+
+.cut-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.new-gallery.cut-peek {
+  width: min(260px, calc(100vw - 16px));
+}
+
+.cut-from {
+  display: block;
+  margin: var(--space-1) 0;
+  color: var(--text-muted);
+  font-size: 11.5px;
+}
+
+.cut-names {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.cut-names li {
+  overflow: hidden;
+  padding: 2px 0;
+  font-size: 12.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cut-more {
+  color: var(--text-muted);
+  font-size: 11.5px;
+}
+
+.cut-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-1);
+  margin-top: var(--space-2);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cut-chip {
     animation: none;
   }
 }

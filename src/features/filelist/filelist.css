@@ -566,6 +566,25 @@ html[data-blurred] .file-row[data-cut] {
   gap: var(--space-1);
 }
 
+/* In the bin, the first item deleted on each day carries the day on its top edge. */
+.file-row[data-day] {
+  box-shadow: inset 0 1px 0 var(--border);
+}
+
+.file-row[data-day]::before {
+  content: attr(data-day);
+  position: absolute;
+  inset: 0 var(--space-4) auto auto;
+  padding: 0 5px;
+  border-radius: 0 0 5px 5px;
+  background: var(--surface-selected);
+  color: var(--text-muted);
+  /* Short enough to clear the centred text of the shortest rows. */
+  font-size: 8.5px;
+  line-height: 9px;
+  pointer-events: none;
+}
+
 /* Sits in the row's padding, so it never covers a name. */
 .file-row[data-pinned]::after,
 .file-row[data-synced]::after,
