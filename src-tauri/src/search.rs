@@ -203,6 +203,7 @@ fn read_top(folder: &Path, query: &Query, sight: Sight) -> Result<(Found, VecDeq
     for (_, entry) in fits {
         found.push(entry, location.clone());
     }
+    found.tag_from(folder, 0);
     Ok((found, below))
 }
 
@@ -307,6 +308,7 @@ impl Search {
                 continue;
             }
             let location: Arc<[u16]> = folder::null_terminated(&folder).into();
+            let from = rows.len();
             // A folder that can't be read has nothing to show, which is no reason to stop.
             let _ = read_folder(&folder, sight, &mut below, |entry| {
                 if query.is_in(&entry, &folder) {
@@ -314,6 +316,7 @@ impl Search {
                     rows.push(entry, location.clone());
                 }
             });
+            rows.tag_from(&folder, from);
             if !quiet && !rows.is_empty() && reported.elapsed() >= report_gap(in_sight) {
                 self.show(&mut rows, &mut quiet);
                 report(Walk::Going);

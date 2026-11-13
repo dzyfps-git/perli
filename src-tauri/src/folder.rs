@@ -411,6 +411,16 @@ impl Found {
     }
 
     /// Moves all of `other`'s rows to the end of this one.
+    /// Reads the tags of the rows pushed since `from`, which are all in `folder`. A search shows
+    /// tags on its rows the way the folder does.
+    pub fn tag_from(&mut self, folder: &Path, from: usize) {
+        if from >= self.entries.len() {
+            return;
+        }
+        let tagged = tags::in_folder(folder, &self.entries[from..]);
+        self.tags.extend(tagged.into_iter().map(|(row, tags)| (row + from as u32, tags)));
+    }
+
     pub fn append(&mut self, other: &mut Self) {
         let after = self.entries.len() as u32;
         self.tags.extend(other.tags.drain().map(|(row, tags)| (row + after, tags)));
