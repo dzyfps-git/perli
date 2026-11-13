@@ -51,7 +51,7 @@ import {
 } from "./prefs";
 import { ago, isoText } from "../../ui/dates";
 import { SelectionBar, type BarItem } from "../reach/SelectionBar";
-import { createSelection } from "./selection";
+import { createSelection, runsOf } from "./selection";
 import { cachedThumb, createThumbLoader } from "./thumbs";
 import { matchSpans } from "./nameMatch";
 import { readProgress } from "../preview/viewerPrefs";
@@ -86,8 +86,7 @@ const ROOMY_LINE = 18;
 const WHISPER_MS = 2400;
 /** A burst of selection changes is added up once, this long after the last one. */
 const WHISPER_WAIT_MS = 120;
-// ponytail: past this many selected rows the status line names no size, since sending the rows
-// alone would cost more than the answer is worth. Add up on the Rust side from ranges if asked for.
+/** Past this many selected rows they go to be added up as runs, not one by one. */
 const MOST_SIZED_ROWS = 20_000;
 /** How far rows start from their place when a folder zooms in or out, as a share of their
  *  distance from the row that was opened. */
@@ -878,9 +877,11 @@ export function FileList(props: {
     const ticket = ++sizeTicket;
     if (count === picked().count && count === 0) return;
     setPicked({ count, bytes: count === 0 ? 0 : picked().bytes });
-    if (count === 0 || count > MOST_SIZED_ROWS) return setPicked({ count, bytes: 0 });
+    if (count === 0) return setPicked({ count, bytes: 0 });
     sizeTimer = window.setTimeout(() => {
-      selectionSize({ view: props.view, request: shown, rows: selection.rows() })
+      const rows = selection.rows();
+      const asked = count > MOST_SIZED_ROWS ? { rows: [], ranges: runsOf(rows) } : { rows };
+      selectionSize({ view: props.view, request: shown, ...asked })
         .then((bytes) => ticket === sizeTicket && setPicked({ count, bytes }))
         // A reload in between forgets the snapshot, and the next change asks again.
         .catch(() => undefined);

@@ -1,3 +1,14 @@
+/** Rows as runs of neighbors, first and last both in. */
+export function runsOf(rows: number[]): [number, number][] {
+  const runs: [number, number][] = [];
+  for (const row of [...rows].sort((a, b) => a - b)) {
+    const last = runs.at(-1);
+    if (last && row <= last[1] + 1) last[1] = Math.max(last[1], row);
+    else runs.push([row, row]);
+  }
+  return runs;
+}
+
 /** Which rows are selected, by row index. */
 export function createSelection() {
   let selected = new Set<number>();
