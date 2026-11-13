@@ -50,3 +50,21 @@ test("parseSession keeps a pinned tab pinned", () => {
     [true, undefined],
   );
 });
+
+test("parseSession keeps how a tab's panes sit, and drops what makes no sense", () => {
+  const session = parseSession(
+    JSON.stringify({
+      tabs: [
+        { panes: [pane, pane], split: 0.3, stacked: true, linked: true },
+        { panes: [pane, pane], split: 7, stacked: "yes" },
+      ],
+    }),
+  );
+  assert.deepEqual(
+    session?.tabs.map(({ split, stacked, linked }) => ({ split, stacked, linked })),
+    [
+      { split: 0.3, stacked: true, linked: true },
+      { split: undefined, stacked: undefined, linked: undefined },
+    ],
+  );
+});

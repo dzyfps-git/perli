@@ -1,11 +1,11 @@
-import { createEffect, createSignal, For, Index, on, onCleanup, onMount, Show } from "solid-js";
+import { createEffect, createSignal, For, Index, on, onCleanup, onMount, Show, untrack } from "solid-js";
 import { expandPath, isFile, openFile, type SearchScope } from "../../api";
 import { ariaKeys } from "../keys/keybinds";
 import { looksLikeName, readTyped } from "../reach/lists";
 import type { Layout } from "../filelist/layout";
 import { forgetSearch, recentSearches, rememberSearch, showHidden } from "../filelist/prefs";
 import { FLAT_QUERY, type FolderView } from "../navigation/folderView";
-import { isBin, toCrumbs, typedPath } from "../navigation/path";
+import { baseName, isBin, parentOf, toCrumbs, typedPath, type Crumb } from "../navigation/path";
 import { lookOf } from "../sidebar/saved";
 import { tagColor } from "../tags/tags";
 import "./pathbar.css";
@@ -20,6 +20,8 @@ const ICON_SHOWN = "\uE7B3";
 const ICON_HIDDEN = "\uED1A";
 const ICON_FILTER = "\uE71C";
 const ICON_CHEVRON = "\uE76C";
+const ICON_LINK = "\uE71B";
+const ICON_MORE = "\uE712";
 
 const ICON_FORGET = "";
 
@@ -31,6 +33,11 @@ function lookColor(path: string) {
 
 /** Long enough that typing a word starts one search, not one per letter. */
 const SEARCH_WAIT_MS = 120;
+/** Holding Back or Forward this long shows the folders behind or ahead. */
+const HOLD_MS = 450;
+
+/** A folder's name as a crumb shows it. */
+const nameOf = (path: string) => toCrumbs(path).at(-1)?.label ?? baseName(path);
 
 /** One thing the path bar offers for what is typed in it. */
 export interface Suggestion {
@@ -67,6 +74,14 @@ export function PathBar(props: {
   onNewTab: (path: string) => void;
   /** What to offer for the text typed in the path bar. */
   suggest: (text: string) => Promise<Suggested>;
+  /** Back or Forward was held or right-clicked: the folders behind or ahead, in a menu at `x`, `y`. */
+  onHistory: (behind: boolean, x: number, y: number) => void;
+  /** A crumb's own menu. */
+  onCrumbContext: (path: string, event: MouseEvent) => void;
+  /** The crumbs folded away in the middle of a long path, in a menu at `x`, `y`. */
+  onFoldedMenu: (crumbs: Crumb[], x: number, y: number) => void;
+  /** With two panes in the tab, whether they follow each other. */
+  linked?: { on: boolean; toggle: () => void };
 }) {
   const [offered, setOffered] = createSignal<Suggested>({ items: [], first: false });
   /** The offer the arrow keys are on, or -1 for the text as typed. */
@@ -82,12 +97,70 @@ export function PathBar(props: {
   /** The recent search the arrow keys are on, or -1 for none. */
   const [recentAt, setRecentAt] = createSignal(-1);
   const recents = () => (recentOpen() ? recentSearches() : []);
+  /** How many crumbs after the first are folded into "…" to fit a long path. */
+  const [fold, setFold] = createSignal(0);
+  /** What has been typed in the path box, which the ghost of the first offer carries on from. */
+  const [typed, setTyped] = createSignal("");
+  let holdTimer: number | undefined;
+  let held = false;
+
+  /** A long path folds in the middle: the first crumb stays, then "…", then the nearest ones. */
+  function fitCrumbs() {
+    setFold(0);
+    const most = Math.max(0, depth() - 2);
+    while (fold() < most && list.scrollWidth > list.clientWidth) setFold(fold() + 1);
+  }
 
   // Narrow panes clip the crumbs, and the current folder must stay visible.
   function revealCurrent() {
+    untrack(fitCrumbs);
     list.querySelector("[aria-current]")?.scrollIntoView({ block: "nearest", inline: "end" });
     list.toggleAttribute("data-clipped", list.scrollLeft > 0);
   }
+
+  /** The rest of the first offer, shown faintly after the typed text, which Tab or Right takes. */
+  const ghost = () => {
+    const first = offered().items[0]?.fill;
+    const text = typed();
+    if (!first || !text || chosen() > 0 || !first.toLowerCase().startsWith(text.toLowerCase())) return "";
+    return first.slice(text.length);
+  };
+
+  function startHold(behind: boolean, button: HTMLElement) {
+    held = false;
+    window.clearTimeout(holdTimer);
+    holdTimer = window.setTimeout(() => {
+      held = true;
+      showHistory(behind, button);
+    }, HOLD_MS);
+  }
+
+  function showHistory(behind: boolean, button: HTMLElement) {
+    const { left, bottom } = button.getBoundingClientRect();
+    props.onHistory(behind, left, bottom + 2);
+  }
+
+  /** A click that ends a hold only closes it. */
+  function endHold(event: MouseEvent, go: () => void) {
+    window.clearTimeout(holdTimer);
+    if (held) event.preventDefault();
+    else go();
+    held = false;
+  }
+
+  const nearest = (behind: boolean) => props.view.historyList(behind)[0]?.path;
+  const backLabel = () => {
+    const to = nearest(true);
+    return props.view.query() ? "Back to the folder" : to ? `Back to ${nameOf(to)}` : "Back";
+  };
+  const forwardLabel = () => {
+    const to = nearest(false);
+    return to ? `Forward to ${nameOf(to)}` : "Forward";
+  };
+  const upLabel = () => {
+    const parent = parentOf(props.view.folder()?.path ?? "");
+    return parent ? `Up to ${nameOf(parent)}` : "Up";
+  };
 
   function focusInput(input: HTMLInputElement) {
     queueMicrotask(() => {
@@ -125,6 +198,7 @@ export function PathBar(props: {
     if (!props.view.editingPath()) {
       asked++;
       setOffered({ items: [], first: false });
+      setTyped("");
     }
   });
 
@@ -165,11 +239,15 @@ export function PathBar(props: {
       event.preventDefault();
       // One step past either end is the text as typed.
       setChosen(((chosen() + 1 + step + items.length + 1) % (items.length + 1)) - 1);
-    } else if (event.key === "Tab" && items.length > 0) {
+    } else if (
+      (event.key === "Tab" && items.length > 0) ||
+      (event.key === "ArrowRight" && ghost() && input.selectionStart === input.value.length)
+    ) {
       event.preventDefault();
       const fill = items[Math.max(0, chosen())].fill;
       if (fill === undefined) return;
       input.value = fill;
+      setTyped(fill);
       offer(fill);
     } else if (event.key === "Enter") {
       const picked = items[chosen()];
@@ -259,7 +337,10 @@ export function PathBar(props: {
     ),
   );
 
-  onCleanup(() => window.clearTimeout(searchTimer));
+  onCleanup(() => {
+    window.clearTimeout(searchTimer);
+    window.clearTimeout(holdTimer);
+  });
 
   onMount(() => {
     const observer = new ResizeObserver(revealCurrent);
@@ -269,23 +350,64 @@ export function PathBar(props: {
 
   return (
     <nav class="pathbar" aria-label="Folder navigation">
-      <button class="nav-button" aria-label="Back" aria-keyshortcuts={ariaKeys("back")} disabled={!props.view.canGoBack()} onClick={() => props.view.back()}>
+      <button
+        class="nav-button"
+        aria-label={backLabel()}
+        aria-keyshortcuts={ariaKeys("back")}
+        aria-haspopup="menu"
+        aria-description="Hold or right-click for the folders behind"
+        disabled={!props.view.canGoBack()}
+        onPointerDown={(event) => event.button === 0 && props.view.historyList(true).length > 1 && startHold(true, event.currentTarget)}
+        onPointerLeave={() => window.clearTimeout(holdTimer)}
+        onClick={(event) => endHold(event, () => props.view.back())}
+        onContextMenu={(event) => {
+          event.preventDefault();
+          showHistory(true, event.currentTarget);
+        }}
+      >
         {ICON_BACK}
       </button>
       <button
         class="nav-button"
-        aria-label="Forward"
+        aria-label={forwardLabel()}
         aria-keyshortcuts={ariaKeys("forward")}
+        aria-haspopup="menu"
+        aria-description="Hold or right-click for the folders ahead"
         disabled={!props.view.canGoForward()}
-        onClick={() => props.view.forward()}
+        onPointerDown={(event) => event.button === 0 && props.view.historyList(false).length > 1 && startHold(false, event.currentTarget)}
+        onPointerLeave={() => window.clearTimeout(holdTimer)}
+        onClick={(event) => endHold(event, () => props.view.forward())}
+        onContextMenu={(event) => {
+          event.preventDefault();
+          showHistory(false, event.currentTarget);
+        }}
       >
         {ICON_FORWARD}
       </button>
-      <button class="nav-button" aria-label="Up" aria-keyshortcuts={ariaKeys("up")} disabled={!props.view.canGoUp()} onClick={() => props.view.up()}>
+      <button class="nav-button" aria-label={upLabel()} aria-keyshortcuts={ariaKeys("up")} disabled={!props.view.canGoUp()} onClick={() => props.view.up()}>
         {ICON_UP}
       </button>
+      <Show when={props.linked}>
+        {(linked) => (
+          <button
+            class="nav-button link-button"
+            aria-label={linked().on ? "Unlink panes" : "Link panes"}
+            aria-description="Linked panes go into folders and back up together"
+            aria-pressed={linked().on}
+            onClick={() => linked().toggle()}
+          >
+            {ICON_LINK}
+          </button>
+        )}
+      </Show>
       <Show when={props.view.editingPath()}>
         <div class="path-field">
+          <Show when={ghost()}>
+            <span class="path-ghost" aria-hidden="true">
+              <span class="path-ghost-typed">{typed()}</span>
+              {ghost()}
+            </span>
+          </Show>
           <input
             ref={focusInput}
             class="path-input"
@@ -296,7 +418,10 @@ export function PathBar(props: {
             aria-activedescendant={chosen() >= 0 ? `path-offer-${props.view.id}-${chosen()}` : undefined}
             spellcheck={false}
             value={props.view.folder()?.path ?? ""}
-            onInput={(event) => offer(event.currentTarget.value)}
+            onInput={(event) => {
+              setTyped(event.currentTarget.value);
+              offer(event.currentTarget.value);
+            }}
             onKeyDown={onInputKey}
             onContextMenu={props.onInputMenu}
             onBlur={closeOnBlur}
@@ -334,7 +459,7 @@ export function PathBar(props: {
       >
         <Index each={crumbs()}>
           {(crumb, index) => (
-            <li>
+            <li hidden={index > 0 && index <= fold()}>
               <button
                 class="crumb"
                 classList={{ "crumb-left": index >= depth() }}
@@ -345,6 +470,10 @@ export function PathBar(props: {
                 onClick={() => props.view.open(crumb().path)}
                 onAuxClick={(event) => event.button === 1 && props.onNewTab(crumb().path)}
                 onMouseDown={(event) => event.button === 1 && event.preventDefault()}
+                onContextMenu={(event) => {
+                  event.preventDefault();
+                  props.onCrumbContext(crumb().path, event);
+                }}
               >
                 {crumb().label}
               </button>
@@ -361,6 +490,19 @@ export function PathBar(props: {
                   }}
                 >
                   {ICON_CHEVRON}
+                </button>
+              </Show>
+              <Show when={index === 0 && fold() > 0}>
+                <button
+                  class="crumb crumb-fold"
+                  aria-label={`${fold()} more folders`}
+                  aria-haspopup="menu"
+                  onClick={(event) => {
+                    const { left, bottom } = event.currentTarget.getBoundingClientRect();
+                    props.onFoldedMenu(crumbs().slice(1, 1 + fold()), left, bottom + 2);
+                  }}
+                >
+                  {ICON_MORE}
                 </button>
               </Show>
             </li>

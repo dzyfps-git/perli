@@ -46,6 +46,7 @@ export const KEYS: KeyCommand[] = [
   { id: "back", label: "Back", group: "Go", keys: ["Alt+Left"] },
   { id: "forward", label: "Forward", group: "Go", keys: ["Alt+Right"] },
   { id: "up", label: "Up", group: "Go", keys: ["Alt+Up", "Backspace"], where: "free" },
+  { id: "home", label: "Go home", group: "Go", keys: ["Alt+Home"] },
   { id: "path", label: "Go to path", group: "Go", keys: ["Ctrl+L", "Alt+D"] },
   { id: "search", label: "Search", group: "Go", keys: ["Ctrl+F"] },
   { id: "refresh", label: "Refresh", group: "Go", keys: ["F5"] },
@@ -80,6 +81,10 @@ export const KEYS: KeyCommand[] = [
   { id: "tabToWindow", label: "Move to new window", group: "Tabs and panes", keys: [] },
   { id: "split", label: "Split view", group: "Tabs and panes", keys: ["Ctrl+\\"] },
   { id: "otherPane", label: "Go to the other pane", group: "Tabs and panes", keys: ["F6"] },
+  { id: "stackPanes", label: "Stack or unstack panes", group: "Tabs and panes", keys: [] },
+  { id: "linkPanes", label: "Link or unlink panes", group: "Tabs and panes", keys: [] },
+  { id: "mirrorPane", label: "Same folder in other pane", group: "Tabs and panes", keys: [] },
+  { id: "tabSearch", label: "Search tabs", group: "Tabs and panes", keys: ["Ctrl+Shift+L"] },
   { id: "nextTab", label: "Next tab", group: "Tabs and panes", keys: ["Ctrl+Tab", "Ctrl+PageDown"] },
   { id: "previousTab", label: "Previous tab", group: "Tabs and panes", keys: ["Ctrl+Shift+Tab", "Ctrl+PageUp"] },
   ...nine.map(

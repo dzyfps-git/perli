@@ -124,6 +124,19 @@ pub fn open_terminal(folder: &str, shell: Option<&str>) -> std::io::Result<()> {
     started.map(drop)
 }
 
+/// The names `open_terminal` takes whose program is on this PC. Windows Terminal is an app
+/// alias, a link that can't be followed, so only its own entry is looked at.
+pub fn terminals() -> Vec<&'static str> {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let folders: Vec<_> = std::env::split_paths(&path).collect();
+    let found = |program: &str| folders.iter().any(|folder| std::fs::symlink_metadata(folder.join(program)).is_ok());
+    [("wt", "wt.exe"), ("pwsh", "pwsh.exe"), ("powershell", "powershell.exe"), ("cmd", "cmd.exe")]
+        .into_iter()
+        .filter(|(_, program)| found(program))
+        .map(|(name, _)| name)
+        .collect()
+}
+
 /// Opens a file with its default app. Blocks, so call it off the main thread.
 /// Opens a web or mail link from a preview in the user's own browser or mail app. Nothing else
 /// is let through, so a document can't start a program.
@@ -174,6 +187,11 @@ mod tests {
         for url in [r"C:\Windows\notepad.exe", "file:///C:/Windows/notepad.exe", "calc", "ms-settings:", ""] {
             assert!(open_link(url).is_err(), "{url}");
         }
+    }
+
+    #[test]
+    fn command_prompt_is_always_a_terminal_on_offer() {
+        assert!(terminals().contains(&"cmd"));
     }
 
     #[test]

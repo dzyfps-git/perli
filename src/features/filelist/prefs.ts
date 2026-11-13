@@ -1,5 +1,5 @@
 import { createSignal } from "solid-js";
-import type { GroupBy, Grouping, Sort } from "../../api";
+import type { GroupBy, Grouping, Sort, Terminal } from "../../api";
 import { movedColumn, restoreColumns, startColumns, type Column, type ColumnId, type ColumnSet } from "./columns";
 import type { Layout } from "./layout";
 import { NO_FILTER, type FilterForm } from "./filter";
@@ -48,6 +48,20 @@ export const [verifyCopies, setVerifyCopies] = stored("verify-copies", saved("ve
 /** Copies to or from one drive wait their turn, which a hard disk likes better than all at once. */
 export const [onePerDrive, setOnePerDrive] = stored("one-per-drive", saved("one-per-drive") === true);
 export const [tileSize, setTileSize] = stored("tile-size", (saved("tile-size") as number | null) ?? 112);
+/** A double click on no row goes up a folder. Off at first, so a missed click goes nowhere. */
+export const [upOnDoubleClick, setUpOnDoubleClick] = stored("up-on-double-click", saved("up-on-double-click") === true);
+/** Each terminal Perli can start, by the name Rust takes, in the order they are offered. */
+export const TERMINAL_NAMES: Record<Terminal, string> = {
+  wt: "Windows Terminal",
+  pwsh: "PowerShell",
+  powershell: "Windows PowerShell",
+  cmd: "Command Prompt",
+};
+/** Which terminal "Open in terminal" starts: the last one picked. */
+export const [terminalChoice, setTerminalChoice] = stored<Terminal>(
+  "terminal",
+  (Object.keys(TERMINAL_NAMES) as Terminal[]).find((name) => name === saved("terminal")) ?? "wt",
+);
 /** What new panes start with. Each pane then keeps its own. */
 export const [lastSort, setLastSort] = stored<Sort>(
   "sort",

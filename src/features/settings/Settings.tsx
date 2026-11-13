@@ -1,8 +1,8 @@
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { Effect, getCurrentWindow } from "@tauri-apps/api/window";
 import { createEffect, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
-import { createTag, exportSettings, importSettings, isDefaultApp, listTags, setDefaultApp } from "../../api";
-import type { Tag } from "../../api";
+import { createTag, exportSettings, importSettings, isDefaultApp, listTags, setDefaultApp, terminals } from "../../api";
+import type { Tag, Terminal } from "../../api";
 import { ColorField, Switch } from "../../ui/Controls";
 import { morph } from "../../ui/morph";
 import {
@@ -30,9 +30,14 @@ import {
   setSelectionBar,
   setStatusBar,
   setWindowsIcons,
+  setTerminalChoice,
+  setUpOnDoubleClick,
   showHidden,
   showSystem,
   statusBar,
+  terminalChoice,
+  TERMINAL_NAMES,
+  upOnDoubleClick,
   windowsIcons,
   type DateForm,
   type Density,
@@ -202,8 +207,12 @@ export function Settings(props: {
   onMount(() => window.addEventListener("focus", followWindows));
   onCleanup(() => window.removeEventListener("focus", followWindows));
 
+  /** The terminals on this PC, which are the ones on offer. */
+  const [found, setFound] = createSignal<Terminal[]>([]);
   createEffect(() => {
-    if (props.open) isDefaultApp().then(setIsDefault).catch(console.error);
+    if (!props.open) return;
+    isDefaultApp().then(setIsDefault).catch(console.error);
+    terminals().then(setFound).catch(console.error);
   });
 
   createEffect(() => {
@@ -481,7 +490,7 @@ export function Settings(props: {
           <section
             class="settings-section"
             data-section="files"
-            data-words="rows density compact cozy roomy height icons windows list status bar count selected items hover cards preview tooltip picture folder sizes space disk dates ago iso modified selection actions keyboard shortcuts keys copy copying verify check queue drive turn"
+            data-words="rows density compact cozy roomy height icons windows list status bar count selected items hover cards preview tooltip picture folder sizes space disk dates ago iso modified selection actions keyboard shortcuts keys copy copying verify check queue drive turn double click up parent terminal powershell command prompt console"
           >
             <h3>Files</h3>
             <h4 id="settings-rows">Row height</h4>
@@ -565,11 +574,33 @@ export function Settings(props: {
               onChange={setPictureWall}
             />
             <Switch
+              label="Double-click empty space to go up"
+              note="A double click below the rows, or between tiles, opens the folder this one is in."
+              checked={upOnDoubleClick()}
+              onChange={setUpOnDoubleClick}
+            />
+            <Switch
               label="Show protected system files"
               note="Windows keeps these out of sight even when hidden files show, because changing them can stop it from starting. They come with hidden files, faded and with a lock."
               checked={showHidden() && showSystem()}
               onChange={props.onToggleSystem}
             />
+            <h4 id="settings-terminal">Terminal</h4>
+            <div class="settings-chips" role="radiogroup" aria-labelledby="settings-terminal">
+              <For each={found()}>
+                {(choice) => (
+                  <button
+                    class="settings-chip"
+                    role="radio"
+                    aria-checked={terminalChoice() === choice}
+                    onClick={() => setTerminalChoice(choice)}
+                  >
+                    {TERMINAL_NAMES[choice]}
+                  </button>
+                )}
+              </For>
+            </div>
+            <p class="settings-note">What "Open in terminal" and {keyText("terminal")} start. Only the ones on this PC are offered.</p>
             <h4>Copying</h4>
             <Switch
               label="Check each copy against its original"

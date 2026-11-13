@@ -1254,6 +1254,12 @@ async fn open_terminal(path: String, shell: Option<String>) -> Result<(), String
         .map_err(|error| error.to_string())
 }
 
+/// The terminals on this PC, by the names `open_terminal` takes.
+#[tauri::command]
+async fn terminals() -> Result<Vec<&'static str>, String> {
+    off_main(|| Ok(shell::terminals())).await
+}
+
 #[tauri::command]
 async fn new_types() -> Result<Vec<templates::NewType>, String> {
     off_main(|| Ok(templates::new_types())).await
@@ -2010,6 +2016,7 @@ fn main() {
             show_shell_menu,
             show_properties,
             open_terminal,
+            terminals,
             new_types,
             file_users,
             thumbnail,

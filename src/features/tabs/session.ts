@@ -12,6 +12,12 @@ export interface SavedTab {
   active: number;
   swapped: boolean;
   pinned?: boolean;
+  /** The first pane's share, when it is not half. */
+  split?: number;
+  /** One pane over the other. */
+  stacked?: boolean;
+  /** The panes follow each other. */
+  linked?: boolean;
 }
 
 export interface Session {
@@ -48,6 +54,9 @@ export function parseSession(text: string | null | undefined): Omit<Session, "st
         active: inRange(tab.active, panes.length),
         swapped: tab.swapped === true,
         ...(tab.pinned === true ? { pinned: true } : {}),
+        ...(typeof tab.split === "number" && tab.split > 0 && tab.split < 1 ? { split: tab.split } : {}),
+        ...(tab.stacked === true ? { stacked: true } : {}),
+        ...(tab.linked === true ? { linked: true } : {}),
       });
     }
     return tabs.length > 0 ? { tabs, active: inRange(saved.active, tabs.length) } : undefined;

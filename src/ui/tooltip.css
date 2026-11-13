@@ -21,7 +21,37 @@
   pointer-events: none;
 }
 
+.tooltip-glide {
+  transition:
+    left var(--motion-glide),
+    top var(--motion-glide);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tooltip-glide {
+    transition: none;
+  }
+}
+
 .tooltip-keys {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
   margin-left: var(--space-2);
   color: var(--text-muted);
+  font-size: 11px;
+}
+
+/* Each key a small pill of its own, like the ones in the menus. */
+.tooltip-key {
+  min-width: 18px;
+  padding: 0 5px;
+  font: inherit;
+  line-height: 17px;
+  text-align: center;
+  color: var(--text);
+  background: var(--surface-hover);
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  border-radius: 5px;
 }

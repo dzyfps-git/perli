@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { cycled, moved, nextActive, otherPane, pinnedFirst } from "./tabList.ts";
+import { cycled, EVEN_SPLIT, moved, nextActive, otherPane, pinnedFirst, snapped, SPLIT_MAX, SPLIT_MIN } from "./tabList.ts";
 
 test("closing the active tab activates the next, then the previous", () => {
   assert.equal(nextActive(["a", "b", "c"], "b", "b"), "c");
@@ -33,4 +33,13 @@ test("pinnedFirst keeps each group in its own order", () => {
     pinnedFirst(["a", "B", "c", "D"], (tab) => tab === tab.toUpperCase()),
     ["B", "D", "a", "c"],
   );
+});
+
+test("a divider is drawn to a third, a half or two thirds, and stays in bounds", () => {
+  assert.equal(snapped(0.49), EVEN_SPLIT);
+  assert.equal(snapped(0.65), 2 / 3);
+  assert.equal(snapped(0.32), 1 / 3);
+  assert.equal(snapped(0.42), 0.42);
+  assert.equal(snapped(0.05), SPLIT_MIN);
+  assert.equal(snapped(1), SPLIT_MAX);
 });

@@ -276,26 +276,169 @@ html[data-blurred] .logo {
   display: none;
 }
 
-/* Swapping by style keeps each list's DOM in place, which keeps its scroll position. */
-.panes-swapped {
-  flex-direction: row-reverse;
+/* A tab's one or two panes and the divider between them. `--split` is the first one's share. */
+.pane-pair {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+.pane-pair-stacked {
+  flex-direction: column;
+}
+
+/* Swapping by order keeps each list's DOM in place, which keeps its scroll position. The pane
+   that comes first on screen takes the first share. */
+.pane-pair > .pane {
+  flex: 1 1 0;
+}
+
+/* The shares only count with two panes: one pane alone takes it all, swapped or not. */
+.pane-pair:has(> .pane-divider) > .pane {
+  order: 2;
+  flex-grow: calc(1 - var(--split, 0.5));
+}
+
+.pane-pair:has(> .pane-divider):not(.panes-swapped) > .pane:first-child,
+.pane-pair:has(> .pane-divider).panes-swapped > .pane + .pane {
+  order: 0;
+  flex-grow: var(--split, 0.5);
 }
 
 .pane {
+  position: relative;
   display: grid;
-  flex: 1 1 0;
   grid-template-columns: minmax(0, 1fr);
   /* The path bar, then the quick filters and the pattern bar when they show, then the list. */
   grid-template-rows: auto auto auto minmax(0, 1fr);
   min-width: 0;
+  min-height: 0;
   overflow: hidden;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-large);
+  transition: box-shadow var(--motion-slide);
 }
 
 .pane-active .pathbar {
   border-image: var(--accent-line) 1;
+}
+
+/* The pane in use wears a soft ring of the accent, and the other steps back a little. */
+.pane-active {
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--accent) 30%, transparent),
+    0 8px 28px -14px color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+.pane::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: light-dark(rgb(255 255 255 / 45%), rgb(0 0 0 / 28%));
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--motion-slide);
+}
+
+.pane-pair:has(> .pane-active) > .pane:not(.pane-active)::after {
+  opacity: 1;
+}
+
+.pane-divider {
+  position: relative;
+  order: 1;
+  flex: none;
+  width: var(--space-2);
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.pane-pair-stacked > .pane-divider {
+  width: auto;
+  height: var(--space-2);
+  cursor: row-resize;
+}
+
+/* A short grip shows on hover, and grows into a line of the accent while it moves. */
+.pane-divider::before {
+  content: "";
+  position: absolute;
+  inset: calc(50% - 16px) calc(50% - 1.5px);
+  border-radius: 2px;
+  background: var(--text-muted);
+  opacity: 0;
+  transition:
+    opacity var(--motion),
+    inset var(--motion-glide),
+    background var(--motion);
+}
+
+.pane-pair-stacked > .pane-divider::before {
+  inset: calc(50% - 1.5px) calc(50% - 16px);
+}
+
+.pane-divider:hover::before,
+.pane-divider:focus-visible::before {
+  opacity: 0.6;
+}
+
+.pane-divider-dragging::before,
+.pane-pair-stacked > .pane-divider-dragging::before {
+  inset: var(--space-2) calc(50% - 1px);
+  background: var(--accent-line);
+  opacity: 1;
+}
+
+.pane-pair-stacked > .pane-divider-dragging::before {
+  inset: calc(50% - 1px) var(--space-2);
+}
+
+.pane-divider:focus-visible {
+  outline: none;
+}
+
+/* Where the divider settles, shown while it moves. The one it sits on lights up. */
+.split-tick {
+  position: absolute;
+  top: 0;
+  left: calc(var(--at) * 100% - 3px);
+  z-index: 2;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  opacity: 0.6;
+  pointer-events: none;
+  animation: tick-in var(--motion-spring);
+  transition:
+    background var(--motion),
+    scale var(--motion-glide);
+}
+
+.pane-pair-stacked > .split-tick {
+  top: calc(var(--at) * 100% - 3px);
+  left: 0;
+}
+
+.split-tick-on {
+  background: var(--accent);
+  opacity: 1;
+  scale: 1.6;
+}
+
+@keyframes tick-in {
+  from {
+    scale: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .split-tick {
+    animation: none;
+  }
 }
 
 .file-area {

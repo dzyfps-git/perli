@@ -2,20 +2,48 @@ import { createEffect, createSignal } from "solid-js";
 import { closeView, openWindow } from "../../api";
 import { morph } from "../../ui/morph";
 import { createFolderView, type FolderView } from "../navigation/folderView";
-import type { SavedPane, Session } from "./session";
-import { cycled, moved, nextActive, otherPane, pinnedFirst } from "./tabList";
+import { followed } from "../navigation/path";
+import type { SavedPane, SavedTab, Session } from "./session";
+import { cycled, EVEN_SPLIT, moved, nextActive, otherPane, pinnedFirst, snapped } from "./tabList";
 
 export type Tabs = ReturnType<typeof createTabs>;
 export type Tab = ReturnType<typeof createTab>;
 
 let tabCount = 0;
+/** How many closed tabs can be reopened. */
+const MOST_CLOSED = 20;
 
-/** One title bar tab: 1 or 2 folder views side by side. */
-function createTab(views: FolderView[], startSwapped = false) {
+/** How a tab's two panes sit: side by side or stacked, the first one's share, and linked. */
+type Layout = Pick<SavedTab, "split" | "stacked" | "linked">;
+
+/** One title bar tab: 1 or 2 folder views side by side, or one over the other. */
+function createTab(views: FolderView[], startSwapped = false, saved: Layout = {}) {
   const [panes, setPanes] = createSignal(views);
   const [active, setActive] = createSignal(views[0]);
   const [swapped, setSwapped] = createSignal(startSwapped);
   const [pinned, setPinned] = createSignal(false);
+  /** The share of the first pane on screen, left or top. */
+  const [split, setSplit] = createSignal(saved.split === undefined ? EVEN_SPLIT : snapped(saved.split));
+  const [stacked, setStacked] = createSignal(saved.stacked === true);
+  /** Linked panes follow each other into folders and back up. */
+  const [linked, setLinked] = createSignal(saved.linked === true);
+  let following = false;
+
+  /** When `mover` goes deeper or up, the other pane goes the same way in its own folder. */
+  const follow = (mover: FolderView) => (from: string, to: string) => {
+    const other = otherPane(panes(), mover);
+    const there = other?.path();
+    const target = linked() && !following && there ? followed(from, to, there) : undefined;
+    if (!other || !target) return;
+    following = true;
+    other.open(target, true).finally(() => (following = false));
+  };
+  const listen = (list: FolderView[]) => {
+    for (const view of list) view.setFollower(follow(view));
+    return list;
+  };
+  listen(views);
+
   return {
     /** A pinned tab sits first, stays narrow and does not close by accident. */
     pinned,
@@ -27,13 +55,28 @@ function createTab(views: FolderView[], startSwapped = false) {
      * Panes slide to their new widths, and one that comes or goes fades. The change lands a frame
      * later, so it is made to the panes as they are by then.
      */
-    setPanes: (change: (panes: FolderView[]) => FolderView[]) => morph(() => setPanes(change), "panes"),
+    setPanes: (change: (panes: FolderView[]) => FolderView[]) => morph(() => setPanes((now) => listen(change(now))), "panes"),
     active,
     activate: setActive,
     swapped,
     swap: () => morph(() => setSwapped(!swapped()), "panes"),
     other: () => otherPane(panes(), active()),
     paths: () => panes().flatMap((view) => view.path() ?? []),
+    split,
+    setSplit,
+    stacked,
+    /** Side by side becomes one over the other, or back. */
+    stack: () => morph(() => setStacked(!stacked()), "panes"),
+    linked,
+    setLinked,
+    /** What to save of how the panes sit. Only what differs from a new tab. */
+    layout(): Layout {
+      return {
+        ...(split() !== EVEN_SPLIT ? { split: split() } : {}),
+        ...(stacked() ? { stacked: true } : {}),
+        ...(linked() ? { linked: true } : {}),
+      };
+    },
   };
 }
 
@@ -44,7 +87,11 @@ export function createTabs() {
   const first = createTab([newView()]);
   const [tabs, setTabs] = createSignal([first]);
   const [active, setActive] = createSignal(first);
-  const closed: string[][] = [];
+  /** Closed tabs and panes by their folders, the latest last. */
+  const [closed, setClosed] = createSignal<string[][]>([]);
+  const remember = (paths: string[]) => {
+    if (paths.length > 0) setClosed([...closed(), paths].slice(-MOST_CLOSED));
+  };
 
   // Only tabs the user looks at read their folders.
   createEffect(() => {
@@ -79,7 +126,7 @@ export function createTabs() {
     morph(() => {
       const list = tabs();
       if (list.length === 1 || !list.includes(tab)) return;
-      closed.push(tab.paths());
+      remember(tab.paths());
       setActive(nextActive(list, tab, active()));
       setTabs(list.filter((other) => other !== tab));
       for (const view of tab.panes()) closeView(view.id).catch(console.error);
@@ -91,7 +138,7 @@ export function createTabs() {
     if (panes.length === 1) return close(tab);
 
     const path = view.path();
-    if (path) closed.push([path]);
+    if (path) remember([path]);
     tab.activate(nextActive(panes, view, tab.active()));
     tab.setPanes((now) => now.filter((pane) => pane !== view));
     closeView(view.id).catch(console.error);
@@ -112,6 +159,7 @@ export function createTabs() {
       const tab = createTab(
         saved.panes.map((pane) => newView(pane)),
         saved.swapped,
+        saved,
       );
       tab.activate(tab.panes()[saved.active]);
       tab.setPinned(saved.pinned === true);
@@ -135,6 +183,7 @@ export function createTabs() {
       active: tab.panes().indexOf(tab.active()),
       swapped: tab.swapped(),
       ...(tab.pinned() ? { pinned: true } : {}),
+      ...tab.layout(),
     }));
     return { start: { path, order: view.order() }, tabs: saved, active: tabs().indexOf(active()) };
   }
@@ -171,6 +220,13 @@ export function createTabs() {
       close(tab, true);
     },
     duplicate: (tab: Tab) => add(tab.paths(), tab),
+    /** The other pane shows the folder of the one in use, which a tab of one pane gets. */
+    mirror(tab = active()) {
+      const path = tab.active().path();
+      if (!path) return;
+      const other = tab.other();
+      return other ? other.open(path) : openToSide(path, tab);
+    },
     /** A tab moves among its own kind: pinned tabs stay ahead of the rest. */
     move: (tab: Tab, offset: number) => setTabs(inOrder(moved(tabs(), tab, offset))),
     cycle: (offset: number) => setActive(cycled(tabs(), active(), offset)),
@@ -178,10 +234,16 @@ export function createTabs() {
       const tab = tabs()[index];
       if (tab) setActive(tab);
     },
-    canReopen: () => closed.length > 0,
-    reopenClosed() {
-      const paths = closed.pop();
-      if (paths?.length) add(paths);
+    canReopen: () => closed().length > 0,
+    /** Closed tabs, the latest first, by their folders. */
+    closedList: () => [...closed()].reverse(),
+    /** The latest closed tab, or the one `back` places before it. */
+    reopenClosed(back = 0) {
+      const list = closed();
+      const paths = list[list.length - 1 - back];
+      if (!paths) return;
+      setClosed(list.filter((other) => other !== paths));
+      add(paths);
     },
   };
 }
