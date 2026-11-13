@@ -972,12 +972,14 @@ async fn send_to(selection: Selection, target: PathBuf, views: State<'_, Views>)
     off_main(move || menus::send_to(paths, target)).await
 }
 
-/// Rows, or with none the folder itself, for what Windows offers on either.
+/// Rows, or with none the folder itself, for what Windows offers on either. `Paths` outlives a
+/// reload of the folder, which rows don't.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", tag = "kind")]
 enum ShellTarget {
     Rows { selection: Selection },
     Folder { path: String },
+    Paths { paths: Vec<PathBuf> },
 }
 
 impl ShellTarget {
@@ -987,6 +989,15 @@ impl ShellTarget {
                 menus::Target::Items(views.read(&selection, folder::Listing::paths)?)
             }
             Self::Folder { path } => menus::Target::Folder(path.into()),
+            Self::Paths { paths } => menus::Target::Items(paths),
+        })
+    }
+
+    /// The items themselves, the folder being one.
+    fn paths(self, views: &Views) -> Result<Vec<PathBuf>, String> {
+        Ok(match self.read(views)? {
+            menus::Target::Items(paths) => paths,
+            menus::Target::Folder(folder) => vec![folder],
         })
     }
 }
@@ -1036,10 +1047,7 @@ async fn show_properties(
 /// folder reloading behind the sheet can't point them at other rows.
 #[tauri::command]
 async fn item_facts(target: ShellTarget, views: State<'_, Views>) -> Result<props::Facts, String> {
-    let paths = match target.read(&views)? {
-        menus::Target::Items(paths) => paths,
-        menus::Target::Folder(folder) => vec![folder],
-    };
+    let paths = target.paths(&views)?;
     off_main(move || props::facts(paths)).await
 }
 
@@ -1062,7 +1070,7 @@ async fn path_properties(path: PathBuf) -> Result<Vec<(&'static str, String, Str
 /// A checksum by `algorithm`, or nothing if a newer checksum took its place.
 #[tauri::command]
 async fn path_checksum(path: PathBuf, algorithm: String) -> Result<Option<String>, String> {
-    async_runtime::spawn_blocking(move || preview::hash(&path, &algorithm))
+    async_runtime::spawn_blocking(move || preview::hash(&path, &algorithm, preview::PROPERTIES_LANE))
         .await
         .map_err(|error| error.to_string())?
         .map_err(|error| error.to_string())
@@ -1224,7 +1232,7 @@ async fn checksum(
     views: State<'_, Views>,
 ) -> Result<Option<String>, String> {
     let path = row_path(&views, view, request, row)?;
-    async_runtime::spawn_blocking(move || preview::hash(&path, &algorithm))
+    async_runtime::spawn_blocking(move || preview::hash(&path, &algorithm, view))
         .await
         .map_err(|error| error.to_string())?
         .map_err(|error| error.to_string())
@@ -1313,15 +1321,15 @@ async fn delete_tag(id: u32) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn set_tag(selection: Selection, tag: u32, on: bool, views: State<'_, Views>) -> Result<(), String> {
-    let paths = views.read(&selection, folder::Listing::paths)?;
+async fn set_tag(target: ShellTarget, tag: u32, on: bool, views: State<'_, Views>) -> Result<(), String> {
+    let paths = target.paths(&views)?;
     with_tags(move || tags::set(&paths, tag, on)).await
 }
 
 /// The tags all the selected rows have.
 #[tauri::command]
-async fn common_tags(selection: Selection, views: State<'_, Views>) -> Result<Vec<u32>, String> {
-    let paths = views.read(&selection, folder::Listing::paths)?;
+async fn common_tags(target: ShellTarget, views: State<'_, Views>) -> Result<Vec<u32>, String> {
+    let paths = target.paths(&views)?;
     with_tags(move || tags::common(&paths)).await
 }
 

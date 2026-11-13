@@ -1150,7 +1150,7 @@ export function App() {
           <Properties
             target={target}
             onPickApp={setPickingApp}
-            onWindows={() => shell.windowsProperties(target, at)}
+            onWindows={(lasting) => shell.windowsProperties(lasting, at)}
             onChanged={showTagChange}
             onClose={() => setShowingProperties(undefined)}
           />
