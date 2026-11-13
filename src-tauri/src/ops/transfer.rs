@@ -7,6 +7,9 @@ use std::mem;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use windows::core::Error;
+use windows::Win32::Foundation::ERROR_FILE_CORRUPT;
+
 use super::sys::{self, Stat};
 use super::tree::Node;
 use super::{names, Answer, Done, Elevated, Facts, Flow, Key, Question, Run};
@@ -271,6 +274,7 @@ impl Run<'_> {
 
     /// Tells a rename that worked from one that needs the slower way across drives.
     fn first_rename(&mut self, from: &Path, to: &Path, elevated: Elevated) -> Flow<Renamed> {
+        let handed = self.elevated.len();
         let mut other_drive = false;
         let renamed = self.attempt(from, Some(elevated), |_| match sys::move_path(from, to) {
             Err(error) if sys::is_cross_drive(&error) => {
@@ -282,7 +286,10 @@ impl Run<'_> {
         Ok(match renamed {
             Some(()) if other_drive => Renamed::OtherDrive,
             Some(()) => Renamed::Done,
-            None => Renamed::Skipped,
+            None => {
+                self.note_skip(from, to, true, handed);
+                Renamed::Skipped
+            }
         })
     }
 
@@ -418,10 +425,12 @@ impl Run<'_> {
     fn place_folder(&mut self, node: &mut Node, target: &Path, moving: bool) -> Flow {
         let elevated = Self::elevated_copy(node, target, moving);
         let stat = node.stat;
+        let handed = self.elevated.len();
         let made = self.attempt(&node.path.clone(), Some(elevated), |_| {
             sys::create_dir_like(target, stat)
         })?;
         if made.is_none() {
+            self.note_skip(&node.path.clone(), target, moving, handed);
             self.step(node.items, node.bytes);
             return Ok(());
         }
@@ -474,11 +483,22 @@ impl Run<'_> {
         let base = self.progress.bytes;
         let path = node.path.clone();
         let elevated = Self::elevated_copy(node, target, moving);
+        let handed = self.elevated.len();
+        let verify = self.host.verify_copies();
         let copied = self.attempt(&path, Some(elevated), |run| {
-            sys::copy_file(&path, &temp, moving, |bytes| run.copied(base + bytes))
+            sys::copy_file(&path, &temp, moving, |bytes| run.copied(base + bytes))?;
+            if verify && !sys::same_bytes(&path, &temp)? {
+                // A retry copies again from the start.
+                let _ = sys::delete_file(&temp);
+                return Err(Error::new(ERROR_FILE_CORRUPT.to_hresult(), "The copy doesn't match the original."));
+            }
+            Ok(())
         });
         if !matches!(copied, Ok(Some(()))) {
             let _ = sys::delete_file(&temp);
+        }
+        if matches!(copied, Ok(None)) {
+            self.note_skip(&path, target, moving, handed);
         }
         let landed = match copied? {
             Some(()) => {

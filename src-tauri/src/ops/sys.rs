@@ -438,6 +438,28 @@ pub fn write_new(path: &Path, bytes: &[u8]) -> Result<()> {
 
 /// Makes a file that must not exist yet. If `fill` fails the file goes again, because nothing
 /// records it and it would block a retry under the same name.
+/// True if both files hold the same bytes, read again from the disk.
+pub fn same_bytes(a: &Path, b: &Path) -> Result<bool> {
+    use std::io::Read;
+    const CHUNK: usize = 1 << 20;
+    let open = |path: &Path| File::open(PathBuf::from(extended(path).to_os_string()));
+    let (mut a, mut b) = (open(a)?, open(b)?);
+    if a.metadata()?.len() != b.metadata()?.len() {
+        return Ok(false);
+    }
+    let (mut left, mut right) = (vec![0; CHUNK], vec![0; CHUNK]);
+    loop {
+        let read = a.read(&mut left)?;
+        if read == 0 {
+            return Ok(true);
+        }
+        b.read_exact(&mut right[..read])?;
+        if left[..read] != right[..read] {
+            return Ok(false);
+        }
+    }
+}
+
 pub(super) fn fill_new(path: &Path, fill: impl FnOnce(&mut File) -> std::io::Result<()>) -> Result<()> {
     guard(path);
     let target = PathBuf::from(extended(path).to_os_string());

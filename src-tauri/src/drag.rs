@@ -29,7 +29,8 @@ use crate::{clipboard, menus};
 pub enum Event {
     /// A drag came in over the window. `name` is its first file, for the picture Perli draws.
     Enter { count: usize, name: String, folder: bool },
-    Over { x: i32, y: i32 },
+    /// `effect` is what letting go would do there, for the badge on the deck.
+    Over { x: i32, y: i32, effect: Option<DropAction> },
     Leave,
     /// `right` means the right button dragged, so the user gets to pick what happens.
     Drop { x: i32, y: i32, right: bool },
@@ -53,6 +54,10 @@ impl DropAction {
             Self::Copy => DROPEFFECT_COPY,
             Self::Link => DROPEFFECT_LINK,
         }
+    }
+
+    fn of(effect: DROPEFFECT) -> Option<Self> {
+        Self::ALL.into_iter().find(|action| action.effect() == effect)
     }
 }
 
@@ -223,8 +228,8 @@ struct Hover {
     allowed: DROPEFFECT,
     /// Windows only says which button dragged while it is held, and it is gone by the drop.
     right: bool,
-    /// Where the UI last heard about.
-    at: Option<POINT>,
+    /// Where the UI last heard about, and what a drop there would do.
+    told: Option<(POINT, Option<DropAction>)>,
 }
 
 impl Hover {
@@ -232,7 +237,7 @@ impl Hover {
         let paths = data.map(files_in).unwrap_or_default();
         let source = data.filter(|data| paths.is_empty() && ops::offers_files(data)).cloned();
         let right = keys.0 & MK_RBUTTON.0 != 0;
-        (!paths.is_empty() || source.is_some()).then_some(Self { paths, source, allowed, right, at: None })
+        (!paths.is_empty() || source.is_some()).then_some(Self { paths, source, allowed, right, told: None })
     }
 
     /// Files with no paths can only be copied out of where they are, and never to the bin.
@@ -279,14 +284,17 @@ impl Target {
             .unwrap_or(DROPEFFECT_NONE)
     }
 
-    /// Windows keeps asking while the pointer rests, and the UI only needs to hear about moves.
-    fn tell_where(&self, at: POINT) {
+    /// Windows keeps asking while the pointer rests, and the UI only needs to hear about moves,
+    /// and about a key that turns a move into a copy. The UI names the folder after it hears,
+    /// so a resting pointer's next ask is what brings that folder's effect.
+    fn tell_where(&self, at: POINT, shown: DROPEFFECT) {
+        let told = (at, DropAction::of(shown));
         let mut hover = self.hover.borrow_mut();
-        let Some(hover) = hover.as_mut().filter(|hover| hover.at != Some(at)) else {
+        let Some(hover) = hover.as_mut().filter(|hover| hover.told != Some(told)) else {
             return;
         };
-        hover.at = Some(at);
-        (self.listener)(Event::Over { x: at.x, y: at.y });
+        hover.told = Some(told);
+        (self.listener)(Event::Over { x: at.x, y: at.y, effect: told.1 });
     }
 
     fn end(&self) -> Option<Hover> {
@@ -317,14 +325,14 @@ impl IDropTarget_Impl for Target_Impl {
                 folder: first.is_some_and(|path| path.is_dir()),
             });
         }
-        self.tell_where(self.inside(point));
+        self.tell_where(self.inside(point), shown);
         Ok(())
     }
 
     fn DragOver(&self, keys: MODIFIERKEYS_FLAGS, point: &POINTL, effect: *mut DROPEFFECT) -> Result<()> {
         let shown = self.effect(keys);
         unsafe { *effect = shown };
-        self.tell_where(self.inside(point));
+        self.tell_where(self.inside(point), shown);
         Ok(())
     }
 
@@ -523,6 +531,8 @@ mod tests {
         effect = ANY;
         unsafe { target.DragOver(MK_CONTROL, other, &raw mut effect) }.unwrap();
         assert_eq!(effect, DROPEFFECT_COPY);
+        effect = ANY;
+        unsafe { target.DragOver(MK_CONTROL, other, &raw mut effect) }.unwrap();
 
         effect = ANY;
         unsafe { target.Drop(&data, MK_CONTROL, other, &raw mut effect) }.unwrap();
@@ -531,8 +541,11 @@ mod tests {
             *heard.borrow(),
             [
                 Event::Enter { count: 1, name: "a.txt".into(), folder: false },
-                Event::Over { x: 5, y: 6 },
-                Event::Over { x: 7, y: 8 },
+                Event::Over { x: 5, y: 6, effect: None },
+                // The same spot again, once the UI named the folder under it.
+                Event::Over { x: 5, y: 6, effect: Some(DropAction::Move) },
+                // A rest at the same spot with the same key says nothing new.
+                Event::Over { x: 7, y: 8, effect: Some(DropAction::Copy) },
                 Event::Drop { x: 7, y: 8, right: false }
             ]
         );

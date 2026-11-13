@@ -170,6 +170,37 @@
   font-size: 14px;
 }
 
+/* How full the bin is, as a thin ring round its icon that fills clockwise. */
+@property --ring {
+  syntax: "<number>";
+  inherits: true;
+  initial-value: 0;
+}
+
+.place-icon[data-ring] {
+  position: relative;
+}
+
+.place-icon[data-ring]::after {
+  content: "";
+  position: absolute;
+  inset: -4px;
+  border-radius: 50%;
+  background: conic-gradient(var(--accent) calc(var(--ring) * 1turn), color-mix(in srgb, var(--text-muted) 22%, transparent) 0);
+  mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 1.5px));
+  transition: --ring var(--motion-glide);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .place-icon[data-ring]::after {
+    transition: none;
+  }
+}
+
+.place-icon[data-full]::after {
+  background: conic-gradient(var(--danger) calc(var(--ring) * 1turn), transparent 0);
+}
+
 .place-free {
   flex: none;
   margin-left: auto;

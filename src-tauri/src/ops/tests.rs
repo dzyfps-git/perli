@@ -100,6 +100,7 @@ pub(super) struct Script {
     replies: RefCell<VecDeque<Reply>>,
     questions: RefCell<Vec<Question>>,
     during: Option<Box<dyn Fn(&Progress)>>,
+    verify: bool,
 }
 
 impl Script {
@@ -136,6 +137,10 @@ impl Host for Script {
             answer: Answer::Skip,
             all: false,
         })
+    }
+
+    fn verify_copies(&self) -> bool {
+        self.verify
     }
 }
 
@@ -725,6 +730,36 @@ fn a_conflict_says_how_many_names_are_taken_and_how_many_are_free() {
 }
 
 #[test]
+fn a_copy_lists_what_it_skipped_after_a_problem_for_a_later_try() {
+    let sandbox = Sandbox::new();
+    let locked = sandbox.file(r"from\locked.txt", "x");
+    let fine = sandbox.file(r"from\fine.txt", "y");
+    let to = sandbox.folder("to");
+    let held = lock(&locked);
+
+    let outcome = run_with(Job::Copy { sources: vec![locked.clone(), fine], folder: to.clone() }, &Script::always(Answer::Skip));
+
+    assert_eq!(outcome.failed, [Failed { source: locked.clone(), folder: to.clone(), moving: false }]);
+    assert_eq!(sandbox.names("to"), ["fine.txt"]);
+    drop(held);
+}
+
+#[test]
+fn a_checked_copy_reads_back_the_same_bytes() {
+    let sandbox = Sandbox::new();
+    let a = sandbox.file("a.txt", "hello");
+    assert!(sys::same_bytes(&a, &sandbox.file("b.txt", "hello")).unwrap());
+    assert!(!sys::same_bytes(&a, &sandbox.file("c.txt", "hellO")).unwrap());
+    assert!(!sys::same_bytes(&a, &sandbox.file("d.txt", "hello!")).unwrap());
+
+    let script = Script { verify: true, ..Script::default() };
+    let outcome = run_with(copy(&a, &sandbox.folder("to")), &script);
+    assert_eq!(script.asked(), 0);
+    assert!(outcome.failed.is_empty());
+    assert_eq!(read(&sandbox.path(r"to\a.txt")), "hello");
+}
+
+#[test]
 fn move_onto_its_own_folder_does_nothing() {
     let sandbox = Sandbox::new();
     let source = sandbox.file(r"here\a.txt", "a");
@@ -1012,6 +1047,7 @@ fn unzip(archive: &Path, own_folder: bool) -> Job {
     Job::Unzip {
         archives: vec![archive.to_path_buf()],
         own_folder,
+        smart: false,
         only: Vec::new(),
         password: None,
     }
@@ -1033,7 +1069,7 @@ fn a_zip_holds_a_tree_and_extracts_to_the_same_tree() {
     fs::create_dir_all(folder.join("empty")).unwrap();
     let long_ago = sys::stat(&sandbox.path(r"here\tree\top.txt")).unwrap().unwrap().modified;
 
-    let outcome = go(Job::Zip { sources: vec![folder] });
+    let outcome = go(Job::Zip { sources: vec![folder], level: ZipLevel::Normal, password: None });
 
     let archive = sandbox.path(r"here\tree.zip");
     assert_eq!(outcome.done, [Done::Created { path: archive.clone() }]);
@@ -1061,7 +1097,7 @@ fn one_entry_extracts_beside_the_archive_on_its_own() {
     let entries: [(&str, &[u8]); 4] =
         [("docs/a.txt", b"a"), ("docs/img/b.png", b"b"), ("docs/img/c.png", b"c"), ("docs/imgs.txt", b"not inside img")];
     zip_of(&archive, &entries);
-    let only = |name: &str| Job::Unzip { archives: vec![archive.clone()], own_folder: false, only: vec![name.into()], password: None };
+    let only = |name: &str| Job::Unzip { archives: vec![archive.clone()], own_folder: false, smart: false, only: vec![name.into()], password: None };
 
     let file = go(only("docs/a.txt"));
     assert_eq!(read(&sandbox.path(r"out\a.txt")), "a");
@@ -1073,13 +1109,58 @@ fn one_entry_extracts_beside_the_archive_on_its_own() {
 }
 
 #[test]
+fn a_zip_can_store_or_squeeze_and_lock_its_files() {
+    let sandbox = Sandbox::new();
+    let text = "the same words again and again ".repeat(400);
+    let source = sandbox.file(r"here\words.txt", &text);
+    let zip = |level, password: Option<&str>| {
+        go(Job::Zip { sources: vec![source.clone()], level, password: password.map(String::from) });
+        let archive = sandbox.path(r"here\words.zip");
+        let bytes = fs::read(&archive).unwrap();
+        fs::remove_file(&archive).unwrap();
+        bytes
+    };
+    let open = |bytes: Vec<u8>| zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+
+    let stored = open(zip(ZipLevel::Store, None)).by_index_raw(0).unwrap().compression();
+    assert_eq!(stored, zip::CompressionMethod::Stored);
+    let (fast, best) = (zip(ZipLevel::Fast, None).len(), zip(ZipLevel::Best, None).len());
+    assert!(best <= fast && fast < text.len(), "best {best}, fast {fast}");
+
+    let mut locked = open(zip(ZipLevel::Normal, Some("secret")));
+    assert!(locked.by_index_raw(0).unwrap().encrypted());
+    assert!(locked.by_index(0).is_err(), "it needs the password");
+    let mut words = String::new();
+    std::io::Read::read_to_string(&mut locked.by_index_decrypt(0, b"secret").unwrap(), &mut words).unwrap();
+    assert_eq!(words, text);
+    assert!(!open(zip(ZipLevel::Normal, Some(""))).by_index_raw(0).unwrap().encrypted(), "an empty password locks nothing");
+}
+
+#[test]
+fn smart_extract_makes_a_folder_only_for_many_items_on_top() {
+    let sandbox = Sandbox::new();
+    fs::create_dir(sandbox.path("out")).unwrap();
+    let one = sandbox.path(r"out\one.zip");
+    zip_of(&one, &[("album/a.jpg", b"a"), ("album/b.jpg", b"b")]);
+    let many = sandbox.path(r"out\many.zip");
+    zip_of(&many, &[("a.jpg", b"a"), ("b.jpg", b"b")]);
+    let smart = |archive: &Path| Job::Unzip { archives: vec![archive.to_path_buf()], own_folder: false, smart: true, only: Vec::new(), password: None };
+
+    go(smart(&one));
+    go(smart(&many));
+
+    assert_eq!(sandbox.names("out"), ["album", "many", "many.zip", "one.zip"], "the album stays as it was, the loose files get a folder");
+    assert_eq!(sandbox.names(r"out\many"), ["a.jpg", "b.jpg"]);
+}
+
+#[test]
 fn a_new_zip_gets_its_name_from_what_went_in() {
     let sandbox = Sandbox::new();
     let (a, b) = (sandbox.file(r"here\a.tar.txt", "a"), sandbox.file(r"here\b.txt", "b"));
 
-    go(Job::Zip { sources: vec![a.clone()] });
-    go(Job::Zip { sources: vec![a.clone(), b.clone()] });
-    go(Job::Zip { sources: vec![a, b] });
+    go(Job::Zip { sources: vec![a.clone()], level: ZipLevel::Normal, password: None });
+    go(Job::Zip { sources: vec![a.clone(), b.clone()], level: ZipLevel::Normal, password: None });
+    go(Job::Zip { sources: vec![a, b], level: ZipLevel::Normal, password: None });
 
     assert_eq!(
         sandbox.names("here"),
@@ -1094,7 +1175,7 @@ fn a_file_given_up_on_leaves_a_good_archive() {
     let held = sandbox.file(r"here\held.bin", &"x".repeat(1 << 20));
     let _lock = lock(&held);
 
-    let outcome = go(Job::Zip { sources: vec![good, held.clone()] });
+    let outcome = go(Job::Zip { sources: vec![good, held.clone()], level: ZipLevel::Normal, password: None });
 
     let archive = sandbox.path(r"here\here.zip");
     assert_eq!(outcome.done.len(), 1);
@@ -1115,7 +1196,7 @@ fn a_cancelled_zip_leaves_nothing() {
         ..Script::default()
     };
 
-    let outcome = run(Job::Zip { sources: vec![a, b] }, &script, &control);
+    let outcome = run(Job::Zip { sources: vec![a, b], level: ZipLevel::Normal, password: None }, &script, &control);
 
     assert!(outcome.cancelled);
     assert!(outcome.done.is_empty());
@@ -1130,7 +1211,7 @@ fn a_link_in_a_zip_stays_out_and_is_not_followed() {
     sandbox.file(r"here\tree\a.txt", "a");
     sandbox.junction(r"here\tree\link", &outside);
 
-    go(Job::Zip { sources: vec![sandbox.path(r"here\tree")] });
+    go(Job::Zip { sources: vec![sandbox.path(r"here\tree")], level: ZipLevel::Normal, password: None });
 
     assert_eq!(entries_of(&sandbox.path(r"here\tree.zip")), ["tree/", "tree/a.txt"]);
 }

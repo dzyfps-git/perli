@@ -170,15 +170,18 @@ export function createShellItems(
     }),
 
     /** `row` is the row the menu opened on. Extracting only fits when all the rows are ZIPs. */
-    async fileToolItems(view: FolderView, row: Row): Promise<MenuItem[]> {
+    async fileToolItems(view: FolderView, row: Row, at: Point): Promise<MenuItem[]> {
       const selection = actions.selected(view);
       const facts = selection && isZip(row.name, row.isDir) ? await rowFacts(selection).catch(report) : undefined;
       const zips = !!facts?.every(([name, isDir]) => isZip(name, isDir));
       const stem = row.name.slice(0, -ZIP.length);
       return [
         { label: "Compress to ZIP", divider: true, action: () => actions.compress(view) },
+        { label: "Compress with options…", action: () => actions.compress(view, at) },
         ...(zips
           ? [
+              // A folder only when the archive would scatter many items here.
+              { label: "Extract", action: () => actions.extract(view, false, true) },
               { label: "Extract here", action: () => actions.extract(view, false) },
               {
                 label: facts?.length === 1 ? `Extract to ${stem}` : "Extract to own folders",

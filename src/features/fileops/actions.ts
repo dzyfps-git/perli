@@ -16,6 +16,7 @@ import type { RenameRequest } from "./BatchRename";
 import { forgetCut, markCut } from "./clipboard";
 import type { DeleteRequest } from "./ConfirmDelete";
 import type { Jobs } from "./jobs";
+import type { ZipRequest } from "./ZipOptions";
 
 export type FileActions = ReturnType<typeof createFileActions>;
 
@@ -25,6 +26,7 @@ export function createFileActions(
   confirmDelete: (request: DeleteRequest) => void,
   otherView: () => FolderView | undefined,
   askRenames: (request: RenameRequest) => void,
+  askZip: (request: ZipRequest) => void,
 ) {
   const report = (failure: unknown) => jobs.report(failure);
   const start = (view: FolderView, task: Task) => startJob(task, view.id).catch(report);
@@ -61,6 +63,12 @@ export function createFileActions(
       start(view, { kind: "paste", folder });
     },
 
+    /** Shortcuts to the clipboard's files, which stay put; a cut keeps waiting for its paste. */
+    pasteShortcut(view: FolderView, folder = view.folder()?.path) {
+      if (view.isBin() || !folder) return;
+      start(view, { kind: "pasteShortcut", folder });
+    },
+
     toOtherPane(view: FolderView, kind: "copy" | "move") {
       const selection = movable(view);
       const folder = otherView()?.folder()?.path;
@@ -94,14 +102,17 @@ export function createFileActions(
       }
     },
 
-    compress(view: FolderView) {
+    /** With `at`, a small popover there asks for the level and a password first. */
+    compress(view: FolderView, at?: { x: number; y: number }) {
       const selection = movable(view);
-      if (selection) start(view, { kind: "zip", selection });
+      if (!selection) return;
+      if (!at) return start(view, { kind: "zip", selection });
+      askZip({ selection, ...at, confirm: (level, password) => start(view, { kind: "zip", selection, level, password }) });
     },
 
-    extract(view: FolderView, ownFolder: boolean) {
+    extract(view: FolderView, ownFolder: boolean, smart = false) {
       const selection = movable(view);
-      if (selection) start(view, { kind: "unzip", selection, ownFolder });
+      if (selection) start(view, { kind: "unzip", selection, ownFolder, smart });
     },
 
     saveTemplate(view: FolderView) {
@@ -157,6 +168,12 @@ export function createFileActions(
     restore(view: FolderView) {
       const selection = selected(view);
       if (selection) start(view, { kind: "restore", selection });
+    },
+
+    /** Deleted items back into `folder`, under their own names, rather than where they were. */
+    restoreTo(view: FolderView, folder: string) {
+      const selection = selected(view);
+      if (selection) start(view, { kind: "restoreTo", selection, folder });
     },
 
     empty(view: FolderView) {

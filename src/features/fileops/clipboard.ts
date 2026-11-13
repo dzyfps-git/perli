@@ -5,6 +5,9 @@ import { samePath } from "../navigation/path";
 /** Files waiting to move on the next paste, which fade until then. */
 const [mark, setMark] = createSignal<{ folder: string; names: Set<string>; sequence: number }>();
 
+/** What is cut now, for the chip on the sidebar. */
+export const cutMark = mark;
+
 export const markCut = (folder: string, names: string[], sequence: number) =>
   setMark({ folder, names: new Set(names), sequence });
 

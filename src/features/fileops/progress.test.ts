@@ -1,7 +1,42 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Progress } from "../../api";
-import { formatSeconds, fraction, nextRate, secondsLeft, startRate } from "./progress.ts";
+import {
+  formatSeconds,
+  fraction,
+  nextRate,
+  nextThen,
+  secondsLeft,
+  SPEED_SAMPLES,
+  speedLine,
+  startRate,
+  sweptText,
+  withSpeed,
+} from "./progress.ts";
+
+test("a card keeps only the newest speeds, and draws them with the fastest on top", () => {
+  let speeds: number[] = [];
+  for (let at = 0; at < SPEED_SAMPLES + 5; at++) speeds = withSpeed(speeds, at);
+  assert.equal(speeds.length, SPEED_SAMPLES);
+  assert.equal(speeds[0], 5);
+  assert.equal(speedLine([0, 50, 100], 100, 10), "0,10 50,5 100,0");
+  assert.equal(speedLine([5], 100, 10), "");
+  assert.equal(speedLine([0, 0], 100, 10), "");
+});
+
+test("the when-done chip offers eject only for a drive that can go", () => {
+  assert.equal(nextThen("none", false), "open");
+  assert.equal(nextThen("open", false), "none");
+  assert.equal(nextThen("open", true), "eject");
+  assert.equal(nextThen("eject", true), "none");
+});
+
+test("the crash card says what was put right, in words", () => {
+  assert.equal(sweptText(0, 0), "");
+  assert.equal(sweptText(1, 0), "1 moved file was put back where it was.");
+  assert.equal(sweptText(3, 2), "3 moved files were put back where they were, and unfinished copies were cleared from 2 folders.");
+  assert.equal(sweptText(0, 1), "Unfinished copies were cleared from 1 folder.");
+});
 
 const progress = (bytes: number, items = 0): Progress => ({
   bytes,

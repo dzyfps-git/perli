@@ -3,7 +3,7 @@ import { setDragging, SHELF, shelve } from "../reach/reach";
 import type { MenuItem } from "../../ui/Menu";
 import { kindOf } from "../filelist/fileKinds";
 import type { FolderView } from "../navigation/folderView";
-import { join } from "../navigation/path";
+import { isBin, join } from "../navigation/path";
 
 /** A folder under the pointer, and what to mark while it is. */
 interface Spot {
@@ -18,6 +18,9 @@ const MOST_LEAN = 18;
 /** Degrees of lean for each pixel the pointer moves in a millisecond. */
 const LEAN_PER_SPEED = 14;
 const LAND_MS = 220;
+/** How long a drag rests on a folder row or a tab before it opens. */
+export const OPEN_MS = 700;
+const OPENING = "data-drop-opening";
 const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
 
 /**
@@ -82,8 +85,31 @@ function createDeck() {
       .finally(() => gone.remove());
   }
 
-  return { show, move, hide };
+  /** What letting go would do, as a word under the deck. Nothing shows where nothing would happen. */
+  function effect(action: DropAction | null | undefined, folder: string | undefined) {
+    if (!deck) return;
+    let badge = deck.querySelector<HTMLElement>(".drag-effect");
+    // Perli's own places only keep the files, and they say so themselves.
+    if (!action || !folder || folder.startsWith("perli:")) return badge?.remove();
+    if (!badge) {
+      badge = document.createElement("span");
+      badge.className = "drag-effect";
+      deck.append(badge);
+    }
+    const shown = isBin(folder) ? "bin" : action;
+    badge.dataset.effect = shown;
+    badge.textContent = EFFECT_LABELS[shown];
+  }
+
+  return { show, move, hide, effect };
 }
+
+const EFFECT_LABELS: Record<DropAction | "bin", string> = {
+  move: "Move",
+  copy: "Copy",
+  link: "Shortcut",
+  bin: "Recycle",
+};
 
 const ACTION_LABELS: Record<DropAction, string> = {
   move: "Move here",
@@ -122,6 +148,7 @@ export function followFileDrag(
   noted: (place: string, paths: string[]) => void,
 ) {
   let shown: Spot | undefined;
+  let opening: { element: HTMLElement; folder: string; timer: number } | undefined;
   const deck = createDeck();
 
   const run = (spot: Spot, action?: DropAction) =>
@@ -137,11 +164,37 @@ export function followFileDrag(
   }
 
   function aim(spot: Spot | undefined) {
-    if (spot?.folder === shown?.folder) return;
-    shown?.element.removeAttribute(OVER);
-    spot?.element.setAttribute(OVER, "");
+    // A folder that opened under the pointer leaves the same folder on a new element.
+    if (spot?.element !== shown?.element) {
+      shown?.element.removeAttribute(OVER);
+      spot?.element.setAttribute(OVER, "");
+    }
+    const moved = spot?.folder !== shown?.folder;
     shown = spot;
-    setDropTarget(spot?.folder ?? null).catch(console.error);
+    if (moved) setDropTarget(spot?.folder ?? null).catch(console.error);
+    rest(spot);
+  }
+
+  /** A drag that rests on a folder row opens it, and on a tab shows that tab, as Explorer does. */
+  function rest(spot: Spot | undefined) {
+    if (opening && opening.element === spot?.element && opening.folder === spot.folder) return;
+    if (opening) {
+      clearTimeout(opening.timer);
+      opening.element.removeAttribute(OPENING);
+      opening = undefined;
+    }
+    const element = spot?.element;
+    const row = element?.matches(".file-row") && spot?.view;
+    const tab = element?.matches(".tab:not(.tab-active)");
+    if (!element || !(row || tab)) return;
+    element.setAttribute(OPENING, "");
+    const timer = window.setTimeout(() => {
+      element.removeAttribute(OPENING);
+      opening = undefined;
+      if (tab) element.click();
+      else if (spot?.view) spot.view.open(spot.folder);
+    }, OPEN_MS);
+    opening = { element, folder: spot.folder, timer };
   }
 
   /** The shelf and its like keep the files where they are, and only remember them. */
@@ -155,7 +208,9 @@ export function followFileDrag(
     if (event.kind === "enter") return deck.show(event.count, event.name, event.folder);
     if (event.kind === "over") {
       deck.move(event.x / window.devicePixelRatio, event.y / window.devicePixelRatio);
-      return aim(spotAt(event.x, event.y, views()));
+      const spot = spotAt(event.x, event.y, views());
+      aim(spot);
+      return deck.effect(event.effect, spot?.folder);
     }
     aim(undefined);
     deck.hide(event.kind === "drop");

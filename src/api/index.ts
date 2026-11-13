@@ -125,6 +125,9 @@ export interface Selection {
 }
 
 /** What the UI can ask of the file engine. Folders are paths, and files are always rows. */
+/** How hard a new ZIP squeezes its files. */
+export type ZipLevel = "store" | "fast" | "normal" | "best";
+
 export type Task =
   | { kind: "copy" | "move"; selection: Selection; folder: string }
   | { kind: "rename"; selection: Selection; name: string }
@@ -136,11 +139,15 @@ export type Task =
   | { kind: "template"; folder: string; extension: string }
   | { kind: "ownTemplate"; folder: string; name: string; date?: string }
   | { kind: "fromClipboard"; folder: string }
-  | { kind: "saveTemplate" | "zip"; selection: Selection }
-  | { kind: "unzip"; selection: Selection; ownFolder: boolean; only?: string[]; password?: string }
+  | { kind: "saveTemplate"; selection: Selection }
+  | { kind: "zip"; selection: Selection; level?: ZipLevel; password?: string }
+  /** `smart` gives an archive its own folder only when more than one item sits at its top. */
+  | { kind: "unzip"; selection: Selection; ownFolder: boolean; smart?: boolean; only?: string[]; password?: string }
   | { kind: "paste"; folder: string }
+  | { kind: "pasteShortcut"; folder: string }
   | { kind: "drop"; folder: string; action?: DropAction }
   | { kind: "recycle" | "delete" | "restore" | "purge"; selection: Selection }
+  | { kind: "restoreTo"; selection: Selection; folder: string }
   | { kind: "empty" };
 
 export interface Progress {
@@ -178,7 +185,18 @@ export type Question =
   | { kind: "noBin"; path: string; choices: Answer[] };
 
 export type JobEvent = { id: number } & (
-  | { kind: "started"; title: string; origin: number | null; newItem: boolean; recycle: boolean; back: boolean }
+  | {
+      kind: "started";
+      title: string;
+      origin: number | null;
+      newItem: boolean;
+      recycle: boolean;
+      back: boolean;
+      /** The folder the job fills, for what to do when it is done. */
+      target: string | null;
+    }
+  /** Waits for another job on these drives. Empty once it starts. */
+  | { kind: "waiting"; drives: string[] }
   | ({ kind: "progress" } & Progress)
   | { kind: "asked"; question: Question }
   | ({
@@ -189,11 +207,26 @@ export type JobEvent = { id: number } & (
       created: string[];
       /** Sources a move left alone because they changed while it ran. */
       kept: string[];
+      /** What a copy or a move skipped after a problem, to try again. */
+      failed: Retry[];
       cancelled: boolean;
       /** The undo step this job added. */
       step: number | null;
     } & Undoable)
 );
+
+/** One item a copy or a move skipped, and the folder it was going to. */
+export interface Retry {
+  source: string;
+  folder: string;
+  moving: boolean;
+}
+
+/** What the start found of jobs a crash cut short. */
+export interface Swept {
+  putBack: number;
+  cleaned: number;
+}
 
 /** What Undo and Redo can do now. */
 export interface Undoable {
@@ -266,7 +299,8 @@ export interface NewType {
 export type FileDrag =
   /** A drag came in over the window: how many things, and the first one's name. */
   | { kind: "enter"; count: number; name: string; folder: boolean }
-  | { kind: "over"; x: number; y: number }
+  /** `effect` is what letting go there would do, or null where nothing would happen. */
+  | { kind: "over"; x: number; y: number; effect?: DropAction | null }
   /** `right` means the right button dragged, so the user gets to pick what happens. */
   | { kind: "drop"; x: number; y: number; right: boolean }
   | { kind: "leave" };
@@ -337,6 +371,9 @@ export const peekFolder = (view: number, request: number, row: number) =>
   invoke<FolderStart | null>("peek_folder", { view, request, row });
 
 export const driveSpace = (path: string) => invoke<DriveSpace>("drive_space", { path });
+
+/** The Recycle Bin's size, and the most it holds, in bytes, where Windows keeps a limit. */
+export const binUsage = () => invoke<{ size: number; limit: number | null }>("bin_usage");
 
 export const mapDrive = () => invoke<void>("map_drive");
 
@@ -460,6 +497,9 @@ export const cancelJobsAndClose = () => invoke<void>("cancel_jobs_and_close");
 export const pauseJob = (id: number) => invoke<void>("pause_job", { id });
 export const resumeJob = (id: number) => invoke<void>("resume_job", { id });
 export const cancelJob = (id: number) => invoke<void>("cancel_job", { id });
+export const startJobNow = (id: number) => invoke<void>("start_job_now", { id });
+export const setJobOptions = (verify: boolean, onePerDrive: boolean) => invoke<void>("set_job_options", { verify, onePerDrive });
+export const takeSweepReport = () => invoke<Swept>("take_sweep_report");
 
 /** `all` uses the same answer for every later case of this kind. */
 export const answerJob = (id: number, answer: Answer, all: boolean) =>
@@ -493,6 +533,7 @@ export const clipboardSequence = () => invoke<number>("clipboard_sequence");
 export const clipboardCanPaste = () => invoke<boolean>("clipboard_can_paste");
 /** Text or a picture is on the clipboard, to make a new file from. */
 export const clipboardHasContent = () => invoke<boolean>("clipboard_has_content");
+export const clipboardHasFiles = () => invoke<boolean>("clipboard_has_files");
 
 /** The first row at or after `start` whose name starts with `prefix`, wrapping around. */
 export const findRow = (view: number, request: number, prefix: string, start: number) =>
@@ -583,6 +624,7 @@ export const openPathsWithExe = (paths: string[], exe: string) =>
 
 /** Windows' file picker for an app. `null` when the user backs out. */
 export const browseApp = () => invoke<string | null>("browse_app");
+export const pickFolder = () => invoke<string | null>("pick_folder");
 
 /** Saves `text` to a file the user picks. False when they back out. */
 export const exportSettings = (text: string) => invoke<boolean>("export_settings", { text });

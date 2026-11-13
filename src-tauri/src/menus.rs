@@ -31,7 +31,7 @@ use windows::Win32::UI::Shell::{
     BHID_DataObject, BHID_SFObject, BHID_SFUIObject, CMF_CANRENAME, CMF_EXPLORE, CMF_NORMAL,
     CMINVOKECOMMANDINFO,
     CMINVOKECOMMANDINFOEX, CMIC_MASK_PTINVOKE, GCS_VERBW, OAIF_ALLOW_REGISTRATION, OAIF_EXEC,
-    OPENASINFO, SEE_MASK_UNICODE,
+    OPENASINFO, SEE_MASK_UNICODE, FOS_PICKFOLDERS,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DispatchMessageW, GetMenuItemCount,
@@ -376,6 +376,20 @@ pub fn browse_app(main: isize) -> Result<Option<String>> {
         let dialog: IFileOpenDialog = CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER)?;
         dialog.SetFileTypes(&[COMDLG_FILTERSPEC { pszName: w!("Apps"), pszSpec: w!("*.exe") }])?;
         dialog.SetTitle(w!("Choose an app"))?;
+        match dialog.Show(Some(HWND(main as _))) {
+            Ok(()) => Ok(Some(take_text(dialog.GetResult()?.GetDisplayName(SIGDN_FILESYSPATH)?))),
+            Err(closed) if closed.code() == ERROR_CANCELLED.to_hresult() => Ok(None),
+            Err(failure) => Err(failure),
+        }
+    })
+}
+
+/// Windows' folder picker, such as for where restored items go. Nothing when the user backs out.
+pub fn pick_folder(main: isize) -> Result<Option<String>> {
+    on_worker(move |_| unsafe {
+        let dialog: IFileOpenDialog = CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER)?;
+        dialog.SetOptions(dialog.GetOptions()? | FOS_PICKFOLDERS)?;
+        dialog.SetTitle(w!("Choose a folder"))?;
         match dialog.Show(Some(HWND(main as _))) {
             Ok(()) => Ok(Some(take_text(dialog.GetResult()?.GetDisplayName(SIGDN_FILESYSPATH)?))),
             Err(closed) if closed.code() == ERROR_CANCELLED.to_hresult() => Ok(None),
