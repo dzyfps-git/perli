@@ -1,14 +1,18 @@
-import { createEffect, createMemo, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, Index, on, onCleanup, onMount, Show } from "solid-js";
 import {
   fetchRows,
   fetchPictureFile,
   fetchThumb,
   findRow,
+  folderPictures,
+  rowProps,
   selectionSize,
+  type Group,
   type Row,
   type Selection,
   type Sort,
   type SortKey,
+  type Thumb,
 } from "../../api";
 import { ColumnHeader, SortStrip } from "./ColumnHeader";
 import { formatSize } from "../../ui/format";
@@ -19,10 +23,32 @@ import { dayOf } from "../reach/lists";
 import { allLooks, lookOf } from "../sidebar/saved";
 import { EmptyState, type Empty } from "./EmptyState";
 import { HoverCard, type CardAsk } from "./HoverCard";
-import { columnsWidth, gridTemplate, type Column } from "./columns";
-import { clampTile, moveTarget, TILE_STEP, type Layout } from "./layout";
+import {
+  columnsWidth,
+  gridTemplate,
+  isProp,
+  MIN_COLUMN_WIDTH,
+  PROP_NAMES,
+  type Column,
+  type ColumnId,
+  type ColumnSet,
+  type PropColumn,
+} from "./columns";
+import { clampTile, groupedMove, moveTarget, placesOf, TILE_STEP, type Layout } from "./layout";
 import { ageShare, hasPicture, iconSheet, kindOf } from "./fileKinds";
-import { dateForm, hoverCards, ROW_HEIGHTS, rowDensity, selectionBar, setTileSize, statusBar, tileSize, windowsIcons } from "./prefs";
+import {
+  dateForm,
+  hoverCards,
+  ROW_HEIGHTS,
+  rowDensity,
+  selectionBar,
+  setColumnWidth,
+  setTileSize,
+  sizeBars,
+  statusBar,
+  tileSize,
+  windowsIcons,
+} from "./prefs";
 import { ago, isoText } from "../../ui/dates";
 import { SelectionBar, type BarItem } from "../reach/SelectionBar";
 import { createSelection } from "./selection";
@@ -68,6 +94,21 @@ const MOST_SIZED_ROWS = 20_000;
 const ZOOM_IN_SHARE = -0.08;
 const ZOOM_OUT_SHARE = 0.06;
 const ZOOM_MS = 280;
+/** How tall a group's header is, apart from the rows under it. */
+const HEADER_HEIGHT = 34;
+/** The extra columns are read a moment after the rows stop changing, a screenful at once. */
+const PROPS_WAIT_MS = 80;
+/** Marks Windows puts around some property text, such as a picture's dimensions. */
+const DIRECTION_MARKS = /[‎‏‪-‮]/g;
+/** How big a folder tile's stack of pictures is drawn, and the pictures in it. */
+const STACK_EDGE = 160;
+const STACK_CARD = 0.62;
+/** Each card's lean in radians and its shift sideways in pixels. The first picture lies on top. */
+const STACK_LEANS = [
+  [0, 0],
+  [-0.15, -11],
+  [0.13, 10],
+] as const;
 const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
 
 /** Each view's last folder, and where on screen the row that left it was, for the zoom. */
@@ -83,7 +124,7 @@ let lastFolderOpen = 0;
 
 interface PooledRow {
   element: HTMLDivElement;
-  cells: { id: SortKey; element: HTMLSpanElement }[];
+  cells: { id: ColumnId; element: HTMLSpanElement }[];
   index: number;
   filled: boolean;
   /** Lives in the name cell in the list, and above the name in the grid. */
@@ -135,13 +176,51 @@ const CELL_TEXT: Record<SortKey, (row: Row, folder: string) => string> = {
   location: (row, folder) => relativeTo(folder, row.location),
 };
 
-const CELL_CLASS: Partial<Record<SortKey, string>> = {
+const CELL_CLASS: Partial<Record<ColumnId, string>> = {
   name: "file-name",
   modified: "file-meta file-date",
   created: "file-meta file-date",
   size: "file-meta file-size",
   location: "file-meta file-clipped",
+  artist: "file-meta file-clipped",
+  album: "file-meta file-clipped",
 };
+
+/** A few pictures from inside a folder, fanned out like prints on a table. */
+async function stackOf(folder: string): Promise<Thumb | null> {
+  const paths = await folderPictures(folder);
+  const read = await Promise.all(paths.map((path) => fetchPictureFile(path, STACK_EDGE).catch(() => null)));
+  const pictures = read.filter((picture): picture is Thumb => picture !== null);
+  if (pictures.length === 0) return null;
+  const context = new OffscreenCanvas(STACK_EDGE, STACK_EDGE).getContext("2d")!;
+  const card = STACK_EDGE * STACK_CARD;
+  const border = 3;
+  for (let at = pictures.length - 1; at >= 0; at--) {
+    const { width, height, pixels } = pictures[at];
+    const bitmap = await createImageBitmap(new ImageData(pixels, width, height));
+    const [lean, shift] = STACK_LEANS[at];
+    context.save();
+    context.translate(STACK_EDGE / 2 + shift, STACK_EDGE / 2);
+    context.rotate(lean);
+    context.shadowColor = "rgb(0 0 0 / 0.3)";
+    context.shadowBlur = 8;
+    context.shadowOffsetY = 2;
+    context.fillStyle = "#fff";
+    context.beginPath();
+    context.roundRect(-card / 2, -card / 2, card, card, 8);
+    context.fill();
+    context.shadowColor = "transparent";
+    const inner = card - border * 2;
+    context.beginPath();
+    context.roundRect(-inner / 2, -inner / 2, inner, inner, 6);
+    context.clip();
+    const scale = Math.max(inner / width, inner / height);
+    context.drawImage(bitmap, (-width * scale) / 2, (-height * scale) / 2, width * scale, height * scale);
+    context.restore();
+    bitmap.close();
+  }
+  return { width: STACK_EDGE, height: STACK_EDGE, pixels: context.getImageData(0, 0, STACK_EDGE, STACK_EDGE).data };
+}
 
 /** A tag on a row: a soft pill with its name in the list, a dot where room is short. */
 function tagMark(id: number, pill: boolean) {
@@ -160,7 +239,7 @@ function tagMark(id: number, pill: boolean) {
 const subText = (row: Row) =>
   [typeText(row.name, row.isDir), row.isDir && !row.size ? "" : formatSize(row.size)].filter(Boolean).join(" \u00b7 ");
 
-function createCell(parent: HTMLElement, id: SortKey) {
+function createCell(parent: HTMLElement, id: ColumnId) {
   const element = document.createElement("span");
   element.className = CELL_CLASS[id] ?? "file-meta";
   element.setAttribute("role", "gridcell");
@@ -168,7 +247,7 @@ function createCell(parent: HTMLElement, id: SortKey) {
   return { id, element };
 }
 
-function createRow(cells: SortKey[], withThumb: boolean, inGrid: boolean): PooledRow {
+function createRow(cells: ColumnId[], withThumb: boolean, inGrid: boolean): PooledRow {
   const element = document.createElement("div");
   element.className = "file-row";
   element.setAttribute("role", "row");
@@ -230,7 +309,21 @@ export function FileList(props: {
   /** Show pictures of files in the grid. */
   thumbs: boolean;
   columns: Column[];
+  /** Which kept set the columns are, which resizing them changes. */
+  columnSet: ColumnSet;
   fixedColumns: boolean;
+  /** The rows under each header, in order. Empty when the rows are not grouped. */
+  groups: Group[];
+  /** What a group's header says. */
+  groupLabel: (key: string) => string;
+  /** Folds a group away or opens it. `every` does all of them. */
+  onFold: (key: string, every: boolean) => void;
+  /** The biggest size a row shows, for the size bars. */
+  largest: number;
+  /** Rows show where each is, under their names, as a flat view does. */
+  paths?: boolean;
+  /** The grid is an even wall of pictures, edge to edge, with no names. */
+  wall?: boolean;
   /** Names waiting to move, which fade. */
   cut?: Set<string>;
   /** Folders opened in place, by full path. */
@@ -325,9 +418,16 @@ export function FileList(props: {
   /** How many rows the last snapshot had, to tell when some are gone. */
   let lastCount = props.count;
   let pool: PooledRow[] = [];
-  const rowHeight = () => ROW_HEIGHTS[rowDensity()];
+  /** A flat view's rows need a second line for where each one is. */
+  const density = () => (props.paths && props.layout === "list" ? "roomy" : rowDensity());
+  const rowHeight = () => ROW_HEIGHTS[density()];
   let itemHeight = 0;
   let perRow = 1;
+  let places = placesOf([], 0, 1, 1, HEADER_HEIGHT);
+  /** The headers in sight, and the one held at the top while its rows scroll under it. */
+  const [heads, setHeads] = createSignal<{ group: Group; top: number }[]>([]);
+  const [stuck, setStuck] = createSignal<{ group: Group; push: number }>();
+  let headsShown = "";
   let builtFor = "";
   let latestJump = 0;
   let press: { x: number; y: number; index: number } | undefined;
@@ -339,7 +439,7 @@ export function FileList(props: {
 
   /** What the row elements depend on, so a column resize does not rebuild them. */
   const cells = createMemo(
-    (): SortKey[] =>
+    (): ColumnId[] =>
       props.layout === "grid"
         ? ["name"]
         : props.columns.filter((column) => column.visible).map((column) => column.id),
@@ -361,7 +461,8 @@ export function FileList(props: {
   const coverOf = (row: Row | undefined) => (row?.isDir ? lookOf(join(row.location || props.folder, row.name))?.cover : undefined);
 
   const thumbs = createThumbLoader(
-    (index) => {
+    (index, key) => {
+      if (key.startsWith("stack|")) return stackOf(key.split("|")[1]);
       const cover = coverOf(rowAt(index));
       return cover ? fetchPictureFile(cover, COVER_EDGE) : fetchThumb(props.view, shown, index);
     },
@@ -410,8 +511,65 @@ export function FileList(props: {
   }
 
   // Percent moves by whole tiles, so a width change needs no JS at all.
-  const placeOf = (index: number) =>
-    `translate(${(index % perRow) * 100}%, ${Math.floor(index / perRow) * itemHeight}px)`;
+  const placeOf = (index: number) => `translate(${places.column(index) * 100}%, ${places.top(index)}px)`;
+
+  /** What the extra columns read for each row, by `thumbKey`, so a reload need not ask again. */
+  const propsRead = new Map<string, Partial<Record<PropColumn, string>>>();
+  const propsWaiting = new Set<number>();
+  let propsTimer: number | undefined;
+
+  function propText(row: Row, index: number, id: PropColumn) {
+    const value = propsRead.get(thumbKey(row))?.[id];
+    if (value === undefined) {
+      propsWaiting.add(index);
+      window.clearTimeout(propsTimer);
+      propsTimer = window.setTimeout(readProps, PROPS_WAIT_MS);
+      return "";
+    }
+    return id === "taken" ? dateText(Number(value)) : value;
+  }
+
+  /** Reads the extra columns of the rows still in sight, all at once. */
+  function readProps() {
+    const ids = cells().filter(isProp);
+    const indexes = [...propsWaiting].filter((index) => pool[index % pool.length]?.index === index);
+    propsWaiting.clear();
+    const keys = indexes.map((index) => rowAt(index)).map((row) => row && thumbKey(row));
+    if (ids.length === 0 || indexes.length === 0) return;
+    rowProps(props.view, shown, indexes, ids.map((id) => PROP_NAMES[id]))
+      .then((values) => {
+        indexes.forEach((index, at) => {
+          const key = keys[at];
+          if (!key) return;
+          const read = { ...propsRead.get(key) };
+          ids.forEach((id, column) => (read[id] = (values[at][column] ?? "").replace(DIRECTION_MARKS, "")));
+          propsRead.set(key, read);
+          const pooled = pool[index % pool.length];
+          if (pooled?.index === index) pooled.filled = false;
+        });
+        paint();
+      })
+      // A reload in between forgets the snapshot, and the rows ask again once they refill.
+      .catch(() => undefined);
+  }
+
+  /** Makes a column as wide as the widest of its painted cells, or its title. */
+  function fitColumn(id: ColumnId) {
+    const measure = new Range();
+    const natural = (element: Element) => {
+      measure.selectNodeContents(element);
+      const style = getComputedStyle(element);
+      return measure.getBoundingClientRect().width + parseFloat(style.paddingLeft) + parseFloat(style.paddingRight);
+    };
+    const widths = pool.flatMap((pooled) =>
+      pooled.filled ? pooled.cells.filter((cell) => cell.id === id).map((cell) => natural(cell.element)) : [],
+    );
+    const at = props.columns.filter((column) => column.visible).findIndex((column) => column.id === id);
+    const title = header?.children[at]?.querySelector(".column-button");
+    // The title keeps room for its sort arrow.
+    if (title) widths.push(natural(title) + 16);
+    setColumnWidth(props.columnSet, id, Math.max(MIN_COLUMN_WIDTH, Math.ceil(Math.max(0, ...widths)) + 2));
+  }
 
   function decorate(pooled: PooledRow) {
     const focused = pooled.index === selection.focused();
@@ -419,7 +577,8 @@ export function FileList(props: {
     pooled.element.toggleAttribute("data-focused", focused);
   }
 
-  const byDay = () => props.layout === "list" && props.sort.key === "modified" && isBin(props.folder);
+  const byDay = () =>
+    props.layout === "list" && props.groups.length === 0 && props.sort.key === "modified" && isBin(props.folder);
 
   /** Whether folders open in place here. */
   const nests = () => props.layout === "list" && props.onExpand !== undefined;
@@ -484,23 +643,37 @@ export function FileList(props: {
     const now = Date.now();
     const inList = props.layout === "list";
     for (const cell of pooled.cells) {
-      cell.element.textContent = row ? CELL_TEXT[cell.id](row, props.folder) : "";
-      if (cell.id === "name") {
+      const { id } = cell;
+      cell.element.textContent = !row ? "" : isProp(id) ? propText(row, index, id) : CELL_TEXT[id](row, props.folder);
+      if (id === "name") {
         if (row && inList) cell.element.append(...row.tags.flatMap((id) => tagMark(id, true)));
         else if (row) cell.element.prepend(...row.tags.flatMap((id) => tagMark(id, false)));
         if (inList) cell.element.prepend(pooled.icon);
         if (nests()) cell.element.prepend(twistOf(pooled, row));
-        if (row && inList && rowDensity() === "roomy") cell.element.dataset.sub = subText(row);
+        // A flat view says where each row is, which matters more there than its kind and size.
+        const where = row && props.paths ? relativeTo(props.folder, row.location) || "In this folder" : undefined;
+        if (row && inList && density() === "roomy") cell.element.dataset.sub = where ?? subText(row);
         else delete cell.element.dataset.sub;
-      } else if (row && (cell.id === "modified" || cell.id === "created")) {
-        cell.element.style.setProperty("--age", String(ageShare(row[cell.id], now)));
+        cell.element.toggleAttribute("data-where", where !== undefined);
+      } else if (row && (id === "modified" || id === "created")) {
+        cell.element.style.setProperty("--age", String(ageShare(row[id], now)));
+      } else if (id === "size") {
+        // The square root keeps small files visible beside one huge one.
+        const share = row && sizeBars() && props.largest > 0 && row.size > 0 ? Math.sqrt(row.size / props.largest) : 0;
+        if (share > 0) cell.element.style.setProperty("--size-share", share.toFixed(3));
+        else cell.element.style.removeProperty("--size-share");
       }
     }
     lightMatch(pooled, row);
     // Windows' picture of a folder would hide the look it was given. Other files show Perli's
     // own icon, unless a picture says more or Windows gave the folder an icon of its own.
     const pictured = row && !look && (windowsIcons() || row.isCustom || hasPicture(kind!) || COVERED.test(row.name));
-    showThumb(pooled, look?.cover ? `cover|${look.cover}` : pictured ? thumbKey(row) : undefined);
+    // A plain folder's tile shows a few of the pictures inside, if it has any.
+    const stacked = !!row?.isDir && !inList && !look && !row.isCustom;
+    pooled.element.toggleAttribute("data-stack", stacked);
+    const path = row && join(row.location || props.folder, row.name);
+    const key = look?.cover ? `cover|${look.cover}` : stacked ? `stack|${path}|${row!.modified}` : pictured ? thumbKey(row) : undefined;
+    showThumb(pooled, key);
     // A book or comic part read shows how far, as a thin bar under its icon.
     const read = row && !row.isDir ? readProgress()[join(row.location || props.folder, row.name)] : undefined;
     if (read !== undefined) {
@@ -566,8 +739,29 @@ export function FileList(props: {
     );
   }
 
+  /** Puts the headers in sight in their places, and holds the current one at the top. */
+  function placeHeads() {
+    const groups = props.groups;
+    const scrolled = grid.scrollTop;
+    const from = groups.length > 0 ? places.groupAt(scrolled) : 0;
+    const to = groups.length > 0 ? places.groupAt(scrolled + grid.clientHeight) : -1;
+    const inSight = groups.slice(from, to + 1).map((group, at) => ({ group, top: places.tops[from + at] }));
+    const shownNow = inSight.map(({ group, top }) => `${group.key}:${group.count}:${group.total}:${top}`).join();
+    if (shownNow !== headsShown) {
+      headsShown = shownNow;
+      setHeads(inSight);
+    }
+    const current = groups[from];
+    const next = places.tops[from + 1] ?? Infinity;
+    const push = Math.min(0, next - HEADER_HEIGHT - scrolled);
+    const before = stuck();
+    if (!current || scrolled <= places.tops[from]) setStuck(undefined);
+    else if (before?.group !== current || before.push !== push) setStuck({ group: current, push });
+  }
+
   function paint() {
-    const first = Math.max(0, Math.floor(grid.scrollTop / itemHeight) - OVERSCAN) * perRow;
+    placeHeads();
+    const first = places.firstAt(grid.scrollTop - OVERSCAN * itemHeight);
     const last = Math.min(props.count, first + pool.length);
 
     for (let index = first; index < last; index++) {
@@ -640,14 +834,16 @@ export function FileList(props: {
 
     const tile = props.layout === "grid" ? tileSize() : 0;
     perRow = tile ? Math.max(1, Math.floor(grid.clientWidth / tile)) : 1;
-    itemHeight = tile || rowHeight();
+    // A wall's tiles are square and fill the width exactly.
+    itemHeight = tile && props.wall ? grid.clientWidth / perRow : tile || rowHeight();
     grid.style.setProperty("--per-row", String(perRow));
     grid.style.setProperty("--item-height", `${itemHeight}px`);
-    spacer.style.height = `${Math.ceil(props.count / perRow) * itemHeight}px`;
+    places = placesOf(props.groups, props.count, perRow, itemHeight, HEADER_HEIGHT);
+    spacer.style.height = `${places.height}px`;
 
     const needed = (Math.ceil(grid.clientHeight / itemHeight) + OVERSCAN * 2) * perRow;
     const size = Math.min(props.count, needed);
-    const shape = `${cells().join()} ${props.layout} ${perRow} ${itemHeight}`;
+    const shape = `${cells().join()} ${props.layout} ${perRow} ${itemHeight} ${!!props.wall}`;
     if (size === pool.length && shape === builtFor) return paint();
 
     builtFor = shape;
@@ -714,8 +910,10 @@ export function FileList(props: {
 
     grid.setAttribute("aria-activedescendant", `file-row-${props.view}-${focused}`);
     if (!reveal) return;
-    const top = Math.floor(focused / perRow) * itemHeight;
-    if (top < grid.scrollTop) grid.scrollTop = top;
+    const top = places.top(focused);
+    // A header held at the top would cover the row.
+    const covered = props.groups.length > 0 ? HEADER_HEIGHT : 0;
+    if (top - covered < grid.scrollTop) grid.scrollTop = top - covered;
     else if (top + itemHeight > grid.scrollTop + grid.clientHeight) {
       grid.scrollTop = top + itemHeight - grid.clientHeight;
     }
@@ -879,7 +1077,7 @@ export function FileList(props: {
   /** New rows take over in one step, so nothing blinks and the scroll position stays. */
   async function swapRows(snapshot: number) {
     const selected = props.selected ?? [];
-    const first = props.top ? 0 : Math.max(0, Math.floor(grid.scrollTop / itemHeight) - OVERSCAN) * perRow;
+    const first = props.top ? 0 : places.firstAt(grid.scrollTop - OVERSCAN * itemHeight);
     const onScreen = (Math.ceil(grid.clientHeight / itemHeight) + OVERSCAN * 2) * perRow;
     const wanted = new Set<number>();
     for (let index = first; index < first + onScreen + PAGE_SIZE; index += PAGE_SIZE) {
@@ -968,15 +1166,15 @@ export function FileList(props: {
     // In the list the icon shares the name's cell, and the editor starts after it.
     const twistRoom = nests() ? TWIST_ROOM + depthOf(row) * INDENT : 0;
     const iconRoom = inList ? sample.icon.offsetWidth + ICON_GAP + twistRoom : 0;
-    const middle = inList && rowDensity() === "roomy" ? ROOMY_LINE / 2 : cell.offsetHeight / 2;
+    const middle = inList && density() === "roomy" ? ROOMY_LINE / 2 : cell.offsetHeight / 2;
     setEditValue(row.name);
     setEditor({
       index,
       name: row.name,
       isDir: row.isDir,
       fresh,
-      left: (index % perRow) * element.offsetWidth + element.clientLeft + cell.offsetLeft + iconRoom,
-      top: Math.floor(index / perRow) * itemHeight + element.clientTop + cell.offsetTop + middle,
+      left: places.column(index) * element.offsetWidth + element.clientLeft + cell.offsetLeft + iconRoom,
+      top: places.top(index) + element.clientTop + cell.offsetTop + middle,
       width: Math.max(cell.offsetWidth - iconRoom, MIN_EDITOR_WIDTH),
     });
   }
@@ -1127,7 +1325,12 @@ export function FileList(props: {
     const pageRows = Math.max(1, Math.floor(grid.clientHeight / itemHeight) - 1);
     const shape = { count: props.count, perRow, pageRows };
     const plain = !event.shiftKey && !event.ctrlKey;
-    const target = props.count > 0 ? ((plain ? treeTarget(event.key, focused) : undefined) ?? moveTarget(event.key, focused, shape)) : undefined;
+    // In a grid of groups, a line can end short and the next group starts a new one.
+    const across = props.layout === "grid" ? groupedMove(event.key, focused, props.groups, perRow) : undefined;
+    const target =
+      props.count > 0
+        ? ((plain ? treeTarget(event.key, focused) : undefined) ?? across ?? moveTarget(event.key, focused, shape))
+        : undefined;
 
     if (target !== undefined) {
       if (event.shiftKey) selection.extendTo(target, false);
@@ -1216,7 +1419,7 @@ export function FileList(props: {
 
   createEffect(
     on(
-      [cells, () => props.layout, tileSize, rowDensity],
+      [cells, () => props.layout, tileSize, density, () => props.wall],
       () => {
         resize();
         selectionChanged(true);
@@ -1227,7 +1430,7 @@ export function FileList(props: {
 
   createEffect(
     on(
-      [typesLearned, () => props.cut, () => props.match, () => props.synced, tags, allLooks, windowsIcons, dateForm, nests, readProgress],
+      [typesLearned, () => props.cut, () => props.match, () => props.synced, tags, allLooks, windowsIcons, dateForm, nests, readProgress, sizeBars],
       () => {
         for (const pooled of pool) pooled.filled = false;
         paint();
@@ -1252,6 +1455,31 @@ export function FileList(props: {
     if (props.active) grid.focus({ preventScroll: true });
   });
 
+  /** A group's header: a glass strip with its name and count, which folds the rows under it. */
+  function GroupHead(head: { group: Group; top: number; held?: boolean }) {
+    const open = () => head.group.count > 0;
+    return (
+      <div class="group-head" data-held={head.held ? "" : undefined} style={{ transform: `translateY(${head.top}px)` }}>
+        <button
+          class="group-fold"
+          aria-expanded={open()}
+          aria-description="Ctrl+click folds or opens every group"
+          // The list keeps the keyboard, so arrows still move through the rows after a click.
+          onMouseDown={(event) => event.preventDefault()}
+          onClick={(event) => {
+            event.stopPropagation();
+            props.onFold(head.group.key, event.ctrlKey);
+          }}
+          onDblClick={(event) => event.stopPropagation()}
+        >
+          <span class="group-twist" aria-hidden="true" />
+          <span class="group-label">{props.groupLabel(head.group.key)}</span>
+          <span class="group-count">{head.group.total.toLocaleString()}</span>
+        </button>
+      </div>
+    );
+  }
+
   return (
     <div
       class="file-list"
@@ -1269,7 +1497,7 @@ export function FileList(props: {
         when={props.layout === "list"}
         fallback={
           <SortStrip
-            columns={props.columns}
+            columns={props.columns.filter((column) => !isProp(column.id))}
             fixed={props.fixedColumns}
             sort={props.sort}
             onSort={props.onSort}
@@ -1280,11 +1508,13 @@ export function FileList(props: {
         <ColumnHeader
           ref={(element) => (header = element)}
           columns={props.columns}
+          set={props.columnSet}
           fixed={props.fixedColumns}
           sort={props.sort}
           onSort={props.onSort}
           onMenu={props.onHeaderMenu}
           onGroup={props.onGroup}
+          onFit={fitColumn}
         />
       </Show>
       <div
@@ -1292,8 +1522,10 @@ export function FileList(props: {
         class="file-grid"
         data-layout={props.layout}
         data-nests={nests() ? "" : undefined}
-        data-density={rowDensity()}
-        style={{ "--row-height": `${rowHeight()}px` }}
+        data-density={density()}
+        data-grouped={props.groups.length > 0 ? "" : undefined}
+        data-wall={props.wall && props.layout === "grid" ? "" : undefined}
+        style={{ "--row-height": `${rowHeight()}px`, "--group-head": `${HEADER_HEIGHT}px` }}
         role="grid"
         aria-multiselectable="true"
         aria-rowcount={props.count}
@@ -1316,9 +1548,17 @@ export function FileList(props: {
         onPointerLeave={() => hideCard(true)}
         onWheel={onWheel}
       >
+        {/* Sticky and no height, so the browser holds it at the top while the rows scroll. */}
+        <div class="group-stuck" role="presentation">
+          <Show when={stuck()}>{(held) => <GroupHead group={held().group} top={held().push} held />}</Show>
+        </div>
         <div ref={marker} class="file-marker" role="presentation" hidden />
         <div ref={spacer} class="file-spacer" role="presentation" />
-        {props.count === 0 && <EmptyState empty={props.empty} />}
+        <div class="group-heads" role="presentation">
+          <Index each={heads()}>{(head) => <GroupHead group={head().group} top={head().top} />}</Index>
+        </div>
+        {/* With every group folded, the headers stay and say what is there. */}
+        {props.count === 0 && props.groups.length === 0 && <EmptyState empty={props.empty} />}
         <Show when={editor()} keyed>
           {(open) => (
             <div

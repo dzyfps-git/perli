@@ -1,7 +1,25 @@
 import type { Grouping, Sort, SortKey } from "../../api";
 
+/** Columns read from each file's own properties, a screenful at a time, which no sort uses. */
+export type PropColumn = "artist" | "album" | "length" | "taken" | "dimensions";
+export type ColumnId = SortKey | PropColumn;
+
+/** Which Windows property each one shows. A `date:` one comes as milliseconds. */
+export const PROP_NAMES: Record<PropColumn, string> = {
+  artist: "System.Music.Artist",
+  album: "System.Music.AlbumTitle",
+  length: "System.Media.Duration",
+  taken: "date:System.Photo.DateTaken",
+  dimensions: "System.Image.Dimensions",
+};
+
+export const isProp = (id: ColumnId): id is PropColumn => id in PROP_NAMES;
+
+/** The columns that suit a folder: its songs' or pictures' own, or the plain ones. */
+export type ColumnSet = "plain" | "music" | "pictures";
+
 export interface Column {
-  id: SortKey;
+  id: ColumnId;
   label: string;
   /** Pixels. The name column ignores this and takes the space left over. */
   width: number;
@@ -20,6 +38,29 @@ export const DEFAULT_COLUMNS: Column[] = [
   { id: "size", label: "Size", width: 90, visible: true },
 ];
 
+const EXTRA_COLUMNS: Column[] = [
+  { id: "artist", label: "Artist", width: 160, visible: false },
+  { id: "album", label: "Album", width: 160, visible: false },
+  { id: "length", label: "Length", width: 80, visible: false },
+  { id: "taken", label: "Date taken", width: 160, visible: false },
+  { id: "dimensions", label: "Dimensions", width: 110, visible: false },
+];
+
+const SET_SHOWS: Record<ColumnSet, ColumnId[]> = {
+  plain: [],
+  music: ["artist", "length"],
+  pictures: ["taken", "dimensions"],
+};
+
+/** What a set of columns starts as: the plain ones, with its own extras put before Size. */
+export function startColumns(set: ColumnSet): Column[] {
+  const shows = SET_SHOWS[set];
+  const extras = EXTRA_COLUMNS.map((column) => ({ ...column, visible: shows.includes(column.id) }));
+  const shown = extras.filter((column) => column.visible);
+  const size = DEFAULT_COLUMNS.findIndex((column) => column.id === "size");
+  return [...DEFAULT_COLUMNS.slice(0, size), ...shown, ...DEFAULT_COLUMNS.slice(size), ...extras.filter((column) => !column.visible)];
+}
+
 /** The Recycle Bin's own columns. "modified" holds when an item was deleted. */
 export const BIN_COLUMNS: Column[] = [
   { id: "name", label: "Name", width: 0, visible: true },
@@ -32,6 +73,13 @@ export const BIN_COLUMNS: Column[] = [
 export const SEARCH_COLUMNS: Column[] = [
   { id: "name", label: "Name", width: 0, visible: true },
   { id: "location", label: "Folder", width: 260, visible: true },
+  { id: "modified", label: "Modified", width: 160, visible: true },
+  { id: "size", label: "Size", width: 90, visible: true },
+];
+
+/** A flat view's own columns. Where each row is shows under its name. */
+export const FLAT_COLUMNS: Column[] = [
+  { id: "name", label: "Name", width: 0, visible: true },
   { id: "modified", label: "Modified", width: 160, visible: true },
   { id: "size", label: "Size", width: 90, visible: true },
 ];
@@ -61,7 +109,7 @@ export function columnsWidth(columns: Column[]) {
 }
 
 /** Moves a column to where `target` is. Name always stays first. */
-export function movedColumn(columns: Column[], id: SortKey, target: SortKey) {
+export function movedColumn(columns: Column[], id: ColumnId, target: ColumnId) {
   if (id === "name" || target === "name") return columns;
   const moving = columns.find((column) => column.id === id)!;
   const others = columns.filter((column) => column !== moving);
@@ -82,14 +130,14 @@ export function typeLabel(name: string, isDir: boolean) {
 }
 
 /** Applies order, widths and visibility saved earlier onto the current set of columns. */
-export function restoreColumns(saved: unknown): Column[] {
-  if (!Array.isArray(saved)) return DEFAULT_COLUMNS;
+export function restoreColumns(saved: unknown, start = DEFAULT_COLUMNS): Column[] {
+  if (!Array.isArray(saved)) return start;
   const position = ({ id }: Column) => {
     const index = saved.findIndex((other) => other?.id === id);
     if (id === "name") return -1;
     return index < 0 ? saved.length : index;
   };
-  return DEFAULT_COLUMNS.map((column) => {
+  return start.map((column) => {
     const found = saved.find((other) => other?.id === column.id);
     return found
       ? { ...column, width: found.width, visible: column.id === "name" || found.visible }

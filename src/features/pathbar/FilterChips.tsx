@@ -31,6 +31,14 @@ const TYPE_CHIPS: { label: string; hint: string; types: string[] }[] = [
 
 const SIZE_CHIPS = ["1 MB", "100 MB", "1 GB"];
 
+/** How deep a flat view goes. One level is the folder's own files. */
+const DEPTH_CHIPS: { depth: number | null; label: string; hint: string }[] = [
+  { depth: null, label: "All levels", hint: "Files from every folder inside, however deep" },
+  { depth: 1, label: "1 level", hint: "Only this folder's own files" },
+  { depth: 2, label: "2 levels", hint: "This folder and the folders right inside it" },
+  { depth: 3, label: "3 levels", hint: "Down to the folders inside those" },
+];
+
 const DATE_CHIPS: { since: Since; label: string; hint: string }[] = [
   { since: "today", label: "Today", hint: "Changed today" },
   { since: "week", label: "This week", hint: "Changed since Monday" },
@@ -77,6 +85,19 @@ export function FilterChips(props: { view: FolderView; onMore: () => void }) {
           pressed={props.view.inside()}
           onClick={() => props.view.setInside(!props.view.inside())}
         />
+        <span class="chip-gap" />
+      </Show>
+      <Show when={props.view.query() === FLAT_QUERY}>
+        <For each={DEPTH_CHIPS}>
+          {(chip) => (
+            <Chip
+              label={chip.label}
+              hint={chip.hint}
+              pressed={props.view.depth() === chip.depth}
+              onClick={() => props.view.setDepth(chip.depth)}
+            />
+          )}
+        </For>
         <span class="chip-gap" />
       </Show>
       <Chip

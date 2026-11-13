@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { besidePoint, moveTarget } from "./layout.ts";
+import { besidePoint, groupedMove, moveTarget, placesOf } from "./layout.ts";
 
 const list = { count: 100, perRow: 1, pageRows: 10 };
 const grid = { count: 10, perRow: 4, pageRows: 2 };
@@ -57,4 +57,55 @@ test("a box beside a point flips at the window edge and stays inside", () => {
   assert.deepEqual(besidePoint(100, 100, 200, 100, window), { left: 116, top: 116 });
   assert.deepEqual(besidePoint(900, 750, 200, 100, window), { left: 684, top: 634 });
   assert.deepEqual(besidePoint(10, 10, 2000, 100, window), { left: 4, top: 26 });
+});
+
+test("rows with no groups follow each other in lines", () => {
+  const places = placesOf([], 10, 4, 100, 30);
+  assert.equal(places.height, 300);
+  assert.equal(places.top(5), 100);
+  assert.equal(places.column(5), 1);
+  assert.equal(places.firstAt(150), 4);
+});
+
+test("each group starts a line of its own under its header", () => {
+  // Five rows, then a folded group of three, then two rows.
+  const groups = [
+    { start: 0, count: 5 },
+    { start: 5, count: 0 },
+    { start: 5, count: 2 },
+  ];
+  const places = placesOf(groups, 7, 4, 100, 30);
+  assert.deepEqual(places.tops, [0, 230, 260]);
+  assert.equal(places.height, 390);
+  assert.equal(places.top(0), 30);
+  assert.equal(places.top(4), 130);
+  assert.equal(places.column(4), 0);
+  assert.equal(places.groupOf(5), 2);
+  assert.equal(places.top(5), 290);
+  assert.equal(places.column(6), 1);
+  assert.equal(places.firstAt(0), 0);
+  assert.equal(places.firstAt(135), 4);
+  assert.equal(places.firstAt(240), 5);
+  assert.equal(places.groupAt(250), 1);
+});
+
+test("a header stays at the top until the next one pushes it off", () => {
+  const places = placesOf([{ start: 0, count: 10 }, { start: 10, count: 10 }], 20, 1, 20, 30);
+  assert.equal(places.headerTop(0, 0), 0);
+  assert.equal(places.headerTop(0, 100), 100);
+  assert.equal(places.headerTop(0, 220), 200);
+  assert.equal(places.headerTop(1, 220), 230);
+});
+
+test("grid up and down step between groups, keeping the tile and skipping folded ones", () => {
+  // Three per line: a group of 5 (lines 0-2, 3-4), a folded one, then a group of 4 (5-7, 8).
+  const groups = [{ start: 0, count: 5 }, { start: 5, count: 0 }, { start: 5, count: 4 }];
+  assert.equal(groupedMove("ArrowDown", 1, groups, 3), 4);
+  assert.equal(groupedMove("ArrowDown", 2, groups, 3), 4, "a short line takes its last tile");
+  assert.equal(groupedMove("ArrowDown", 4, groups, 3), 6, "into the next group's first line");
+  assert.equal(groupedMove("ArrowUp", 6, groups, 3), 4, "back to the last line above");
+  assert.equal(groupedMove("ArrowUp", 7, groups, 3), 4);
+  assert.equal(groupedMove("ArrowUp", 1, groups, 3), 1, "the top stays put");
+  assert.equal(groupedMove("ArrowDown", 8, groups, 3), 8, "the bottom stays put");
+  assert.equal(groupedMove("ArrowLeft", 1, groups, 3), undefined);
 });

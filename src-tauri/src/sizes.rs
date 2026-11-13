@@ -1,6 +1,7 @@
 //! Folder totals, which Windows keeps nowhere, so a thread adds them up. Only runs when asked.
 
 use std::collections::HashMap;
+use std::fs;
 use std::mem;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -12,6 +13,7 @@ use serde::Serialize;
 
 use crate::folder::Entry;
 use crate::ops::sys::{self, Stat};
+use crate::session;
 
 const REPORT_GAP: Duration = Duration::from_secs(1);
 /// The disk map hears of the folders weighed so far this often.
@@ -19,7 +21,28 @@ const MAP_GAP: Duration = Duration::from_millis(200);
 
 // ponytail: grows with every folder looked at and each total stays until the next scan. Dropping
 // the least recently used would cap it.
-static KNOWN: LazyLock<RwLock<HashMap<PathBuf, u64>>> = LazyLock::new(RwLock::default);
+static KNOWN: LazyLock<RwLock<HashMap<PathBuf, u64>>> = LazyLock::new(|| RwLock::new(load()));
+
+/// Where totals wait between sessions.
+const SAVED: &str = "folder-sizes.json";
+
+/// The last session's totals, which stand until a scan adds those folders up again. Tests start
+/// from none, and leave the user's own alone.
+fn load() -> HashMap<PathBuf, u64> {
+    let text = session::data_file(SAVED).filter(|_| !cfg!(test)).and_then(|file| fs::read_to_string(file).ok());
+    text.and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default()
+}
+
+fn save() {
+    let Some(file) = session::data_file(SAVED).filter(|_| !cfg!(test)) else { return };
+    // The first scan can come before anything else made Perli's folder.
+    if let Some(folder) = file.parent() {
+        let _ = fs::create_dir_all(folder);
+    }
+    if let Ok(text) = serde_json::to_string(&*KNOWN.read().unwrap_or_else(PoisonError::into_inner)) {
+        let _ = fs::write(file, text);
+    }
+}
 
 fn key(path: &Path) -> PathBuf {
     path.to_string_lossy().to_lowercase().into()
@@ -36,6 +59,9 @@ pub fn of(path: &Path) -> Option<u64> {
 
 pub fn forget() {
     KNOWN.write().unwrap_or_else(PoisonError::into_inner).clear();
+    if let Some(file) = session::data_file(SAVED).filter(|_| !cfg!(test)) {
+        let _ = fs::remove_file(file);
+    }
 }
 
 /// Calls `visit` for each entry of `folder`, with whether it is a real folder to walk into. A
@@ -94,6 +120,7 @@ fn scan(folder: &Path, stop: &AtomicBool, report: impl Fn()) {
         }
     }
     report();
+    save();
 }
 
 /// One thing right inside a folder, with all the bytes under it, for the disk map.
