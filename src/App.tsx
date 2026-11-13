@@ -351,7 +351,9 @@ export function App() {
     !!drives() ||
     !!previewing() ||
     keysOpen() ||
-    activityOpen();
+    activityOpen() ||
+    // Every sheet opens as a modal dialog, so one left off the list above still counts.
+    !!document.querySelector("dialog:modal");
   /** The settings page stands where the files do, so the keys of the files rest too. */
   const dialogOpen = () => settingsShown() || sheetOpen();
   // Going to a folder, by any road, puts the files back in front.
@@ -646,8 +648,13 @@ export function App() {
     });
   }
 
+  /** The user's own folder, for a search that can't start where the user is. */
+  let home = "C:\\";
+
   /** Every file with the tag, on every drive, as a search of its own. */
-  function showTagged(view: FolderView, tag: Tag) {
+  async function showTagged(view: FolderView, tag: Tag) {
+    // The Recycle Bin can't be searched, so the search starts from home. It covers all drives.
+    if ((view.isBin() || !view.folder()) && !(await view.open(home))) return;
     view.setScope("drives");
     view.search(tagQuery(tag.name));
   }
@@ -1426,6 +1433,7 @@ export function App() {
     refreshTags();
     startUpdates();
     const start = await startState();
+    home = start.home ?? home;
     const session = start.folder ? undefined : parseSession(start.session);
     if (session) {
       tabs.restore(session);
