@@ -10,15 +10,13 @@ use serde::{Deserialize, Serialize};
 use windows::core::{implement, Ref, Result, BOOL};
 use windows::Win32::Foundation::{HWND, LPARAM, POINT, POINTL};
 use windows::Win32::Graphics::Gdi::ScreenToClient;
-use windows::Win32::System::Com::{
-    CoCreateInstance, IDataObject, CLSCTX_INPROC_SERVER, DVASPECT_CONTENT, FORMATETC, TYMED_HGLOBAL,
-};
+use windows::Win32::System::Com::{IDataObject, DVASPECT_CONTENT, FORMATETC, TYMED_HGLOBAL};
 use windows::Win32::System::Ole::{
     IDropSource, IDropTarget, IDropTarget_Impl, RegisterDragDrop, ReleaseStgMedium, RevokeDragDrop,
     CF_HDROP, DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_LINK, DROPEFFECT_MOVE, DROPEFFECT_NONE, MK_ALT,
 };
 use windows::Win32::System::SystemServices::{MK_CONTROL, MK_RBUTTON, MK_SHIFT, MODIFIERKEYS_FLAGS};
-use windows::Win32::UI::Shell::{CLSID_DragDropHelper, IDropTargetHelper, SHDoDragDrop};
+use windows::Win32::UI::Shell::SHDoDragDrop;
 use windows::Win32::UI::WindowsAndMessaging::EnumChildWindows;
 
 use crate::folder::BIN_PATH;
@@ -29,6 +27,8 @@ use crate::{clipboard, menus};
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", tag = "kind")]
 pub enum Event {
+    /// A drag came in over the window. `name` is its first file, for the picture Perli draws.
+    Enter { count: usize, name: String, folder: bool },
     Over { x: i32, y: i32 },
     Leave,
     /// `right` means the right button dragged, so the user gets to pick what happens.
@@ -229,8 +229,6 @@ struct Target {
     window: HWND,
     drags: Arc<Drags>,
     listener: Box<dyn Fn(Event)>,
-    /// Draws the picture of what is being dragged over Perli.
-    helper: Option<IDropTargetHelper>,
     hover: RefCell<Option<Hover>>,
 }
 
@@ -240,7 +238,6 @@ impl Target {
             window,
             drags,
             listener,
-            helper: unsafe { CoCreateInstance(&CLSID_DragDropHelper, None, CLSCTX_INPROC_SERVER) }.ok(),
             hover: RefCell::new(None),
         }
     }
@@ -289,9 +286,15 @@ impl IDropTarget_Impl for Target_Impl {
         *self.hover.borrow_mut() = Hover::over(data.as_ref(), keys, unsafe { *effect });
         let shown = self.effect(keys);
         unsafe { *effect = shown };
-        if let (Some(helper), Some(data)) = (&self.helper, data.as_ref()) {
-            let screen = POINT { x: point.x, y: point.y };
-            let _ = unsafe { helper.DragEnter(self.window, data, &raw const screen, shown) };
+        // Over Perli the page draws the dragged files itself, as a deck that follows the pointer,
+        // so Windows' picture of them is not asked for here. Other windows still show it.
+        if let Some(hover) = self.hover.borrow().as_ref() {
+            let first = hover.paths.first();
+            (self.listener)(Event::Enter {
+                count: hover.paths.len(),
+                name: first.and_then(|path| path.file_name()).map(|name| name.to_string_lossy().into_owned()).unwrap_or_default(),
+                folder: first.is_some_and(|path| path.is_dir()),
+            });
         }
         self.tell_where(self.inside(point));
         Ok(())
@@ -300,18 +303,11 @@ impl IDropTarget_Impl for Target_Impl {
     fn DragOver(&self, keys: MODIFIERKEYS_FLAGS, point: &POINTL, effect: *mut DROPEFFECT) -> Result<()> {
         let shown = self.effect(keys);
         unsafe { *effect = shown };
-        if let Some(helper) = &self.helper {
-            let screen = POINT { x: point.x, y: point.y };
-            let _ = unsafe { helper.DragOver(&raw const screen, shown) };
-        }
         self.tell_where(self.inside(point));
         Ok(())
     }
 
     fn DragLeave(&self) -> Result<()> {
-        if let Some(helper) = &self.helper {
-            let _ = unsafe { helper.DragLeave() };
-        }
         if self.end().is_some() {
             (self.listener)(Event::Leave);
         }
@@ -320,16 +316,12 @@ impl IDropTarget_Impl for Target_Impl {
 
     fn Drop(
         &self,
-        data: Ref<IDataObject>,
+        _data: Ref<IDataObject>,
         keys: MODIFIERKEYS_FLAGS,
         point: &POINTL,
         effect: *mut DROPEFFECT,
     ) -> Result<()> {
         let shown = self.effect(keys);
-        if let (Some(helper), Some(data)) = (&self.helper, data.as_ref()) {
-            let screen = POINT { x: point.x, y: point.y };
-            let _ = unsafe { helper.Drop(data, &raw const screen, shown) };
-        }
         // Perli's own job does the work, so the source must not delete anything itself.
         unsafe { *effect = DROPEFFECT_NONE };
         if let Some(Hover { paths, source, allowed, right, .. }) = self.end() {
@@ -516,7 +508,12 @@ mod tests {
         assert_eq!(effect, DROPEFFECT_NONE, "a source must never delete after a Perli drop");
         assert_eq!(
             *heard.borrow(),
-            [Event::Over { x: 5, y: 6 }, Event::Over { x: 7, y: 8 }, Event::Drop { x: 7, y: 8, right: false }]
+            [
+                Event::Enter { count: 1, name: "a.txt".into(), folder: false },
+                Event::Over { x: 5, y: 6 },
+                Event::Over { x: 7, y: 8 },
+                Event::Drop { x: 7, y: 8, right: false }
+            ]
         );
 
         match drags.job(&into, None) {

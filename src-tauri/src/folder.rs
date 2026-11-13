@@ -467,6 +467,11 @@ impl Listing {
             .collect()
     }
 
+    /// What `rows` add up to, as the list shows their sizes. Nothing on disk is read.
+    pub fn rows_size(&self, rows: &[u32]) -> u64 {
+        self.chosen(rows).map(|entry| self.size_of(entry)).sum()
+    }
+
     /// The Recycle Bin items at `rows`. Other folders have none.
     pub fn bin_items(&self, rows: &[u32]) -> Vec<BinItem> {
         let Some(bin) = &self.bin else {

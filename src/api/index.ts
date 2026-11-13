@@ -208,6 +208,8 @@ export interface NewType {
 
 /** Files being dragged over the window, in physical pixels inside it. */
 export type FileDrag =
+  /** A drag came in over the window: how many things, and the first one's name. */
+  | { kind: "enter"; count: number; name: string; folder: boolean }
   | { kind: "over"; x: number; y: number }
   /** `right` means the right button dragged, so the user gets to pick what happens. */
   | { kind: "drop"; x: number; y: number; right: boolean }
@@ -366,8 +368,14 @@ export const measureSelection = (selection: Selection) => invoke<Measured>("meas
 
 export const binSummary = () => invoke<Measured>("bin_summary");
 
+/** Fired on `window` once Perli puts files on the clipboard. */
+export const CLIPBOARD_SET = "perli-clipboard-set";
+
 export const setClipboard = (selection: Selection, cut: boolean) =>
-  invoke<{ names: string[]; sequence: number }>("set_clipboard", { selection, cut });
+  invoke<{ names: string[]; sequence: number }>("set_clipboard", { selection, cut }).then((set) => {
+    window.dispatchEvent(new Event(CLIPBOARD_SET));
+    return set;
+  });
 
 export const cancelCut = (sequence: number) => invoke<void>("cancel_cut", { sequence });
 
@@ -398,6 +406,12 @@ export const commonTags = (selection: Selection) => invoke<number[]>("common_tag
 /** The rows whose names fit `pattern`, such as `*.jpg;*.png`. */
 export const rowsMatching = (view: number, request: number, pattern: string) =>
   invoke<number[]>("rows_matching", { view, request, pattern });
+
+/** The bytes of the selected files, from the listing alone. Folders count as nothing. */
+export const selectionSize = (selection: Selection) => invoke<number>("selection_size", { selection });
+
+/** The accent color picked in Windows, as `#rrggbb`. */
+export const windowsAccent = () => invoke<string | null>("windows_accent");
 
 /** Starts adding up the folders in `path`. `onSizesGrew` says when totals come in. */
 export const scanSizes = (view: number, path: string) => invoke<void>("scan_sizes", { view, path });

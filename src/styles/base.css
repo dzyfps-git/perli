@@ -20,6 +20,12 @@ body {
   overflow: hidden;
 }
 
+/* The Solid backdrop asks Windows for nothing, so the page fills the window itself. */
+html[data-backdrop="solid"],
+html[data-backdrop="solid"] body {
+  background: var(--surface-hover);
+}
+
 /* With Windows transparency off, Mica is gone and nothing else fills the sidebar. */
 @media (prefers-reduced-transparency: reduce) {
   html,
@@ -339,5 +345,59 @@ html[data-blurred] .logo {
   to {
     opacity: 0;
     scale: 0.85;
+  }
+}
+
+/* As Perli starts, the accent draws the window's edge once, from the logo's corner round and
+   back, then lets go and rests in the logo. Nothing here can be clicked or read. */
+@property --edge {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: 0deg;
+}
+
+.edge-draw {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  padding: 2px;
+  background: conic-gradient(
+    from -135deg,
+    var(--accent-start),
+    var(--accent),
+    var(--accent-end) var(--edge),
+    transparent var(--edge)
+  );
+  mask:
+    linear-gradient(#000 0 0) content-box exclude,
+    linear-gradient(#000 0 0);
+  pointer-events: none;
+  animation:
+    edge-sweep 1300ms cubic-bezier(0.5, 0, 0.2, 1) forwards,
+    edge-fade 500ms 1300ms ease-out forwards;
+}
+
+@keyframes edge-sweep {
+  to {
+    --edge: 360deg;
+  }
+}
+
+@keyframes edge-fade {
+  to {
+    opacity: 0;
+  }
+}
+
+/* The logo takes the light in as the edge lets it go. */
+.shell[data-arriving] .logo {
+  animation:
+    drift var(--drift-time) linear infinite,
+    logo-rest 900ms 1100ms ease-out;
+}
+
+@keyframes logo-rest {
+  40% {
+    filter: drop-shadow(0 0 8px var(--accent));
   }
 }

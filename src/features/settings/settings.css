@@ -1,3 +1,4 @@
+/* The look every sheet shares: a glass card over the dimmed window. `openSheet` moves it. */
 .settings {
   width: min(420px, 80vw);
   padding: var(--space-4);
@@ -13,25 +14,8 @@
   background: rgb(0 0 0 / 28%);
 }
 
-.settings[open] {
-  animation: settings-in var(--motion-slide);
-}
-
-@keyframes settings-in {
-  from {
-    opacity: 0;
-    translate: 0 -8px;
-  }
-}
-
 .settings:focus {
   outline: none;
-}
-
-.settings-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
 }
 
 .settings h2 {
@@ -47,82 +31,224 @@
   font-weight: 400;
 }
 
-.settings-close {
-  width: var(--row-height);
-  height: var(--row-height);
-  padding: 0;
-  border: 0;
+.settings-note {
+  margin: var(--space-2) 0 0;
+  color: var(--text-muted);
+}
+
+/* The settings page stands where the files do: its parts on the left, the settings on the right. */
+.settings-page {
+  display: grid;
+  flex: 1;
+  grid-template-columns: 208px minmax(0, 1fr);
+  min-height: 0;
   border-radius: var(--radius);
-  background: transparent;
-  color: var(--text);
-  font-family: var(--font-icons);
-  font-size: 10px;
-  transition: background var(--motion);
+  background: var(--surface);
+  animation: settings-page-in var(--motion-slide);
 }
 
-.settings-close:hover {
-  background: var(--surface-hover);
+.settings-page[hidden] {
+  display: none;
 }
 
-.settings-themes {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: var(--space-1);
+@keyframes settings-page-in {
+  from {
+    opacity: 0;
+    translate: 0 6px;
+  }
 }
 
-.settings-accents {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: var(--space-1);
-}
-
-.settings-theme,
-.settings-accent {
+.settings-nav {
   display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-height: 0;
+  padding: var(--space-4) var(--space-2) var(--space-3) var(--space-3);
+  border-right: 1px solid var(--border);
+  overflow-y: auto;
+}
+
+.settings-nav h2 {
+  margin: 0 var(--space-2) var(--space-2);
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.settings-nav .settings-note {
+  margin: var(--space-2);
+}
+
+.settings-search {
+  flex: none;
+  height: 32px;
+  margin-bottom: var(--space-2);
+  padding: 0 var(--space-2);
+  color: var(--text);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font: inherit;
+}
+
+.settings-search::-webkit-search-cancel-button {
+  display: none;
+}
+
+.settings-search:focus-visible,
+.settings-palette-name:focus-visible {
+  border-color: var(--accent);
+  outline: none;
+}
+
+.settings-link {
+  position: relative;
+  display: flex;
+  flex: none;
   align-items: center;
-  justify-content: center;
   gap: var(--space-2);
   height: 32px;
   padding: 0 var(--space-2);
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: var(--radius);
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  text-align: left;
+  transition:
+    background var(--motion),
+    color var(--motion);
+}
+
+.settings-link[hidden] {
+  display: none;
+}
+
+.settings-link:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.settings-link[aria-current="true"] {
+  background: var(--surface-selected);
+  color: var(--text);
+}
+
+/* The mark of the part on show grows out of its middle. */
+.settings-link::before {
+  content: "";
+  position: absolute;
+  inset: 8px auto 8px 0;
+  width: 3px;
+  border-radius: 2px;
+  background: var(--accent-line);
+  scale: 1 0;
+  transition: scale var(--motion-spring);
+}
+
+.settings-link[aria-current="true"]::before {
+  scale: 1;
+}
+
+.settings-link:focus-visible,
+.settings-chip:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.settings-link-icon {
+  width: 16px;
+  font: 14px var(--font-icons);
+  text-align: center;
+}
+
+.settings-done {
+  margin-top: auto;
+}
+
+.settings-done .settings-link-icon {
+  font-size: 10px;
+}
+
+.settings-body {
+  min-height: 0;
+  padding: 0 var(--space-4) 40vh;
+  overflow-y: auto;
+  scroll-padding-top: var(--space-2);
+}
+
+.settings-section {
+  max-width: 620px;
+  margin: 0 auto;
+  padding-top: var(--space-4);
+}
+
+.settings-section[hidden] {
+  display: none;
+}
+
+.settings-section h3 {
+  margin: 0 0 var(--space-3);
+  padding: 0 var(--space-2);
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.settings-section h4 {
+  margin: var(--space-4) var(--space-2) var(--space-2);
+  color: var(--text-muted);
+  font-size: var(--font-size);
+  font-weight: 400;
+}
+
+.settings-section > .settings-note {
+  margin: var(--space-2) var(--space-2) 0;
+  font-size: 12px;
+}
+
+.settings-section + .settings-section {
+  margin-top: var(--space-4);
+  border-top: 1px solid var(--border);
+}
+
+.settings-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  padding: 0 var(--space-2);
+}
+
+.settings-chip {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  height: 32px;
+  padding: 0 var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: 999px;
   background: transparent;
   color: var(--text);
   font: inherit;
   transition:
     background var(--motion),
-    border-color var(--motion);
+    border-color var(--motion),
+    scale var(--motion-slide);
 }
 
-.settings-accent {
-  justify-content: flex-start;
-}
-
-.settings-theme:hover,
-.settings-accent:hover {
+.settings-chip:hover:enabled {
   background: var(--surface-hover);
 }
 
-.settings-theme[aria-checked="true"],
-.settings-accent[aria-checked="true"] {
+.settings-chip:active:enabled {
+  scale: 0.96;
+}
+
+.settings-chip:disabled {
+  opacity: 50%;
+}
+
+.settings-chip[aria-checked="true"] {
   border-color: var(--accent);
   background: var(--surface-selected);
-}
-
-.settings-theme:focus-visible,
-.settings-accent:focus-visible,
-.settings-close:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
-}
-
-.settings-default {
-  width: 100%;
-}
-
-.settings-note {
-  margin: var(--space-2) 0 0;
-  color: var(--text-muted);
 }
 
 .settings-swatch {
@@ -130,16 +256,7 @@
   width: 14px;
   height: 14px;
   border-radius: 50%;
-  background: var(--accent-line);
-}
-
-.settings-update-buttons {
-  display: flex;
-  gap: var(--space-2);
-}
-
-.settings-update-buttons .settings-theme {
-  flex: 1;
+  background: linear-gradient(135deg, var(--accent-start), var(--accent), var(--accent-end));
 }
 
 /* Edits the palette shown, which is always one of the user's own. */
@@ -147,19 +264,9 @@
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  margin-top: var(--space-2);
+  margin: var(--space-2) var(--space-2) 0;
 }
 
-.settings-search {
-  width: 100%;
-  margin-top: var(--space-3);
-}
-
-.settings-section[hidden] {
-  display: none;
-}
-
-.settings-search,
 .settings-palette-name {
   flex: 1;
   min-width: 0;
@@ -170,12 +277,6 @@
   border: 1px solid var(--border);
   border-radius: var(--radius);
   font: inherit;
-}
-
-.settings-search:focus-visible,
-.settings-palette-name:focus-visible {
-  border-color: var(--accent);
-  outline: none;
 }
 
 .settings-palette-color {
@@ -196,4 +297,95 @@
 .settings-palette-color::-webkit-color-swatch {
   border: 0;
   border-radius: calc(var(--radius) - 3px);
+}
+
+.settings-update {
+  color: var(--text);
+}
+
+/* A small window that wears the theme, the accent and the row height, so a choice shows before
+   it is made. Its colors come from the same tokens, read again under its own color scheme. */
+.look-preview {
+  --surface: color-mix(in srgb, var(--accent) 3%, light-dark(#fbfafc, #0e0e11));
+  --surface-hover: color-mix(in srgb, var(--accent) 6%, light-dark(#efedf2, #1a1a1f));
+  --surface-selected: color-mix(in srgb, var(--accent) 18%, var(--surface));
+  --text: light-dark(#1c1b20, #f0eff2);
+  --text-muted: light-dark(#66646e, #9a99a3);
+  --border: light-dark(rgb(0 0 0 / 8%), rgb(255 255 255 / 8%));
+  --date-fresh: light-dark(#b45309, #fbbf77);
+
+  display: grid;
+  gap: var(--space-1);
+  margin: 0 var(--space-2);
+  padding: var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-large);
+  background: var(--surface-hover);
+  color: var(--text);
+  transition:
+    background 300ms ease-out,
+    color 300ms ease-out;
+}
+
+.look-tabs {
+  display: flex;
+  gap: var(--space-1);
+}
+
+.look-tab {
+  padding: 3px var(--space-3);
+  border-radius: var(--radius);
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.look-tab-on {
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--accent) 70%, transparent);
+}
+
+.look-rows {
+  display: grid;
+  padding: var(--space-1);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.look-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  height: var(--look-row, 34px);
+  padding: 0 var(--space-2);
+  border-radius: calc(var(--radius) - 2px);
+  transition: height var(--motion-glide);
+}
+
+.look-row-on {
+  background: var(--surface-selected);
+}
+
+.look-tile {
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  background: linear-gradient(135deg, var(--accent-start), var(--accent), var(--accent-end));
+  opacity: 0.85;
+}
+
+.look-date {
+  margin-left: auto;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.look-date-fresh {
+  color: var(--date-fresh);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .settings-page {
+    animation: none;
+  }
 }

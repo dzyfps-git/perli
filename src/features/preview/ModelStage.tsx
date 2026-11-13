@@ -1,6 +1,7 @@
 import { createSignal, onCleanup, Show } from "solid-js";
-import { saved, stored } from "../filelist/prefs";
+import { ToolCog } from "../../ui/Controls";
 import type { ModelView, ReadModel } from "./model";
+import { grid, light, setGrid, setLight, VIEWER_SETTINGS } from "./viewerPrefs";
 
 const ICON_RESET = "";
 const ICON_TURN = "";
@@ -11,8 +12,6 @@ const ICON_UPRIGHT = "";
 const ICON_PLAY = "";
 const ICON_PAUSE = "";
 
-const [grid, setGrid] = stored("model-grid", saved("model-grid") === true);
-const [light, setLight] = stored("model-light", saved("model-light") === true);
 
 const number = (value: number) => Number(value.toPrecision(3)).toLocaleString();
 const count = (amount: number, one: string) => `${amount.toLocaleString()} ${one}${amount === 1 ? "" : "s"}`;
@@ -133,6 +132,7 @@ export function ModelStage(live: {
           <button class="strip-icon" aria-label="Z up" aria-keyshortcuts="U" aria-pressed={upright()} onClick={tools.u}>
             {ICON_UPRIGHT}
           </button>
+          <ToolCog label="Model settings" items={VIEWER_SETTINGS["3D models"]} />
         </div>
         <div class="model-facts">{facts()}</div>
         <Show when={view()!.clips.length}>

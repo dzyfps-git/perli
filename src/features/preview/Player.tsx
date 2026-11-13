@@ -1,7 +1,9 @@
 import { createEffect, createSignal, For, onCleanup, Show } from "solid-js";
 import type { SongInfo, Tags, Thumb } from "../../api";
 import { saved, stored } from "../filelist/prefs";
+import { ToolCog } from "../../ui/Controls";
 import { instrumentName } from "./instruments";
+import { playNext, setPlayNext, VIEWER_SETTINGS } from "./viewerPrefs";
 
 const ICON_PLAY = "";
 const ICON_PAUSE = "";
@@ -28,7 +30,6 @@ const COVER_EDGE = 320;
 const SHOWN_INSTRUMENTS = 8;
 
 const [volume, setVolume] = stored("song-volume", (saved("song-volume") as number | null) ?? 1);
-const [playNext, setPlayNext] = stored("song-play-next", saved("song-play-next") === true);
 const [speed, setSpeed] = createSignal(1);
 
 /** Where the sound comes from. `made` marks a URL made here, which must be let go of. */
@@ -492,8 +493,10 @@ export function Player(live: PlayerProps) {
             max="1"
             step="0.05"
             value={volume()}
+            style={{ "--fill": volume() }}
             onInput={(event) => setVolume(event.currentTarget.valueAsNumber)}
           />
+          <ToolCog label="Music settings" items={VIEWER_SETTINGS.Music} />
         </div>
       </Show>
     </div>

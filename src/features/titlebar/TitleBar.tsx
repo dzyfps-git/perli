@@ -12,12 +12,23 @@ const ICON_MINIMIZE = "";
 const ICON_MAXIMIZE = "";
 const ICON_RESTORE = "";
 
+const ICON_SETTINGS = "";
+
+/** The settings, when they are open as a tab after the folders. */
+export interface SettingsTab {
+  active: boolean;
+  onActivate: () => void;
+  /** A folder tab was picked, so the settings step back. */
+  onLeave: () => void;
+  onClose: () => void;
+}
+
 function tabTitle(tab: Tab) {
   const titles = tab.panes().map((view) => toCrumbs(view.path() ?? "").at(-1)?.label ?? "New tab");
   return titles.join(" | ");
 }
 
-export function TitleBar(props: { tabs: Tabs; onNewTab: () => void }) {
+export function TitleBar(props: { tabs: Tabs; onNewTab: () => void; settings?: SettingsTab }) {
   const appWindow = getCurrentWindow();
   const [maximized, setMaximized] = createSignal(false);
   const [menu, setMenu] = createSignal<{ x: number; y: number; tab: Tab }>();
@@ -57,6 +68,7 @@ export function TitleBar(props: { tabs: Tabs; onNewTab: () => void }) {
   createEffect(() => {
     props.tabs.tabs();
     props.tabs.active();
+    props.settings?.active;
     moveInk();
   });
 
@@ -65,6 +77,12 @@ export function TitleBar(props: { tabs: Tabs; onNewTab: () => void }) {
     observer.observe(strip);
     onCleanup(() => observer.disconnect());
   });
+
+  const isActive = (tab: Tab) => tab === props.tabs.active() && !props.settings?.active;
+  function activate(tab: Tab) {
+    props.settings?.onLeave();
+    props.tabs.activate(tab);
+  }
 
   function menuItems(tab: Tab) {
     const { tabs } = props;
@@ -92,14 +110,14 @@ export function TitleBar(props: { tabs: Tabs; onNewTab: () => void }) {
           {(tab) => (
             <div
               class="tab"
-              classList={{ "tab-active": tab === props.tabs.active() }}
+              classList={{ "tab-active": isActive(tab) }}
               style={{ "--tab-name": `tab-${tab.id}` }}
               data-drop={tab.active().folder()?.path}
               role="tab"
-              aria-selected={tab === props.tabs.active()}
+              aria-selected={isActive(tab)}
               tabindex="0"
-              onClick={() => props.tabs.activate(tab)}
-              onKeyDown={(event) => event.key === "Enter" && props.tabs.activate(tab)}
+              onClick={() => activate(tab)}
+              onKeyDown={(event) => event.key === "Enter" && activate(tab)}
               onAuxClick={(event) => event.button === 1 && props.tabs.close(tab)}
               onContextMenu={(event) => {
                 event.preventDefault();
@@ -125,6 +143,34 @@ export function TitleBar(props: { tabs: Tabs; onNewTab: () => void }) {
             </div>
           )}
         </For>
+        <Show when={props.settings}>
+          <div
+            class="tab tab-settings"
+            classList={{ "tab-active": props.settings?.active }}
+            role="tab"
+            aria-selected={props.settings?.active}
+            tabindex="0"
+            onClick={() => props.settings?.onActivate()}
+            onKeyDown={(event) => event.key === "Enter" && props.settings?.onActivate()}
+            onAuxClick={(event) => event.button === 1 && props.settings?.onClose()}
+          >
+            <span class="tab-glyph" aria-hidden="true">
+              {ICON_SETTINGS}
+            </span>
+            <span class="tab-title">Settings</span>
+            <button
+              class="tab-close"
+              aria-label="Close settings"
+              aria-keyshortcuts="Control+W"
+              onClick={(event) => {
+                event.stopPropagation();
+                props.settings?.onClose();
+              }}
+            >
+              {ICON_CLOSE}
+            </button>
+          </div>
+        </Show>
         <button class="tab-add" aria-label="New tab" aria-keyshortcuts="Control+T" onClick={props.onNewTab}>
           {ICON_ADD}
         </button>

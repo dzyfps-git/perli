@@ -717,6 +717,24 @@ async fn measure_selection(
     Ok(Measured { items, bytes })
 }
 
+/// The sizes of the selected rows added up, as the list shows them, for the status line.
+#[tauri::command]
+fn selection_size(selection: Selection, views: State<'_, Views>) -> Result<u64, String> {
+    views.read(&selection, folder::Listing::rows_size)
+}
+
+/// The accent color the user picked in Windows, as `#rrggbb`.
+#[tauri::command]
+fn windows_accent() -> Option<String> {
+    use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
+    let bytes = registry::read_value(HKEY_CURRENT_USER, r"Software\Microsoft\Windows\DWM", Some("AccentColor"), RRF_RT_REG_DWORD)?;
+    // Stored as alpha, blue, green, red from the top byte down, so red comes first in memory.
+    let [red, green, blue, ..] = bytes[..] else {
+        return None;
+    };
+    Some(format!("#{red:02x}{green:02x}{blue:02x}"))
+}
+
 /// Why each selected row can't take the name lined up with it, if it can't.
 #[tauri::command]
 async fn check_renames(
@@ -1543,6 +1561,8 @@ fn main() {
             set_tag,
             common_tags,
             rows_matching,
+            selection_size,
+            windows_accent,
             scan_sizes,
             stop_sizes,
             drop_choices,

@@ -1,5 +1,7 @@
+import { createSignal } from "solid-js";
+import { windowsAccent } from "../../api";
 import { saved, stored } from "../filelist/prefs";
-import { newPalette, savedPalettes, type Palette } from "./palettes";
+import { newPalette, savedPalettes, windowsColors, type Palette } from "./palettes";
 
 export const THEMES = [
   { id: "system", label: "System" },
@@ -16,6 +18,21 @@ export const ACCENTS = [
   { id: "mono", label: "Mono" },
 ] as const;
 
+/** The accent that follows the color picked in Windows. */
+export const WINDOWS_ACCENT = "windows";
+
+/** What Windows paints behind the window, where Perli lets it show through. */
+export const BACKDROPS = [
+  { id: "mica", label: "Mica" },
+  { id: "tabbed", label: "Mica Alt" },
+  { id: "acrylic", label: "Acrylic" },
+  { id: "solid", label: "Solid" },
+] as const;
+export type Backdrop = (typeof BACKDROPS)[number]["id"];
+
+/** How big everything is drawn, as the zoom of the whole page. */
+export const SCALES = [0.9, 1, 1.1, 1.25, 1.5];
+
 export type Theme = (typeof THEMES)[number]["id"];
 /** One of `ACCENTS`, or the id of one of the user's palettes. */
 export type Accent = string;
@@ -27,7 +44,24 @@ function savedChoice<T extends string>(key: string, choices: readonly { id: T }[
 
 export const [palettes, setPalettes] = stored<Palette[]>("palettes", savedPalettes(saved("palettes")));
 export const [theme, setTheme] = stored<Theme>("theme", savedChoice("theme", THEMES));
-export const [accent, setAccent] = stored<Accent>("accent", savedChoice("accent", [...ACCENTS, ...palettes()]));
+export const [accent, setAccent] = stored<Accent>("accent", savedChoice("accent", [...ACCENTS, { id: WINDOWS_ACCENT }, ...palettes()]));
+export const [backdrop, setBackdrop] = stored<Backdrop>("backdrop", savedChoice("backdrop", BACKDROPS));
+const savedScale = saved("ui-scale");
+export const [uiScale, setUiScale] = stored<number>(
+  "ui-scale",
+  SCALES.includes(savedScale as number) ? (savedScale as number) : 1,
+);
+
+const [windowsColor, setWindowsColor] = createSignal<string | null>(null);
+
+/** Asks Windows for its accent color again. */
+export const readWindowsColor = () => windowsAccent().then(setWindowsColor).catch(console.error);
+
+/** The three colors of an accent that no style rule paints: Windows' own, or one of the user's palettes. */
+export function accentColors(id: Accent): readonly string[] | undefined {
+  if (id === WINDOWS_ACCENT) return windowsColors(windowsColor() ?? "#6b7cff");
+  return palettes().find((palette) => palette.id === id)?.colors;
+}
 
 /** The palette shown, if it is one of the user's own. */
 export const ownPalette = () => palettes().find((palette) => palette.id === accent());

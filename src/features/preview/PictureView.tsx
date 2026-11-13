@@ -1,6 +1,8 @@
 import { createMemo, createSignal, onCleanup, onMount } from "solid-js";
 import type { Thumb } from "../../api";
+import { ToolCog } from "../../ui/Controls";
 import { draw } from "./QuickPreview";
+import { sharpPixels, VIEWER_SETTINGS } from "./viewerPrefs";
 
 const ICON_ZOOM_IN = "";
 const ICON_ZOOM_OUT = "";
@@ -167,6 +169,7 @@ export function PictureView(live: PictureViewProps) {
     <div
       ref={stage}
       class="picture-stage"
+      data-sharp={sharpPixels() || undefined}
       data-zoomed={zoom() !== null || undefined}
       data-dragging={dragging() || undefined}
       onWheel={onWheel}
@@ -193,6 +196,7 @@ export function PictureView(live: PictureViewProps) {
         <button class="strip-icon" aria-label="Turn right" aria-keyshortcuts="R" onClick={() => tools.turn(1)}>
           {ICON_TURN}
         </button>
+        <ToolCog label="Picture settings" items={VIEWER_SETTINGS.Pictures} />
       </div>
     </div>
   );

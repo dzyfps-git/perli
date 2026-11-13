@@ -200,6 +200,7 @@ export function SortStrip(props: {
         max={MAX_TILE}
         step={TILE_STEP}
         value={tileSize()}
+        style={{ "--fill": (tileSize() - MIN_TILE) / (MAX_TILE - MIN_TILE) }}
         onInput={(event) => setTileSize(event.currentTarget.valueAsNumber)}
       />
     </div>

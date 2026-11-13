@@ -1,4 +1,4 @@
-import { createSignal, For, onCleanup, onMount, Show, type JSX } from "solid-js";
+import { createEffect, createSignal, For, on, onCleanup, onMount, Show, type JSX } from "solid-js";
 import {
   driveSpace,
   listPlaces,
@@ -10,6 +10,7 @@ import {
   type Recent,
 } from "../../api";
 import { formatSize } from "../../ui/format";
+import { landed } from "../fileops/landed";
 import { tagColor } from "../tags/tags";
 import type { FolderView } from "../navigation/folderView";
 import { BIN_PATH, samePath } from "../navigation/path";
@@ -37,6 +38,8 @@ const ICON_NETWORK = "";
 const ICON_CLOUD = "";
 
 const FULL_SHARE = 0.9;
+/** How long a drive's bar takes to make its wave. */
+const WAVE_MS = 1200;
 /** How many recent files the sidebar lists. */
 const RECENT_COUNT = 10;
 
@@ -58,6 +61,8 @@ function Place(props: {
   /** Set for what is not a folder to browse, such as a recent file. */
   onOpen?: () => void;
   space?: DriveSpace;
+  /** A copy or a move just landed on this drive. */
+  wave?: boolean;
 }) {
   const used = () => (props.space ? 1 - props.space.free / props.space.total : 0);
   return (
@@ -77,7 +82,7 @@ function Place(props: {
           {(space) => (
             <>
               <span class="place-free">{formatSize(space().free)} free</span>
-              <span class="place-bar" role="presentation">
+              <span class="place-bar" role="presentation" data-wave={props.wave ? "" : undefined}>
                 <span
                   class="place-used"
                   classList={{ "place-used-full": used() >= FULL_SHARE }}
@@ -127,6 +132,9 @@ export function Sidebar(props: {
   const [spaces, setSpaces] = createSignal<Record<string, DriveSpace>>({});
   const [recent, setRecent] = createSignal<Recent[]>([]);
   const asking = new Set<string>();
+  /** The drives whose bars are making a wave. */
+  const [waving, setWaving] = createSignal<string[]>([]);
+  let waveTimer: number | undefined;
   let nav!: HTMLElement;
   let glide!: HTMLSpanElement;
 
@@ -156,6 +164,25 @@ export function Sidebar(props: {
         .finally(() => asking.delete(path));
     }
   }
+
+  // A job that changed a drive shows there at once: its bar makes a wave and is measured again.
+  createEffect(
+    on(
+      landed,
+      (job) => {
+        const drives = (places()?.drives ?? [])
+          .map((drive) => drive.path)
+          .filter((path) => job?.folders.some((folder) => folder.toLowerCase().startsWith(path.toLowerCase())));
+        if (drives.length === 0) return;
+        readSpaces();
+        setWaving(drives);
+        window.clearTimeout(waveTimer);
+        waveTimer = window.setTimeout(() => setWaving([]), WAVE_MS);
+      },
+      { defer: true },
+    ),
+  );
+  onCleanup(() => window.clearTimeout(waveTimer));
 
   /** Files open in other apps, so coming back to Perli is when the list may have changed. */
   const readRecent = () => recentFiles(RECENT_COUNT).then(setRecent).catch(console.error);
@@ -272,6 +299,7 @@ export function Sidebar(props: {
               icon={drive.network ? ICON_NETWORK : ICON_DRIVE}
               onMenu={props.onMenu}
               space={spaces()[drive.path]}
+              wave={waving().includes(drive.path)}
             />
           )}
         </For>

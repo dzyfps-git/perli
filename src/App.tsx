@@ -1,5 +1,5 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { createEffect, createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import { createEffect, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
 import {
   cancelJobsAndClose,
   clipboardCanPaste,
@@ -41,6 +41,7 @@ import { JobsPanel } from "./features/fileops/JobsPanel";
 import { createShellItems } from "./features/fileops/shellItems";
 import { NO_FILTER } from "./features/filelist/filter";
 import { BIN_COLUMNS, nextGrouping, nextSort, SEARCH_COLUMNS } from "./features/filelist/columns";
+import type { Empty } from "./features/filelist/EmptyState";
 import { FileList } from "./features/filelist/FileList";
 import { FilterDialog } from "./features/filelist/FilterDialog";
 import { clampTile, isLargestTile, isSmallestTile, TILE_STEP, type Layout } from "./features/filelist/layout";
@@ -50,7 +51,9 @@ import {
   folderSizes,
   rowDensity,
   setRowDensity,
+  setStatusBar,
   setWindowsIcons,
+  statusBar,
   windowsIcons,
   type Density,
   forgetSorts,
@@ -74,6 +77,7 @@ import { Palette, type Command } from "./features/palette/Palette";
 import { PathBar } from "./features/pathbar/PathBar";
 import { DetailsPanel } from "./features/preview/DetailsPanel";
 import { QuickPreview, type PreviewAt } from "./features/preview/QuickPreview";
+import { BACKDROPS, SCALES, setBackdrop, setUiScale } from "./features/settings/appearance";
 import { Settings } from "./features/settings/Settings";
 import { startUpdates, updateState } from "./features/settings/updates";
 import { BookmarksBar } from "./features/sidebar/BookmarksBar";
@@ -102,6 +106,7 @@ import { refreshTags, TAG_COLORS } from "./features/tags/tags";
 import { TitleBar } from "./features/titlebar/TitleBar";
 import { Menu, type MenuItem } from "./ui/Menu";
 import { Tooltip } from "./ui/Tooltip";
+import "./ui/controls.css";
 
 const SAVE_DELAY_MS = 300;
 /** How long a folder bound for its own window waits to hear which file to select there. */
@@ -121,6 +126,9 @@ function isBrowserKey(event: KeyboardEvent, key: string) {
   return ["f3", "f5", "f7"].includes(key) || (event.ctrlKey && ctrlKeys.includes(key));
 }
 
+/** The edge of the window is drawn once, as Perli starts. */
+const drawsEdge = !matchMedia("(prefers-reduced-motion: reduce)").matches;
+
 const isTyping = (event: Event) => event.target instanceof HTMLInputElement;
 // A job's Delete key must only ever mean the files, never a focused button.
 const isInList = (event: Event) => (event.target as HTMLElement).classList?.contains("file-grid");
@@ -135,12 +143,6 @@ const trackWindowFocus = (event: FocusEvent) =>
 /** The columns a view keeps to itself, which the user can't change. */
 const ownColumns = (view: FolderView) => (view.isBin() ? BIN_COLUMNS : view.query() ? SEARCH_COLUMNS : undefined);
 const rowPath = (view: FolderView, row: Row) => join(row.location || view.folder()!.path, row.name);
-const emptyText = (view: FolderView) => {
-  if (view.searching()) return "Searching…";
-  if (view.filtered()) return "Nothing fits the filter.";
-  if (view.isBin()) return "The Recycle Bin is empty.";
-  return view.query() ? "No matches." : "This folder is empty.";
-};
 const toggleFlat = (view: FolderView) => view.search(view.query() === FLAT_QUERY ? "" : FLAT_QUERY);
 
 /** Glyphs a folder can wear, from Segoe Fluent Icons. */
@@ -213,8 +215,20 @@ export function App() {
   const tabs = createTabs();
   /** `from` is the path crumb whose menu this is. */
   const [menu, setMenu] = createSignal<{ x: number; y: number; items: MenuItem[]; from?: string }>();
+  /** The settings are a tab of their own: it can exist without being the one in front. */
   const [settingsOpen, setSettingsOpen] = createSignal(false);
+  const [settingsShown, setSettingsShown] = createSignal(false);
+  const showSettings = () => {
+    setSettingsOpen(true);
+    setSettingsShown(true);
+  };
+  const closeSettings = () => {
+    setSettingsShown(false);
+    setSettingsOpen(false);
+    tabs.activeView().list()?.focus();
+  };
   const [paletteOpen, setPaletteOpen] = createSignal(false);
+  const [edgeShown, setEdgeShown] = createSignal(drawsEdge);
   const [places, setPlaces] = createSignal<Places>();
   const [deleting, setDeleting] = createSignal<DeleteRequest>();
   const [renaming, setRenaming] = createSignal<RenameRequest>();
@@ -222,15 +236,20 @@ export function App() {
   const [selectingPattern, setSelectingPattern] = createSignal<FolderView>();
   const [namingTag, setNamingTag] = createSignal<FolderView>();
   const [previewing, setPreviewing] = createSignal<{ view: FolderView; at: PreviewAt }>();
-  /** The dialog covers the tabs, so nothing behind it may change. */
-  const dialogOpen = () =>
-    settingsOpen() ||
+  /** A sheet covers the tabs, so nothing behind it may change. */
+  const sheetOpen = () =>
     !!deleting() ||
     !!renaming() ||
     !!filtering() ||
     !!selectingPattern() ||
     !!namingTag() ||
     !!previewing();
+  /** The settings page stands where the files do, so the keys of the files rest too. */
+  const dialogOpen = () => settingsShown() || sheetOpen();
+  // Going to a folder, by any road, puts the files back in front.
+  createEffect(
+    on([tabs.active, () => tabs.activeView().arrival()], () => setSettingsShown(false), { defer: true }),
+  );
   const jobs = createJobs(tabs.allViews);
   const actions = createFileActions(jobs, setDeleting, () => tabs.active().other(), setRenaming);
   const shell = createShellItems(jobs, actions);
@@ -318,6 +337,7 @@ export function App() {
       return;
     }
     comeForward().catch(console.error);
+    setSettingsShown(false);
     // A tab showing search results there can't select by name, so it gets a plain tab instead.
     const shown =
       ask.select.length > 0 &&
@@ -614,6 +634,7 @@ export function App() {
           ...(view.layout() === "grid" ? tileItems : rowItems),
           { label: "Windows icons", divider: true, checked: windowsIcons(), action: () => setWindowsIcons(!windowsIcons()) },
           { label: "Details panel", checked: detailsPanel(), action: toggleDetails },
+          { label: "Status bar", checked: statusBar(), action: () => setStatusBar(!statusBar()) },
           { label: "Keep sidebar open", checked: sidebarOpen(), action: toggleSidebar },
         ],
       },
@@ -681,7 +702,40 @@ export function App() {
     setMenu({ x, y, items: [...fileItems, ...viewItems(view), ...shellItems] });
   }
 
+  /** What a list with no rows says, and the few things worth doing from there. */
+  function emptyState(view: FolderView): Empty {
+    if (view.searching()) return { art: "search", text: "Searching…", actions: [] };
+    if (view.filtered()) {
+      return {
+        art: "filter",
+        text: "Nothing fits the filter.",
+        actions: [
+          { label: "Clear filter", run: () => view.setFilterForm(NO_FILTER) },
+          { label: "Change filter", keys: "Ctrl+Shift+F", run: () => setFiltering(view) },
+        ],
+      };
+    }
+    if (view.isBin()) return { art: "bin", text: "The Recycle Bin is empty.", actions: [] };
+    if (view.query()) {
+      const flat = view.query() === FLAT_QUERY;
+      return {
+        art: "search",
+        text: flat ? "No files in this folder or the ones inside it." : "No matches.",
+        actions: [{ label: flat ? "Show this folder only" : "Clear search", keys: "Esc", run: () => view.search("") }],
+      };
+    }
+    return {
+      art: "folder",
+      text: "This folder is empty.",
+      actions: [
+        { label: "New folder", keys: "Ctrl+Shift+N", run: () => actions.newItem(view, true) },
+        { label: "Paste", keys: "Ctrl+V", run: () => actions.paste(view), enabled: clipboardCanPaste },
+      ],
+    };
+  }
+
   const newTab = async () => {
+    setSettingsShown(false);
     const path = tabs.activeView().folder()?.path;
     if (path) await tabs.add([path]);
   };
@@ -772,7 +826,13 @@ export function App() {
       { label: "Undo", keys: "Ctrl+Z", run: () => actions.undo(view) },
       { label: "Redo", keys: "Ctrl+Y", run: () => actions.redo(view) },
       { label: "Delete", keys: "Delete", run: () => actions.remove(view, false) },
-      { label: "Settings", keys: "Ctrl+,", run: () => setSettingsOpen(true) },
+      { label: statusBar() ? "Hide status bar" : "Always show status bar", run: () => setStatusBar(!statusBar()) },
+      ...BACKDROPS.map(({ id, label }) => ({ label: `Window backdrop: ${label}`, run: () => setBackdrop(id) })),
+      ...SCALES.map((scale) => ({
+        label: `Text and interface size: ${Math.round(scale * 100)}%`,
+        run: () => setUiScale(scale),
+      })),
+      { label: "Settings", keys: "Ctrl+,", run: showSettings },
       { label: "Map network drive", run: () => mapDrive().catch(jobs.report) },
       { label: "Disconnect network drive", run: () => disconnectDrive().catch(jobs.report) },
       goTo("Recycle Bin", BIN_PATH),
@@ -815,8 +875,19 @@ export function App() {
     // Left alone, this key prints the page.
     if (event.ctrlKey && key === "p") {
       event.preventDefault();
-      if (!dialogOpen()) togglePalette();
+      if (!sheetOpen()) togglePalette();
       return;
+    }
+
+    // The settings tab closes as a tab does, and steps aside for the keys that go to another tab.
+    if (settingsShown() && !sheetOpen() && !paletteOpen()) {
+      const closes = key === "escape" || (event.ctrlKey && (key === "w" || key === ","));
+      const leaves = event.ctrlKey && (key === "tab" || key === "pagedown" || key === "pageup" || !!digit);
+      if (closes) {
+        event.preventDefault();
+        return closeSettings();
+      }
+      if (leaves) setSettingsShown(false);
     }
 
     if (dialogOpen() || paletteOpen()) {
@@ -849,7 +920,7 @@ export function App() {
     else if (event.ctrlKey && event.shiftKey && digit === 2) view.setLayout("grid");
     else if (event.ctrlKey && !event.shiftKey && digit) tabs.activateAt(digit - 1);
     else if (event.ctrlKey && key === "h") toggleHidden();
-    else if (event.ctrlKey && key === ",") setSettingsOpen(true);
+    else if (event.ctrlKey && key === ",") showSettings();
     else if (event.ctrlKey && (key === "+" || key === "=")) resizeTiles(view, TILE_STEP);
     else if (event.ctrlKey && key === "-") resizeTiles(view, -TILE_STEP);
     else if (key === "backspace" || !isBrowserKey(event, key)) return;
@@ -946,7 +1017,7 @@ export function App() {
                 columns={ownColumns(view) ?? columns()}
                 fixedColumns={ownColumns(view) !== undefined}
                 cut={view.query() ? undefined : cutNames(view.folder()!.path)}
-                emptyText={emptyText(view)}
+                empty={emptyState(view)}
                 match={view.query() === FLAT_QUERY ? undefined : view.query()}
                 active={tab === tabs.active() && view === tab.active()}
                 layout={view.layout()}
@@ -976,8 +1047,21 @@ export function App() {
   };
 
   return (
-    <div class="shell" data-sidebar={sidebarOpen() ? "open" : "rail"}>
-      <TitleBar tabs={tabs} onNewTab={newTab} />
+    <div class="shell" data-sidebar={sidebarOpen() ? "open" : "rail"} data-arriving={edgeShown() ? "" : undefined}>
+      <TitleBar
+        tabs={tabs}
+        onNewTab={newTab}
+        settings={
+          settingsOpen()
+            ? {
+                active: settingsShown(),
+                onActivate: showSettings,
+                onLeave: () => setSettingsShown(false),
+                onClose: closeSettings,
+              }
+            : undefined
+        }
+      />
       <aside class="sidebar">
         <div class="sidebar-panel">
         <span class="logo">Perli</span>
@@ -991,7 +1075,7 @@ export function App() {
           class="settings-button"
           aria-label={updateState() === "ready" ? "Settings, update ready" : "Settings"}
           aria-keyshortcuts="Control+,"
-          onClick={() => setSettingsOpen(true)}
+          onClick={showSettings}
         >
           <span class="settings-icon" aria-hidden="true">
             {ICON_SETTINGS}
@@ -1011,7 +1095,7 @@ export function App() {
         />
         <For each={tabs.tabs()}>
           {(tab) => (
-            <div class="panes" classList={{ "panes-swapped": tab.swapped() }} hidden={tab !== tabs.active()}>
+            <div class="panes" classList={{ "panes-swapped": tab.swapped() }} hidden={tab !== tabs.active() || settingsShown()}>
               <For each={tab.panes()}>{(view) => <Pane tab={tab} view={view} />}</For>
               <Show when={detailsPanel() && tab === tabs.active()}>
                 <DetailsPanel view={tab.active()} />
@@ -1019,6 +1103,15 @@ export function App() {
             </div>
           )}
         </For>
+        <Settings
+          open={settingsOpen()}
+          shown={settingsShown()}
+          onClose={closeSettings}
+          onToggleSizes={toggleSizes}
+          onTagsChanged={showTagChange}
+          onDeleteTag={askDeleteTag}
+          onBeforeUpdate={flushSession}
+        />
       </main>
       <Show when={menu()} keyed>
         {(open) => <Menu x={open.x} y={open.y} items={open.items} onClose={closeMenu} />}
@@ -1061,15 +1154,14 @@ export function App() {
         onClose={() => setPaletteOpen(false)}
         focusList={() => tabs.activeView().list()?.focus()}
       />
-      <Settings
-        open={settingsOpen()}
-        onClose={() => setSettingsOpen(false)}
-        onToggleSizes={toggleSizes}
-        onTagsChanged={showTagChange}
-        onDeleteTag={askDeleteTag}
-        onBeforeUpdate={flushSession}
-      />
       <Tooltip />
+      <Show when={edgeShown()}>
+        <span
+          class="edge-draw"
+          role="presentation"
+          onAnimationEnd={(event) => event.animationName === "edge-fade" && setEdgeShown(false)}
+        />
+      </Show>
     </div>
   );
 }

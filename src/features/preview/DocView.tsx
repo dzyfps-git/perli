@@ -1,7 +1,9 @@
 import { createEffect, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import type { BookHeading } from "../../api";
 import { saved, stored } from "../filelist/prefs";
+import { ToolCog } from "../../ui/Controls";
 import { createFind } from "./FindBar";
+import { contentsOpen, setContentsOpen, VIEWER_SETTINGS } from "./viewerPrefs";
 
 const ICON_CONTENTS = "";
 const ICON_FIND = "";
@@ -9,7 +11,6 @@ const ICON_SMALLER = "";
 const ICON_BIGGER = "";
 
 const SIZES = [13, 14, 15, 16, 18, 20, 22, 24];
-const [contentsOpen, setContentsOpen] = stored("doc-contents", saved("doc-contents") === true);
 const [bookSize, setBookSize] = stored("book-size", (saved("book-size") as number | null) ?? 16);
 /** A heading counts as reached once it is this close to the top. */
 const REACHED_PX = 32;
@@ -319,6 +320,7 @@ export function BookView(live: BookViewProps) {
         <button class="strip-icon" aria-label="Bigger text" aria-keyshortcuts="+" disabled={bookSize() >= SIZES.at(-1)!} onClick={() => size(1)}>
           {ICON_BIGGER}
         </button>
+        <ToolCog label="Book settings" items={VIEWER_SETTINGS["Documents and books"]} />
       </div>
       <Show when={resumed()}>
         <div class="doc-resumed" role="status">

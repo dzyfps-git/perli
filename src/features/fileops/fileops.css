@@ -194,10 +194,6 @@
   color: var(--text-muted);
 }
 
-.job-all input {
-  margin: 0;
-  accent-color: var(--accent);
-}
 
 .job-icon:focus-visible,
 .job-choice:focus-visible {
@@ -342,5 +338,114 @@
 @media (prefers-reduced-motion: reduce) {
   .job-fill-done {
     animation: none;
+  }
+}
+
+/* The files being dragged, gathered into a small deck under the pointer. */
+.drag-deck {
+  position: fixed;
+  inset: 0 auto auto 0;
+  z-index: 100;
+  width: 44px;
+  height: 52px;
+  margin: 10px 0 0 14px;
+  pointer-events: none;
+  transform-origin: 50% 0;
+  transition: rotate 120ms ease-out;
+  animation: drag-deck-in var(--motion-spring);
+}
+
+.drag-card {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--overlay-tint);
+  box-shadow: var(--shadow);
+  backdrop-filter: var(--blur);
+}
+
+.drag-card-2 {
+  rotate: -7deg;
+  translate: -4px 2px;
+}
+
+.drag-card-3 {
+  rotate: 9deg;
+  translate: 5px 3px;
+}
+
+.drag-card .file-icon {
+  width: 24px;
+  height: 24px;
+}
+
+.drag-count {
+  position: absolute;
+  inset: -7px -9px auto auto;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: var(--accent-line);
+  color: light-dark(#fff, #0e0e11);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 18px;
+  text-align: center;
+}
+
+@keyframes drag-deck-in {
+  from {
+    scale: 0.5;
+    opacity: 0;
+  }
+}
+
+/* Every running job, as one thin thread along the window's top edge. */
+.job-thread {
+  position: fixed;
+  inset: 0 0 auto;
+  z-index: 90;
+  height: 2px;
+  background: var(--accent-line);
+  transform-origin: left;
+  pointer-events: none;
+  transition:
+    transform 240ms ease-out,
+    opacity 300ms ease-out;
+}
+
+.job-thread[data-paused] {
+  opacity: 0.35;
+}
+
+/* At the end the thread glows once along its whole length, and lets go. */
+.job-thread[data-done] {
+  animation: job-thread-done 700ms ease-out forwards;
+}
+
+@keyframes job-thread-done {
+  30% {
+    box-shadow: 0 0 12px 2px var(--accent);
+    opacity: 1;
+  }
+
+  to {
+    box-shadow: 0 0 0 0 transparent;
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .drag-deck,
+  .job-thread[data-done] {
+    animation: none;
+  }
+
+  .job-thread[data-done] {
+    opacity: 0;
   }
 }

@@ -1,6 +1,7 @@
 import { createSignal, onMount } from "solid-js";
 import type { Measured } from "../../api";
 import { formatSize } from "../../ui/format";
+import { openSheet } from "../../ui/sheet";
 import "../settings/settings.css";
 import "./fileops.css";
 
@@ -21,6 +22,7 @@ export function ConfirmDelete(props: { request: DeleteRequest; onClose: () => vo
   const [failure, setFailure] = createSignal<string>();
   let dialog!: HTMLDialogElement;
   let cancel!: HTMLButtonElement;
+  let close!: ReturnType<typeof openSheet>;
 
   function summary() {
     if (props.request.note) return props.request.note;
@@ -31,12 +33,12 @@ export function ConfirmDelete(props: { request: DeleteRequest; onClose: () => vo
   }
 
   function confirm() {
-    dialog.close();
+    close();
     props.request.confirm();
   }
 
   onMount(() => {
-    dialog.showModal();
+    close = openSheet(dialog);
     cancel.focus();
     props.request
       .measure?.()
@@ -49,7 +51,7 @@ export function ConfirmDelete(props: { request: DeleteRequest; onClose: () => vo
       <h2>{props.request.title}</h2>
       <p class="confirm-summary">{summary()}</p>
       <div class="confirm-buttons">
-        <button ref={cancel} class="job-choice" onClick={() => dialog.close()}>
+        <button ref={cancel} class="job-choice" onClick={() => close()}>
           {props.request.cancelLabel ?? "Cancel"}
         </button>
         <button
