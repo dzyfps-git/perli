@@ -1,12 +1,13 @@
 import { createSignal } from "solid-js";
 import { windowsAccent } from "../../api";
 import { saved, stored } from "../filelist/prefs";
-import { newPalette, savedPalettes, windowsColors, type Palette } from "./palettes";
+import { isDaytime, newPalette, savedPalettes, windowsColors, type Palette } from "./palettes";
 
 export const THEMES = [
   { id: "system", label: "System" },
   { id: "light", label: "Light" },
   { id: "dark", label: "Dark" },
+  { id: "hour", label: "By the hour" },
 ] as const;
 
 export const ACCENTS = [
@@ -51,6 +52,18 @@ export const [uiScale, setUiScale] = stored<number>(
   "ui-scale",
   SCALES.includes(savedScale as number) ? (savedScale as number) : 1,
 );
+
+const [clock, setClock] = createSignal(new Date());
+
+/** The time "By the hour" goes by, read again when it may have turned. */
+export const readClock = () => setClock(new Date());
+
+/** Light or dark as drawn. "By the hour" is light by day and dark by night. */
+export const drawnTheme = (value: Theme = theme()) =>
+  value === "hour" ? (isDaytime(clock()) ? "light" : "dark") : value;
+
+/** The clock moved past a turn since it was last read, as after the PC slept. */
+export const turnedSinceRead = () => isDaytime(clock()) !== isDaytime(new Date());
 
 const [windowsColor, setWindowsColor] = createSignal<string | null>(null);
 

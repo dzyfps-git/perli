@@ -15,7 +15,7 @@ use windows::Win32::Security::Cryptography::{
     BCRYPT_MD5_ALG_HANDLE, BCRYPT_SHA1_ALG_HANDLE, BCRYPT_SHA256_ALG_HANDLE, BCRYPT_SHA512_ALG_HANDLE,
 };
 use windows::Win32::System::Com::CoTaskMemFree;
-use windows::Win32::System::Com::StructuredStorage::{PropVariantClear, PropVariantToFileTime};
+use windows::Win32::System::Com::StructuredStorage::{PropVariantClear, PropVariantToFileTime, PropVariantToInt32};
 use windows::Win32::System::Variant::PSTF_UTC;
 use windows::Win32::UI::Shell::PropertiesSystem::{
     IPropertyDescription, IPropertyStore, PSFormatPropertyValue, PSGetPropertyDescription, PSGetPropertyKeyFromName,
@@ -57,6 +57,8 @@ pub enum Preview {
     Video,
     /// Anything else shows Windows' own picture of it.
     Picture,
+    /// A file only in the cloud, so nothing of it is read. Windows' picture shows, if it has one.
+    Cloud,
 }
 
 /// The part of `bytes` that is whole UTF-8 text, or `None` if it is not text at all. A cut in the
@@ -78,8 +80,11 @@ fn is_markdown(path: &Path) -> bool {
 
 /// What a file shows, starting at `offset` for the later pieces of a text.
 pub fn read(path: &Path, offset: u64) -> Preview {
-    if path.is_dir() || thumbs::is_online_only(path) {
+    if path.is_dir() {
         return Preview::Picture;
+    }
+    if thumbs::is_online_only(path) {
+        return Preview::Cloud;
     }
     if offset == 0 {
         if let Some(preview) = inside_of(path) {
@@ -344,6 +349,17 @@ fn date(store: &IPropertyStore, name: &str) -> Option<u64> {
     let _ = unsafe { PropVariantClear(&raw mut value) };
     let time = time.ok()?;
     unix_ms((u64::from(time.dwHighDateTime) << 32) | u64::from(time.dwLowDateTime))
+}
+
+/// A whole number property, such as a drive's `System.Volume.BitLockerProtection`.
+pub fn whole_number(path: &Path, name: &str) -> Option<i32> {
+    let _com = Com::enter();
+    let store = store_of(path)?;
+    let key = key_of(name)?;
+    let mut value = unsafe { store.GetValue(&raw const key) }.ok()?;
+    let number = unsafe { PropVariantToInt32(&raw const value) };
+    let _ = unsafe { PropVariantClear(&raw mut value) };
+    number.ok()
 }
 
 /// FILETIME ticks since 1601 as milliseconds since 1970. Nothing for a time before 1970 or none.

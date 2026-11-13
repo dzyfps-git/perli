@@ -13,6 +13,7 @@ import {
   fetchPictureFile,
   fetchRows,
   fetchThumb,
+  keepOnDevice,
   modelFile,
   openAudio,
   openLink,
@@ -98,6 +99,10 @@ const ICON_CLOSE = "\uE711";
 const ICON_FULL = "\uE740";
 const ICON_WINDOWED = "\uE73F";
 const ICON_STRIP = "\uE8FD";
+const ICON_CLOUD = "\uE753";
+/** How often a file the sync app is fetching is looked at, and for how long at most. */
+const FETCH_POLL_MS = 1000;
+const FETCH_TRIES = 300;
 /** How many files the strip shows on each side of the one in the preview. */
 const BESIDE = 5;
 /** A size the preview is never saved smaller than, so a slip of the hand can't lose it. */
@@ -142,6 +147,8 @@ export function QuickPreview(props: {
   const [copied, setCopied] = createSignal(false);
   /** The slideshow goes from picture to picture, so it lives here and not in one of them. */
   const [slideshow, setSlideshow] = createSignal(false);
+  /** The sync app is fetching the file shown, so it can be previewed. */
+  const [fetching, setFetching] = createSignal(false);
   let dialog!: HTMLDialogElement;
   /** Sends the sheet back to the row it grew from. Only the preview over the list has it. */
   let fold: ((after?: () => void) => void) | undefined;
@@ -161,6 +168,7 @@ export function QuickPreview(props: {
   async function show(at: number) {
     const mine = ++ticket;
     setFailure(undefined);
+    setFetching(false);
     const { view } = props.at;
     snapshot = props.at.snapshot();
     try {
@@ -175,6 +183,28 @@ export function QuickPreview(props: {
       slideIn();
     } catch (reason) {
       if (mine === ticket) setFailure(String(reason));
+    }
+  }
+
+  /**
+   * Asks the sync app to keep the file on this PC, then shows its real preview once it is here.
+   * Nothing downloads until this is asked for.
+   */
+  async function fetchShown() {
+    const { view } = props.at;
+    const [at, shot, mine] = [index(), snapshot, ticket];
+    setFetching(true);
+    try {
+      await keepOnDevice({ view, request: shot, rows: [at] }, true);
+      for (let tries = 0; tries < FETCH_TRIES && mine === ticket; tries++) {
+        if ((await previewRow(view, shot, at)).kind !== "cloud") return void (mine === ticket && show(at));
+        await new Promise((done) => setTimeout(done, FETCH_POLL_MS));
+      }
+      if (mine === ticket) setFailure("It is still downloading. Try again in a moment.");
+    } catch (reason) {
+      if (mine === ticket) setFailure(String(reason));
+    } finally {
+      if (mine === ticket) setFetching(false);
     }
   }
 
@@ -519,6 +549,20 @@ export function QuickPreview(props: {
               {preview.kind === "text" && <TextView {...text(row()!, preview)} />}
               {preview.kind === "markdown" && <MarkdownView {...markdown(row()!, preview.html, preview.source)} />}
               {preview.kind === "picture" && <PictureView {...picture(row()!)} />}
+              {preview.kind === "cloud" && (
+                <>
+                  <PictureView {...picture(row()!)} />
+                  <div class="preview-cloud" role="status">
+                    <span class="preview-cloud-icon" aria-hidden="true">
+                      {ICON_CLOUD}
+                    </span>
+                    <span>Only online · {formatSize(row()!.size)}</span>
+                    <button class="preview-chip" disabled={fetching()} onClick={() => void fetchShown()}>
+                      {fetching() ? "Downloading…" : "Download to preview"}
+                    </button>
+                  </div>
+                </>
+              )}
               {preview.kind === "comic" && <ComicView {...comic(row()!, preview.pages)} />}
               {preview.kind === "book" && <BookView {...book(row()!, preview)} />}
               {preview.kind === "archive" && <ArchiveView {...archive(preview.entries, preview.more)} />}

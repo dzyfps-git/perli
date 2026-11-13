@@ -2,6 +2,8 @@
 //! need nothing special, because every file call already takes UNC paths.
 
 use std::ptr::null_mut;
+use std::sync::mpsc;
+use std::time::Duration;
 
 use serde::Serialize;
 use windows::core::{Error, Result, BOOL, HSTRING, PCWSTR, PWSTR};
@@ -22,6 +24,40 @@ use windows::Win32::Storage::FileSystem::{
 use windows::Win32::System::WindowsProgramming::DRIVE_REMOTE;
 
 use crate::ops::Com;
+
+/// How long another computer gets to answer before a folder on it is called out of reach.
+const ANSWER_WAIT: Duration = Duration::from_secs(4);
+
+/// False when asking about `path` takes longer than a few seconds, as it does for a server that
+/// is off. Any answer counts, even "no such folder". The question goes on in the background,
+/// since Windows can't be stopped from waiting.
+// ponytail: a sleepy NAS that needs longer to wake reads as out of reach once; Try again finds it.
+pub fn answers(path: &str) -> bool {
+    let (sender, receiver) = mpsc::channel();
+    let path = path.to_string();
+    std::thread::spawn(move || {
+        let _ = std::fs::metadata(&path);
+        let _ = sender.send(());
+    });
+    receiver.recv_timeout(ANSWER_WAIT).is_ok()
+}
+
+/// Fails with a plain message when `path` is on another computer that isn't answering, so a
+/// folder open says so in seconds instead of waiting on Windows for a minute.
+pub fn must_answer(path: &str) -> Result<()> {
+    if !is_remote(path) || answers(path) {
+        return Ok(());
+    }
+    Err(Error::new(E_FAIL, format!("{} isn't answering. It may be off, or out of reach of this PC.", place_of(path))))
+}
+
+/// The `\\server` or `Z:` part of `path`, to say what isn't answering.
+pub fn place_of(path: &str) -> String {
+    match path.strip_prefix(r"\\") {
+        Some(rest) => format!(r"\\{}", rest.split('\\').next().unwrap_or(rest)),
+        None => path.get(..2).unwrap_or(path).to_string(),
+    }
+}
 
 /// What Windows' dialogs return when the user cancels them.
 const CANCELLED: WIN32_ERROR = WIN32_ERROR(u32::MAX);

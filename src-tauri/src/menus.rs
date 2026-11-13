@@ -398,16 +398,16 @@ pub fn pick_folder(main: isize) -> Result<Option<String>> {
     })
 }
 
-/// Windows' file picker for a file of Perli's settings, to save one or to open one. Nothing when
-/// the user backs out.
-pub fn pick_settings_file(main: isize, save: bool) -> Result<Option<String>> {
+/// Windows' file picker for a file of Perli's settings or a palette: to save one as `save_as`, or,
+/// with no name, to open one. Nothing when the user backs out.
+pub fn pick_settings_file(main: isize, save_as: Option<String>) -> Result<Option<String>> {
     on_worker(move |_| unsafe {
-        let class = if save { &FileSaveDialog } else { &FileOpenDialog };
+        let class = if save_as.is_some() { &FileSaveDialog } else { &FileOpenDialog };
         let dialog: IFileDialog = CoCreateInstance(class, None, CLSCTX_INPROC_SERVER)?;
-        dialog.SetFileTypes(&[COMDLG_FILTERSPEC { pszName: w!("Perli settings"), pszSpec: w!("*.json") }])?;
+        dialog.SetFileTypes(&[COMDLG_FILTERSPEC { pszName: w!("Perli settings and palettes"), pszSpec: w!("*.json") }])?;
         dialog.SetDefaultExtension(w!("json"))?;
-        if save {
-            dialog.SetFileName(w!("Perli settings.json"))?;
+        if let Some(name) = &save_as {
+            dialog.SetFileName(&HSTRING::from(name.as_str()))?;
         }
         match dialog.Show(Some(HWND(main as _))) {
             Ok(()) => Ok(Some(take_text(dialog.GetResult()?.GetDisplayName(SIGDN_FILESYSPATH)?))),

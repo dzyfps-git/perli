@@ -2,7 +2,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use windows::core::{Interface, HSTRING};
@@ -22,6 +22,8 @@ pub struct Recent {
     name: String,
     path: String,
     is_dir: bool,
+    /// When it was last opened, in milliseconds since 1970.
+    opened: u64,
 }
 
 /// Blocks, because each target is checked on disk, so call it off the main thread.
@@ -29,8 +31,27 @@ pub fn read(limit: usize) -> Vec<Recent> {
     places::known_folder(&FOLDERID_Recent).map_or_else(Vec::new, |folder| read_from(Path::new(&folder), limit))
 }
 
-fn read_from(folder: &Path, limit: usize) -> Vec<Recent> {
+/// Takes `target` off Windows' list of recent items, as Explorer's "Remove from Quick access"
+/// does: every shortcut in the Recent folder that points to it goes. The file itself stays.
+pub fn forget(target: &str) -> std::io::Result<usize> {
+    let folder = places::known_folder(&FOLDERID_Recent).ok_or_else(|| std::io::Error::other("Windows has no Recent folder"))?;
+    forget_in(Path::new(&folder), target)
+}
+
+fn forget_in(folder: &Path, target: &str) -> std::io::Result<usize> {
     let _com = Com::enter();
+    let mut gone = 0;
+    for (_, shortcut) in shortcuts_in(folder) {
+        if target_of(&shortcut).is_some_and(|(path, _)| path.eq_ignore_ascii_case(target)) {
+            fs::remove_file(&shortcut)?;
+            gone += 1;
+        }
+    }
+    Ok(gone)
+}
+
+/// The shortcuts in `folder`, newest first.
+fn shortcuts_in(folder: &Path) -> Vec<(SystemTime, PathBuf)> {
     let mut shortcuts: Vec<(SystemTime, PathBuf)> = fs::read_dir(folder)
         .into_iter()
         .flatten()
@@ -38,10 +59,14 @@ fn read_from(folder: &Path, limit: usize) -> Vec<Recent> {
         .filter(|entry| entry.path().extension().is_some_and(|extension| extension.eq_ignore_ascii_case("lnk")))
         .filter_map(|entry| Some((entry.metadata().ok()?.modified().ok()?, entry.path())))
         .collect();
-    shortcuts.sort_by(|a, b| b.0.cmp(&a.0));
+    shortcuts.sort_by_key(|shortcut| std::cmp::Reverse(shortcut.0));
+    shortcuts
+}
 
+fn read_from(folder: &Path, limit: usize) -> Vec<Recent> {
+    let _com = Com::enter();
     let mut found: Vec<Recent> = Vec::new();
-    for (_, shortcut) in shortcuts {
+    for (when, shortcut) in shortcuts_in(folder) {
         if found.len() == limit {
             break;
         }
@@ -62,7 +87,8 @@ fn read_from(folder: &Path, limit: usize) -> Vec<Recent> {
         let name = Path::new(&target)
             .file_name()
             .map_or_else(|| target.clone(), |name| name.to_string_lossy().into_owned());
-        found.push(Recent { name, path: target, is_dir });
+        let opened = when.duration_since(UNIX_EPOCH).map_or(0, |since| since.as_millis() as u64);
+        found.push(Recent { name, path: target, is_dir, opened });
     }
     found
 }
@@ -122,8 +148,17 @@ mod tests {
         assert_eq!(names, [("folder", true), ("new.txt", false), ("old.txt", false)]);
         assert_eq!(read_from(&links, 1).len(), 1);
         assert_eq!(target_of(&links.join("folder.lnk")).map(|(_, dir)| dir), Some(true), "the shortcut knows");
+        assert!(found[0].opened > found[1].opened, "newest first, with when");
+
+        assert_eq!(forget_in(&links, &files.join("new.txt").to_string_lossy()).unwrap(), 2, "both shortcuts to it");
+        let left: Vec<_> = read_from(&links, 10).into_iter().map(|recent| recent.name).collect();
+        assert_eq!(left, ["folder", "old.txt"]);
+        assert!(files.join("new.txt").exists(), "the file itself stays");
         assert!(network::is_remote(r"\\server\share\a.txt"));
         assert!(!network::is_remote(&files.to_string_lossy()));
+        assert_eq!(network::place_of(r"\\server\share\a.txt"), r"\\server");
+        assert_eq!(network::place_of(r"Z:\a.txt"), "Z:");
+        assert!(network::must_answer(&files.to_string_lossy()).is_ok(), "this PC always answers");
         fs::remove_dir_all(&root).unwrap();
     }
 }

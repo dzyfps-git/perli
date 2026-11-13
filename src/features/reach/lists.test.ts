@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { dayOf, looksLikeName, readTyped, visited, withPaths } from "./lists.ts";
+import { dayOf, looksLikeName, readTyped, serverOf, visited, withPaths } from "./lists.ts";
 
 test("a path goes on the shelf once, whatever its case", () => {
   assert.deepEqual(withPaths(["C:\\a"], ["c:\\A", "C:\\b", "C:\\B"]), ["C:\\a", "C:\\b"]);
@@ -36,4 +36,12 @@ test("steps of the activity log fall under their day", () => {
   assert.equal(dayOf(new Date(2026, 10, 10, 23).getTime(), now), "Yesterday");
   assert.equal(dayOf(0, now), "Earlier");
   assert.notEqual(dayOf(new Date(2026, 10, 2).getTime(), now), "Today");
+});
+
+test("a server is told from the path of a folder on it", () => {
+  assert.equal(serverOf("\\\\nas\\photos\\2026"), "\\\\nas");
+  assert.equal(serverOf("\\\\nas"), "\\\\nas");
+  assert.equal(serverOf("C:\\Users"), undefined);
+  assert.equal(serverOf("\\\\?\\C:\\long"), undefined, "a long path is this PC");
+  assert.equal(serverOf("\\\\.\\pipe"), undefined);
 });

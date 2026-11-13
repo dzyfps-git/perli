@@ -51,10 +51,53 @@
 }
 
 .preview-body {
+  position: relative;
   flex: 1;
   min-height: 0;
   overflow: auto;
   outline: none;
+}
+
+/* A file only in the cloud says so over Windows' picture of it, and asks before it downloads. */
+.preview-cloud {
+  position: absolute;
+  inset: auto 50% var(--space-4) auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-1) var(--space-1) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--overlay-tint);
+  backdrop-filter: var(--blur);
+  box-shadow: var(--shadow);
+  font-size: 12px;
+  white-space: nowrap;
+  translate: 50% 0;
+  animation: preview-cloud-in var(--motion-slide);
+}
+
+.preview-cloud-icon {
+  color: var(--accent);
+  font-family: var(--font-icons);
+  font-size: 14px;
+}
+
+.preview-cloud .preview-chip:disabled {
+  opacity: 0.7;
+}
+
+@keyframes preview-cloud-in {
+  from {
+    opacity: 0;
+    translate: 50% 8px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .preview-cloud {
+    animation: none;
+  }
 }
 
 .preview-text {

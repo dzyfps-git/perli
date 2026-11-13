@@ -127,6 +127,8 @@ export function createFolderView(id: number, saved?: SavedPane) {
   /** Changes when the list should start over. A reload keeps it, so nothing blinks. */
   const [arrival, setArrival] = createSignal(0);
   const [error, setError] = createSignal<string>();
+  /** The folder whose open failed last, which Try again opens. Nothing when a reload failed. */
+  let failedAt: string | undefined;
   const [trail, setTrail] = createSignal("");
   const [backStack, setBackStack] = createSignal<string[]>([]);
   const [forwardStack, setForwardStack] = createSignal<string[]>([]);
@@ -279,6 +281,7 @@ export function createFolderView(id: number, saved?: SavedPane) {
       const opened = await openFolder(id, request, folder()?.request ?? 0, target, wanted);
       if (request !== latestRequest) return undefined;
       setError(undefined);
+      failedAt = undefined;
       leavingSearch = !!searched;
       batch(() => {
         // Text typed while this opened is a search of the new folder, which is waiting to start.
@@ -304,7 +307,10 @@ export function createFolderView(id: number, saved?: SavedPane) {
       else noteColumnSet(opened).catch(console.error);
       return opened;
     } catch (failure) {
-      if (request === latestRequest && !quiet) setError(String(failure));
+      if (request === latestRequest && !quiet) {
+        failedAt = target;
+        setError(String(failure));
+      }
       return undefined;
     } finally {
       settle(request);
@@ -490,6 +496,9 @@ export function createFolderView(id: number, saved?: SavedPane) {
     return opened;
   }
 
+  /** Opens again what failed: the folder that wouldn't open, or else the one shown. */
+  const retry = () => (failedAt ? open(failedAt) : refresh());
+
   /** Also retries a saved folder that failed to open. */
   async function refresh() {
     if (query()) return reload();
@@ -543,6 +552,7 @@ export function createFolderView(id: number, saved?: SavedPane) {
     },
     order,
     error,
+    retry,
     trail,
     sort: shownSort,
     /** The folder's own sort, which a search leaves alone. */
