@@ -1,0 +1,447 @@
+/* Perli's own versions of Windows' dialogs: Properties, Open with, and the network drive pair. */
+
+.properties,
+.app-picker,
+.drive-sheet {
+  display: flex;
+  flex-direction: column;
+  max-height: min(640px, 88vh);
+}
+
+.properties:not([open]),
+.app-picker:not([open]),
+.drive-sheet:not([open]) {
+  display: none;
+}
+
+.properties {
+  width: min(460px, 92vw);
+}
+
+.properties-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-bottom: var(--space-3);
+}
+
+.properties-picture {
+  flex: none;
+  width: 48px;
+  height: 48px;
+  object-fit: contain;
+  border-radius: var(--radius);
+  animation: properties-settle var(--motion-spring) backwards;
+}
+
+.properties-title {
+  min-width: 0;
+}
+
+.properties-title h2 {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  user-select: text;
+}
+
+.properties-kind,
+.app-what {
+  margin: 2px 0 0;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.properties-body {
+  min-height: 0;
+  margin: 0 calc(var(--space-2) * -1);
+  padding: 0 var(--space-2);
+  overflow-y: auto;
+}
+
+/* Label beside value here, since the sheet is wide enough for both. */
+.properties-facts {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: var(--space-1) var(--space-3);
+  align-items: baseline;
+}
+
+.properties-facts dt,
+.properties-facts dd {
+  margin: 0;
+  animation: properties-settle var(--motion-slide) backwards;
+}
+
+.properties-place {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.properties-place span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.properties-copy {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: calc(var(--radius) - 2px);
+  background: transparent;
+  color: var(--text-muted);
+  font: 12px var(--font-icons);
+  opacity: 0;
+  transition:
+    opacity var(--motion),
+    background var(--motion),
+    scale var(--motion-spring);
+}
+
+.properties-place:hover .properties-copy,
+.properties-copy:focus-visible {
+  opacity: 1;
+}
+
+.properties-copy:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.properties-copy:active {
+  scale: 0.86;
+}
+
+.properties-copy:focus-visible,
+.properties-link:focus-visible,
+.properties-tag:focus-visible,
+.app-row:focus-visible,
+.app-search:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* How full a drive is, filling from the left as the sheet opens. */
+.properties-space {
+  display: block;
+  height: 6px;
+  margin-bottom: var(--space-1);
+  border-radius: 3px;
+  background: var(--surface-hover);
+  overflow: hidden;
+}
+
+.properties-space::before {
+  content: "";
+  display: block;
+  width: var(--used);
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(to right, var(--accent-start), var(--accent-end));
+  animation: properties-fill 0.6s var(--spring, ease-out) backwards;
+}
+
+.properties-switches {
+  display: grid;
+  margin: var(--space-3) calc(var(--space-2) * -1) 0;
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--border);
+}
+
+.properties-tags,
+.drive-recent {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  margin-top: var(--space-3);
+}
+
+.properties-tag {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  height: 26px;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  transition:
+    background var(--motion),
+    color var(--motion),
+    scale var(--motion-spring);
+}
+
+.properties-tag:hover {
+  background: var(--surface-hover);
+}
+
+.properties-tag:active {
+  scale: 0.94;
+}
+
+.properties-tag[aria-pressed="true"] {
+  border-color: var(--accent-line, var(--accent));
+  background: var(--surface-selected);
+  color: var(--text);
+}
+
+.properties-more {
+  margin-top: var(--space-3);
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--border);
+}
+
+.properties-more summary {
+  padding: var(--space-1) 0;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: color var(--motion);
+}
+
+.properties-more summary:hover,
+.properties-more[open] summary {
+  color: var(--text);
+}
+
+.properties-more .details-facts {
+  margin-top: var(--space-2);
+  animation: properties-settle var(--motion-slide);
+}
+
+.properties-failure {
+  margin: var(--space-2) 0 0;
+  color: var(--danger);
+}
+
+.properties-buttons {
+  align-items: center;
+  margin-top: var(--space-4);
+}
+
+.properties-said {
+  flex: 1;
+  min-width: 0;
+  color: var(--text-muted);
+  text-align: right;
+}
+
+/* The way out to Windows' own dialog reads as a link, apart from the sheet's buttons. */
+.properties-link {
+  padding: 2px var(--space-1);
+  border: 0;
+  border-radius: calc(var(--radius) - 2px);
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  transition: opacity var(--motion);
+}
+
+.properties-link:hover {
+  text-decoration: underline;
+}
+
+.properties-link:active {
+  opacity: 0.6;
+}
+
+.app-picker {
+  width: min(400px, 92vw);
+}
+
+.app-search {
+  min-width: 0;
+  height: var(--row-height);
+  margin-top: var(--space-3);
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-hover);
+  color: var(--text);
+  font: inherit;
+  caret-color: var(--accent);
+  user-select: text;
+}
+
+.app-list,
+.drive-list {
+  display: grid;
+  align-content: start;
+  gap: 2px;
+  min-height: 96px;
+  margin: var(--space-2) calc(var(--space-2) * -1) 0;
+  padding: 0 var(--space-2);
+  overflow-y: auto;
+}
+
+.app-group {
+  margin: var(--space-2) var(--space-2) 2px;
+  color: var(--text-muted);
+  font-size: 11.5px;
+}
+
+.app-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-height: 40px;
+  padding: var(--space-1) var(--space-2);
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  animation: properties-settle var(--motion-slide) backwards;
+  animation-delay: calc(var(--at) * 18ms);
+  transition:
+    background var(--motion),
+    scale var(--motion-spring);
+}
+
+.app-row[aria-selected="true"] {
+  background: var(--surface-selected);
+}
+
+.app-row:active {
+  scale: 0.985;
+}
+
+.app-icon {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  object-fit: contain;
+}
+
+.app-glyph {
+  display: grid;
+  place-items: center;
+  color: var(--text-muted);
+  font: 18px var(--font-icons);
+}
+
+.app-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-none {
+  margin: var(--space-3) var(--space-2);
+  color: var(--text-muted);
+}
+
+.app-other {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  margin-top: var(--space-2);
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--border);
+}
+
+.app-other .app-search {
+  flex: 1;
+  margin-top: 0;
+}
+
+.drive-sheet {
+  width: min(440px, 92vw);
+}
+
+.drive-fields {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+}
+
+.drive-hint {
+  margin: var(--space-2) 0;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+.drive-recent {
+  margin: 0 0 var(--space-2);
+}
+
+.drive-recent .settings-chip {
+  height: 26px;
+  padding: 0 var(--space-2);
+}
+
+.drive-confirm:enabled {
+  border-color: var(--accent-line, var(--accent));
+}
+
+.drive-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-height: 40px;
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius);
+  animation: properties-settle var(--motion-slide) backwards;
+  transition:
+    opacity var(--motion-slide),
+    translate var(--motion-slide);
+}
+
+.drive-row:hover {
+  background: var(--surface-hover);
+}
+
+.drive-leaving {
+  opacity: 0.4;
+  translate: 8px 0;
+}
+
+.drive-letter {
+  flex: none;
+  font-weight: 600;
+}
+
+.drive-remote {
+  flex: 1;
+  min-width: 0;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  user-select: text;
+}
+
+@keyframes properties-settle {
+  from {
+    opacity: 0;
+    translate: 0 4px;
+  }
+}
+
+@keyframes properties-fill {
+  from {
+    width: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .properties-picture,
+  .properties-facts dt,
+  .properties-facts dd,
+  .properties-space::before,
+  .properties-more .details-facts,
+  .app-row,
+  .drive-row {
+    animation: none;
+    transition: none;
+  }
+}

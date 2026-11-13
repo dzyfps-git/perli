@@ -15,6 +15,7 @@ mod places;
 mod inside;
 mod midi;
 mod preview;
+mod props;
 mod recent;
 mod registry;
 mod search;
@@ -705,7 +706,10 @@ async fn measure_selection(
     selection: Selection,
     views: State<'_, Views>,
 ) -> Result<Measured, String> {
-    let paths = views.read(&selection, folder::Listing::paths)?;
+    measure(views.read(&selection, folder::Listing::paths)?).await
+}
+
+async fn measure(paths: Vec<PathBuf>) -> Result<Measured, String> {
     let worker = thread::Builder::new()
         .stack_size(jobs::STACK_BYTES)
         .spawn(move || ops::measure(&paths))
@@ -926,7 +930,36 @@ async fn apps_for(
     views: State<'_, Views>,
 ) -> Result<Vec<menus::App>, String> {
     let paths = views.read(&selection, folder::Listing::paths)?;
-    off_main(move || menus::apps_for(paths)).await
+    off_main(move || menus::apps_for(paths, false)).await
+}
+
+/// Every app that can open `paths`, for Perli's own app picker.
+#[tauri::command]
+async fn apps_for_paths(paths: Vec<PathBuf>) -> Result<Vec<menus::App>, String> {
+    off_main(move || menus::apps_for(paths, true)).await
+}
+
+#[tauri::command]
+async fn open_paths_with(paths: Vec<PathBuf>, app: String) -> Result<(), String> {
+    off_main(move || menus::open_with(paths, app)).await
+}
+
+#[tauri::command]
+async fn open_paths_with_exe(paths: Vec<PathBuf>, exe: PathBuf) -> Result<(), String> {
+    off_main(move || menus::open_with_exe(paths, exe)).await
+}
+
+/// Windows' file picker for an app. Nothing when the user backs out.
+#[tauri::command]
+async fn browse_app(app: AppHandle) -> Result<Option<String>, String> {
+    let main = jobs::owner(&app);
+    off_main(move || menus::browse_app(main)).await
+}
+
+/// Windows' own window for picking an app, which is the only thing allowed to set a default.
+#[tauri::command]
+async fn choose_app_for(path: PathBuf) -> Result<(), String> {
+    off_main(move || menus::choose_app(path)).await
 }
 
 #[tauri::command]
@@ -955,12 +988,14 @@ async fn send_to(selection: Selection, target: PathBuf, views: State<'_, Views>)
     off_main(move || menus::send_to(paths, target)).await
 }
 
-/// Rows, or with none the folder itself, for what Windows offers on either.
+/// Rows, or with none the folder itself, for what Windows offers on either. `Paths` outlives a
+/// reload of the folder, which rows don't.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", tag = "kind")]
 enum ShellTarget {
     Rows { selection: Selection },
     Folder { path: String },
+    Paths { paths: Vec<PathBuf> },
 }
 
 impl ShellTarget {
@@ -970,6 +1005,15 @@ impl ShellTarget {
                 menus::Target::Items(views.read(&selection, folder::Listing::paths)?)
             }
             Self::Folder { path } => menus::Target::Folder(path.into()),
+            Self::Paths { paths } => menus::Target::Items(paths),
+        })
+    }
+
+    /// The items themselves, the folder being one.
+    fn paths(self, views: &Views) -> Result<Vec<PathBuf>, String> {
+        Ok(match self.read(views)? {
+            menus::Target::Items(paths) => paths,
+            menus::Target::Folder(folder) => vec![folder],
         })
     }
 }
@@ -1013,6 +1057,45 @@ async fn show_properties(
     let target = target.read(&views)?;
     let main = jobs::owner(&app);
     off_main(move || menus::show_properties(target, main, x, y)).await
+}
+
+/// What Perli's own Properties sheet starts from. Its paths carry the later questions, so a
+/// folder reloading behind the sheet can't point them at other rows.
+#[tauri::command]
+async fn item_facts(target: ShellTarget, views: State<'_, Views>) -> Result<props::Facts, String> {
+    let paths = target.paths(&views)?;
+    off_main(move || props::facts(paths)).await
+}
+
+#[tauri::command]
+async fn set_attributes(paths: Vec<PathBuf>, read_only: Option<bool>, hidden: Option<bool>) -> Result<(), String> {
+    off_main(move || props::set_attributes(&paths, read_only, hidden)).await
+}
+
+/// How much is in `paths`, folders walked to the bottom.
+#[tauri::command]
+async fn measure_paths(paths: Vec<PathBuf>) -> Result<Measured, String> {
+    measure(paths).await
+}
+
+#[tauri::command]
+async fn path_properties(path: PathBuf) -> Result<Vec<(&'static str, String, String)>, String> {
+    off_main(move || preview::properties(&path)).await
+}
+
+/// A checksum by `algorithm`, or nothing if a newer checksum took its place.
+#[tauri::command]
+async fn path_checksum(path: PathBuf, algorithm: String) -> Result<Option<String>, String> {
+    async_runtime::spawn_blocking(move || preview::hash(&path, &algorithm, preview::PROPERTIES_LANE))
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())
+}
+
+/// The apps holding `paths`.
+#[tauri::command]
+async fn path_users(paths: Vec<PathBuf>) -> Result<Vec<String>, String> {
+    off_main(move || Ok(ops::sys::users_of(&paths))).await
 }
 
 #[tauri::command]
@@ -1165,7 +1248,7 @@ async fn checksum(
     views: State<'_, Views>,
 ) -> Result<Option<String>, String> {
     let path = row_path(&views, view, request, row)?;
-    async_runtime::spawn_blocking(move || preview::hash(&path, &algorithm))
+    async_runtime::spawn_blocking(move || preview::hash(&path, &algorithm, view))
         .await
         .map_err(|error| error.to_string())?
         .map_err(|error| error.to_string())
@@ -1254,15 +1337,15 @@ async fn delete_tag(id: u32) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn set_tag(selection: Selection, tag: u32, on: bool, views: State<'_, Views>) -> Result<(), String> {
-    let paths = views.read(&selection, folder::Listing::paths)?;
+async fn set_tag(target: ShellTarget, tag: u32, on: bool, views: State<'_, Views>) -> Result<(), String> {
+    let paths = target.paths(&views)?;
     with_tags(move || tags::set(&paths, tag, on)).await
 }
 
 /// The tags all the selected rows have.
 #[tauri::command]
-async fn common_tags(selection: Selection, views: State<'_, Views>) -> Result<Vec<u32>, String> {
-    let paths = views.read(&selection, folder::Listing::paths)?;
+async fn common_tags(target: ShellTarget, views: State<'_, Views>) -> Result<Vec<u32>, String> {
+    let paths = target.paths(&views)?;
     with_tags(move || tags::common(&paths)).await
 }
 
@@ -1347,6 +1430,24 @@ async fn map_drive(app: AppHandle) -> Result<(), String> {
 async fn disconnect_drive(app: AppHandle) -> Result<(), String> {
     let owner = jobs::owner(&app);
     off_main(move || network::disconnect_drive(owner)).await
+}
+
+/// Free drive letters and the network drives mapped now.
+#[tauri::command]
+async fn drive_letters() -> Result<network::Letters, String> {
+    off_main(|| Ok(network::drive_letters())).await
+}
+
+/// Runs until the server answers, or until the user closes Windows' sign-in window.
+#[tauri::command]
+async fn map_network_drive(letter: String, remote: String, remember: bool, app: AppHandle) -> Result<(), String> {
+    let owner = jobs::owner(&app);
+    off_main(move || network::map(&letter, &remote, remember, owner)).await
+}
+
+#[tauri::command]
+async fn unmap_drive(letter: String) -> Result<(), String> {
+    off_main(move || network::unmap(&letter)).await
 }
 
 /// The `names` that fit `query`, best first, by the matcher a folder search uses.
@@ -1524,8 +1625,19 @@ fn main() {
             place_snap_area,
             open_file,
             apps_for,
+            apps_for_paths,
+            open_paths_with,
+            open_paths_with_exe,
+            browse_app,
+            choose_app_for,
             open_with,
             choose_app,
+            item_facts,
+            set_attributes,
+            measure_paths,
+            path_properties,
+            path_checksum,
+            path_users,
             send_targets,
             send_to,
             show_shell_menu,
@@ -1573,6 +1685,9 @@ fn main() {
             clipboard_text,
             map_drive,
             disconnect_drive,
+            drive_letters,
+            map_network_drive,
+            unmap_drive,
             rank_names,
             is_default_app,
             set_default_app,

@@ -187,10 +187,43 @@ export interface Measured {
   bytes: number;
 }
 
-/** An app Windows recommends for a file type. */
+/** An app that can open a file type. */
 export interface App {
   id: string;
   name: string;
+  /** Windows suggests it for the type. The rest only say they can open it. */
+  recommended: boolean;
+  /** A file whose picture stands for the app. */
+  icon: string | null;
+}
+
+/** How many of the items have something. */
+export type Share = "all" | "none" | "some";
+
+/** What the Properties sheet starts from. Times are milliseconds since 1970, of the first item. */
+export interface ItemFacts {
+  paths: string[];
+  folders: number;
+  files: number;
+  /** A drive itself. */
+  isRoot: boolean;
+  size: number;
+  modified: number | null;
+  created: number | null;
+  accessed: number | null;
+  /** Among the files only. */
+  readOnly: Share;
+  hidden: Share;
+  kind: string | null;
+  defaultApp: string | null;
+  /** Reading it would download it. */
+  onlineOnly: boolean;
+}
+
+/** Free drive letters, Z first, and the network drives mapped now. */
+export interface DriveLetters {
+  free: string[];
+  mapped: { letter: string; remote: string }[];
 }
 
 export interface SendTarget {
@@ -229,7 +262,11 @@ export interface Thumb {
 }
 
 /** What a Windows menu or Properties window is for. */
-export type ShellTarget = { kind: "rows"; selection: Selection } | { kind: "folder"; path: string };
+/** `paths` outlives a reload of the folder, which `rows` don't. */
+export type ShellTarget =
+  | { kind: "rows"; selection: Selection }
+  | { kind: "folder"; path: string }
+  | { kind: "paths"; paths: string[] };
 
 const HEADER_BYTES = 34;
 const TAG_BYTES = 4;
@@ -269,6 +306,14 @@ export const driveSpace = (path: string) => invoke<DriveSpace>("drive_space", { 
 export const mapDrive = () => invoke<void>("map_drive");
 
 export const disconnectDrive = () => invoke<void>("disconnect_drive");
+
+export const driveLetters = () => invoke<DriveLetters>("drive_letters");
+
+/** Windows asks for a name and password itself when the server wants them. */
+export const mapNetworkDrive = (letter: string, remote: string, remember: boolean) =>
+  invoke<void>("map_network_drive", { letter, remote, remember });
+
+export const unmapDrive = (letter: string) => invoke<void>("unmap_drive", { letter });
 
 /** Positions in `names` of the ones that fit `query`, best first. */
 export const rankNames = (query: string, names: string[]) => invoke<number[]>("rank_names", { query, names });
@@ -397,11 +442,11 @@ export const editTag = (id: number, name: string, color: number) => invoke<void>
 export const deleteTag = (id: number) => invoke<void>("delete_tag", { id });
 
 /** Puts `tag` on the selected rows, or takes it off. */
-export const setTag = (selection: Selection, tag: number, on: boolean) =>
-  invoke<void>("set_tag", { selection, tag, on });
+export const setTag = (target: ShellTarget, tag: number, on: boolean) =>
+  invoke<void>("set_tag", { target, tag, on });
 
 /** The tags all the selected rows have. */
-export const commonTags = (selection: Selection) => invoke<number[]>("common_tags", { selection });
+export const commonTags = (target: ShellTarget) => invoke<number[]>("common_tags", { target });
 
 /** The rows whose names fit `pattern`, such as `*.jpg;*.png`. */
 export const rowsMatching = (view: number, request: number, pattern: string) =>
@@ -437,6 +482,33 @@ export const appsFor = (selection: Selection) => invoke<App[]>("apps_for", { sel
 export const openWith = (selection: Selection, app: string) => invoke<void>("open_with", { selection, app });
 
 export const chooseApp = (selection: Selection) => invoke<void>("choose_app", { selection });
+
+/** Every app that can open files of `paths`' type. Empty when they don't share one. */
+export const appsForPaths = (paths: string[]) => invoke<App[]>("apps_for_paths", { paths });
+
+export const openPathsWith = (paths: string[], app: string) => invoke<void>("open_paths_with", { paths, app });
+
+export const openPathsWithExe = (paths: string[], exe: string) =>
+  invoke<void>("open_paths_with_exe", { paths, exe });
+
+/** Windows' file picker for an app. `null` when the user backs out. */
+export const browseApp = () => invoke<string | null>("browse_app");
+
+/** Windows' own window for picking an app, the only thing that may set a default. */
+export const chooseAppFor = (path: string) => invoke<void>("choose_app_for", { path });
+
+export const itemFacts = (target: ShellTarget) => invoke<ItemFacts>("item_facts", { target });
+
+/** Only for the items themselves, never what is inside a folder. */
+export const setAttributes = (paths: string[], change: { readOnly?: boolean; hidden?: boolean }) =>
+  invoke<void>("set_attributes", { paths, ...change });
+
+export const measurePaths = (paths: string[]) => invoke<Measured>("measure_paths", { paths });
+
+export const pathProperties = (path: string) =>
+  invoke<[group: string, label: string, value: string][]>("path_properties", { path });
+
+export const pathUsers = (paths: string[]) => invoke<string[]>("path_users", { paths });
 
 export const sendTargets = () => invoke<SendTarget[]>("send_targets");
 
@@ -568,6 +640,9 @@ export type HashKind = "md5" | "sha1" | "sha256" | "sha512";
 /** `null` once a newer checksum took its place. */
 export const checksum = (view: number, request: number, row: number, algorithm: HashKind) =>
   invoke<string | null>("checksum", { view, request, row, algorithm });
+
+export const pathChecksum = (path: string, algorithm: HashKind) =>
+  invoke<string | null>("path_checksum", { path, algorithm });
 
 /** Web and mail links only. */
 export const openLink = (url: string) => invoke<void>("open_link", { url });
