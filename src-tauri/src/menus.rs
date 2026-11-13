@@ -263,11 +263,27 @@ fn is_program(path: &Path) -> bool {
     path.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("exe")) && path.is_file()
 }
 
-/// Paths as one command line. No Windows path holds a quote, so wrapping each is enough.
-fn quoted(paths: &[PathBuf]) -> String {
-    let wrapped: Vec<String> = paths.iter().map(|path| format!("\"{}\"", path.display())).collect();
-    wrapped.join(" ")
+/// Paths as command lines that each fit under Windows' cap of 32,767 characters, with room for
+/// the program's own name. No Windows path holds a quote, so wrapping each is enough.
+fn quoted(paths: &[PathBuf]) -> Vec<String> {
+    let mut lines = vec![String::new()];
+    for path in paths {
+        let wrapped = format!("\"{}\"", path.display());
+        let line = lines.last_mut().expect("never empty");
+        if !line.is_empty() && line.len() + 1 + wrapped.len() > COMMAND_LINE_MOST {
+            lines.push(wrapped);
+        } else {
+            if !line.is_empty() {
+                line.push(' ');
+            }
+            line.push_str(&wrapped);
+        }
+    }
+    lines
 }
+
+/// Under Windows' 32,767 characters, leaving room for the program's own path.
+const COMMAND_LINE_MOST: usize = 30_000;
 
 /// The extension every file shares. Folders and mixed types have no list of apps.
 fn shared_extension(paths: &[PathBuf]) -> Option<String> {
@@ -356,17 +372,18 @@ pub fn open_with_exe(paths: Vec<PathBuf>, exe: PathBuf) -> Result<()> {
     if paths.is_empty() || paths.iter().any(|path| !path.is_file()) {
         return Err(Error::new(E_FAIL, "Only files open with an app"));
     }
-    // ponytail: one command line, which Windows caps near 32,000 characters. Start the app
-    // once per batch of files if someone opens thousands at once.
-    let (program, files) = (HSTRING::from(exe.as_os_str()), HSTRING::from(quoted(&paths)));
+    // Thousands of files don't fit one command line, so the app starts once per batch.
+    let program = HSTRING::from(exe.as_os_str());
+    let batches: Vec<HSTRING> = quoted(&paths).iter().map(HSTRING::from).collect();
     on_worker(move |owner| {
-        let started = unsafe { ShellExecuteW(Some(owner), w!("open"), &program, &files, None, SW_SHOWNORMAL) };
-        // Values up to 32 mean it failed.
-        if started.0 as isize > 32 {
-            Ok(())
-        } else {
-            Err(Error::new(E_FAIL, "Windows could not start that app"))
+        for files in &batches {
+            let started = unsafe { ShellExecuteW(Some(owner), w!("open"), &program, files, None, SW_SHOWNORMAL) };
+            // Values up to 32 mean it failed.
+            if started.0 as isize <= 32 {
+                return Err(Error::new(E_FAIL, "Windows could not start that app"));
+            }
         }
+        Ok(())
     })
 }
 
@@ -816,7 +833,12 @@ mod tests {
     #[test]
     fn files_make_one_quoted_command_line_and_only_an_exe_is_a_program() {
         let paths = vec![PathBuf::from(r"C:\a b\one.txt"), PathBuf::from(r"C:\two.txt")];
-        assert_eq!(quoted(&paths), r#""C:\a b\one.txt" "C:\two.txt""#);
+        assert_eq!(quoted(&paths), [r#""C:\a b\one.txt" "C:\two.txt""#]);
+        let many: Vec<PathBuf> = (0..2_000).map(|n| PathBuf::from(format!(r"C:\some folder\file {n:05}.txt"))).collect();
+        let lines = quoted(&many);
+        assert!(lines.len() > 1);
+        assert!(lines.iter().all(|line| line.len() <= COMMAND_LINE_MOST));
+        assert_eq!(lines.iter().map(|line| line.matches(".txt").count()).sum::<usize>(), 2_000);
         let folder = TempFolder::new("program");
         let text = folder.0.join("note.txt");
         fs::write(&text, "").unwrap();
