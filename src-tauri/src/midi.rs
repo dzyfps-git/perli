@@ -182,8 +182,8 @@ pub struct SongInfo {
     notes: Vec<(f32, f32, u8, u8)>,
     /// When each beat falls, in seconds.
     beats: Vec<f32>,
-    /// How many beats make a bar.
-    per_bar: u8,
+    /// When each bar starts, in seconds, following the song's time signatures.
+    bars: Vec<f32>,
 }
 
 pub const DRUMS: u8 = 128;
@@ -198,6 +198,8 @@ enum Event {
     On { channel: u8, key: u8 },
     Off { channel: u8, key: u8 },
     Program { channel: u8, program: u8 },
+    /// A time signature: so many notes a bar, each a 2 to the `power` part of a whole note.
+    Meter { count: u8, power: u8 },
 }
 
 struct Reader<'a> {
@@ -252,23 +254,19 @@ fn read_info(bytes: &[u8]) -> Option<SongInfo> {
     file.take(header.checked_sub(6)?)?;
 
     let mut title = None;
-    let mut meter = None;
     let mut events = Vec::new();
     for track in 0..tracks {
         let (Some(kind), Some(length)) = (file.take(4), file.u32()) else { break };
         let Some(body) = file.take(length as usize).or_else(|| file.bytes.get(file.at..)) else { break };
         if kind == b"MTrk" {
-            read_track(body, &mut events, if track == 0 { Some(&mut title) } else { None }, &mut meter);
+            read_track(body, &mut events, if track == 0 { Some(&mut title) } else { None });
         }
     }
     events.sort_by_key(|(tick, _)| *tick);
 
     let seconds_at = timing(division, &events);
-    // ponytail: the first time signature counts for the whole song. Songs that change it draw
-    // their bar lines off after the change.
-    let per_bar = meter.map_or(4, |(count, power): (u8, u8)| ((u32::from(count) * 4) >> power.min(7)).clamp(1, 255) as u8);
-    let beats = beats(division, &events);
-    let mut info = SongInfo { title, beats, per_bar, ..SongInfo::default() };
+    let (beats, bars) = beats_and_bars(division, &events);
+    let mut info = SongInfo { title, beats, bars, ..SongInfo::default() };
     let mut programs = [0u8; 16];
     let mut held: Vec<Vec<(u8, f32)>> = vec![Vec::new(); 16];
     for ((_, event), seconds) in events.iter().zip(seconds_at) {
@@ -294,14 +292,14 @@ fn read_info(bytes: &[u8]) -> Option<SongInfo> {
                     }
                 }
             }
-            Event::Tempo(_) => {}
+            Event::Tempo(_) | Event::Meter { .. } => {}
         }
     }
     info.notes.sort_by(|a, b| a.0.total_cmp(&b.0));
     Some(info)
 }
 
-fn read_track(body: &[u8], events: &mut Vec<(u64, Event)>, mut title: Option<&mut Option<String>>, meter: &mut Option<(u8, u8)>) {
+fn read_track(body: &[u8], events: &mut Vec<(u64, Event)>, mut title: Option<&mut Option<String>>) {
     let mut track = Reader { bytes: body, at: 0 };
     let mut tick = 0u64;
     let mut running = 0u8;
@@ -326,10 +324,7 @@ fn read_track(body: &[u8], events: &mut Vec<(u64, Event)>, mut title: Option<&mu
                         }
                         None
                     }
-                    (0x58, [count, power, ..]) => {
-                        meter.get_or_insert((*count, *power));
-                        None
-                    }
+                    (0x58, [count, power, ..]) if *count > 0 => Some(Event::Meter { count: *count, power: *power }),
                     (0x2F, _) => return,
                     _ => None,
                 }
@@ -385,33 +380,57 @@ fn timing(division: u16, events: &[(u64, Event)]) -> Vec<f64> {
         .collect()
 }
 
-/// When each beat falls, in seconds, up to the song's last event.
-fn beats(division: u16, events: &[(u64, Event)]) -> Vec<f32> {
+/// When each beat and each bar starts, in seconds, up to the song's last event. A new time
+/// signature starts a new bar where it falls.
+fn beats_and_bars(division: u16, events: &[(u64, Event)]) -> (Vec<f32>, Vec<f32>) {
     if division & 0x8000 != 0 {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
     let per_beat = u64::from(division.max(1));
     let last = events.last().map_or(0, |(tick, _)| *tick);
-    let mut changes = events.iter().filter_map(|(tick, event)| match event {
-        Event::Tempo(tempo) => Some((*tick, f64::from(*tempo))),
-        _ => None,
-    });
-    let mut next = changes.next();
+    let beats: Vec<u64> = (0..).map(|beat| beat * per_beat).take_while(|tick| *tick <= last).take(MOST_BEATS).collect();
+    let mut meters = events
+        .iter()
+        .filter_map(|(tick, event)| match event {
+            // A bar of 7/8 is 3.5 beats, so it is counted in ticks.
+            Event::Meter { count, power } => Some((*tick, ((per_beat * 4 * u64::from(*count)) >> (*power).min(7)).max(1))),
+            _ => None,
+        })
+        .peekable();
+    let (mut bars, mut tick, mut length) = (Vec::new(), 0u64, per_beat * 4);
+    while tick <= last && bars.len() < MOST_BEATS {
+        while let Some((_, changed)) = meters.next_if(|(at, _)| *at <= tick) {
+            length = changed;
+        }
+        bars.push(tick);
+        let end = tick + length;
+        tick = meters.peek().map_or(end, |(at, _)| (*at).min(end));
+    }
+    (seconds_of(per_beat, events, &beats), seconds_of(per_beat, events, &bars))
+}
+
+/// When each of `ticks`, in order, falls in seconds, following the tempo changes before it.
+fn seconds_of(per_beat: u64, events: &[(u64, Event)], ticks: &[u64]) -> Vec<f32> {
+    let mut changes = events
+        .iter()
+        .filter_map(|(tick, event)| match event {
+            Event::Tempo(tempo) => Some((*tick, f64::from(*tempo))),
+            _ => None,
+        })
+        .peekable();
     let (mut tempo, mut from, mut seconds) = (DEFAULT_TEMPO, 0u64, 0.0f64);
     let span = |ticks: u64, tempo: f64| ticks as f64 * tempo / 1_000_000.0 / per_beat as f64;
-    let mut found = Vec::new();
-    let mut tick = 0u64;
-    while tick <= last && found.len() < MOST_BEATS {
-        while let Some((at, changed)) = next.filter(|(at, _)| *at <= tick) {
-            seconds += span(at - from, tempo);
-            from = at;
-            tempo = changed;
-            next = changes.next();
-        }
-        found.push((seconds + span(tick - from, tempo)) as f32);
-        tick += per_beat;
-    }
-    found
+    ticks
+        .iter()
+        .map(|&tick| {
+            while let Some((at, changed)) = changes.next_if(|(at, _)| *at <= tick) {
+                seconds += span(at - from, tempo);
+                from = at;
+                tempo = changed;
+            }
+            (seconds + span(tick - from, tempo)) as f32
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -493,9 +512,21 @@ mod tests {
         assert_eq!(info.instruments, [0, 40, DRUMS]);
         assert_eq!(info.notes, [(0.0, 1.0, 60, 0), (1.0, 0.5, 64, 0), (1.5, 0.5, 36, 9)]);
         assert_eq!(info.channels, [(0, 0), (9, DRUMS)]);
-        assert_eq!((info.beats.as_slice(), info.per_bar), ([0.0, 1.0, 2.0].as_slice(), 4));
+        assert_eq!((info.beats.as_slice(), info.bars.as_slice()), ([0.0, 1.0, 2.0].as_slice(), [0.0].as_slice()));
         assert!(read_info(b"RIFF").is_none());
         // Cut off in the middle of a track: the notes before the cut stay.
         assert_eq!(read_info(&song[..song.len() - 12]).unwrap().notes.len(), 2);
+    }
+
+    #[test]
+    fn bar_lines_follow_a_change_of_time_signature() {
+        // 3/4 for one bar, then 7/8, at the default half a second a beat, with a note at tick 960.
+        let track = b"\0\xFF\x58\x04\x03\x02\x18\x08\x82\x20\xFF\x58\x04\x07\x03\x18\x08\x85\x20\x90\x3C\x64\0\x80\x3C\0\0\xFF\x2F\0";
+        let mut song = b"MThd\0\0\0\x06\0\0\0\x01\0\x60MTrk".to_vec();
+        song.extend_from_slice(&(track.len() as u32).to_be_bytes());
+        song.extend_from_slice(track);
+        let info = read_info(&song).unwrap();
+        assert_eq!(info.bars, [0.0, 1.5, 3.25, 5.0]);
+        assert_eq!(info.beats.len(), 11);
     }
 }

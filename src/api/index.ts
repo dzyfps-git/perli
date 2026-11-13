@@ -957,7 +957,8 @@ export interface SongInfo {
   notes: [number, number, number, number][];
   /** When each beat falls, in seconds. */
   beats: number[];
-  perBar: number;
+  /** When each bar starts, in seconds, following the time signatures. */
+  bars: number[];
 }
 
 /** How a MIDI file is played: silent channels as bits, keys up or down, and how fast. */

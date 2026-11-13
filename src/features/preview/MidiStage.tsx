@@ -34,7 +34,8 @@ function firstFrom(notes: Note[], seconds: number) {
 export function MidiStage(props: {
   notes: Note[];
   beats: number[];
-  perBar: number;
+  /** When each bar starts, in seconds. */
+  bars: number[];
   /** Silent channels, one bit each. */
   muted: number;
   falling: boolean;
@@ -60,7 +61,7 @@ export function MidiStage(props: {
     pen.font = `${10 * scale}px ${style.fontFamily}`;
     pen.textBaseline = "middle";
 
-    const { notes, beats, perBar, muted, falling } = props;
+    const { notes, beats, bars, muted, falling } = props;
     const now = props.time();
     // The keys from the C under the lowest note to the B over the highest.
     let [low, high, longest] = [127, 0, 0];
@@ -82,10 +83,11 @@ export function MidiStage(props: {
       const slot = wide / keys;
       const perSecond = floor / SPAN;
       pen.fillStyle = line;
-      for (let beat = firstFromBeats(beats, now); beat < beats.length && beats[beat] < now + SPAN; beat++) {
-        const y = floor - (beats[beat] - now) * perSecond;
-        pen.globalAlpha = beat % perBar === 0 ? 1 : 0.4;
-        pen.fillRect(0, y, wide, scale);
+      for (const [times, alpha] of [[beats, 0.4], [bars, 1]] as const) {
+        pen.globalAlpha = alpha;
+        for (let at = firstFromBeats(times, now); at < times.length && times[at] < now + SPAN; at++) {
+          pen.fillRect(0, floor - (times[at] - now) * perSecond, wide, scale);
+        }
       }
       pen.globalAlpha = 1;
       for (let at = start; at < notes.length && notes[at][0] < now + SPAN; at++) {
@@ -116,16 +118,18 @@ export function MidiStage(props: {
     const top = RULER * scale;
     const row = (tall - top) / keys;
     const perSecond = (wide - left) / SPAN;
+    pen.fillStyle = line;
+    pen.globalAlpha = 0.4;
     for (let beat = firstFromBeats(beats, now); beat < beats.length && beats[beat] < now + SPAN; beat++) {
-      const x = left + (beats[beat] - now) * perSecond;
-      const bar = beat % perBar === 0;
+      pen.fillRect(left + (beats[beat] - now) * perSecond, top, scale, tall);
+    }
+    pen.globalAlpha = 1;
+    for (let bar = firstFromBeats(bars, now); bar < bars.length && bars[bar] < now + SPAN; bar++) {
+      const x = left + (bars[bar] - now) * perSecond;
       pen.fillStyle = line;
-      pen.globalAlpha = bar ? 1 : 0.4;
-      pen.fillRect(x, bar ? 0 : top, scale, tall);
-      if (bar) {
-        pen.fillStyle = quiet;
-        pen.fillText(String(beat / perBar + 1), x + 4 * scale, top / 2);
-      }
+      pen.fillRect(x, 0, scale, tall);
+      pen.fillStyle = quiet;
+      pen.fillText(String(bar + 1), x + 4 * scale, top / 2);
     }
     pen.globalAlpha = 1;
     for (let at = start; at < notes.length && notes[at][0] < now + SPAN; at++) {
@@ -162,7 +166,7 @@ export function MidiStage(props: {
 
   // Any change draws at once, and playing keeps it moving.
   createEffect(() => {
-    void [props.notes, props.beats, props.muted, props.falling];
+    void [props.notes, props.beats, props.bars, props.muted, props.falling];
     cancelAnimationFrame(frame);
     if (props.playing) run();
     else draw();

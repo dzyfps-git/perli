@@ -626,7 +626,7 @@ export function Player(live: PlayerProps) {
         <MidiStage
           notes={song()!.notes}
           beats={song()!.beats}
-          perBar={song()!.perBar}
+          bars={song()!.bars}
           muted={settings().muted}
           falling={falling()}
           time={() => time() * tempo()}
