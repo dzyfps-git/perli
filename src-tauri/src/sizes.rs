@@ -33,13 +33,20 @@ fn load() -> HashMap<PathBuf, u64> {
     text.and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default()
 }
 
+/// Writes under the lock, so a `forget` can't land between reading the totals and writing them.
+/// No totals means forgotten, so there is no file to bring back.
+// ponytail: writes every total each time, which a big map pays for once a second while a scan runs.
 fn save() {
     let Some(file) = session::data_file(SAVED).filter(|_| !cfg!(test)) else { return };
+    let known = KNOWN.read().unwrap_or_else(PoisonError::into_inner);
+    if known.is_empty() {
+        return;
+    }
     // The first scan can come before anything else made Perli's folder.
     if let Some(folder) = file.parent() {
         let _ = fs::create_dir_all(folder);
     }
-    if let Ok(text) = serde_json::to_string(&*KNOWN.read().unwrap_or_else(PoisonError::into_inner)) {
+    if let Ok(text) = serde_json::to_string(&*known) {
         let _ = fs::write(file, text);
     }
 }
@@ -58,7 +65,8 @@ pub fn of(path: &Path) -> Option<u64> {
 }
 
 pub fn forget() {
-    KNOWN.write().unwrap_or_else(PoisonError::into_inner).clear();
+    let mut known = KNOWN.write().unwrap_or_else(PoisonError::into_inner);
+    known.clear();
     if let Some(file) = session::data_file(SAVED).filter(|_| !cfg!(test)) {
         let _ = fs::remove_file(file);
     }
@@ -104,18 +112,23 @@ fn scan(folder: &Path, stop: &AtomicBool, report: impl Fn()) {
     let mut reported = Instant::now();
     for found in folders {
         let Some(bytes) = total(&found, stop) else {
+            // A stopped scan keeps the totals it finished.
+            save();
             return;
         };
         {
             let mut known = KNOWN.write().unwrap_or_else(PoisonError::into_inner);
             // Checked under the lock: `forget` stops scans before it clears, so no total lands after.
             if stop.load(Ordering::SeqCst) {
+                drop(known);
+                save();
                 return;
             }
             known.insert(key(&found), bytes);
         }
         if reported.elapsed() >= REPORT_GAP {
             report();
+            save();
             reported = Instant::now();
         }
     }

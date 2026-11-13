@@ -18,7 +18,7 @@ use windows::core::Result;
 
 #[cfg(test)]
 use crate::folder::Filter;
-use crate::folder::{self, Entry, Found, Listing, Order, Sight, SortKey};
+use crate::folder::{self, Entry, Found, GroupBy, Listing, Order, Sight, SortKey};
 use crate::network;
 use crate::ops::sys::{self, Stat};
 use crate::tags;
@@ -416,9 +416,10 @@ fn tagged(name: &str, scope: Scope, folder: &Path) -> Found {
     found
 }
 
-/// A filter can leave so few rows that scrolling never asks for more.
+/// A filter can leave so few rows that scrolling never asks for more. Groups count every row
+/// they hold, and a folded one shows none, so scrolling can't ask for those either.
 fn needs_every_row(order: &Order) -> bool {
-    order.key != SortKey::Found || order.filter.is_active()
+    order.key != SortKey::Found || order.filter.is_active() || order.group_by != GroupBy::None
 }
 
 /// The search of each view that has one.
@@ -886,6 +887,11 @@ mod tests {
         let filter = Filter { name: "a".to_string(), ..Filter::default() };
         searches.arranged(1, &Order { filter, ..found_order() });
         assert_eq!(search.room(), usize::MAX);
+
+        let grouped = Arc::new(Search::new(Found::default(), AHEAD));
+        searches.all().insert(2, grouped.clone());
+        searches.arranged(2, &Order { group_by: GroupBy::Kind, ..found_order() });
+        assert_eq!(grouped.room(), usize::MAX);
 
         let tree = Tree::new("order");
         let (_, heard) = start(&searches, &tree, "report", Order::default());
