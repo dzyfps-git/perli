@@ -505,6 +505,10 @@ export function FileList(props: {
         if (snapshot !== props.snapshot) return;
         pages.set(page, rows);
         if (pages.size > MAX_PAGES) pages.delete(pages.keys().next().value!);
+        // The row just after this page could not tell its day from the one above it until now.
+        const after = (page + 1) * PAGE_SIZE;
+        const below = pool[after % pool.length];
+        if (byDay() && below?.index === after) below.filled = false;
         paint();
       })
       .catch(console.error)
@@ -567,7 +571,10 @@ export function FileList(props: {
     const natural = (element: Element) => {
       measure.selectNodeContents(element);
       const style = getComputedStyle(element);
-      return measure.getBoundingClientRect().width + parseFloat(style.paddingLeft) + parseFloat(style.paddingRight);
+      // A shortened name hides the part the pills after it would need room for.
+      const label = element.querySelector(".file-label");
+      const hidden = label ? label.scrollWidth - label.clientWidth : 0;
+      return measure.getBoundingClientRect().width + hidden + parseFloat(style.paddingLeft) + parseFloat(style.paddingRight);
     };
     const widths = pool.flatMap((pooled) =>
       pooled.filled ? pooled.cells.filter((cell) => cell.id === id).map((cell) => natural(cell.element)) : [],
@@ -621,7 +628,7 @@ export function FileList(props: {
     pooled.element.toggleAttribute("data-system", row?.isSystem ?? false);
     pooled.element.toggleAttribute("data-cut", !!row && !row.location && !!props.cut?.has(row.name));
     // The bin by date deleted reads in days: a small label where one day gives way to the next.
-    // ponytail: a row whose neighbour above is not loaded yet goes without, until it refills.
+    // A row whose neighbour above is not loaded yet gets its label once that page arrives.
     const day = row && byDay() ? dayOf(row.modified, Date.now()) : undefined;
     const above = day && index > 0 ? rowAt(index - 1) : undefined;
     if (day && (index === 0 || (above && dayOf(above.modified, Date.now()) !== day))) pooled.element.dataset.day = day;
@@ -654,10 +661,20 @@ export function FileList(props: {
       const { id } = cell;
       cell.element.textContent = !row ? "" : isProp(id) ? propText(row, index, id) : CELL_TEXT[id](row, props.folder);
       if (id === "name") {
-        if (row && inList) cell.element.append(...row.tags.flatMap((id) => tagMark(id, true)));
-        else if (row) cell.element.prepend(...row.tags.flatMap((id) => tagMark(id, false)));
+        const pills = row && inList ? row.tags.flatMap((id) => tagMark(id, true)) : [];
+        // The name shortens on its own, so a long one never hides the pills after it.
+        let line: HTMLElement | undefined;
+        if (pills.length) {
+          const label = document.createElement("span");
+          label.className = "file-label";
+          label.append(...cell.element.childNodes);
+          line = document.createElement("span");
+          line.className = "file-line";
+          line.append(label, ...pills);
+          cell.element.append(line);
+        } else if (row && !inList) cell.element.prepend(...row.tags.flatMap((id) => tagMark(id, false)));
         if (inList) cell.element.prepend(pooled.icon);
-        if (nests()) cell.element.prepend(twistOf(pooled, row));
+        if (nests()) (line ?? cell.element).prepend(twistOf(pooled, row));
         // A flat view says where each row is, which matters more there than its kind and size.
         const where = row && props.paths ? relativeTo(props.folder, row.location) || "In this folder" : undefined;
         if (row && inList && density() === "roomy") cell.element.dataset.sub = where ?? subText(row);
@@ -702,7 +719,8 @@ export function FileList(props: {
     for (const range of pooled.matches ?? []) nameMatches.delete(range);
     pooled.matches = undefined;
     const cell = pooled.cells.find((cell) => cell.id === "name")?.element;
-    const text = cell && [...cell.childNodes].find((node) => node instanceof Text);
+    const holder = cell?.querySelector(".file-label") ?? cell;
+    const text = holder && [...holder.childNodes].find((node) => node instanceof Text);
     if (!row || !props.match || !(text instanceof Text)) return;
     pooled.matches = matchSpans(row.name, props.match).map(([start, end]) => {
       const range = new Range();
