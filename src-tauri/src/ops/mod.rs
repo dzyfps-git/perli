@@ -270,8 +270,10 @@ pub struct Outcome {
     pub touched: BTreeSet<PathBuf>,
     /// Sources a move left alone because they changed while it ran.
     pub kept: Vec<PathBuf>,
-    /// What a copy or a move skipped after a problem, to try again later.
+    /// What the job skipped after a problem.
     pub failed: Vec<Failed>,
+    /// True if `failed` can be tried again as a copy or a move. A restore or an undo only lists it.
+    pub retries: bool,
     pub cancelled: bool,
 }
 
@@ -630,6 +632,7 @@ impl<'a> Run<'a> {
             touched: self.touched,
             kept: self.kept,
             failed: self.failed,
+            retries: false,
             cancelled,
         }
     }
@@ -683,13 +686,11 @@ fn with_users(message: &str, users: &[String]) -> String {
 pub fn run(job: Job, host: &dyn Host, control: &Arc<Control>) -> Outcome {
     let _com = shell::Com::enter();
     let mut run = Run::new(host, control);
-    // A restore or an undo moves things too, but has no "try again" of its own.
+    // A restore or an undo lists what it skipped, but has no "try again" of its own.
     let retries = matches!(job, Job::Copy { .. } | Job::Move { .. });
     let worked = run.job(job).and_then(|()| run.finish_elevated());
     let mut outcome = run.finish(worked.is_err() || control.cancelled());
-    if !retries {
-        outcome.failed.clear();
-    }
+    outcome.retries = retries;
     outcome
 }
 

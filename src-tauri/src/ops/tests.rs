@@ -762,6 +762,26 @@ fn a_copy_lists_what_it_skipped_after_a_problem_for_a_later_try() {
 }
 
 #[test]
+fn an_undo_lists_what_it_skipped_but_offers_no_try_again() {
+    let sandbox = Sandbox::new();
+    let moved = go(moving(&sandbox.file(r"from\a.txt", "a"), &sandbox.folder("to")));
+    let copied = go(copy(&sandbox.file(r"from\b.txt", "b"), &sandbox.path("to")));
+    let (a, b) = (sandbox.path(r"to\a.txt"), sandbox.path(r"to\b.txt"));
+    let held = (lock(&a), lock(&b));
+
+    let mut records = moved.done;
+    records.extend(copied.done);
+    let outcome = run_with(Job::Undo { records }, &Script::always(Answer::Skip));
+
+    let mut skipped: Vec<PathBuf> = outcome.failed.iter().map(|failed| failed.source.clone()).collect();
+    skipped.sort();
+    assert_eq!(skipped, [a, b]);
+    assert!(!outcome.retries);
+    drop(held);
+    assert!(go(copy(&sandbox.path(r"from\b.txt"), &sandbox.folder("again"))).retries);
+}
+
+#[test]
 fn a_checked_copy_reads_back_the_same_bytes() {
     let sandbox = Sandbox::new();
     let a = sandbox.file("a.txt", "hello");

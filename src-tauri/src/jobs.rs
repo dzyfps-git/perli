@@ -93,6 +93,8 @@ enum Change {
         created: Vec<String>,
         kept: Vec<String>,
         failed: Vec<Retry>,
+        /// False for a restore or an undo, whose skips are only listed.
+        retries: bool,
         cancelled: bool,
         /// The undo step this job added.
         step: Option<u64>,
@@ -101,7 +103,7 @@ enum Change {
     },
 }
 
-/// What a copy or a move skipped, which the UI can try again.
+/// What a job skipped. The UI can try it again after a copy or a move.
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Retry {
@@ -742,6 +744,7 @@ impl Bridge {
             touched,
             kept,
             failed,
+            retries,
             cancelled,
         } = outcome;
         let mut log = jobs.log();
@@ -755,6 +758,7 @@ impl Bridge {
             created,
             kept: kept.iter().map(|path| text(path)).collect(),
             failed: failed.iter().take(SELECT_LIMIT).map(Retry::from).collect(),
+            retries,
             cancelled,
             step,
             undoable,
@@ -1150,6 +1154,7 @@ mod tests {
                 created: Vec::new(),
                 kept: Vec::new(),
                 failed: Vec::new(),
+                retries: true,
                 cancelled: false,
                 step: None,
                 undoable: Undoable {

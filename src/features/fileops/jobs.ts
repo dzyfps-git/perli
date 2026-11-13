@@ -62,8 +62,10 @@ export interface JobCard {
     /** It ran to the end, rather than being cancelled or only telling something. */
     done: boolean;
     kept: string[];
-    /** What it skipped after a problem, to try again. */
+    /** What it skipped after a problem. */
     failed: Retry[];
+    /** `failed` can be tried again, as after a copy or a move. */
+    retries: boolean;
     /** The undo step this job added. */
     step: number | null;
   };
@@ -157,7 +159,7 @@ export function createJobs(views: () => FolderView[], host: JobsHost) {
     // Only the newest delete keeps its card, so pressing Delete again and again stacks nothing.
     if (toast) setCards((list) => list.filter((other) => !(other.recycle && other.ended)));
     const done = toast ? "In the Recycle Bin" : "Done";
-    const ended = { note: event.cancelled ? "Cancelled" : done, done: !event.cancelled, kept, failed, step: event.step };
+    const ended = { note: event.cancelled ? "Cancelled" : done, done: !event.cancelled, kept, failed, retries: event.retries, step: event.step };
     patch(event.id, { shown: true, question: undefined, waiting: undefined, ended });
     // What a move left behind, or what it skipped, stays on screen until the user has seen it.
     if (!stays) setTimeout(() => remove(event.id), toast ? UNDO_TOAST_MS : LINGER_MS);
@@ -203,7 +205,7 @@ export function createJobs(views: () => FolderView[], host: JobsHost) {
       speeds: [],
       target: null,
       then: "none",
-      ended: { note, done: false, kept: [], failed: [], step: null },
+      ended: { note, done: false, kept: [], failed: [], retries: false, step: null },
     });
   }
 

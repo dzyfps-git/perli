@@ -258,8 +258,10 @@ export type JobEvent = { id: number } & (
       created: string[];
       /** Sources a move left alone because they changed while it ran. */
       kept: string[];
-      /** What a copy or a move skipped after a problem, to try again. */
+      /** What the job skipped after a problem. */
       failed: Retry[];
+      /** False for a restore or an undo, whose skips are only listed. */
+      retries: boolean;
       cancelled: boolean;
       /** The undo step this job added. */
       step: number | null;
