@@ -11,6 +11,22 @@
   box-shadow: var(--shadow);
   backdrop-filter: var(--blur);
   overflow: hidden;
+  /* The corner drags it to another size, which the next preview opens at. */
+  resize: both;
+  min-width: 320px;
+  min-height: 320px;
+  max-width: 96vw;
+  max-height: 94vh;
+}
+
+.quick-preview.preview-full {
+  width: 100vw !important;
+  height: 100vh !important;
+  max-width: none;
+  max-height: none;
+  border: 0;
+  border-radius: 0;
+  resize: none;
 }
 
 .quick-preview:not([open]) {
@@ -21,7 +37,8 @@
   background: rgb(0 0 0 / 28%);
 }
 
-.quick-preview[open] {
+/* Over the list it grows out of the row as a sheet. Beside the list it only fades in. */
+.quick-preview.preview-docked[open] {
   animation: preview-in var(--motion-slide);
 }
 
@@ -1605,5 +1622,509 @@
 @media (prefers-reduced-motion: reduce) {
   .preview-dock {
     animation: none;
+  }
+}
+
+/* The preview frame: the neighbouring files, and what can be done with the file shown. */
+.preview-strip {
+  display: flex;
+  flex: none;
+  justify-content: center;
+  gap: var(--space-1);
+  padding: var(--space-1) var(--space-3);
+  border-top: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.preview-strip-item {
+  position: relative;
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 44px;
+  height: 36px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 9px;
+  overflow: hidden;
+  opacity: 0.6;
+  transition:
+    opacity var(--motion),
+    scale var(--motion-spring),
+    border-color var(--motion);
+}
+
+.preview-strip-item:hover {
+  opacity: 1;
+}
+
+.preview-strip-item[aria-current] {
+  border-color: var(--accent);
+  opacity: 1;
+  scale: 1.12;
+}
+
+.preview-strip-item canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.preview-strip-kind {
+  text-transform: uppercase;
+}
+
+.preview-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  margin-left: auto;
+}
+
+.preview-chip {
+  height: 22px;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 11.5px;
+  transition:
+    background-color var(--motion),
+    border-color var(--motion);
+}
+
+.preview-chip:hover {
+  background: var(--surface-hover);
+  border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
+}
+
+.preview-chip:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* The chips took the room at the end, so the buttons after them only follow. */
+.preview-chips ~ .preview-dock-button {
+  margin-left: 0;
+}
+
+.preview-dock-button[aria-pressed="true"] {
+  color: var(--accent);
+}
+
+.preview-docked .preview-chips {
+  margin-left: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .preview-strip-item {
+    transition: none;
+  }
+}
+
+/* Pictures: a backdrop that takes the picture's colour, squares behind what is see-through,
+   camera chips, and the word on what was copied. */
+.picture-stage {
+  background: radial-gradient(
+    ellipse at center,
+    color-mix(in oklch, var(--picture-tint, transparent) 26%, transparent),
+    color-mix(in oklch, var(--picture-tint, transparent) 8%, transparent) 70%
+  );
+  transition: background var(--motion-glide);
+}
+
+.picture-stage[data-clear] .preview-picture {
+  background: repeating-conic-gradient(color-mix(in srgb, var(--text) 14%, transparent) 0% 25%, transparent 0% 50%) 0 0 / 16px 16px;
+}
+
+.picture-stage[data-picking],
+.picture-stage[data-picking][data-zoomed] {
+  cursor: crosshair;
+}
+
+.picture-chips {
+  position: absolute;
+  bottom: var(--space-3);
+  left: var(--space-3);
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  max-width: 70%;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  transition: opacity var(--motion);
+}
+
+.picture-chips li,
+.picture-said {
+  padding: 2px var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: var(--overlay-tint);
+  color: var(--text);
+  font-size: 11.5px;
+  backdrop-filter: var(--blur);
+}
+
+.preview-body[data-idle] .picture-chips {
+  opacity: 0;
+}
+
+.picture-said {
+  position: absolute;
+  bottom: var(--space-3);
+  left: 50%;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0;
+  translate: -50% 0;
+  animation: picture-said-in var(--motion-spring);
+}
+
+.picture-swatch {
+  width: 12px;
+  height: 12px;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+}
+
+.picture-frame {
+  min-width: 64px;
+  font-variant-numeric: tabular-nums;
+}
+
+@keyframes picture-said-in {
+  from {
+    opacity: 0;
+    translate: -50% 6px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .picture-stage,
+  .picture-chips {
+    transition: none;
+  }
+
+  .picture-said {
+    animation: none;
+  }
+}
+
+/* Text: tables that sort and filter, JSON as a tree, and what kind of text it is. */
+.text-kind {
+  min-width: 0;
+  padding: 0 var(--space-2);
+  color: var(--text-muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.preview-tools .strip-icon[data-done] {
+  color: var(--accent);
+}
+
+.preview-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--overlay-tint);
+  backdrop-filter: var(--blur);
+}
+
+.preview-table .table-filters th {
+  top: 28px;
+  padding-top: 0;
+}
+
+.table-sort {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-weight: 600;
+  text-align: left;
+}
+
+.table-sort::after {
+  content: "";
+  border: 4px solid transparent;
+  opacity: 0;
+  transition:
+    opacity var(--motion),
+    rotate var(--motion-spring);
+}
+
+th[aria-sort="ascending"] .table-sort::after,
+th[aria-sort="descending"] .table-sort::after {
+  border-bottom-color: var(--accent);
+  translate: 0 -2px;
+  opacity: 1;
+}
+
+th[aria-sort="descending"] .table-sort::after {
+  translate: 0 2px;
+  rotate: 180deg;
+}
+
+.table-sort:hover {
+  color: var(--accent);
+}
+
+.table-sort:focus-visible,
+.table-filters input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.table-filters input {
+  width: 100%;
+  min-width: 6ch;
+  height: 22px;
+  padding: 0 var(--space-1);
+  border: 1px solid var(--border);
+  border-radius: var(--space-1);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-weight: 400;
+}
+
+.json-tree {
+  padding: var(--space-4);
+  font:
+    12.5px/1.6 "Cascadia Mono",
+    Consolas,
+    monospace;
+}
+
+.json-fold > summary {
+  cursor: pointer;
+  border-radius: var(--space-1);
+}
+
+.json-fold > summary:hover {
+  background: var(--surface-hover);
+}
+
+.json-fold > :not(summary) {
+  margin-left: 18px;
+}
+
+.json-leaf {
+  padding-left: 14px;
+}
+
+.json-name {
+  color: var(--accent);
+}
+
+.json-name::after {
+  content: ": ";
+  color: var(--text-muted);
+}
+
+.json-count {
+  color: var(--text-muted);
+}
+
+.json-value[data-kind="string"] {
+  color: var(--tag-3, var(--text));
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.json-value[data-kind="number"] {
+  color: var(--tag-1, var(--text));
+}
+
+.json-value:is([data-kind="boolean"], [data-kind="null"]) {
+  color: var(--tag-6, var(--text-muted));
+}
+
+/* Markdown: the card of what the file says about itself, copy buttons, task boxes, where a
+   link goes, and the file as written. */
+.md-front {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px var(--space-3);
+  margin: 0 0 var(--space-4);
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  font-size: 12.5px;
+}
+
+.md-front dt {
+  color: var(--text-muted);
+}
+
+.md-front dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.preview-markdown pre {
+  position: relative;
+}
+
+.md-copy {
+  position: absolute;
+  top: var(--space-1);
+  right: var(--space-1);
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--space-1);
+  background: var(--overlay-tint);
+  color: var(--text-muted);
+  font: 12px / 1 var(--font-icons);
+  opacity: 0;
+  transition:
+    opacity var(--motion),
+    color var(--motion);
+}
+
+.preview-markdown pre:hover .md-copy,
+.md-copy:focus-visible {
+  opacity: 1;
+}
+
+.md-copy:hover {
+  color: var(--text);
+}
+
+.md-copy[data-done] {
+  color: var(--accent);
+  opacity: 1;
+}
+
+.preview-markdown li:has(> input[type="checkbox"]) {
+  list-style: none;
+  margin-left: -1.4em;
+}
+
+.preview-markdown input[type="checkbox"] {
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  margin: 0 var(--space-2) 0 0;
+  border: 1.5px solid var(--text-muted);
+  border-radius: 4px;
+  vertical-align: -2px;
+}
+
+.preview-markdown input[type="checkbox"]:checked {
+  border-color: var(--accent);
+  background: var(--accent)
+    url('data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 14 14"><path d="M3 7.2l2.6 2.6L11 4.4" fill="none" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>')
+    center / contain;
+}
+
+.preview-markdown a[href]:not([href=""]) {
+  position: relative;
+}
+
+.preview-markdown a[href]:not([href=""]):hover::after {
+  content: attr(href);
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 2;
+  max-width: 48ch;
+  padding: 2px var(--space-2);
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--space-1);
+  background: var(--overlay-tint);
+  color: var(--text);
+  font-size: 11.5px;
+  font-weight: 400;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  backdrop-filter: var(--blur);
+  pointer-events: none;
+}
+
+.md-source {
+  max-width: 900px;
+  margin: 0 auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .table-sort::after,
+  .md-copy {
+    transition: none;
+  }
+}
+
+/* Details: the few facts that sum the file up, and values that copy on a click. */
+.details-headline {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  margin: calc(-1 * var(--space-2)) 0 var(--space-3);
+  padding: 0;
+  list-style: none;
+}
+
+.details-headline li {
+  padding: 1px var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  font-size: 11.5px;
+}
+
+.details-value {
+  position: relative;
+  border-radius: var(--space-1);
+  cursor: copy;
+  transition: background-color var(--motion);
+}
+
+.details-value:hover {
+  background: var(--surface-hover);
+}
+
+.details-value:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.details-value[data-copied]::after {
+  content: "Copied";
+  position: absolute;
+  top: 0;
+  right: 0;
+  padding: 0 var(--space-2);
+  border-radius: var(--space-1);
+  background: var(--accent);
+  color: white;
+  font-size: 11px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .details-value {
+    transition: none;
   }
 }

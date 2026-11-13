@@ -80,6 +80,9 @@ async fn load(path: PathBuf, edge: u32, own: bool) -> Vec<u8> {
     result.recv().await.unwrap_or_default()
 }
 
+const PEEK_NAMES: usize = 6;
+const PEEK_COUNT: usize = 1000;
+
 /// The first lines of a file that reads as UTF-8 text, for a preview. Bytes that are not UTF-8,
 /// or control characters, mean it is not text. A file in the cloud stays there. Blocks, so call
 /// it off the main thread.
@@ -94,6 +97,38 @@ pub fn text_start(path: &Path) -> Option<String> {
     // The cut can land inside a character, which is fine.
     let text = crate::preview::as_text(body, true)?;
     (!text.is_empty()).then(|| text.lines().take(PEEK_LINES).collect::<Vec<_>>().join("\n"))
+}
+
+/// What a folder's hover card says is inside it.
+#[derive(Debug, PartialEq, serde::Serialize)]
+pub struct FolderStart {
+    /// The first few names, folders marked with `true`.
+    pub names: Vec<(String, bool)>,
+    pub count: usize,
+    /// The folder holds more than were counted.
+    pub more: bool,
+}
+
+/// The first few things in a folder and how many it holds, without hidden ones. Counting stops
+/// at `PEEK_COUNT`, so a huge folder answers as fast as a small one. Blocks.
+pub fn folder_start(path: &Path) -> Option<FolderStart> {
+    const HIDDEN: u32 = 0x2;
+    let mut found = FolderStart { names: Vec::new(), count: 0, more: false };
+    for entry in fs::read_dir(path).ok()?.flatten() {
+        let Ok(data) = entry.metadata() else { continue };
+        if data.file_attributes() & HIDDEN != 0 {
+            continue;
+        }
+        if found.count == PEEK_COUNT {
+            found.more = true;
+            break;
+        }
+        found.count += 1;
+        if found.names.len() < PEEK_NAMES {
+            found.names.push((entry.file_name().to_string_lossy().into_owned(), data.is_dir()));
+        }
+    }
+    Some(found)
 }
 
 /// True if opening the file would fetch it from the cloud.
@@ -283,5 +318,26 @@ mod tests {
 
         assert!(bytes.len() > HEADER_BYTES);
         fs::remove_dir_all(folder).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod folder_start_tests {
+    use super::*;
+
+    #[test]
+    fn a_folder_card_lists_the_first_names_and_counts_the_rest() {
+        let folder = std::env::temp_dir().join(format!("perli-folder-start-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&folder);
+        fs::create_dir_all(folder.join("inner")).unwrap();
+        for at in 0..8 {
+            fs::write(folder.join(format!("file{at}.txt")), "x").unwrap();
+        }
+        let found = folder_start(&folder).unwrap();
+        assert_eq!((found.count, found.more, found.names.len()), (9, false, PEEK_NAMES));
+        assert!(found.names.contains(&("file0.txt".to_string(), false)));
+        assert_eq!(folder_start(&folder.join("inner")), Some(FolderStart { names: Vec::new(), count: 0, more: false }));
+        assert_eq!(folder_start(&folder.join("missing")), None);
+        fs::remove_dir_all(&folder).unwrap();
     }
 }

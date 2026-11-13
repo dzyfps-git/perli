@@ -1747,6 +1747,8 @@ export function App() {
               setPreviewPane(true);
               closePreview();
             }}
+            onOpenWith={(path) => setPickingApp([path])}
+            onShow={(path) => showInFolder(view, path)}
           />
         )}
       </Show>

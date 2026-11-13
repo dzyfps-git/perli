@@ -39,8 +39,8 @@ const MODEL_BYTES: u64 = 256 * 1024 * 1024;
 pub enum Preview {
     /// `next` is where the following piece starts, if there is one.
     #[serde(rename_all = "camelCase")]
-    Text { text: String, next: Option<u64> },
-    Markdown { html: String },
+    Text { text: String, next: Option<u64>, end: u64, bom: bool },
+    Markdown { html: String, source: String },
     /// What a ZIP holds, and whether there was more than the list.
     Archive { entries: Vec<inside::Entry>, more: bool },
     /// A comic's pages, by their names inside it.
@@ -86,8 +86,9 @@ pub fn read(path: &Path, offset: u64) -> Preview {
     }
     let size = path.metadata().map_or(0, |data| data.len());
     if offset == 0 && is_markdown(path) && size <= MARKDOWN_BYTES {
-        if let Some(text) = std::fs::read(path).ok().and_then(|bytes| as_text(strip_bom(&bytes), false).map(markdown)) {
-            return Preview::Markdown { html: text };
+        let read = std::fs::read(path).ok();
+        if let Some(source) = read.as_deref().and_then(|bytes| as_text(strip_bom(bytes), false)) {
+            return Preview::Markdown { html: markdown(source), source: source.to_string() };
         }
     }
     piece(path, offset).unwrap_or(Preview::Picture)
@@ -157,14 +158,16 @@ fn piece(path: &Path, offset: u64) -> Option<Preview> {
     }
     // A piece ends after a whole line, so no line is split between two of them.
     let shown = if more { text.rfind('\n').map_or(text, |end| &text[..=end]) } else { text };
-    let next = more.then(|| offset + (skipped + shown.len()) as u64);
-    Some(Preview::Text { text: shown.to_string(), next })
+    // Where this piece stops, which is where a file that is still growing is read on from.
+    let end = offset + (skipped + shown.len()) as u64;
+    Some(Preview::Text { text: shown.to_string(), next: more.then_some(end), end, bom: skipped > 0 })
 }
 
 /// HTML for Markdown, with no HTML of its own: tags in the text show as text, links that are not
 /// web or mail links do nothing, and only pictures on this PC show. Their `<canvas>` carries the
 /// full path for the window to draw.
 pub fn markdown(text: &str) -> String {
+    let (front, text) = front_matter(text);
     let parser = Parser::new_ext(text, Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS);
     let mut events = Vec::new();
     let mut picture: Option<(CowStr, String)> = None;
@@ -192,8 +195,47 @@ pub fn markdown(text: &str) -> String {
         }
     }
     let mut out = String::new();
+    if !front.is_empty() {
+        out.push_str("<dl class=\"md-front\">");
+        for (name, value) in &front {
+            out.push_str(&format!("<dt>{}</dt><dd>{}</dd>", escape(name), escape(value)));
+        }
+        out.push_str("</dl>\n");
+    }
     html::push_html(&mut out, events.into_iter());
     out
+}
+
+/// The block between two `---` lines that many Markdown files start with, as names and values,
+/// and the text after it. The items of a list join their name's value. A block that never
+/// closes is not one.
+fn front_matter(text: &str) -> (Vec<(String, String)>, &str) {
+    let Some(rest) = text.strip_prefix("---\n").or_else(|| text.strip_prefix("---\r\n")) else {
+        return (Vec::new(), text);
+    };
+    let mut found: Vec<(String, String)> = Vec::new();
+    let mut at = 0;
+    for line in rest.split_inclusive('\n') {
+        at += line.len();
+        let line = line.trim_end();
+        if line == "---" || line == "..." {
+            return (found, &rest[at..]);
+        }
+        let unquote = |value: &str| value.trim().trim_matches(['"', '\'']).to_string();
+        if let Some(item) = line.trim_start().strip_prefix("- ") {
+            if let Some((_, value)) = found.last_mut() {
+                if !value.is_empty() {
+                    value.push_str(", ");
+                }
+                value.push_str(&unquote(item));
+            }
+        } else if let Some((name, value)) = line.split_once(':') {
+            if !name.is_empty() && !name.starts_with([' ', '\t', '#']) {
+                found.push((name.trim().to_string(), unquote(value)));
+            }
+        }
+    }
+    (Vec::new(), text)
 }
 
 pub(crate) fn is_web_link(dest: &str) -> bool {
@@ -376,7 +418,7 @@ mod tests {
         let mut offset = 0;
         let mut pieces = 0;
         loop {
-            let Preview::Text { text, next } = read(&file, offset) else { panic!("not text") };
+            let Preview::Text { text, next, .. } = read(&file, offset) else { panic!("not text") };
             assert!(text.ends_with('\n'));
             joined.push_str(&text);
             pieces += 1;
@@ -414,7 +456,14 @@ mod tests {
         fs::write(folder.join("a.bin"), b"MZ\0\0").unwrap();
         fs::write(folder.join("empty.txt"), "").unwrap();
 
-        assert_eq!(read(&folder.join("read.md"), 0), Preview::Markdown { html: "<p><em>hi</em></p>\n".into() });
+        assert_eq!(read(&folder.join("read.md"), 0), Preview::Markdown { html: "<p><em>hi</em></p>\n".into(), source: "*hi*".into() });
+        // A text that is still being written is read on from where the last piece stopped.
+        std::fs::write(folder.join("grow.log"), "one\n").unwrap();
+        let Preview::Text { end, next, bom, .. } = read(&folder.join("grow.log"), 0) else { panic!("not text") };
+        assert_eq!((end, next, bom), (4, None, false));
+        std::fs::write(folder.join("grow.log"), "one\ntwo\n").unwrap();
+        assert_eq!(read(&folder.join("grow.log"), end), Preview::Text { text: "two\n".into(), next: None, end: 8, bom: false });
+        assert_eq!(read(&folder.join("grow.log"), 8), Preview::Text { text: String::new(), next: None, end: 8, bom: false });
         assert_eq!(read(&folder.join("a.bin"), 0), Preview::Picture);
         assert_eq!(read(&folder.join("empty.txt"), 0), Preview::Picture);
         assert_eq!(read(&folder, 0), Preview::Picture);
@@ -498,5 +547,23 @@ mod tests {
         ] {
             assert_eq!(group_of(name), group, "{name}");
         }
+    }
+}
+
+#[cfg(test)]
+mod front_matter_tests {
+    use super::*;
+
+    #[test]
+    fn front_matter_becomes_a_card_and_leaves_the_text() {
+        let html = markdown("---\ntitle: \"A <b>\"\ntags:\n  - one\n  - two\n# note\n---\n# Head\n");
+        assert_eq!(html, "<dl class=\"md-front\"><dt>title</dt><dd>A &lt;b&gt;</dd><dt>tags</dt><dd>one, two</dd></dl>\n<h1>Head</h1>\n");
+    }
+
+    #[test]
+    fn a_rule_at_the_top_that_never_closes_is_no_front_matter() {
+        assert_eq!(front_matter("---\ntitle: x\ntext").0, Vec::new());
+        assert_eq!(front_matter("plain").1, "plain");
+        assert!(markdown("---\ntext\n").contains("<hr />"));
     }
 }

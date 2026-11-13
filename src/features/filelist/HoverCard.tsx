@@ -1,6 +1,6 @@
-import { createSignal, For, onMount, Show } from "solid-js";
+import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { Portal } from "solid-js/web";
-import { fetchThumb, peekText, type Row, type Thumb } from "../../api";
+import { fetchThumb, peekFolder, peekText, type FolderStart, type Row, type Thumb } from "../../api";
 import { formatSize } from "../../ui/format";
 import { relativeTo } from "../navigation/path";
 import { tagColor, tags } from "../tags/tags";
@@ -21,8 +21,20 @@ export interface CardAsk {
 
 const dates = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" });
 
-/** A row's details, with a preview of its text or its picture. It never takes the pointer. */
-export function HoverCard(props: { ask: CardAsk; view: number; folder: string; sync?: string }) {
+/**
+ * A row's details, with a preview of its text, its picture or what a folder holds. It never takes
+ * the pointer, until Shift pins it: then it stays, and its text can be selected and copied.
+ */
+export function HoverCard(props: {
+  ask: CardAsk;
+  view: number;
+  folder: string;
+  sync?: string;
+  /** Told when the card is pinned, and when a pinned card is let go. */
+  onPin?: (pinned: boolean) => void;
+}) {
+  const [inside, setInside] = createSignal<FolderStart>();
+  const [pinned, setPinned] = createSignal(false);
   const [text, setText] = createSignal<string>();
   const [thumb, setThumb] = createSignal<Thumb>();
   let box!: HTMLDivElement;
@@ -61,19 +73,54 @@ export function HoverCard(props: { ask: CardAsk; view: number; folder: string; s
     if (picture) setThumb(picture);
   }
 
+  function pin(on: boolean) {
+    setPinned(on);
+    props.onPin?.(on);
+  }
+
   onMount(() => {
     place();
-    if (!row.isDir) loadPreview().then(() => box.isConnected && place());
+    const loaded = row.isDir
+      ? peekFolder(props.view, props.ask.snapshot, props.ask.index).then((found) => found && setInside(found), () => undefined)
+      : loadPreview();
+    loaded.then(() => box.isConnected && place());
+    // Shift pins the card. Any other key, or a press outside it, lets a pinned card go.
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Shift" && !event.repeat && !pinned()) pin(true);
+      else if (pinned() && !["Shift", "Control", "Alt", "Meta"].includes(event.key) && !(event.ctrlKey && event.key.toLowerCase() === "c")) pin(false);
+    };
+    const onPress = (event: PointerEvent) => pinned() && !box.contains(event.target as Node) && pin(false);
+    window.addEventListener("keydown", onKey, true);
+    window.addEventListener("pointerdown", onPress, true);
+    onCleanup(() => {
+      window.removeEventListener("keydown", onKey, true);
+      window.removeEventListener("pointerdown", onPress, true);
+    });
   });
 
   return (
     <Portal>
-      <div ref={box} class="hover-card" role="tooltip">
+      <div ref={box} class="hover-card" role="tooltip" data-pinned={pinned() || undefined}>
         <Show when={text()}>
           <pre class="hover-card-text">{text()}</pre>
         </Show>
         <Show when={thumb()}>
           <canvas ref={drawThumb} class="hover-card-picture" />
+        </Show>
+        <Show when={inside()}>
+          {(found) => (
+            <Show when={found().count > 0} fallback={<p class="hover-card-hint">Nothing in this folder.</p>}>
+              <ul class="hover-card-inside">
+                <For each={found().names}>{([name, folder]) => <li data-folder={folder || undefined}>{name}</li>}</For>
+                <Show when={found().count > found().names.length}>
+                  <li class="hover-card-rest">
+                    and {(found().count - found().names.length).toLocaleString()}
+                    {found().more ? " or" : ""} more
+                  </li>
+                </Show>
+              </ul>
+            </Show>
+          )}
         </Show>
         <p class="hover-card-name">{row.name}</p>
         <dl class="hover-card-facts">
@@ -98,6 +145,7 @@ export function HoverCard(props: { ask: CardAsk; view: number; folder: string; s
             </For>
           </ul>
         </Show>
+        <p class="hover-card-hint">{pinned() ? "Pinned. Esc lets it go." : "Shift pins this card."}</p>
       </div>
     </Portal>
   );
