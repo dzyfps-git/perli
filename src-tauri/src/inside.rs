@@ -159,6 +159,15 @@ pub fn text(path: &Path, name: &str, password: Option<&str>) -> Result<Option<St
     Ok(crate::preview::as_text(body, true).map(str::to_string))
 }
 
+/// Reads all of a locked file, so its checksum proves `password`. A wrong one can pass the quick
+/// header check of ZipCrypto and show only once the file is read through.
+pub fn check_password(path: &Path, name: &str, password: &str) -> Result<(), String> {
+    let mut zip = open(path)?;
+    let mut entry = entry(&mut zip, name, Some(password))?;
+    std::io::copy(&mut entry, &mut std::io::sink()).map_err(|error| read_failed(error, Some(password)))?;
+    Ok(())
+}
+
 fn read_entry(zip: &mut Zip, name: &str, most: u64) -> Result<Vec<u8>, String> {
     read_locked(zip, name, most, None)
 }

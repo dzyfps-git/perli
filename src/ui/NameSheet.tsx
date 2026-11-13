@@ -36,7 +36,8 @@ export function NameSheet(props: { ask: NameAsk; onClose: () => void }) {
       class="settings confirm"
       aria-label={props.ask.title}
       onClose={props.onClose}
-      onKeyDown={(event) => event.key === "Enter" && confirm()}
+      // Only the name box: Enter on a button presses that button.
+      onKeyDown={(event) => event.key === "Enter" && event.target === input && confirm()}
     >
       <h2>{props.ask.title}</h2>
       <div class="rename-fields filter-one">

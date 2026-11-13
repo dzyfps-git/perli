@@ -17,6 +17,7 @@ import type { Layout } from "../filelist/layout";
 import {
   folderSizes,
   grouping,
+  inlineFolders,
   lastLayout,
   lastSort,
   rememberedFilter,
@@ -135,6 +136,9 @@ export function createFolderView(id: number, saved?: SavedPane) {
   let walkedSight = "";
   const sight = () => `${showHidden()} ${showSystem()}`;
 
+  /** Only the list with its arrows shows folders opened in place, and can close them again. */
+  const nests = () => layout() === "list" && inlineFolders();
+
   /** The folder shown, or the saved one that has not been opened yet. */
   const path = () => folder()?.path ?? saved?.path;
   const shownSort = () => (query() ? searchSort() : sort());
@@ -147,7 +151,7 @@ export function createFolderView(id: number, saved?: SavedPane) {
     showSystem: showSystem(),
     // Rows of a search carry no tags, so a tag would leave none of them.
     filter: { ...toFilter(filterForm()), tags: query() ? [] : filterForm().tags },
-    expanded: query() || isBin(target) ? [] : expanded(),
+    expanded: query() || isBin(target) || !nests() ? [] : expanded(),
   });
   /** A folder opens in its own order, even from a search. */
   const openingOrder = (target: string, wanted: Sort, form: typeof NO_FILTER): Order => ({
@@ -156,7 +160,7 @@ export function createFolderView(id: number, saved?: SavedPane) {
     showHidden: showHidden(),
     showSystem: showSystem(),
     filter: toFilter(form),
-    expanded: samePath(path(), target) && !isBin(target) ? expanded() : [],
+    expanded: samePath(path(), target) && !isBin(target) && nests() ? expanded() : [],
   });
   /** Row numbers mean nothing outside the snapshot they came from. */
   const selectedRows = (snapshot: number) => {
@@ -373,6 +377,14 @@ export function createFolderView(id: number, saved?: SavedPane) {
   function setLayout(next: Layout) {
     if (next !== layout()) morph(() => setLayoutValue(next), "layout");
     setLastLayout(next);
+    if (next !== "list") collapseAll();
+  }
+
+  /** Closes every folder opened in place, where nothing could show or close them. */
+  function collapseAll() {
+    if (expanded().length === 0) return;
+    setExpanded([]);
+    reload();
   }
 
   async function open(path: string) {
@@ -481,6 +493,7 @@ export function createFolderView(id: number, saved?: SavedPane) {
     },
     list: () => list,
     expanded,
+    collapseAll,
     /** Opens `folder` in place, under its row, or closes it and every folder opened inside it. */
     toggleExpand(folder: string) {
       const open = expanded().some((other) => samePath(other, folder));

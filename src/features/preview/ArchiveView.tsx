@@ -67,6 +67,8 @@ export interface ArchiveViewProps {
   more: boolean;
   picture: (entry: string, edge: number, password?: string) => Promise<Thumb | null>;
   text: (entry: string, password?: string) => Promise<string | null>;
+  /** Fails unless the password opens all of the entry. */
+  check: (entry: string, password: string) => Promise<void>;
   /** Takes these entries out beside the archive. */
   extract: (only: string[], password?: string) => Promise<void>;
   test: (password?: string) => Promise<ArchiveTested>;
@@ -184,12 +186,12 @@ export function ArchiveView(live: ArchiveViewProps) {
     else setAsking({ then });
   }
 
-  /** The password is tried on the first locked file, which is quick, before anything uses it. */
+  /** The password is tried on all of the smallest locked file before anything uses it. */
   async function tryPassword(tried: string) {
     const waiting = asking();
     if (!waiting || !firstLocked) return;
     try {
-      await props.text(firstLocked.name, tried);
+      await props.check(firstLocked.name, tried);
       setPassword(tried);
       setAsking(undefined);
       waiting.then();

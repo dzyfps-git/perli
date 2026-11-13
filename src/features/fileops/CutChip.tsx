@@ -1,5 +1,5 @@
 import { For, Show } from "solid-js";
-import { baseName } from "../navigation/path";
+import { baseName, parentOf, samePath } from "../navigation/path";
 import { cutMark, takeBackCut } from "./clipboard";
 
 const ICON_CUT = "";
@@ -25,7 +25,12 @@ export function CutChip(props: { onShow: (folder: string, names: string[]) => vo
   return (
     <Show when={cutMark()}>
       {(cut) => {
-        const names = () => [...cut().names].sort((a, b) => a.localeCompare(b));
+        // The paths, not the faded names: rows of a search fade nowhere, but are cut all the same.
+        const names = () => cut().paths.map(baseName).sort((a, b) => a.localeCompare(b));
+        const first = () => parentOf(cut().paths[0] ?? "") ?? cut().folder;
+        const oneFolder = () => cut().paths.every((path) => samePath(parentOf(path), first()));
+        /** Show goes to the first one's folder, with what is cut there selected. */
+        const shownNames = () => cut().paths.filter((path) => samePath(parentOf(path), first())).map(baseName);
         const label = () => (names().length === 1 ? "1 item cut" : `${names().length} items cut`);
         const more = () => names().length - MOST_NAMES;
         return (
@@ -40,7 +45,7 @@ export function CutChip(props: { onShow: (folder: string, names: string[]) => vo
               <span class="cut-label">{label()}</span>
             </button>
             <div ref={peek} class="new-gallery cut-peek" popover="auto" role="dialog" aria-label={label()}>
-              <span class="cut-from">From {baseName(cut().folder) || cut().folder}</span>
+              <span class="cut-from">From {oneFolder() ? baseName(first()) || first() : "several folders"}</span>
               <ul class="cut-names">
                 <For each={names().slice(0, MOST_NAMES)}>{(name) => <li>{name}</li>}</For>
               </ul>
@@ -52,7 +57,7 @@ export function CutChip(props: { onShow: (folder: string, names: string[]) => vo
                   class="job-choice"
                   onClick={() => {
                     peek.hidePopover();
-                    props.onShow(cut().folder, names());
+                    props.onShow(first(), shownNames());
                   }}
                 >
                   Show
