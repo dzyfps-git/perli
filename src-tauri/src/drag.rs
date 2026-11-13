@@ -541,7 +541,7 @@ mod tests {
     fn a_drag_follows_the_ui_and_leaves_the_source_alone() {
         let scene = Scene::new("flow");
         let into = scene.folder.join("into");
-        let data = menus::data_object(&[scene.file.clone()]).unwrap();
+        let data = menus::data_object(std::slice::from_ref(&scene.file)).unwrap();
         let drags = Arc::new(Drags::default());
         let heard = Rc::new(RefCell::new(Vec::new()));
         let log = heard.clone();
@@ -648,7 +648,7 @@ mod tests {
     fn the_right_button_is_remembered_from_the_start_of_the_drag() {
         let scene = Scene::new("right");
         let into = scene.folder.join("into");
-        let data = menus::data_object(&[scene.file.clone()]).unwrap();
+        let data = menus::data_object(std::slice::from_ref(&scene.file)).unwrap();
         let drags = Arc::new(Drags::default());
         let heard = Rc::new(RefCell::new(Vec::new()));
         let log = heard.clone();
@@ -693,7 +693,7 @@ mod tests {
     #[test]
     fn leaving_forgets_the_drag() {
         let scene = Scene::new("leave");
-        let data = menus::data_object(&[scene.file.clone()]).unwrap();
+        let data = menus::data_object(std::slice::from_ref(&scene.file)).unwrap();
         let drags = Arc::new(Drags::default());
         let target: IDropTarget = Target::new(HWND::default(), drags.clone(), Box::new(|_| ())).into();
 

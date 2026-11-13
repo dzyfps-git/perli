@@ -517,6 +517,8 @@ async fn list_places() -> Result<places::Places, String> {
         .map_err(|error| error.message())
 }
 
+// Tauri hands each argument and state over by name, so one struct would change what the UI sends.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 async fn open_folder(
     view: u32,
@@ -1956,7 +1958,9 @@ fn main() {
     let posed = ask.plain_folder().filter(|_| !ask.new_window && default_app::is_on()).map(str::to_string);
     let door = if ask.new_window { None } else { launch::Door::claim() };
     if door.is_none() && !ask.new_window && launch::hand_off(&ask) {
-        posed.map(pose_for);
+        if let Some(posed) = posed {
+            pose_for(posed);
+        }
         return;
     }
     if let Some(folder) = posed {

@@ -95,11 +95,14 @@ impl Drop for Sandbox {
 }
 
 /// Answers questions from a list, then skips. `during` runs on every progress report.
+/// Runs on each progress report, to change things mid-job.
+type During = Box<dyn Fn(&Progress)>;
+
 #[derive(Default)]
 pub(super) struct Script {
     replies: RefCell<VecDeque<Reply>>,
     questions: RefCell<Vec<Question>>,
-    during: Option<Box<dyn Fn(&Progress)>>,
+    during: Option<During>,
     verify: bool,
 }
 
@@ -2145,7 +2148,7 @@ fn recycled_file_lands_in_the_bin_and_undo_restores_it() {
 #[test]
 fn several_items_recycle_in_one_job_and_a_folder_goes_whole() {
     let sandbox = Sandbox::new();
-    let paths = vec![sandbox.file(r"here\a.txt", "a"), sandbox.file(r"here\tree\b.txt", "b")];
+    let paths = [sandbox.file(r"here\a.txt", "a"), sandbox.file(r"here\tree\b.txt", "b")];
     let tree = sandbox.path(r"here\tree");
 
     let outcome = go(Job::Recycle {

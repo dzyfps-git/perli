@@ -24,7 +24,7 @@ fn rate_of(bytes: &[u8]) -> Option<u32> {
     let exponent = i32::from(be16(bytes, 0)? & 0x7fff) - 16383 - 63;
     let mantissa = u64::from_be_bytes(bytes.get(2..10)?.try_into().ok()?);
     let rate = mantissa as f64 * 2f64.powi(exponent);
-    (rate >= 1.0 && rate <= 768_000.0).then(|| rate.round() as u32)
+    (1.0..=768_000.0).contains(&rate).then(|| rate.round() as u32)
 }
 
 /// An AIFF file read whole, for `aiff_to_wav`.

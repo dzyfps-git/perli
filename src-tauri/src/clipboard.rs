@@ -101,7 +101,7 @@ pub fn decode(bytes: &[u8]) -> Option<Vec<PathBuf>> {
     }
     let units: Vec<u16> = bytes
         .get(word(0)? as usize..)?
-        .chunks_exact(2)
+        .as_chunks::<2>().0.iter()
         .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
         .collect();
     let names = units.split(|&unit| unit == 0).take_while(|name| !name.is_empty());
@@ -203,7 +203,7 @@ fn image_file(png: Vec<u8>) -> Template {
 }
 
 fn text_file(units: &[u8]) -> Option<Template> {
-    let units: Vec<u16> = units.chunks_exact(2).map(|pair| u16::from_le_bytes([pair[0], pair[1]])).collect();
+    let units: Vec<u16> = units.as_chunks::<2>().0.iter().map(|pair| u16::from_le_bytes([pair[0], pair[1]])).collect();
     let length = units.iter().position(|&unit| unit == 0).unwrap_or(units.len());
     let text = String::from_utf16_lossy(&units[..length]);
     let stem = "Pasted text".to_string();

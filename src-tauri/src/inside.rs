@@ -506,8 +506,7 @@ fn contents_of(file: &str, source: &str, chapters: &[String]) -> Vec<Heading> {
             }
         }
     };
-    loop {
-        let Ok(event) = reader.read_event() else { break };
+    while let Ok(event) = reader.read_event() {
         match event {
             Event::Start(start) => match start.local_name().as_ref() {
                 "nav" if !in_toc => in_toc = attribute(&start, "type").is_some_and(|kind| kind.split(' ').any(|one| one == "toc")),

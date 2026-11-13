@@ -389,6 +389,7 @@ impl Found {
         self.locations.append(&mut other.locations);
     }
 
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.entries.len()
     }
@@ -1546,7 +1547,7 @@ mod tests {
         let bytes = listing.encode_rows(0, 1);
         let location_bytes = u32::from_le_bytes(bytes[33..37].try_into().unwrap()) as usize;
         let location: Vec<u16> = bytes[48..48 + location_bytes]
-            .chunks_exact(2)
+            .as_chunks::<2>().0.iter()
             .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
             .collect();
         assert_eq!(String::from_utf16(&location).unwrap(), r"C:\home");
