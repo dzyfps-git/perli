@@ -31,8 +31,9 @@ use windows::Win32::UI::Shell::{
     OPENASINFO, SEE_MASK_UNICODE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DispatchMessageW, GetMessageW,
-    PostMessageW, RegisterClassW, SetForegroundWindow, TrackPopupMenuEx, TranslateMessage, MSG,
+    CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DispatchMessageW, GetMenuItemCount,
+    GetMenuItemInfoW, GetMessageW, HMENU, MENUITEMINFOW, MFS_CHECKED, MFS_DISABLED, MFT_SEPARATOR, MIIM_BITMAP,
+    MIIM_FTYPE, MIIM_ID, MIIM_STATE, MIIM_STRING, MIIM_SUBMENU, PostMessageW, RegisterClassW, SetForegroundWindow, TrackPopupMenuEx, TranslateMessage, MSG,
     SW_SHOWNORMAL, TPM_RETURNCMD, TPM_RIGHTBUTTON, WINDOW_EX_STYLE, WM_APP, WM_DRAWITEM,
     WM_INITMENUPOPUP, WM_MEASUREITEM, WM_MENUCHAR, WM_NULL, WNDCLASSW, WS_POPUP,
 };
@@ -486,6 +487,128 @@ fn run_menu(target: &Target, owner: HWND, main: HWND, point: POINT) -> Result<Op
     result
 }
 
+/// One item of Windows' own menu, for Perli's menu to show in its own look.
+#[derive(Serialize, Debug, Default)]
+pub struct Entry {
+    /// What to run it by. Items that only open a side menu have none.
+    id: Option<u32>,
+    label: String,
+    /// The item's small picture, as `thumbs::encode` writes one.
+    icon: Option<Vec<u8>>,
+    divider: bool,
+    disabled: bool,
+    checked: bool,
+    items: Vec<Entry>,
+}
+
+/// Perli's menu has these already, in its own way.
+const LISTED_ELSEWHERE: [&str; 3] = ["properties", "openas", "sendto"];
+/// Side menus inside side menus end somewhere.
+const DEEPEST_MENU: u32 = 3;
+const LONGEST_LABEL: usize = 260;
+/// Below this, a menu picture is one of Windows' own marks and no bitmap.
+const FIRST_REAL_BITMAP: isize = 12;
+
+thread_local! {
+    /// The menu last listed, kept so a choice from it can run.
+    static LISTED: RefCell<Option<(IContextMenu, HMENU, HSTRING)>> = const { RefCell::new(None) };
+}
+
+/// Menu text marks its access key with `&` and puts a key hint after a tab.
+fn plain_label(text: &str) -> String {
+    let text = text.split('\t').next().unwrap_or_default();
+    text.replace("&&", "\0").replace('&', "").replace('\0', "&").trim().to_string()
+}
+
+fn read_entries(menu: &IContextMenu, popup: HMENU, depth: u32) -> Vec<Entry> {
+    let mut entries = Vec::new();
+    let mut divider = false;
+    for index in 0..unsafe { GetMenuItemCount(Some(popup)) }.max(0) as u32 {
+        let mut text = [0u16; LONGEST_LABEL];
+        let mut info = MENUITEMINFOW {
+            cbSize: size_of::<MENUITEMINFOW>() as u32,
+            fMask: MIIM_FTYPE | MIIM_STATE | MIIM_ID | MIIM_SUBMENU | MIIM_STRING | MIIM_BITMAP,
+            dwTypeData: PWSTR(text.as_mut_ptr()),
+            cch: LONGEST_LABEL as u32,
+            ..Default::default()
+        };
+        if unsafe { GetMenuItemInfoW(popup, index, true, &raw mut info) }.is_err() {
+            continue;
+        }
+        if info.fType.contains(MFT_SEPARATOR) {
+            divider = !entries.is_empty();
+            continue;
+        }
+        let label = plain_label(&String::from_utf16_lossy(&text[..info.cch.min(LONGEST_LABEL as u32) as usize]));
+        let offset = info.wID.checked_sub(FIRST_COMMAND).filter(|_| info.wID <= LAST_COMMAND);
+        let side = !info.hSubMenu.is_invalid();
+        let verb = offset.filter(|_| !side).and_then(|offset| verb_of(menu, offset));
+        let known = |verbs: &[&str]| verb.as_deref().is_some_and(|verb| verbs.contains(&verb.to_lowercase().as_str()));
+        // An item with no text draws itself, which only a real Windows menu can show.
+        if label.is_empty() || known(&OWN_VERBS) || known(&LISTED_ELSEWHERE) {
+            continue;
+        }
+        let items = if side && depth < DEEPEST_MENU {
+            // Many side menus are only filled when Windows says they are about to open.
+            let _ = forward(WM_INITMENUPOPUP, WPARAM(info.hSubMenu.0 as usize), LPARAM(index as isize));
+            read_entries(menu, info.hSubMenu, depth + 1)
+        } else {
+            Vec::new()
+        };
+        if side && items.is_empty() {
+            continue;
+        }
+        let has_picture = info.hbmpItem.0 as isize >= FIRST_REAL_BITMAP;
+        entries.push(Entry {
+            id: offset.filter(|_| !side),
+            label,
+            icon: has_picture.then(|| crate::thumbs::encode(info.hbmpItem).ok()).flatten(),
+            divider: std::mem::take(&mut divider),
+            disabled: info.fState.contains(MFS_DISABLED),
+            checked: info.fState.contains(MFS_CHECKED),
+            items,
+        });
+    }
+    entries
+}
+
+fn forget_listed() {
+    if let Some((_, popup, _)) = LISTED.take() {
+        let _ = unsafe { DestroyMenu(popup) };
+    }
+}
+
+/// What Windows and other apps add to a right click on `target`, without what Perli lists
+/// itself. The menu stays alive until the next one is listed, so `run_listed` can run from it.
+pub fn list_menu(target: Target) -> Result<Vec<Entry>> {
+    on_worker(move |owner| {
+        forget_listed();
+        let menu = target.context_menu(owner)?;
+        let popup = unsafe { CreatePopupMenu() }?;
+        let flags = CMF_NORMAL | CMF_EXPLORE | CMF_CANRENAME;
+        if let Err(error) = unsafe { menu.QueryContextMenu(popup, 0, FIRST_COMMAND, LAST_COMMAND, flags) }.ok() {
+            let _ = unsafe { DestroyMenu(popup) };
+            return Err(error);
+        }
+        OPEN_MENU.set(Some(menu.clone()));
+        let entries = read_entries(&menu, popup, 0);
+        OPEN_MENU.set(None);
+        LISTED.set(Some((menu, popup, target.directory())));
+        Ok(entries)
+    })
+}
+
+/// Runs the item `id` of the menu last listed, as if chosen at (`x`, `y`) inside `main`.
+pub fn run_listed(id: u32, main: isize, x: i32, y: i32) -> Result<()> {
+    on_worker(move |owner| {
+        let Some((menu, _, directory)) = LISTED.with_borrow(Clone::clone) else {
+            return Err(Error::new(E_FAIL, "That menu is gone"));
+        };
+        let verb = (PCSTR(id as usize as *const u8), PCWSTR(id as usize as *const u16));
+        invoke(&menu, owner, verb, on_screen(HWND(main as _), x, y), &directory)
+    })
+}
+
 fn on_screen(main: HWND, x: i32, y: i32) -> POINT {
     let mut point = POINT { x, y };
     let _ = unsafe { ClientToScreen(main, &raw mut point) };
@@ -554,6 +677,25 @@ mod tests {
         assert_eq!(shared_extension(&[a.clone(), c]), None);
         assert_eq!(shared_extension(&[a, sub]), None);
         assert_eq!(shared_extension(&[]), None);
+    }
+
+    #[test]
+    fn menu_text_loses_its_access_key_and_key_hint() {
+        assert_eq!(plain_label("&Open"), "Open");
+        assert_eq!(plain_label("Cu&t\tCtrl+X"), "Cut");
+        assert_eq!(plain_label("Fish && Chips"), "Fish & Chips");
+    }
+
+    #[test]
+    fn windows_own_items_are_listed_without_perlis() {
+        let folder = std::env::temp_dir();
+        let entries = list_menu(Target::Items(vec![folder])).unwrap();
+        let labels: Vec<_> = entries.iter().map(|entry| entry.label.to_lowercase()).collect();
+        assert!(!entries.is_empty());
+        assert!(entries.iter().all(|entry| !entry.label.is_empty() && (entry.id.is_some() || !entry.items.is_empty())));
+        for own in ["cut", "copy", "delete", "rename", "properties"] {
+            assert!(!labels.contains(&own.to_string()), "{labels:?}");
+        }
     }
 
     #[test]

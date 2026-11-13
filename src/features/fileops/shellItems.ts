@@ -10,11 +10,15 @@ import {
   rowFacts,
   sendTargets,
   sendTo,
+  entryPicture,
+  runShellItem,
   setTag,
+  shellMenuItems,
   showProperties,
   showShellMenu,
   type Row,
   type Selection,
+  type ShellEntry,
   type ShellTarget,
 } from "../../api";
 import type { MenuItem } from "../../ui/Menu";
@@ -73,6 +77,32 @@ export function createShellItems(jobs: Jobs, actions: FileActions) {
     const verb = await showShellMenu(target, ...physical(at)).catch(report);
     if (verb) run[verb]?.();
   }
+
+  /** Side menus of Windows that Perli's menu has as its own. They carry no verb to tell them by. */
+  // ponytail: matched by their English label, so another language shows them twice. Match by
+  // menu handler in menus.rs if that matters.
+  const OWN_SIDE_MENUS = ["Open with", "Send to"];
+  const isNew = (entry: ShellEntry) => !(entry.items.length > 0 && OWN_SIDE_MENUS.includes(entry.label));
+
+  const fromWindows = (entry: ShellEntry, at: Point): MenuItem => ({
+    label: entry.label,
+    divider: entry.divider,
+    disabled: entry.disabled,
+    checked: entry.checked || undefined,
+    picture: (entry.icon && entryPicture(entry.icon)) ?? undefined,
+    items: entry.items.length > 0 ? entry.items.map((inner) => fromWindows(inner, at)) : undefined,
+    action: entry.id === null ? undefined : () => runShellItem(entry.id!, ...physical(at)).catch(report),
+  });
+
+  /** What Windows and other apps add, in Perli's own look. Read when it opens, so it is never stale. */
+  const moreItem = (target: () => ShellTarget | undefined, at: Point): MenuItem => ({
+    label: "More from Windows",
+    divider: true,
+    async load() {
+      const now = target();
+      return now ? (await shellMenuItems(now)).filter(isNew).map((entry) => fromWindows(entry, at)) : [];
+    },
+  });
 
   async function whoIsUsing(selection: Selection) {
     const users = await fileUsers(selection);
@@ -200,7 +230,8 @@ export function createShellItems(jobs: Jobs, actions: FileActions) {
         ...(folder ? [terminalItem(folder)] : []),
         { label: "What's using this?", action: () => withRows(view, whoIsUsing) },
         { label: "Properties", action: () => propertiesOf(ofRows(view), at) },
-        { label: "Show more options", divider: true, action: () => showMore(view, ofRows(view), at, verbs) },
+        moreItem(() => ofRows(view), at),
+        { label: "Classic Windows menu", action: () => showMore(view, ofRows(view), at, verbs) },
       ];
     },
 
@@ -210,9 +241,9 @@ export function createShellItems(jobs: Jobs, actions: FileActions) {
       return [
         terminalItem(path, true),
         { label: "Properties", action: () => propertiesOf(ofFolder(path), at) },
+        moreItem(() => ofFolder(path), at),
         {
-          label: "Show more options",
-          divider: true,
+          label: "Classic Windows menu",
           action: () => showMore(view, ofFolder(path), at, { paste: () => actions.paste(view) }),
         },
       ];

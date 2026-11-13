@@ -36,9 +36,9 @@
 
 .menu-item {
   display: flex;
-  justify-content: space-between;
-  gap: var(--space-4);
-  padding: var(--space-2) var(--space-3);
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3) var(--space-2) var(--space-2);
   border: 0;
   border-radius: var(--radius);
   background: transparent;
@@ -56,6 +56,84 @@
 
 .menu-item:disabled {
   color: var(--text-muted);
+}
+
+.menu-icon {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  color: var(--text-muted);
+  font-family: var(--font-icons);
+  font-size: 14px;
+  line-height: 16px;
+  text-align: center;
+  transition: color 160ms, scale 320ms var(--spring);
+}
+
+.menu-icon canvas {
+  width: 16px;
+  height: 16px;
+}
+
+.menu-item:not(:disabled):hover .menu-icon,
+.menu-item:focus-visible .menu-icon {
+  color: var(--accent);
+  scale: 1.12;
+}
+
+.menu-item:disabled .menu-icon {
+  opacity: 0.5;
+}
+
+.menu-label {
+  flex: 1;
+  overflow: hidden;
+  max-width: 320px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.menu-star {
+  color: var(--accent);
+  font-family: var(--font-icons);
+  font-size: 10px;
+}
+
+.menu-keys {
+  display: flex;
+  gap: 3px;
+  margin-left: var(--space-4);
+}
+
+.menu-keys kbd {
+  min-width: 18px;
+  padding: 1px 5px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--text) 5%, transparent);
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 0.8em;
+  text-align: center;
+}
+
+.menu-hint {
+  margin: var(--space-1) 0 0;
+  padding: var(--space-2) var(--space-3);
+  border-top: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 0.8em;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .menu-icon {
+    transition: none;
+  }
+
+  .menu-item:not(:disabled):hover .menu-icon,
+  .menu-item:focus-visible .menu-icon {
+    scale: none;
+  }
 }
 
 .menu-item[aria-checked="true"]::after {

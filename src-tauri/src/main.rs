@@ -970,6 +970,20 @@ async fn show_shell_menu(
     off_main(move || menus::show_menu(target, main, x, y)).await
 }
 
+/// Windows' and other apps' items for `target`, for Perli's own menu to show.
+#[tauri::command]
+async fn shell_menu_items(target: ShellTarget, views: State<'_, Views>) -> Result<Vec<menus::Entry>, String> {
+    let target = target.read(&views)?;
+    off_main(move || menus::list_menu(target)).await
+}
+
+/// Runs an item `shell_menu_items` listed last.
+#[tauri::command]
+async fn run_shell_item(id: u32, x: i32, y: i32, app: AppHandle) -> Result<(), String> {
+    let main = jobs::owner(&app);
+    off_main(move || menus::run_listed(id, main, x, y)).await
+}
+
 #[tauri::command]
 async fn show_properties(
     target: ShellTarget,
@@ -1543,6 +1557,8 @@ fn main() {
             is_default_app,
             set_default_app,
             come_forward,
+            shell_menu_items,
+            run_shell_item,
             open_window
         ])
         .run(tauri::generate_context!())
