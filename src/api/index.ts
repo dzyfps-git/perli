@@ -461,6 +461,9 @@ export interface OpenAsk {
 export const onOpenAsked = (handler: (ask: OpenAsk) => void) =>
   listen<OpenAsk>("open-asked", (event) => handler(event.payload));
 
+/** Asks that came before the UI listened. Call once `onOpenAsked` is set; later ones are events. */
+export const asksWaiting = () => invoke<OpenAsk[]>("asks_waiting");
+
 /** Brings the window to the front. */
 export const comeForward = () => invoke<void>("come_forward");
 
