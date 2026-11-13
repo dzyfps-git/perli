@@ -53,7 +53,7 @@ export function createFileActions(
       if (!selection || !folder) return;
       setClipboard(selection, true)
         // Search rows are in other folders, so their names must not fade this folder's rows.
-        .then(({ names, sequence }) => markCut(folder, view.query() ? [] : names, sequence))
+        .then(({ names, paths, sequence }) => markCut(folder, view.query() ? [] : names, paths, sequence))
         .catch(report);
     },
 

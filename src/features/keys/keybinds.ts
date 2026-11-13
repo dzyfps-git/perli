@@ -1,6 +1,6 @@
 import { createMemo } from "solid-js";
 import { saved, stored } from "../filelist/prefs";
-import { bound, KEYS, keysOf, rebound, type Overrides } from "./keys";
+import { bound, KEYS, keysOf, rebound, reset, type Overrides } from "./keys";
 
 /** The user's own keys, kept between runs, and what every part of Perli asks about them. */
 
@@ -50,8 +50,5 @@ export function labelKeys(label: string, fallback?: string) {
 }
 export const rebind = (id: string, combo: string) => setOverrides(rebound(KEYS, overrides(), id, combo));
 export const unbind = (id: string) => setOverrides({ ...overrides(), [id]: [] });
-export function resetKey(id: string) {
-  const { [id]: _gone, ...rest } = overrides();
-  setOverrides(rest);
-}
+export const resetKey = (id: string) => setOverrides(reset(KEYS, overrides(), id));
 export const resetKeys = () => setOverrides({});

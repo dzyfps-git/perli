@@ -748,9 +748,11 @@ fn a_copy_lists_what_it_skipped_after_a_problem_for_a_later_try() {
 fn a_checked_copy_reads_back_the_same_bytes() {
     let sandbox = Sandbox::new();
     let a = sandbox.file("a.txt", "hello");
-    assert!(sys::same_bytes(&a, &sandbox.file("b.txt", "hello")).unwrap());
-    assert!(!sys::same_bytes(&a, &sandbox.file("c.txt", "hellO")).unwrap());
-    assert!(!sys::same_bytes(&a, &sandbox.file("d.txt", "hello!")).unwrap());
+    let go_on = || true;
+    assert!(sys::same_bytes(&a, &sandbox.file("b.txt", "hello"), &go_on).unwrap());
+    assert!(!sys::same_bytes(&a, &sandbox.file("c.txt", "hellO"), &go_on).unwrap());
+    assert!(!sys::same_bytes(&a, &sandbox.file("d.txt", "hello!"), &go_on).unwrap());
+    assert!(sys::same_bytes(&a, &sandbox.path("b.txt"), &|| false).is_err(), "a cancel stops the check");
 
     let script = Script { verify: true, ..Script::default() };
     let outcome = run_with(copy(&a, &sandbox.folder("to")), &script);
@@ -2441,4 +2443,21 @@ fn rename_checks_catch_taken_names_but_allow_a_new_case() {
     assert_eq!(check_rename(&file, "A.TXT"), Ok(()));
     assert_eq!(check_rename(&file, "c.txt"), Ok(()));
     assert!(check_rename(&file, "c?.txt").is_err());
+}
+
+#[test]
+fn undoing_a_rename_then_a_move_of_the_same_file_runs_them_in_turn() {
+    let sandbox = Sandbox::new();
+    let (a, b, moved) = (sandbox.path("a.txt"), sandbox.path("b.txt"), sandbox.path(r"sub\b.txt"));
+    sandbox.file(r"sub\b.txt", "x");
+    let records = vec![
+        Done::Moved { from: a.clone(), to: b.clone() },
+        Done::Moved { from: b.clone(), to: moved.clone() },
+    ];
+    let batches = super::undo_batches(records.clone());
+    assert_eq!(batches.len(), 2, "the move back from sub waits for nothing, the rename back waits for it");
+
+    go(Job::Undo { records });
+
+    assert!(exists(&a) && !exists(&b) && !exists(&moved));
 }

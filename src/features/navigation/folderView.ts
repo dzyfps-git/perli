@@ -22,6 +22,7 @@ import { dateGroups, KIND_GROUPS } from "../filelist/groups";
 import {
   folderSizes,
   grouping,
+  inlineFolders,
   lastLayout,
   lastSort,
   rememberedFilter,
@@ -179,6 +180,9 @@ export function createFolderView(id: number, saved?: SavedPane) {
   let follower: ((from: string, to: string) => void) | undefined;
   const sight = () => `${showHidden()} ${showSystem()}`;
 
+  /** Only the list with its arrows shows folders opened in place, and can close them again. */
+  const nests = () => layout() === "list" && inlineFolders();
+
   /** The folder shown, or the saved one that has not been opened yet. */
   const path = () => folder()?.path ?? saved?.path;
   const shownSort = () => (query() ? searchSort() : sort());
@@ -201,7 +205,7 @@ export function createFolderView(id: number, saved?: SavedPane) {
     // Rows of a search carry no tags, so a tag would leave none of them.
     filter: { ...toFilter(filterForm()), tags: query() ? [] : filterForm().tags },
     // Grouped rows don't nest, so the folders opened in place close.
-    expanded: query() || isBin(target) || shownGroupBy() !== "none" ? [] : expanded(),
+    expanded: query() || isBin(target) || shownGroupBy() !== "none" || !nests() ? [] : expanded(),
     ...grouped(shownGroupBy(), folded()),
   });
   /** A folder opens in its own order, even from a search. */
@@ -211,7 +215,7 @@ export function createFolderView(id: number, saved?: SavedPane) {
     showHidden: showHidden(),
     showSystem: showSystem(),
     filter: toFilter(form),
-    expanded: samePath(path(), target) && !isBin(target) && by === "none" ? expanded() : [],
+    expanded: samePath(path(), target) && !isBin(target) && by === "none" && nests() ? expanded() : [],
     ...grouped(by, samePath(path(), target) ? folded() : []),
   });
   /** Row numbers mean nothing outside the snapshot they came from. */
@@ -273,7 +277,8 @@ export function createFolderView(id: number, saved?: SavedPane) {
     const before = path();
     const request = ++latestRequest;
     const folderSort = arrivalSort(target);
-    const form = samePath(path(), target) ? filterForm() : (rememberedFilter(target) ?? NO_FILTER);
+    // Only a folder already open has a form of its own. A restored one reads its pinned filter.
+    const form = samePath(folder()?.path, target) ? filterForm() : (rememberedFilter(target) ?? NO_FILTER);
     const by = samePath(path(), target) ? groupBy() : rememberedGroup(target);
     opening = true;
     try {
@@ -483,6 +488,14 @@ export function createFolderView(id: number, saved?: SavedPane) {
   function setLayout(next: Layout) {
     if (next !== layout()) morph(() => setLayoutValue(next), "layout");
     setLastLayout(next);
+    if (next !== "list") collapseAll();
+  }
+
+  /** Closes every folder opened in place, where nothing could show or close them. */
+  function collapseAll() {
+    if (expanded().length === 0) return;
+    setExpanded([]);
+    reload();
   }
 
   /** A `quiet` open that fails leaves the folder shown as it was, with no word of it. */
@@ -618,6 +631,7 @@ export function createFolderView(id: number, saved?: SavedPane) {
       setDepthValue(next);
       if (query() === FLAT_QUERY) readAgain({ select: [], rename: false, step: "start", top: true });
     },
+    collapseAll,
     /** Opens `folder` in place, under its row, or closes it and every folder opened inside it. */
     toggleExpand(folder: string) {
       const open = expanded().some((other) => samePath(other, folder));

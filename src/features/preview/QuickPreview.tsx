@@ -3,6 +3,7 @@ import { createEffect, createResource, createSignal, For, lazy, on, onCleanup, o
 import {
   aiffAudio,
   archiveTest,
+  archivePassword,
   archiveText,
   besideText,
   bookChapter,
@@ -380,6 +381,7 @@ export function QuickPreview(props: {
       more,
       picture: (entry, edge, password) => fetchArchivePicture(view, shot, at, entry, edge, password),
       text: (entry, password) => archiveText(view, shot, at, entry, password),
+      check: (entry, password) => archivePassword(view, shot, at, entry, password),
       extract: (only, password) =>
         startJob({ kind: "unzip", selection: { view, request: shot, rows: [at] }, ownFolder: false, only, password }, view).catch(
           (reason) => void setFailure(String(reason)),
@@ -436,6 +438,8 @@ export function QuickPreview(props: {
     const target = event.target as HTMLElement;
     // A slider takes its own arrow keys.
     if (key.startsWith("Arrow") && target.matches("input")) return;
+    // Enter and Space press a focused button, such as Open with or Copy path.
+    if ((key === "Enter" || key === " ") && target.closest("button, summary, a[href]")) return;
     if (viewKeys?.(event)) {
       event.preventDefault();
       return;

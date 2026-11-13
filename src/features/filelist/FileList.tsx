@@ -1215,7 +1215,8 @@ export function FileList(props: {
   }
 
   /** `step` moves the editor on to the row before or after once the name is saved. */
-  async function commitRename(step = 0) {
+  /** `enter` is a press of Enter, the only way to say yes to a new extension. */
+  async function commitRename(step = 0, enter = false) {
     const current = editor();
     if (!current || committing) return;
     const name = editInput.value;
@@ -1226,7 +1227,7 @@ export function FileList(props: {
     }
     // A new extension can leave a file no app opens, so the first Enter only asks.
     const [before, after] = [extensionOf(current.name), extensionOf(name)];
-    if (!current.isDir && !current.fresh && before !== after && extensionAsked !== after) {
+    if (!current.isDir && !current.fresh && before !== after && !(enter && extensionAsked === after)) {
       extensionAsked = after;
       setEditError(undefined);
       const change = after ? `to ${after}` : "off";
@@ -1302,7 +1303,7 @@ export function FileList(props: {
   }
 
   function onEditorKey(event: KeyboardEvent) {
-    if (event.key === "Enter") commitRename();
+    if (event.key === "Enter") commitRename(0, true);
     else if (event.key === "Escape") endRename();
     else if (event.key === "Tab") commitRename(event.shiftKey ? -1 : 1);
     else if (event.key === "F2") {

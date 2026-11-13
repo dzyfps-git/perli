@@ -234,6 +234,8 @@ export function Player(live: PlayerProps) {
   let lastSave = 0;
   let resumeTimer: ReturnType<typeof setTimeout> | undefined;
   let renderTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Counts renders asked for, so only the newest one's sound is kept. */
+  let renderAsk = 0;
   /** Where a song played again at another tempo picks up, in its new seconds. */
   let pendingSeek: number | undefined;
   /** The cover, until the song it belongs to has started. */
@@ -436,20 +438,23 @@ export function Player(live: PlayerProps) {
     setSettings(next);
     setSection(undefined);
     clearTimeout(renderTimer);
+    const ask = ++renderAsk;
     renderTimer = setTimeout(async () => {
       setRendering(true);
       try {
         const loaded = await props.render!(next, font);
-        if (gone || !mine()) return void (loaded.made && URL.revokeObjectURL(loaded.url));
+        // A render asked for later wins, even if this one, started first, ends last.
+        if (gone || !mine() || ask !== renderAsk) return void (loaded.made && URL.revokeObjectURL(loaded.url));
         const songTime = audio.currentTime * (now()?.playing?.speed ?? 1);
         pendingSeek = songTime / next.speed;
         start({ ...now()!, source: loaded, playing: next }, !audio.paused);
         setSource(loaded);
       } catch (reason) {
-        if (!gone && font) setSoundSet(null);
-        if (!gone) setProblem(String(reason));
+        if (gone || ask !== renderAsk) return;
+        if (font) setSoundSet(null);
+        setProblem(String(reason));
       } finally {
-        if (!gone) setRendering(false);
+        if (!gone && ask === renderAsk) setRendering(false);
       }
     }, RENDER_MS);
   }

@@ -184,7 +184,8 @@ export function TitleBar(props: { tabs: Tabs; onNewTab: () => void; onTabSearch:
                 classList={{ "tab-active": isActive(tab), "tab-pinned": tab.pinned() }}
                 style={{ "--tab-name": `tab-${tab.id}`, "--tab-tint": tint(tab) }}
                 data-tinted={tint(tab) ? "" : undefined}
-                data-drop={tab.active().folder()?.path}
+                // The saved path, so a restored tab not yet opened still takes a drag.
+                data-drop={tab.active().path()}
                 role="tab"
                 aria-selected={isActive(tab)}
                 tabindex="0"

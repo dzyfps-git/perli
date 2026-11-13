@@ -109,7 +109,9 @@ impl Run<'_> {
             let Some(stat) = self.check_source(&source, &identity)? else {
                 continue;
             };
-            if let Some(node) = self.scan(&source, stat)? {
+            let scanned = self.scan(&source, stat)?;
+            self.note_unread(&source, &folder.join(source.file_name().unwrap_or_default()), false);
+            if let Some(node) = scanned {
                 self.add_total(node.items, node.bytes);
                 nodes.push(node);
             }
@@ -215,8 +217,12 @@ impl Run<'_> {
         match &plan {
             Plan::Skip => self.step(1, 0),
             Plan::Merge(folder) => {
-                let listed = self.attempt(source, None, |_| sys::read_dir(source))?;
-                let entries = listed.unwrap_or_default();
+                let Some(entries) = self.attempt(source, None, |_| sys::read_dir(source))? else {
+                    // Left where it is, and offered again with the skipped items.
+                    self.note_skip(source, folder, true, self.elevated.len());
+                    self.step(1, 0);
+                    return Ok(());
+                };
                 self.add_total(entries.len() as u64, 0);
                 for (name, stat) in entries {
                     self.move_item(&source.join(&name), stat, &folder.join(&name), crossing)?;
@@ -298,7 +304,11 @@ impl Run<'_> {
     fn cross_drives(&mut self, crossing: Vec<Crossing>) -> Flow {
         let mut nodes = Vec::with_capacity(crossing.len());
         for Crossing { source, stat, plan } in crossing {
-            if let Some(node) = self.scan(&source, stat)? {
+            let scanned = self.scan(&source, stat)?;
+            if let Plan::Write(target) | Plan::Replace(target) | Plan::Merge(target) = &plan {
+                self.note_unread(&source, target, true);
+            }
+            if let Some(node) = scanned {
                 // `move_all` already counted the item itself.
                 self.add_total(node.items - 1, node.bytes);
                 nodes.push((node, plan));
@@ -487,9 +497,13 @@ impl Run<'_> {
         let verify = self.host.verify_copies();
         let copied = self.attempt(&path, Some(elevated), |run| {
             sys::copy_file(&path, &temp, moving, |bytes| run.copied(base + bytes))?;
-            if verify && !sys::same_bytes(&path, &temp)? {
-                // A retry copies again from the start.
+            // A retry copies again from the start, into the same temp name, so a copy that
+            // fails its check or can't be read back goes first.
+            let checked = if verify { sys::same_bytes(&path, &temp, &|| run.control.proceed()) } else { Ok(true) };
+            if !matches!(checked, Ok(true)) {
                 let _ = sys::delete_file(&temp);
+            }
+            if !checked? {
                 return Err(Error::new(ERROR_FILE_CORRUPT.to_hresult(), "The copy doesn't match the original."));
             }
             Ok(())

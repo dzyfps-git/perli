@@ -2,7 +2,7 @@ import { createEffect, createSignal } from "solid-js";
 import { closeView, openWindow } from "../../api";
 import { morph } from "../../ui/morph";
 import { createFolderView, type FolderView } from "../navigation/folderView";
-import { followed } from "../navigation/path";
+import { followed, samePath } from "../navigation/path";
 import type { SavedPane, SavedTab, Session } from "./session";
 import { cycled, EVEN_SPLIT, moved, nextActive, otherPane, pinnedFirst, snapped } from "./tabList";
 
@@ -27,16 +27,28 @@ function createTab(views: FolderView[], startSwapped = false, saved: Layout = {}
   const [stacked, setStacked] = createSignal(saved.stacked === true);
   /** Linked panes follow each other into folders and back up. */
   const [linked, setLinked] = createSignal(saved.linked === true);
-  let following = false;
+  /** Where the tab itself is taking each pane, so getting there leads the other pane nowhere. */
+  const led = new Map<FolderView, string>();
+  const lead = (view: FolderView, target: string, quiet = false) => {
+    led.set(view, target);
+    return view.open(target, quiet).finally(() => {
+      if (led.get(view) === target) led.delete(view);
+    });
+  };
 
-  /** When `mover` goes deeper or up, the other pane goes the same way in its own folder. */
+  /**
+   * When `mover` goes deeper or up, the other pane goes the same way in its own folder. Only a
+   * pane's arrival where the tab led it is quiet, so the user going on meanwhile still leads.
+   */
   const follow = (mover: FolderView) => (from: string, to: string) => {
+    const going = led.get(mover);
+    led.delete(mover);
+    if (going !== undefined && samePath(going, to)) return;
     const other = otherPane(panes(), mover);
-    const there = other?.path();
-    const target = linked() && !following && there ? followed(from, to, there) : undefined;
-    if (!other || !target) return;
-    following = true;
-    other.open(target, true).finally(() => (following = false));
+    // A pane still on its way follows from where it is going.
+    const there = other && (led.get(other) ?? other.path());
+    const target = linked() && there ? followed(from, to, there) : undefined;
+    if (other && target) lead(other, target, true);
   };
   const listen = (list: FolderView[]) => {
     for (const view of list) view.setFollower(follow(view));
@@ -58,6 +70,8 @@ function createTab(views: FolderView[], startSwapped = false, saved: Layout = {}
     setPanes: (change: (panes: FolderView[]) => FolderView[]) => morph(() => setPanes((now) => listen(change(now))), "panes"),
     active,
     activate: setActive,
+    /** Opens `target` in one of this tab's panes without a linked pane following it. */
+    lead,
     swapped,
     swap: () => morph(() => setSwapped(!swapped()), "panes"),
     other: () => otherPane(panes(), active()),
@@ -109,12 +123,14 @@ export function createTabs() {
     const tab = createTab(opened);
     // Tab changes land a frame later, once the old look is captured, so each one reads the list
     // as it is by then. Closing several at once never brings back one closed just before.
-    morph(() => {
+    const placed = morph(() => {
       const result = [...tabs()];
       result.splice(result.indexOf(after) + 1, 0, tab);
       setTabs(inOrder(result));
       if (!behind) setActive(tab);
     }, "tabs");
+    // Back only once the tab is in the list, so a caller adding the next one after it finds it.
+    await placed?.updateCallbackDone.catch(() => undefined);
     return opened[0];
   }
 
@@ -151,7 +167,7 @@ export function createTabs() {
     // open to the side inside that frame would add another pane. Nothing does that today.
     if (!tab.panes().includes(view)) tab.setPanes((now) => [...now, view]);
     tab.activate(view);
-    return view.open(path);
+    return tab.lead(view, path);
   }
 
   function restore(session: Omit<Session, "start">) {
@@ -225,7 +241,7 @@ export function createTabs() {
       const path = tab.active().path();
       if (!path) return;
       const other = tab.other();
-      return other ? other.open(path) : openToSide(path, tab);
+      return other ? tab.lead(other, path) : openToSide(path, tab);
     },
     /** A tab moves among its own kind: pinned tabs stay ahead of the rest. */
     move: (tab: Tab, offset: number) => setTabs(inOrder(moved(tabs(), tab, offset))),

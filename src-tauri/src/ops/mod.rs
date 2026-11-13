@@ -292,6 +292,9 @@ struct Run<'a> {
     touched: BTreeSet<PathBuf>,
     kept: Vec<PathBuf>,
     failed: Vec<Failed>,
+    /// Folders a scan was told to skip because they couldn't be listed, until a copy or move
+    /// records each as skipped with where it was going.
+    unread: Vec<PathBuf>,
     /// Folders a merge moved everything out of, children first.
     emptied: Vec<PathBuf>,
     elevated: Vec<Elevated>,
@@ -313,6 +316,7 @@ impl<'a> Run<'a> {
             touched: BTreeSet::new(),
             kept: Vec::new(),
             failed: Vec::new(),
+            unread: Vec::new(),
             emptied: Vec::new(),
             elevated: Vec::new(),
             undoing: false,
@@ -463,9 +467,8 @@ impl<'a> Run<'a> {
     /// Applies records backwards, each kind in one batch where they sit together.
     fn undo(&mut self, records: Vec<Done>) -> Flow {
         self.undoing = true;
-        let backwards: Vec<Done> = records.into_iter().rev().collect();
-        let same_kind = |a: &Done, b: &Done| mem::discriminant(a) == mem::discriminant(b);
-        for group in backwards.chunk_by(same_kind) {
+        for group in undo_batches(records) {
+            let group = &group[..];
             match &group[0] {
                 Done::Created { .. } => {
                     let paths: Vec<PathBuf> = group
@@ -626,6 +629,15 @@ impl<'a> Run<'a> {
         }
     }
 
+    /// Records each folder under `source` that its scan skipped, as going where `target` puts it.
+    fn note_unread(&mut self, source: &Path, target: &Path, moving: bool) {
+        let handed = self.elevated.len();
+        for path in mem::take(&mut self.unread) {
+            let inside = path.strip_prefix(source).unwrap_or(Path::new(""));
+            self.note_skip(&path, &target.join(inside), moving, handed);
+        }
+    }
+
     /// `attempt` gave nothing back. Unless the work went to the admin run, the user skipped it.
     fn note_skip(&mut self, source: &Path, target: &Path, moving: bool, handed: usize) {
         if self.elevated.len() == handed {
@@ -654,4 +666,29 @@ pub fn run(job: Job, host: &dyn Host, control: &Arc<Control>) -> Outcome {
         outcome.failed.clear();
     }
     outcome
+}
+
+/// The records to reverse, newest first, in batches of one kind that can run together. A move
+/// that reverses onto or out of a place an earlier move of the batch uses waits for a batch of its
+/// own: undoing a rename and then a move of the same file must finish one before the other.
+fn undo_batches(records: Vec<Done>) -> Vec<Vec<Done>> {
+    let lower = |path: &Path| PathBuf::from(path.to_string_lossy().to_lowercase());
+    let related = |a: &Path, b: &Path| {
+        let (a, b) = (lower(a), lower(b));
+        a.starts_with(&b) || b.starts_with(&a)
+    };
+    let needs = |batch: &[Done], record: &Done| match record {
+        Done::Moved { from, to } => batch.iter().any(|earlier| {
+            matches!(earlier, Done::Moved { from: was, to: now } if related(was, to) || related(now, from))
+        }),
+        _ => false,
+    };
+    let mut batches: Vec<Vec<Done>> = Vec::new();
+    for record in records.into_iter().rev() {
+        match batches.last_mut() {
+            Some(batch) if mem::discriminant(&batch[0]) == mem::discriminant(&record) && !needs(batch, &record) => batch.push(record),
+            _ => batches.push(vec![record]),
+        }
+    }
+    batches
 }

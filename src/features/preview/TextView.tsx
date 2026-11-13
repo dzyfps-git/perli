@@ -1,5 +1,6 @@
 import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { ToolCog } from "../../ui/Controls";
+import { formatSize } from "../../ui/format";
 import { createFind, lineIn, scrollToRange } from "./FindBar";
 import { asTable, asTree, numbers, setAsTable, setAsTree, setNumbers, setWrap, VIEWER_SETTINGS, wrap } from "./viewerPrefs";
 import { highlight } from "./highlight";
@@ -21,6 +22,8 @@ const FOLLOW_MS = 1000;
 const MOST_TREE = 2 * 1024 * 1024;
 /** A part of the tree shows this many of its items, and counts the rest. */
 const MOST_ITEMS = 500;
+/** The second level starts open only while all of it stays under this many rows. */
+const MOST_OPEN_ROWS = 2000;
 const DONE_MS = 1400;
 
 /** How close to the end the next piece starts to load. */
@@ -70,7 +73,8 @@ export function TextView(live: TextViewProps) {
   /** Everything is loaded, so the whole file can be looked at as one thing. */
   const [whole, setWhole] = createSignal(props.first.next === null);
   const [following, setFollowing] = createSignal(false);
-  const [copied, setCopied] = createSignal(false);
+  /** What the last copy says it did. */
+  const [copied, setCopied] = createSignal<string>();
   const [order, setOrder] = createSignal<TableOrder>();
   const [filters, setFilters] = createSignal<string[]>([]);
   const [filtering, setFiltering] = createSignal(false);
@@ -165,8 +169,9 @@ export function TextView(live: TextViewProps) {
   async function copyAll() {
     while (await more());
     await navigator.clipboard.writeText(text());
-    setCopied(true);
-    setTimeout(() => setCopied(false), DONE_MS);
+    // Reading stops at a size limit or a failed read, so the copy may not be all of the file.
+    setCopied(whole() ? "Copied" : `Copied the first ${formatSize(text().length)} only`);
+    setTimeout(() => setCopied(undefined), DONE_MS);
   }
 
   /** What was added to the file since the last look, shown at once and scrolled to. */
@@ -290,7 +295,7 @@ export function TextView(live: TextViewProps) {
             {ICON_FOLLOW}
           </button>
         </Show>
-        <button class="strip-icon" aria-label={copied() ? "Copied" : "Copy all"} data-done={copied() || undefined} onClick={() => void copyAll().catch(console.error)}>
+        <button class="strip-icon" aria-label={copied() ?? "Copy all"} data-done={copied() === "Copied" || undefined} onClick={() => void copyAll().catch(console.error)}>
           {ICON_COPY}
         </button>
         <span class="zoom-chip text-kind">{kind()}</span>
@@ -349,10 +354,15 @@ export function TextView(live: TextViewProps) {
 }
 
 /** One value of a JSON file. An object or a list folds, and draws what it holds only once open. */
-function JsonNode(props: { name?: string; value: unknown; depth: number }) {
+function JsonNode(props: { name?: string; value: unknown; depth: number; roomy?: boolean }) {
   const holds = () => props.value !== null && typeof props.value === "object";
   const items = () => (Array.isArray(props.value) ? props.value.map((value, at) => [String(at), value] as const) : Object.entries(props.value as object));
-  const [open, setOpen] = createSignal(props.depth < 2);
+  const size = (value: unknown) => (value !== null && typeof value === "object" ? Object.keys(value).length : 0);
+  // The top starts open, and the level under it too while that stays small: 500 lists of 500
+  // would otherwise draw a quarter of a million rows at once.
+  const rowsOneDown = () => items().slice(0, MOST_ITEMS).reduce((sum, [, value]) => sum + Math.min(size(value), MOST_ITEMS), 0);
+  const [open, setOpen] = createSignal(props.depth === 0 || (props.depth === 1 && !!props.roomy));
+  const roomy = () => props.depth === 0 && rowsOneDown() <= MOST_OPEN_ROWS;
   const name = () => (props.name === undefined ? null : <span class="json-name">{props.name}</span>);
   return (
     <Show
@@ -374,7 +384,7 @@ function JsonNode(props: { name?: string; value: unknown; depth: number }) {
           </span>
         </summary>
         <Show when={open()}>
-          <For each={items().slice(0, MOST_ITEMS)}>{([key, value]) => <JsonNode name={key} value={value} depth={props.depth + 1} />}</For>
+          <For each={items().slice(0, MOST_ITEMS)}>{([key, value]) => <JsonNode name={key} value={value} depth={props.depth + 1} roomy={roomy()} />}</For>
           <Show when={items().length > MOST_ITEMS}>
             <div class="json-leaf json-count">and {(items().length - MOST_ITEMS).toLocaleString()} more</div>
           </Show>

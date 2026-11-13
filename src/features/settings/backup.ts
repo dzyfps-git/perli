@@ -20,6 +20,8 @@ const NOT_SETTINGS = [
 export interface TagLook {
   name: string;
   color: number;
+  /** The tag's number on the computer it was saved on, which settings such as smart folders use. */
+  id?: number;
 }
 
 export interface Backup {
@@ -55,7 +57,10 @@ export function unpacked(text: string): Backup {
   const tags = (Array.isArray(file.tags) ? file.tags : []).filter(
     (tag): tag is TagLook => typeof tag?.name === "string" && Number.isInteger(tag.color) && tag.color >= 0,
   );
-  return { prefs: Object.fromEntries(prefs), tags: tags.map(({ name, color }) => ({ name, color })) };
+  return {
+    prefs: Object.fromEntries(prefs),
+    tags: tags.map(({ name, color, id }) => ({ name, color, ...(Number.isInteger(id) ? { id } : {}) })),
+  };
 }
 
 /** The tags of `wanted` that `known` has none of by that name, in any case. */
@@ -63,3 +68,46 @@ export const missingTags = (wanted: TagLook[], known: { name: string }[]) =>
   wanted.filter((tag) => !known.some((other) => other.name.toLowerCase() === tag.name.toLowerCase()));
 
 export const storageKey = (name: string) => PREFIX + name;
+
+/** Settings that hold tags by number, and where in each the numbers are. */
+const TAG_HOLDERS: Record<string, (value: unknown, map: (ids: number[]) => number[]) => unknown> = {
+  "smart-folders": (list, map) =>
+    Array.isArray(list)
+      ? list.map((smart) => (Array.isArray(smart?.filter?.tags) ? { ...smart, filter: { ...smart.filter, tags: map(smart.filter.tags) } } : smart))
+      : list,
+  // Filters pinned to folders, keyed by folder.
+  "folder-filters": (forms, map) =>
+    forms && typeof forms === "object" && !Array.isArray(forms)
+      ? Object.fromEntries(
+          Object.entries(forms).map(([folder, form]) => [folder, Array.isArray(form?.tags) ? { ...form, tags: map(form.tags) } : form]),
+        )
+      : forms,
+};
+
+/**
+ * `prefs` with each tag number of the saving computer changed to the number of the tag with the
+ * same name here. A file from before tags carried their numbers is left as it is.
+ */
+export function remapTags(prefs: Record<string, string>, saved: TagLook[], here: { id: number; name: string }[]) {
+  if (!saved.some((tag) => tag.id !== undefined)) return prefs;
+  const numbers = new Map<number, number>();
+  for (const tag of saved) {
+    const found = here.find((other) => other.name.toLowerCase() === tag.name.toLowerCase());
+    if (tag.id !== undefined && found) numbers.set(tag.id, found.id);
+  }
+  const map = (ids: number[]) => ids.flatMap((id) => (numbers.has(id) ? [numbers.get(id)!] : []));
+  const next = { ...prefs };
+  for (const [name, remap] of Object.entries(TAG_HOLDERS)) {
+    if (!(name in next)) continue;
+    try {
+      next[name] = JSON.stringify(remap(JSON.parse(next[name]), map));
+    } catch {
+      // Not JSON: Perli reads it as nothing anyway.
+    }
+  }
+  return next;
+}
+
+/** The stored settings a restore must take away, because the file has none of them. */
+export const staleSettings = (current: Record<string, string>, restored: Record<string, string>) =>
+  Object.keys(current).filter((name) => !(name in restored));

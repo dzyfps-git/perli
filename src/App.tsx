@@ -17,6 +17,7 @@ import {
   onCloseAsked,
   onFolderChanged,
   onOpenAsked,
+  asksWaiting,
   comeForward,
   ejectDrive,
   keepOnDevice,
@@ -405,7 +406,9 @@ export function App() {
     keysOpen() ||
     !!mapping() ||
     updateSheet() ||
-    activityOpen();
+    activityOpen() ||
+    // Every sheet opens as a modal dialog, so one left off the list above still counts.
+    !!document.querySelector("dialog:modal");
   /** The settings page stands where the files do, so the keys of the files rest too. */
   const dialogOpen = () => settingsShown() || sheetOpen();
   // Going to a folder, by any road, puts the files back in front.
@@ -512,7 +515,10 @@ export function App() {
     }
     comeForward().catch(console.error);
     setSettingsShown(false);
-    const shown = ask.select.length > 0 && tabs.tabs().find((tab) => samePath(tab.active().folder()?.path, folder));
+    // A tab showing search results there can't select by name, so it gets a plain tab instead.
+    const shown =
+      ask.select.length > 0 &&
+      tabs.tabs().find((tab) => !tab.active().query() && samePath(tab.active().folder()?.path, folder));
     if (shown) tabs.activate(shown);
     const view = shown ? shown.active() : await tabs.add([folder]);
     if (ask.select.length > 0) await view?.reload(ask.select);
@@ -565,6 +571,8 @@ export function App() {
   };
   // The folders seen lately are places to drop on and to move to.
   createEffect(() => noteFolder(tabs.activeView().folder()?.path));
+  // With the arrows turned off, nothing could close a folder opened in place.
+  createEffect(on(inlineFolders, (on) => on || tabs.allViews().forEach((view) => view.collapseAll()), { defer: true }));
   const toggleSidebar = () => setSidebarOpen(!sidebarOpen());
 
   const networkItems = (): MenuItem[] => [
@@ -708,7 +716,9 @@ export function App() {
   }
 
   /** Every file with the tag, on every drive, as a search of its own. */
-  function showTagged(view: FolderView, tag: Tag) {
+  async function showTagged(view: FolderView, tag: Tag) {
+    // The Recycle Bin can't be searched, so the search starts from home. It covers all drives.
+    if ((view.isBin() || !view.folder()) && !(await view.open(homePath ?? "C:\\"))) return;
     view.setScope("drives");
     view.search(tagQuery(tag.name));
   }
@@ -887,8 +897,9 @@ export function App() {
     const selection = actions.selected(view);
     if (!tag || !selection) return;
     try {
-      const common = await commonTags(selection);
-      await setTag(selection, tag.id, !common.includes(tag.id));
+      const rows = { kind: "rows", selection } as const;
+      const common = await commonTags(rows);
+      await setTag(rows, tag.id, !common.includes(tag.id));
       showTagChange();
     } catch (failure) {
       jobs.report(failure);
@@ -970,7 +981,11 @@ export function App() {
         label: row.isDir ? "Folders" : kind === "file" ? `Same type (.${extension || "none"})` : "Same kind",
         action: () =>
           quietly(
-            selectWhere(view, row.isDir ? { kinds: "folders" } : { extensions: kind === "file" ? [extension] : extensionsOf(kind) }),
+            selectWhere(
+              view,
+              // Folders have no extension either, so a type of files must leave them out.
+              row.isDir ? { kinds: "folders" } : { kinds: "files", extensions: kind === "file" ? [extension] : extensionsOf(kind) },
+            ),
           ),
       },
       {
@@ -1269,7 +1284,7 @@ export function App() {
     const tag = allTags().find((known) => known.name === name);
     const selection = actions.selected(view);
     if (!tag || !selection) return;
-    await setTag(selection, tag.id, on);
+    await setTag({ kind: "rows", selection }, tag.id, on);
     showTagChange();
   }
 
@@ -1781,6 +1796,9 @@ export function App() {
       if (opened && start.select.length > 0) await tabs.activeView().reload(start.select);
     }
     setKeepSession(!start.folder);
+    // Starts handed over while this window loaded wait in the back end until now.
+    await openListener;
+    for (const ask of await asksWaiting()) await openAsked(ask).catch(console.error);
   });
   onCleanup(() => {
     window.clearTimeout(saveTimer);
@@ -2097,7 +2115,7 @@ export function App() {
           <Properties
             target={target}
             onPickApp={setPickingApp}
-            onWindows={() => shell.windowsProperties(target, at)}
+            onWindows={(lasting) => shell.windowsProperties(lasting, at)}
             onChanged={showTagChange}
             onClose={() => setShowingProperties(undefined)}
           />

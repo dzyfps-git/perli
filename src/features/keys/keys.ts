@@ -124,26 +124,52 @@ export type Overrides = Record<string, string[]>;
 
 export const keysOf = (command: KeyCommand, overrides: Overrides) => overrides[command.id] ?? command.keys;
 
-/** Which command each combo starts. A fixed command's keys are not in here. */
+/** The list moves its cursor on these first, so a command on one would act on the next row. */
+const MOVES = ["Up", "Down", "Left", "Right", "Home", "End", "PageUp", "PageDown"];
+const MOVING: KeyCommand = { id: "move", label: "moving through the list", group: "Files", keys: [], fixed: true, quiet: true };
+
+function movesInList(combo: string) {
+  const parts = combo.split("+");
+  const key = parts.pop()!;
+  // Ctrl+PageUp and Ctrl+PageDown change tabs, which the list leaves alone.
+  const tabbing = parts.includes("Ctrl") && key.startsWith("Page");
+  return MOVES.includes(key) && parts.every((part) => part === "Ctrl" || part === "Shift") && !tabbing;
+}
+
+/** Keys Perli keeps for itself, so no command can take them. */
+export const taken = (table: KeyCommand[], combo: string) =>
+  table.find((command) => command.fixed && command.keys.includes(combo)) ?? (movesInList(combo) ? MOVING : undefined);
+
+/** Which command each combo starts. A fixed command's keys are not in here, nor kept ones saved before. */
 export function bound(table: KeyCommand[], overrides: Overrides) {
   const found = new Map<string, KeyCommand>();
   for (const command of table) {
     if (command.fixed) continue;
-    for (const combo of keysOf(command, overrides)) if (!found.has(combo)) found.set(combo, command);
+    for (const combo of keysOf(command, overrides)) if (!found.has(combo) && !movesInList(combo)) found.set(combo, command);
   }
   return found;
 }
 
-/** `combo` becomes the only key of `id`, and is taken from whatever had it. */
-export function rebound(table: KeyCommand[], overrides: Overrides, id: string, combo: string): Overrides {
+/** `keys` become `id`'s own, and are taken from whatever else had them. */
+function given(table: KeyCommand[], overrides: Overrides, id: string, keys: string[]): Overrides {
   const next: Overrides = { ...overrides };
   for (const command of table) {
-    const keys = keysOf(command, overrides);
-    if (command.id !== id && !command.fixed && keys.includes(combo)) next[command.id] = keys.filter((key) => key !== combo);
+    const had = keysOf(command, overrides);
+    if (command.id !== id && !command.fixed && had.some((key) => keys.includes(key))) {
+      next[command.id] = had.filter((key) => !keys.includes(key));
+    }
   }
-  next[id] = [combo];
   return next;
 }
 
-/** Keys Perli keeps for itself, so no command can take them. */
-export const taken = (table: KeyCommand[], combo: string) => table.find((command) => command.fixed && command.keys.includes(combo));
+/** `combo` becomes the only key of `id`, and is taken from whatever had it. */
+export function rebound(table: KeyCommand[], overrides: Overrides, id: string, combo: string): Overrides {
+  return { ...given(table, overrides, id, [combo]), [id]: [combo] };
+}
+
+/** `id` gets the keys it started with back, taking them from whatever had them since. */
+export function reset(table: KeyCommand[], overrides: Overrides, id: string): Overrides {
+  const { [id]: _gone, ...rest } = overrides;
+  const start = table.find((command) => command.id === id)?.keys ?? [];
+  return given(table, rest, id, start);
+}
