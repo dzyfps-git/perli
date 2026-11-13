@@ -747,6 +747,40 @@ fn a_copy_lists_what_it_skipped_after_a_problem_for_a_later_try() {
     drop(held);
 }
 
+/// Takes away the user's right to list `folder` until dropped.
+struct Unlistable(PathBuf);
+
+impl Unlistable {
+    fn new(folder: &Path) -> Self {
+        let user = std::env::var("USERNAME").unwrap();
+        let denied = Command::new("icacls").arg(folder).args(["/deny", &format!("{user}:(RD)")]).output().unwrap();
+        assert!(denied.status.success(), "{denied:?}");
+        Self(folder.to_path_buf())
+    }
+}
+
+impl Drop for Unlistable {
+    fn drop(&mut self) {
+        let user = std::env::var("USERNAME").unwrap();
+        let _ = Command::new("icacls").arg(&self.0).args(["/remove:d", &user]).output();
+    }
+}
+
+#[test]
+fn a_folder_that_cant_be_listed_is_listed_as_skipped() {
+    let sandbox = Sandbox::new();
+    sandbox.file(r"from\tree\fine.txt", "y");
+    let closed = sandbox.folder(r"from\tree\closed");
+    let to = sandbox.folder("to");
+    let held = Unlistable::new(&closed);
+
+    let outcome = run_with(Job::Copy { sources: vec![sandbox.path(r"from\tree")], folder: to.clone() }, &Script::always(Answer::Skip));
+    drop(held);
+
+    assert_eq!(outcome.failed, [Failed { source: closed, folder: to.join("tree"), moving: false }]);
+    assert_eq!(read(&sandbox.path(r"to\tree\fine.txt")), "y");
+}
+
 #[test]
 fn a_checked_copy_reads_back_the_same_bytes() {
     let sandbox = Sandbox::new();

@@ -51,8 +51,17 @@ fn keep(known: &mut HashMap<PathBuf, (u64, u64)>, path: PathBuf, bytes: u64) {
 
 /// Writes under the lock, so a `forget` can't land between reading the totals and writing them.
 /// No totals means forgotten, so there is no file to bring back.
+/// Where `save` writes. Tests write to a file of their own and leave the user's alone.
+fn saved_file() -> Option<PathBuf> {
+    if cfg!(test) {
+        Some(std::env::temp_dir().join(format!("perli-test-{}-{SAVED}", std::process::id())))
+    } else {
+        session::data_file(SAVED)
+    }
+}
+
 fn save() {
-    let Some(file) = session::data_file(SAVED).filter(|_| !cfg!(test)) else { return };
+    let Some(file) = saved_file() else { return };
     let known = KNOWN.read().unwrap_or_else(PoisonError::into_inner);
     if known.is_empty() {
         return;
@@ -62,8 +71,14 @@ fn save() {
         let _ = fs::create_dir_all(folder);
     }
     let totals: HashMap<&PathBuf, u64> = known.iter().map(|(path, &(bytes, _))| (path, bytes)).collect();
-    if let Ok(text) = serde_json::to_string(&totals) {
-        let _ = fs::write(file, text);
+    let Ok(text) = serde_json::to_string(&totals) else { return };
+    // Written beside it and swapped in, so a crash or a reader never meets half a file. One
+    // writer at a time, since scans of two views can save at once.
+    static SAVING: Mutex<()> = Mutex::new(());
+    let _one = SAVING.lock().unwrap_or_else(PoisonError::into_inner);
+    let fresh = file.with_extension("new");
+    if fs::write(&fresh, text).is_ok() {
+        let _ = fs::rename(&fresh, &file);
     }
 }
 
@@ -349,6 +364,18 @@ mod tests {
         let tree = Tree::new("stop");
         assert_eq!(total(&tree.0, &AtomicBool::new(true)), None);
         assert_eq!(total(&tree.0, &AtomicBool::new(false)), Some(129));
+    }
+
+    #[test]
+    fn a_stopped_scan_writes_the_totals_it_has() {
+        let tree = Tree::new("saved");
+        let file = saved_file().unwrap();
+        let kept = key(&tree.0.join("kept"));
+        keep(&mut KNOWN.write().unwrap(), kept.clone(), 5);
+        scan(&tree.0, &AtomicBool::new(true), || ());
+        let saved: HashMap<PathBuf, u64> = serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!(saved.get(&kept), Some(&5));
+        let _ = fs::remove_file(&file);
     }
 
     #[test]
