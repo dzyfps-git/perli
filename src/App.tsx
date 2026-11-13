@@ -912,7 +912,11 @@ export function App() {
         label: row.isDir ? "Folders" : kind === "file" ? `Same type (.${extension || "none"})` : "Same kind",
         action: () =>
           quietly(
-            selectWhere(view, row.isDir ? { kinds: "folders" } : { extensions: kind === "file" ? [extension] : extensionsOf(kind) }),
+            selectWhere(
+              view,
+              // Folders have no extension either, so a type of files must leave them out.
+              row.isDir ? { kinds: "folders" } : { kinds: "files", extensions: kind === "file" ? [extension] : extensionsOf(kind) },
+            ),
           ),
       },
       {

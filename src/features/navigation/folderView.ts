@@ -210,7 +210,8 @@ export function createFolderView(id: number, saved?: SavedPane) {
     const searched = query();
     const request = ++latestRequest;
     const folderSort = arrivalSort(target);
-    const form = samePath(path(), target) ? filterForm() : (rememberedFilter(target) ?? NO_FILTER);
+    // Only a folder already open has a form of its own. A restored one reads its pinned filter.
+    const form = samePath(folder()?.path, target) ? filterForm() : (rememberedFilter(target) ?? NO_FILTER);
     opening = true;
     try {
       const wanted = openingOrder(target, folderSort ?? sort(), form);

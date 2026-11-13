@@ -52,6 +52,14 @@ test("smart folders get this computer's numbers for their tags", () => {
   assert.equal(remapTags(prefs, [{ name: "Work", color: 1 }], [{ id: 12, name: "Work" }]), prefs);
 });
 
+test("filters pinned to folders get this computer's numbers for their tags", () => {
+  const forms = { "c:\work": { name: "", tags: [4] }, "c:\other": { name: "x" } };
+  const remapped = remapTags({ "folder-filters": JSON.stringify(forms) }, [{ name: "Work", color: 1, id: 4 }], [{ id: 7, name: "Work" }]);
+  const back = JSON.parse(remapped["folder-filters"]);
+  assert.deepEqual(back["c:\work"].tags, [7]);
+  assert.deepEqual(back["c:\other"], { name: "x" });
+});
+
 test("a restore takes away settings the file has none of", () => {
   assert.deepEqual(staleSettings({ theme: '"light"', accent: '"sea"' }, { accent: '"sea"' }), ["theme"]);
 });

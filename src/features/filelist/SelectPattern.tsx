@@ -28,8 +28,12 @@ export function SelectPattern(props: { view: FolderView; onClose: () => void }) 
     return Array.from({ length: all }, (_, row) => row).filter((row) => !kept.has(row));
   }
 
+  /** The newest match in flight, which Done waits for. */
+  let lighting: Promise<void> = Promise.resolve();
+  const light = () => (lighting = match());
+
   // An older answer must not cover a newer one, so each one knows its turn.
-  async function light() {
+  async function match() {
     const turn = ++latest;
     const text = input.value;
     const shown = request();
@@ -45,7 +49,12 @@ export function SelectPattern(props: { view: FolderView; onClose: () => void }) 
     }
   }
 
-  function close(keep: boolean) {
+  let closing = false;
+  async function close(keep: boolean) {
+    if (closing) return;
+    closing = true;
+    // Done keeps what the last words typed select, even if their answer is still on its way.
+    if (keep) await lighting;
     latest++;
     if (!keep) props.view.list()?.select(beforeRows());
     props.onClose();
