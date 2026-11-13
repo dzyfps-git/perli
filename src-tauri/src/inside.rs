@@ -160,8 +160,7 @@ pub fn text(path: &Path, name: &str, password: Option<&str>) -> Result<Option<St
     let entry = entry(&mut zip, name, password)?;
     let mut bytes = Vec::new();
     entry.take(MOST_TEXT_BYTES).read_to_end(&mut bytes).map_err(|error| read_failed(error, password))?;
-    let body = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&bytes);
-    Ok(crate::preview::as_text(body, true).map(str::to_string))
+    Ok(crate::preview::as_text(&bytes, true))
 }
 
 /// Reads all of a locked file, so its checksum proves `password`. A wrong one can pass the quick

@@ -834,7 +834,7 @@ export async function fetchRows(
 
 /** What the quick preview shows. `next` is where the following piece of a text starts. */
 export type Preview =
-  | { kind: "text"; text: string; next: number | null; end: number; bom: boolean }
+  | { kind: "text"; text: string; next: number | null; end: number; encoding: string }
   | { kind: "markdown"; html: string; source: string }
   | { kind: "archive"; entries: ArchiveEntry[]; more: boolean }
   | { kind: "comic"; pages: string[] }

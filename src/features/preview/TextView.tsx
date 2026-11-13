@@ -39,8 +39,8 @@ export interface TextPiece {
   next: number | null;
   /** Where the piece stops in the file, for reading on when the file grows. */
   end?: number;
-  /** The file starts with a byte order mark. */
-  bom?: boolean;
+  /** How the file stands for its letters, as Notepad names it: "UTF-8", "UTF-16 LE", "Windows-1252". */
+  encoding?: string;
 }
 
 export interface TextViewProps {
@@ -103,7 +103,7 @@ export function TextView(live: TextViewProps) {
       return { failure: String(reason instanceof Error ? reason.message : reason) };
     }
   });
-  const kind = () => `UTF-8${props.first.bom ? " with BOM" : ""} · ${lineEnding(props.first.text)}`;
+  const kind = () => `${props.first.encoding ?? "UTF-8"} · ${lineEnding(props.first.text)}`;
 
   const color = props.language ? pieceColorer(props.language) : undefined;
   /** The last piece shown, which the next one replaces when it ended inside a comment or string. */
