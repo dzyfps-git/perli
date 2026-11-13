@@ -37,7 +37,9 @@ const CF_HDROP: u32 = 15;
 
 const PNG_START: &[u8] = b"\x89PNG\r\n\x1a\n";
 
-const OPEN_TRIES: u32 = 5;
+/// Clipboard history and other watchers open the clipboard after each change, which on a busy
+/// machine can hold it for a few hundred milliseconds. Half a second of tries rides that out.
+const OPEN_TRIES: u32 = 25;
 const OPEN_WAIT: Duration = Duration::from_millis(20);
 
 /// Where `DROPFILES` says whether its names are UTF-16.
