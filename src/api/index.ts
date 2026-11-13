@@ -413,8 +413,14 @@ export const measureSelection = (selection: Selection) => invoke<Measured>("meas
 
 export const binSummary = () => invoke<Measured>("bin_summary");
 
+/** Fired on `window` once Perli puts files on the clipboard. */
+export const CLIPBOARD_SET = "perli-clipboard-set";
+
 export const setClipboard = (selection: Selection, cut: boolean) =>
-  invoke<{ names: string[]; sequence: number }>("set_clipboard", { selection, cut });
+  invoke<{ names: string[]; sequence: number }>("set_clipboard", { selection, cut }).then((set) => {
+    window.dispatchEvent(new Event(CLIPBOARD_SET));
+    return set;
+  });
 
 export const cancelCut = (sequence: number) => invoke<void>("cancel_cut", { sequence });
 
@@ -562,6 +568,9 @@ export interface OpenAsk {
 
 export const onOpenAsked = (handler: (ask: OpenAsk) => void) =>
   listen<OpenAsk>("open-asked", (event) => handler(event.payload));
+
+/** Asks that came before the UI listened. Call once `onOpenAsked` is set; later ones are events. */
+export const asksWaiting = () => invoke<OpenAsk[]>("asks_waiting");
 
 /** Brings the window to the front. */
 export const comeForward = () => invoke<void>("come_forward");
