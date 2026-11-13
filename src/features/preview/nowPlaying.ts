@@ -1,6 +1,6 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { createSignal } from "solid-js";
-import { aiffAudio, openAudio, songAudio, type Playing, type Tags } from "../../api";
+import { aiffAudio, forgetSong, openAudio, songAudio, type Playing, type Tags } from "../../api";
 import { saved, stored } from "../filelist/prefs";
 import { playNext } from "./viewerPrefs";
 
@@ -15,6 +15,8 @@ export interface Source {
   url: string;
   made: boolean;
   tags: Tags;
+  /** The number of a MIDI song the app is still making, which must be let go of too. */
+  song?: number;
 }
 
 /** A file of the folder that can play, and its row in the list if it is still known. */
@@ -61,9 +63,18 @@ export const wav = (bytes: ArrayBuffer): Source => ({
   tags: NO_TAGS,
 });
 
+/** A MIDI song the app makes while it plays. */
+export const song = (number: number): Source => ({ url: convertFileSrc(String(number), "song"), made: true, tags: NO_TAGS, song: number });
+
+/** Lets go of what a source made. */
+export function letGo(source: Source) {
+  if (source.song !== undefined) void forgetSong(source.song).catch(() => {});
+  else if (source.made) URL.revokeObjectURL(source.url);
+}
+
 /** A song by its path alone, for one that plays after its list has moved on. */
 export async function sourceOf(path: string): Promise<Source> {
-  if (MIDI.test(path)) return wav(await songAudio(0, 0, 0, { path }));
+  if (MIDI.test(path)) return song(await songAudio(0, 0, 0, { path }));
   if (AIFF.test(path)) return wav(await aiffAudio(0, 0, 0, path));
   const [shown, tags] = await openAudio(0, 0, 0, path);
   return { url: convertFileSrc(shown), made: false, tags };
@@ -74,14 +85,14 @@ export const titleOf = (name: string, tags?: Tags) => tags?.title || name.replac
 /** Lets go of what the song playing made, before another takes its place. */
 export function release() {
   const song = now();
-  if (song?.source.made) URL.revokeObjectURL(song.source.url);
+  if (song) letGo(song.source);
   if (song?.cover) URL.revokeObjectURL(song.cover);
 }
 
 /** Plays `song` in place of the one before, which is let go of. */
 export function start(song: Now, play = true) {
   const before = now();
-  if (before?.source.made && before.source.url !== song.source.url) URL.revokeObjectURL(before.source.url);
+  if (before && before.source.url !== song.source.url) letGo(before.source);
   if (before?.cover && before.cover !== song.cover) URL.revokeObjectURL(before.cover);
   setNow(song);
   setMini(false);
@@ -114,7 +125,7 @@ export async function skip() {
   const source = await sourceOf(next.path);
   // A MIDI song takes a while to render. Stop, or a newer skip, in that time wins.
   if (mine !== skips || now() !== from) {
-    if (source.made) URL.revokeObjectURL(source.url);
+    letGo(source);
     return true;
   }
   start({ path: next.path, name: next.name, title: titleOf(next.name, source.tags), source });

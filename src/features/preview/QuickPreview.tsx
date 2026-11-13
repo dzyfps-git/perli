@@ -45,7 +45,7 @@ import type { ComicViewProps } from "./ComicView";
 import type { ArchiveViewProps } from "./ArchiveView";
 import type { PlayerProps } from "./Player";
 import type { VideoViewProps } from "./VideoView";
-import { wav, type Track } from "./nowPlaying";
+import { song, wav, type Track } from "./nowPlaying";
 import "./preview.css";
 
 /** Which row the preview starts on. A reload while it is open moves it on to the new rows. */
@@ -347,7 +347,7 @@ export function QuickPreview(props: {
             const [path, tags] = await openAudio(view, shot, at);
             return { url: convertFileSrc(path), made: false, tags };
           },
-      render: midi ? async (playing, font) => wav(await songAudio(view, shot, at, { playing, font })) : undefined,
+      render: midi ? async (playing, font) => song(await songAudio(view, shot, at, { playing, font })) : undefined,
       info: midi ? () => songInfo(view, shot, at) : undefined,
       cover: midi ? undefined : (edge) => fetchCover(view, shot, at, edge),
       lyrics: midi || item.isCloud ? undefined : () => besideText(view, shot, at, "lrc"),

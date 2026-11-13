@@ -1463,8 +1463,8 @@ async fn model_file(view: u32, request: u64, row: u32, part: Option<String>, vie
     Ok(Response::new(bytes))
 }
 
-/// A MIDI file as one WAV, played through the bundled SoundFont or, with `font`, through a
-/// `.sf2` file of the user's own.
+/// A MIDI file as one WAV, by the number the window streams it under from `song://`, played
+/// through the bundled SoundFont or, with `font`, through a `.sf2` file of the user's own.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 async fn song_audio(
@@ -1476,7 +1476,8 @@ async fn song_audio(
     font: Option<PathBuf>,
     app: AppHandle,
     views: State<'_, Views>,
-) -> Result<Response, String> {
+    streams: State<'_, midi::Streams>,
+) -> Result<u64, String> {
     let path = media_path(&views, view, request, row, path)?;
     let own = font.filter(|font| font.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("sf2")));
     let font = match own {
@@ -1488,9 +1489,15 @@ async fn song_audio(
     };
     let playing = playing.unwrap_or_default();
     // A broken file can trip the synthesizer's own checks.
-    let render = move || std::panic::catch_unwind(|| midi::render(&font, &path, playing));
-    let wav = blocking(move || render().unwrap_or_else(|_| Err("This MIDI file can't be read".into()))).await?;
-    Ok(Response::new(wav))
+    let start = move || std::panic::catch_unwind(|| midi::stream(&font, &path, playing));
+    let stream = blocking(move || start().unwrap_or_else(|_| Err("This MIDI file can't be read".into()))).await?;
+    Ok(streams.add(stream))
+}
+
+/// Lets go of a song the window no longer plays, which stops making it.
+#[tauri::command]
+fn forget_song(number: u64, streams: State<'_, midi::Streams>) {
+    streams.forget(number);
 }
 
 /// A MIDI file's name, instruments and notes, for the piano roll.
@@ -1498,6 +1505,13 @@ async fn song_audio(
 async fn song_info(view: u32, request: u64, row: u32, views: State<'_, Views>) -> Result<midi::SongInfo, String> {
     let path = row_path(&views, view, request, row)?;
     blocking(move || midi::info(&path)).await
+}
+
+/// A MIDI file's notes, packed, for the piano roll. See `SongInfo::packed_notes`.
+#[tauri::command]
+async fn song_notes(view: u32, request: u64, row: u32, views: State<'_, Views>) -> Result<Response, String> {
+    let path = row_path(&views, view, request, row)?;
+    blocking(move || midi::info(&path).map(|info| Response::new(info.packed_notes()))).await
 }
 
 /// A sound file's tags, and its path for the window to stream it. Only this file opens to the
@@ -2000,6 +2014,18 @@ fn main() {
         .manage(Arc::new(Drags::default()))
         .manage(Searches::default())
         .manage(Scans::default())
+        .manage(midi::Streams::default())
+        // A MIDI song as it is made, which the window streams by number from `song://`.
+        .register_asynchronous_uri_scheme_protocol("song", |context, request, responder| {
+            let number = request.uri().path().trim_start_matches('/').parse().ok();
+            let stream = number.and_then(|number| context.app_handle().state::<midi::Streams>().get(number));
+            let range = request.headers().get("range").and_then(|range| range.to_str().ok()).map(str::to_string);
+            // Waits for the part asked for to be made, so off the window's thread.
+            std::thread::spawn(move || match stream {
+                Some(stream) => responder.respond(stream.answer(range.as_deref())),
+                None => responder.respond(tauri::http::Response::builder().status(404).body(Vec::new()).unwrap()),
+            });
+        })
         .manage(Preload(Mutex::new(preload)))
         .setup(move |app| {
             // What earlier drags out of a ZIP left behind.
@@ -2115,6 +2141,8 @@ fn main() {
             model_file,
             song_audio,
             song_info,
+            song_notes,
+            forget_song,
             open_audio,
             aiff_audio,
             cover,

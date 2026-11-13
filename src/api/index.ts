@@ -947,14 +947,22 @@ export const bookChapter = (view: number, request: number, row: number, entry: s
 export const modelFile = (view: number, request: number, row: number, part?: string) =>
   invoke<ArrayBuffer>("model_file", { view, request, row, part: part ?? null });
 
-/** A MIDI file's name, instruments and notes. Notes are start and length in seconds, key, channel. */
+/** A MIDI song's notes in order of start, as columns: start and length in seconds, key, channel. */
+export interface Notes {
+  start: Float32Array;
+  long: Float32Array;
+  key: Uint8Array;
+  channel: Uint8Array;
+}
+
+/** A MIDI file's name, instruments and notes. */
 export interface SongInfo {
   title: string | null;
   /** General MIDI programs in the order they first play. 128 is the drums. */
   instruments: number[];
   /** Each channel that plays and the instrument it starts with. */
   channels: [channel: number, instrument: number][];
-  notes: [number, number, number, number][];
+  notes: Notes;
   /** When each beat falls, in seconds. */
   beats: number[];
   /** When each bar starts, in seconds, following the time signatures. */
@@ -968,8 +976,24 @@ export interface Playing {
   speed: number;
 }
 
-export const songInfo = (view: number, request: number, row: number) =>
-  invoke<SongInfo>("song_info", { view, request, row });
+export async function songInfo(view: number, request: number, row: number): Promise<SongInfo> {
+  const [info, packed] = await Promise.all([
+    invoke<Omit<SongInfo, "notes">>("song_info", { view, request, row }),
+    invoke<ArrayBuffer>("song_notes", { view, request, row }),
+  ]);
+  return { ...info, notes: unpackNotes(packed) };
+}
+
+/** Notes packed by Rust as columns: every start, every length, every key, every channel. */
+export function unpackNotes(packed: ArrayBuffer): Notes {
+  const count = Math.floor(packed.byteLength / 10);
+  return {
+    start: new Float32Array(packed, 0, count),
+    long: new Float32Array(packed, 4 * count, count),
+    key: new Uint8Array(packed, 8 * count, count),
+    channel: new Uint8Array(packed, 9 * count, count),
+  };
+}
 
 export interface Tags {
   title: string | null;
@@ -989,9 +1013,12 @@ export const fetchCover = (view: number, request: number, row: number, edge: num
 export const aiffAudio = (view: number, request: number, row: number, path?: string) =>
   invoke<ArrayBuffer>("aiff_audio", { view, request, row, path: path ?? null });
 
-/** A MIDI file as one WAV, through the bundled SoundFont or a `.sf2` file named by `font`. */
+/**
+ * A MIDI file as one WAV, through the bundled SoundFont or a `.sf2` file named by `font`. The
+ * number streams it from `song://` while it is made, until `forgetSong` lets go of it.
+ */
 export const songAudio = (view: number, request: number, row: number, how?: { playing?: Playing; font?: string; path?: string }) =>
-  invoke<ArrayBuffer>("song_audio", {
+  invoke<number>("song_audio", {
     view,
     request,
     row,
@@ -999,6 +1026,8 @@ export const songAudio = (view: number, request: number, row: number, how?: { pl
     playing: how?.playing ?? null,
     font: how?.font ?? null,
   });
+
+export const forgetSong = (number: number) => invoke<void>("forget_song", { number });
 
 /** A picture on this PC that a Markdown file points to. */
 export const fetchPictureFile = (path: string, edge: number) =>
