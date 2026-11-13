@@ -1915,6 +1915,8 @@ fn open_window(folder: String, select: Vec<String>) -> Result<(), String> {
 /// How long Perli answers for the Explorer window another app expects after it asks Windows to
 /// show a file in its folder. The ask comes well within this.
 const POSING_TIME: Duration = Duration::from_secs(10);
+/// How long after the start the tags of deleted files are dropped.
+const TAG_SWEEP_AFTER: Duration = Duration::from_secs(60);
 
 /// Passes on what another app wants selected in `folder`, to the Perli that holds the door. That
 /// can be this one, whose door opens a moment after it starts.
@@ -1956,6 +1958,11 @@ fn main() {
     }
     thread::spawn(default_app::heal);
     parts::start_sweep();
+    // Once the start is long over, so it never competes with it.
+    thread::spawn(|| {
+        thread::sleep(TAG_SWEEP_AFTER);
+        tags::sweep();
+    });
     let start = Start::read(ask);
     let preload = start.first_folder().map(|(path, order)| {
         let reader = path.clone();
