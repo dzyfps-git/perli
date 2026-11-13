@@ -32,7 +32,8 @@ struct Area {
     handle: isize,
 }
 
-// ponytail: one area for one window. Keep this per window if Perli ever opens a second one.
+/// The one area of this process's one window. A second Perli window is a process of its own,
+/// with its own area.
 static AREA: OnceLock<Area> = OnceLock::new();
 static HOVERED: AtomicBool = AtomicBool::new(false);
 
