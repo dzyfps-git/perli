@@ -527,7 +527,6 @@ async fn open_folder(
     app: AppHandle,
 ) -> Result<Opened, String> {
     let started = Instant::now();
-    let watch = watch_of(&path, &order.expanded);
     let shown_watch = views
         .0
         .write()
@@ -544,8 +543,9 @@ async fn open_folder(
         .take_if(|(preloaded, _)| *preloaded == path);
     let resolved = folder::resolve(&path).map_err(|error| error.message())?;
     let full = resolved.clone();
-    let listing = async_runtime::spawn_blocking(move || {
+    let (listing, watch) = async_runtime::spawn_blocking(move || {
         network::must_answer(&full)?;
+        let watch = watch_of(&path, &order.expanded);
         let read = || folder::Listing::read(&path, order.clone());
         let first = match waiting {
             Some((_, reader)) => match reader.join().unwrap_or_else(|_| read()) {
@@ -555,13 +555,15 @@ async fn open_folder(
             },
             None => read(),
         };
-        first.or_else(|failure| {
-            if network::reconnect(&full, &failure, jobs::owner(&app)) {
-                read()
-            } else {
-                Err(failure)
-            }
-        })
+        first
+            .or_else(|failure| {
+                if network::reconnect(&full, &failure, jobs::owner(&app)) {
+                    read()
+                } else {
+                    Err(failure)
+                }
+            })
+            .map(|listing| (listing, watch))
     })
     .await
     .map_err(|error| error.to_string())?
@@ -584,7 +586,7 @@ async fn open_folder(
 }
 
 /// What a view watches once `path` and the folders opened in it have read fine. Make it before
-/// the read, and hand it over only after, because a failed open leaves the old folder or search
+/// the read, off the async threads as it lists them, and hand it over only after, because a failed open leaves the old folder or search
 /// on screen, and that one must go on as it was. Each read's rows keep theirs, so a read the UI
 /// drops can't keep the watch either: the next read starts by going back to the rows shown.
 fn watch_of(path: &str, expanded: &[String]) -> Option<Watch> {
@@ -657,7 +659,6 @@ async fn reload_view(
     searches: State<'_, Searches>,
     app: AppHandle,
 ) -> Result<Reloaded, String> {
-    let watch = if search.is_some() { None } else { watch_of(&path, &order.expanded) };
     if search.is_none() {
         searches.stop(view);
     }
@@ -671,7 +672,8 @@ async fn reload_view(
         }
     };
 
-    let (listing, reloaded) = async_runtime::spawn_blocking(move || {
+    let (listing, reloaded, watch) = async_runtime::spawn_blocking(move || {
+        let watch = if search.is_some() { None } else { watch_of(&path, &order.expanded) };
         let listing = match search {
             Some(asked) => find(&app, view, asked, &path, order),
             None => folder::Listing::read(&path, order),
@@ -681,7 +683,7 @@ async fn reload_view(
                 shape: listing.shape(),
                 selected: listing.rows_keyed(&keys),
             };
-            (listing, reloaded)
+            (listing, reloaded, watch)
         })
     })
     .await

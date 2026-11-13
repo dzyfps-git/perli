@@ -16,7 +16,7 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 use std::thread;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 use tauri::{AppHandle, Emitter, Manager};
 use windows::Win32::Storage::FileSystem::GetLogicalDrives;
@@ -28,39 +28,24 @@ const CHECK_GAP: Duration = Duration::from_secs(1);
 /// one part in this many of a drive's time.
 const LOOK_SHARE: u32 = 20;
 
-/// The folders one view shows: its own, and each one opened in place.
+/// The folders one view shows: its own, and each one opened in place, each with a stamp of
+/// every name, size and time it held when last looked at. None if it couldn't be listed.
 #[derive(Clone, Debug)]
 pub struct Watch {
-    folders: Vec<(PathBuf, Seen)>,
-}
-
-/// What a folder looked like last.
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum Seen {
-    /// Its modified time, taken before the read, until the first look lists it.
-    Modified(Option<SystemTime>),
-    /// A stamp of every name, size and time in it. None if it couldn't be listed.
-    Listed(Option<u64>),
+    folders: Vec<(PathBuf, Option<u64>)>,
 }
 
 impl Watch {
-    /// Must run before the folders are read, so a change during the read still shows up.
+    /// Lists each folder, so it may wait on a slow drive. Must run before the folders are read,
+    /// so a change during the read still shows up.
     pub fn new(folders: impl IntoIterator<Item = PathBuf>) -> Self {
-        let folders = folders.into_iter().map(|folder| {
-            let seen = Seen::Modified(modified(&folder));
-            (folder, seen)
-        });
-        Self { folders: folders.collect() }
+        Self { folders: folders.into_iter().map(|folder| { let seen = stamp(&folder); (folder, seen) }).collect() }
     }
 
     pub fn same_folders(&self, other: &Watch) -> bool {
         self.folders.len() == other.folders.len()
             && self.folders.iter().zip(&other.folders).all(|((a, _), (b, _))| a == b)
     }
-}
-
-fn modified(folder: &Path) -> Option<SystemTime> {
-    std::fs::metadata(folder).and_then(|data| data.modified()).ok()
 }
 
 fn stamp(folder: &Path) -> Option<u64> {
@@ -73,17 +58,6 @@ fn stamp(folder: &Path) -> Option<u64> {
         (name, stat.size, time, stat.is_dir()).hash(&mut hasher);
     }
     Some(hasher.finish())
-}
-
-/// Lists `folder` and says whether it changed since `seen`.
-fn look(folder: &Path, seen: Seen) -> (bool, Seen) {
-    // The listing goes first: a change between the two then shows twice, never not at all.
-    let listed = stamp(folder);
-    let changed = match seen {
-        Seen::Modified(then) => modified(folder) != then,
-        Seen::Listed(then) => listed != then,
-    };
-    (changed, Seen::Listed(listed))
 }
 
 struct Watched {
@@ -143,8 +117,8 @@ impl Watches {
             let started = Instant::now();
             let mut moved = false;
             for (folder, seen) in &mut watch.folders {
-                let (changed, now) = look(folder, *seen);
-                moved |= changed;
+                let now = stamp(folder);
+                moved |= now != *seen;
                 *seen = now;
             }
             let took = started.elapsed() * LOOK_SHARE;
@@ -225,14 +199,26 @@ mod tests {
         assert!(watches.changed().is_empty());
 
         // The folder's own modified time stays put for this.
-        let before = modified(&folder);
+        let modified = || fs::metadata(&folder).unwrap().modified().unwrap();
+        let before = modified();
         fs::OpenOptions::new().append(true).open(folder.join("log.txt")).unwrap().write_all(b"more").unwrap();
-        assert_eq!(modified(&folder), before);
+        assert_eq!(modified(), before);
         assert_eq!(watches.changed(), [1]);
 
         fs::write(inner.join("new.txt"), "").unwrap();
         assert_eq!(watches.changed(), [1]);
         assert!(watches.changed().is_empty());
+        fs::remove_dir_all(&folder).unwrap();
+    }
+
+    #[test]
+    fn a_change_before_the_first_look_still_shows() {
+        let folder = sandbox("early");
+        fs::write(folder.join("log.txt"), "a").unwrap();
+        let watches = Watches::default();
+        watches.set(1, Some(Watch::new([folder.clone()])));
+        fs::write(folder.join("log.txt"), "a longer text").unwrap();
+        assert_eq!(watches.changed(), [1]);
         fs::remove_dir_all(&folder).unwrap();
     }
 
