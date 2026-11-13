@@ -3,7 +3,7 @@ import { ToolCog } from "../../ui/Controls";
 import { formatSize } from "../../ui/format";
 import { createFind, lineIn, scrollToRange } from "./FindBar";
 import { asTable, asTree, numbers, setAsTable, setAsTree, setNumbers, setWrap, VIEWER_SETTINGS, wrap } from "./viewerPrefs";
-import { highlight } from "./highlight";
+import { pieceColorer } from "./highlight";
 import { arrange, guessDelimiter, lineEnding, parseTable, type TableOrder } from "./table";
 
 const ICON_FIND = "";
@@ -105,11 +105,26 @@ export function TextView(live: TextViewProps) {
   });
   const kind = () => `UTF-8${props.first.bom ? " with BOM" : ""} · ${lineEnding(props.first.text)}`;
 
-  async function add(piece: string) {
-    const html = props.language ? await highlight(piece, props.language).catch(() => undefined) : undefined;
-    if (gone) return;
-    if (html === undefined) code.append(piece);
-    else code.insertAdjacentHTML("beforeend", html);
+  const color = props.language ? pieceColorer(props.language) : undefined;
+  /** The last piece shown, which the next one replaces when it ended inside a comment or string. */
+  let lastPiece: HTMLElement | undefined;
+  let adding = Promise.resolve();
+
+  /** Pieces go on one at a time, in order. */
+  function add(piece: string) {
+    adding = adding.then(async () => {
+      const colored = color ? await color(piece).catch(() => undefined) : undefined;
+      if (gone) return;
+      const shown = document.createElement("span");
+      if (colored === undefined) shown.textContent = piece;
+      else {
+        if (colored.replaces) lastPiece?.remove();
+        shown.innerHTML = colored.html;
+      }
+      code.append(shown);
+      lastPiece = shown;
+    });
+    return adding;
   }
 
   /** Loads the next piece, if there is one. True if it did. */
