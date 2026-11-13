@@ -1383,15 +1383,34 @@ async fn archive_test(view: u32, request: u64, row: u32, password: Option<String
 }
 
 const DRAG_FOLDER: &str = "perli-drag";
+/// How long what a drag took out of a ZIP stays, as the app it went to may still be reading it.
+const DRAG_KEEP: Duration = Duration::from_secs(60 * 60);
+const DRAG_SWEEP_GAP: Duration = Duration::from_secs(10 * 60);
+
+fn since_1970() -> Duration {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default()
+}
+
+/// Removes each drag's folder in `root` older than `keep`. Its name is when it was made.
+fn sweep_drags(root: &Path, keep: Duration) {
+    let now = since_1970().as_nanos();
+    for entry in std::fs::read_dir(root).into_iter().flatten().flatten() {
+        let made = entry.file_name().to_str().and_then(|name| name.parse::<u128>().ok());
+        if made.is_none_or(|made| now.saturating_sub(made) > keep.as_nanos()) {
+            // One still open in another app goes on a later sweep.
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+}
 
 /// Drags one file out of a ZIP: it is taken out to a temporary folder first, as Windows drags files.
 #[tauri::command]
 async fn drag_entry(view: u32, request: u64, row: u32, entry: String, password: Option<String>, views: State<'_, Views>, app: AppHandle) -> Result<(), String> {
     let path = row_path(&views, view, request, row)?;
     let taken = blocking(move || {
-        // ponytail: what a drag takes out stays until Perli next starts, since the app it was
-        // dropped on may still be copying after the drop.
-        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |now| now.as_nanos());
+        // A sweep takes it away after DRAG_KEEP, since the app it was dropped on may still be
+        // copying it or have it open after the drop.
+        let stamp = since_1970().as_nanos();
         let folder = std::env::temp_dir().join(DRAG_FOLDER).join(stamp.to_string());
         std::fs::create_dir_all(&folder).map_err(|error| error.to_string())?;
         inside::take_out(&path, &entry, password.as_deref(), &folder)
@@ -2021,8 +2040,12 @@ fn main() {
         .manage(Scans::default())
         .manage(Preload(Mutex::new(preload)))
         .setup(move |app| {
-            // What earlier drags out of a ZIP left behind.
+            // What earlier drags out of a ZIP left behind, then what this run's drags leave.
             let _ = std::fs::remove_dir_all(std::env::temp_dir().join(DRAG_FOLDER));
+            std::thread::spawn(|| loop {
+                std::thread::sleep(DRAG_SWEEP_GAP);
+                sweep_drags(&std::env::temp_dir().join(DRAG_FOLDER), DRAG_KEEP);
+            });
             if let Some(door) = door {
                 let asked = app.handle().clone();
                 door.listen(move |ask| {
@@ -2236,6 +2259,21 @@ mod tests {
         view.begin(3, 1);
 
         assert_eq!(held(&view), [1]);
+    }
+
+    #[test]
+    fn a_drag_sweep_takes_only_old_folders() {
+        let root = std::env::temp_dir().join(format!("perli-drag-sweep-{}", std::process::id()));
+        let now = since_1970().as_nanos();
+        let (old, new) = (root.join((now - 2_000_000_000).to_string()), root.join(now.to_string()));
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::create_dir_all(&new).unwrap();
+        std::fs::write(old.join("a.txt"), "a").unwrap();
+
+        sweep_drags(&root, Duration::from_secs(1));
+        assert!(!old.exists());
+        assert!(new.exists());
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
