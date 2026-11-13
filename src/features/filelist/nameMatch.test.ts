@@ -14,3 +14,10 @@ test("a name missing a letter, or an empty query, lights nothing", () => {
   assert.deepEqual(matchSpans("notes.txt", "zz"), []);
   assert.deepEqual(matchSpans("notes.txt", ""), []);
 });
+
+test("the letters lit are the ones search's best fit scored, not the first found", () => {
+  // From the second f the letters sit closer and the r starts a word, as search scores it.
+  assert.deepEqual(matchSpans("fax_fab_r", "fbr"), [[4, 5], [6, 7], [8, 9]]);
+  // A capital after a small letter starts a word too.
+  assert.deepEqual(matchSpans("xmasMovie", "mv"), [[4, 5], [6, 7]]);
+});

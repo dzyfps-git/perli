@@ -567,6 +567,13 @@ mod tests {
         Query::new(query).fit(&name.encode_utf16().collect::<Vec<_>>())
     }
 
+    #[test]
+    fn the_best_fit_scores_as_name_match_ts_lights_it() {
+        // nameMatch.test.ts lights f4, b6, r8 and M4, v6 for these; those are the scores here.
+        assert_eq!(fit("fbr", "fax_fab_r"), Some(11));
+        assert_eq!(fit("mv", "xmasMovie"), Some(6));
+    }
+
     fn start(searches: &Searches, tree: &Tree, query: &str, order: Order) -> (Listing, mpsc::Receiver<Walk>) {
         let (reports, heard) = mpsc::channel();
         let report = move |done| {
