@@ -36,7 +36,7 @@ export const plainHash = (text: string) => text.replace(/[\s:]/g, "").toLowerCas
 export function DetailsPanel(props: { view: FolderView }) {
   const [row, setRow] = createSignal<Row>();
   const [picture, setPicture] = createSignal<Thumb>();
-  const [facts, setFacts] = createSignal<[string, string][]>([]);
+  const [facts, setFacts] = createSignal<[group: string, label: string, value: string][]>([]);
   const [hash, setHash] = createSignal<Hash>();
   const [copied, setCopied] = createSignal<string>();
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -133,8 +133,11 @@ export function DetailsPanel(props: { view: FolderView }) {
         <p class="details-name">{row()!.name}</p>
         <dl class="details-facts">
           <For each={facts()}>
-            {([label, value]) => (
+            {([group, label, value], at) => (
               <>
+                <Show when={group !== facts()[at() - 1]?.[0]}>
+                  <dt class="details-group">{group}</dt>
+                </Show>
                 <dt>{label}</dt>
                 <dd>{value}</dd>
               </>
@@ -143,7 +146,7 @@ export function DetailsPanel(props: { view: FolderView }) {
           <Show when={hash()}>
             {(shown) => (
               <>
-                <dt>Checksum</dt>
+                <dt class="details-group">Checksum</dt>
                 <dd class="details-hash">
                   <div class="hash-kinds" role="group" aria-label="Checksum kind">
                     <For each={KINDS}>

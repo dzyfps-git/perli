@@ -2,9 +2,11 @@
 
 mod clipboard;
 mod default_app;
+mod explorer;
 mod drag;
 mod folder;
 mod jobs;
+mod launch;
 mod menus;
 mod network;
 mod ops;
@@ -27,6 +29,7 @@ mod watch;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex, PoisonError, RwLock};
 use std::thread::{self, JoinHandle};
@@ -54,6 +57,15 @@ const CANCEL_CHECK: Duration = Duration::from_millis(50);
 /// The update found by the last check, waiting for the user to install it.
 #[derive(Default)]
 struct PendingUpdate(Mutex<Option<tauri_plugin_updater::Update>>);
+
+/// Folders later starts handed over before the UI listened for them. `None` once it listens.
+struct Inbox(Mutex<Option<Vec<launch::Ask>>>);
+
+impl Default for Inbox {
+    fn default() -> Self {
+        Self(Mutex::new(Some(Vec::new())))
+    }
+}
 
 /// What a newer release offers.
 #[derive(Serialize)]
@@ -359,6 +371,8 @@ struct SearchGrew {
 #[derive(Clone, Serialize)]
 struct Start {
     folder: Option<String>,
+    /// Names to select in `folder`.
+    select: Vec<String>,
     session: Option<String>,
     home: Option<String>,
 }
@@ -374,12 +388,12 @@ fn folder_argument(text: String) -> String {
 }
 
 impl Start {
-    fn read() -> Self {
-        let folder = std::env::args().nth(1).map(folder_argument);
-        let session = folder.is_none().then(session::read).flatten();
+    fn read(ask: launch::Ask) -> Self {
+        let session = ask.folder.is_none().then(session::read).flatten();
         let home = std::env::var("USERPROFILE").ok();
         Self {
-            folder,
+            folder: ask.folder,
+            select: ask.select,
             session,
             home,
         }
@@ -399,6 +413,13 @@ impl Start {
 #[tauri::command]
 fn start_state(start: State<'_, Start>) -> Start {
     start.inner().clone()
+}
+
+/// Called once the UI listens for "open-asked": hands over what came before, and from then on
+/// each ask goes out as an event.
+#[tauri::command]
+fn asks_waiting(inbox: State<'_, Inbox>) -> Vec<launch::Ask> {
+    inbox.0.lock().unwrap().take().unwrap_or_default()
 }
 
 #[tauri::command]
@@ -1097,7 +1118,7 @@ async fn cover(view: u32, request: u64, row: u32, edge: u32, views: State<'_, Vi
 
 /// Every property Windows shows for one row, as label and value.
 #[tauri::command]
-async fn row_properties(view: u32, request: u64, row: u32, views: State<'_, Views>) -> Result<Vec<(String, String)>, String> {
+async fn row_properties(view: u32, request: u64, row: u32, views: State<'_, Views>) -> Result<Vec<(&'static str, String, String)>, String> {
     let path = row_path(&views, view, request, row)?;
     off_main(move || preview::properties(&path)).await
 }
@@ -1312,13 +1333,72 @@ async fn set_default_app(on: bool) -> Result<(), String> {
     off_main(move || default_app::set(on)).await
 }
 
+/// Brings the window to the front for a folder another start handed over.
+#[tauri::command]
+fn come_forward(window: tauri::WebviewWindow) {
+    let _ = window.unminimize();
+    let _ = window.set_focus();
+}
+
+/// Starts one more Perli with a window of its own, for those who want each folder in one.
+#[tauri::command]
+fn open_window(folder: String, select: Vec<String>) -> Result<(), String> {
+    let mut start = Command::new(std::env::current_exe().map_err(|error| error.to_string())?);
+    start.arg("--new-window");
+    if select.is_empty() {
+        start.arg("--directory").arg(&folder);
+    }
+    for name in &select {
+        start.arg("--select").arg(Path::new(&folder).join(name));
+    }
+    start.spawn().map(|_| ()).map_err(|error| error.to_string())
+}
+
+/// How long Perli answers for the Explorer window another app expects after it asks Windows to
+/// show a file in its folder. The ask comes well within this.
+const POSING_TIME: Duration = Duration::from_secs(10);
+
+/// Passes on what another app wants selected in `folder`, to the Perli that holds the door. That
+/// can be this one, whose door opens a moment after it starts.
+fn pose_for(folder: String) {
+    explorer::pose(&folder, POSING_TIME, |paths| {
+        let names = paths.iter().filter_map(|path| Path::new(path).file_name());
+        let select = names.map(|name| name.to_string_lossy().into_owned()).collect();
+        let ask = launch::Ask { folder: Some(folder.clone()), select, new_window: false };
+        for _ in 0..50 {
+            if launch::hand_off(&ask) {
+                return;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+    });
+}
+
 fn main() {
-    if std::env::args().nth(1).as_deref() == Some(default_app::RESTORE_ARGUMENT) {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some(default_app::RESTORE_ARGUMENT) {
         let _ = default_app::set(false);
         return;
     }
+    // Everything down to the door runs before any window or web view loads, so a start that
+    // only passes a folder on is over in a moment.
+    let ask = match launch::Ask::parse(&args).settle() {
+        Ok(ask) => ask,
+        Err(place) => return explorer::open(&place),
+    };
+    // Only a Perli that opens folders for Windows is ever asked to select a file this way.
+    let posed = ask.plain_folder().filter(|_| !ask.new_window && default_app::is_on()).map(str::to_string);
+    let door = if ask.new_window { None } else { launch::Door::claim() };
+    if door.is_none() && !ask.new_window && launch::hand_off(&ask) {
+        posed.map(pose_for);
+        return;
+    }
+    if let Some(folder) = posed {
+        thread::spawn(move || pose_for(folder));
+    }
+    thread::spawn(default_app::heal);
     thread::spawn(parts::sweep);
-    let start = Start::read();
+    let start = Start::read(ask);
     let preload = start.first_folder().map(|(path, order)| {
         let reader = path.clone();
         (
@@ -1348,6 +1428,7 @@ fn main() {
         .manage(Views::default())
         .manage(Jobs::loading_history())
         .manage(Closing::default())
+        .manage(Inbox::default())
         .manage(PendingUpdate::default())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(Watches::default())
@@ -1355,7 +1436,19 @@ fn main() {
         .manage(Searches::default())
         .manage(Scans::default())
         .manage(Preload(Mutex::new(preload)))
-        .setup(|app| {
+        .setup(move |app| {
+            if let Some(door) = door {
+                let asked = app.handle().clone();
+                door.listen(move |ask| {
+                    // Held while sending, so an ask can't slip between the UI's take and its event.
+                    let inbox = asked.state::<Inbox>();
+                    let mut inbox = inbox.0.lock().unwrap();
+                    match inbox.as_mut() {
+                        Some(waiting) => waiting.push(ask),
+                        None => drop(asked.emit("open-asked", ask)),
+                    }
+                });
+            }
             watch::start(app.handle().clone());
             let (events, drags) = (app.handle().clone(), app.state::<Arc<Drags>>().inner().clone());
             drag::attach(jobs::owner(app.handle()), drags, move |event| {
@@ -1365,6 +1458,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             start_state,
+            asks_waiting,
             save_session,
             list_places,
             drive_space,
@@ -1447,7 +1541,9 @@ fn main() {
             disconnect_drive,
             rank_names,
             is_default_app,
-            set_default_app
+            set_default_app,
+            come_forward,
+            open_window
         ])
         .run(tauri::generate_context!())
         .expect("failed to start Perli");

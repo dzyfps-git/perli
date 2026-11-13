@@ -11,6 +11,10 @@ import {
   mapDrive,
   onCloseAsked,
   onFolderChanged,
+  onOpenAsked,
+  asksWaiting,
+  comeForward,
+  openWindow,
   onSearchGrew,
   onSizesGrew,
   openFile,
@@ -24,6 +28,7 @@ import {
   type Recent,
   type Row,
   type Sort,
+  type OpenAsk,
   type Tag,
 } from "./api";
 import { createFileActions } from "./features/fileops/actions";
@@ -52,13 +57,14 @@ import {
   setLastSort,
   setShowHidden,
   setTileSize,
+  openInWindow,
   showHidden,
   tileSize,
   toggleColumn,
 } from "./features/filelist/prefs";
 import { SelectPattern } from "./features/filelist/SelectPattern";
 import { FLAT_QUERY, type FolderView, type RowAt } from "./features/navigation/folderView";
-import { BIN_PATH, isBin, isDriveRoot, join, parentOf, baseName } from "./features/navigation/path";
+import { BIN_PATH, isBin, isDriveRoot, join, parentOf, baseName, samePath } from "./features/navigation/path";
 import { Palette, type Command } from "./features/palette/Palette";
 import { PathBar } from "./features/pathbar/PathBar";
 import { DetailsPanel } from "./features/preview/DetailsPanel";
@@ -91,6 +97,8 @@ import { Menu, type MenuItem } from "./ui/Menu";
 import { Tooltip } from "./ui/Tooltip";
 
 const SAVE_DELAY_MS = 300;
+/** How long a folder bound for its own window waits to hear which file to select there. */
+const WINDOW_WAIT_MS = 600;
 const MOUSE_BACK = 3;
 const MOUSE_FORWARD = 4;
 const ICON_SETTINGS = "\uE713";
@@ -274,6 +282,44 @@ export function App() {
     tabs.allViews().find((view) => view.id === id)?.searchGrew(walk),
   );
   const sizesListener = onSizesGrew((id) => tabs.allViews().find((view) => view.id === id)?.sizesGrew());
+
+  let windowTimer: number | undefined;
+  let windowWaiting: string | undefined;
+
+  /**
+   * A folder opened from outside Perli gets a tab. Items to select go to the tab that shows their
+   * folder already, which is the one opened a moment ago when another app asked to show a file.
+   */
+  async function openAsked(ask: OpenAsk) {
+    if (!ask.folder) return comeForward();
+    const folder = ask.folder;
+    if (openInWindow()) {
+      // "Show in folder" asks twice: for the folder, then for the file to select in it. A window
+      // can't be reached once it is open, so the folder waits a moment for its file.
+      // ponytail: a file named later than this gets a second window. Windows names it in well
+      // under the wait on every machine tried.
+      window.clearTimeout(windowTimer);
+      const waited = windowWaiting;
+      windowWaiting = undefined;
+      if (waited && !samePath(waited, folder)) await openWindow(waited, []);
+      if (ask.select.length > 0) return openWindow(folder, ask.select);
+      windowWaiting = folder;
+      windowTimer = window.setTimeout(() => {
+        windowWaiting = undefined;
+        openWindow(folder, []).catch(console.error);
+      }, WINDOW_WAIT_MS);
+      return;
+    }
+    comeForward().catch(console.error);
+    // A tab showing search results there can't select by name, so it gets a plain tab instead.
+    const shown =
+      ask.select.length > 0 &&
+      tabs.tabs().find((tab) => !tab.active().query() && samePath(tab.active().folder()?.path, folder));
+    if (shown) tabs.activate(shown);
+    const view = shown ? shown.active() : await tabs.add([folder]);
+    if (ask.select.length > 0) await view?.reload(ask.select);
+  }
+  const openListener = onOpenAsked((ask) => openAsked(ask).catch(console.error));
 
   async function searchIn(view: FolderView, path: string) {
     if (await view.open(path)) view.askSearch();
@@ -809,12 +855,17 @@ export function App() {
     } else {
       const opened = await tabs.activeView().open(start.folder ?? start.home ?? "");
       if (opened) performance.mark("perli-folder-open", { detail: opened });
+      if (opened && start.select.length > 0) await tabs.activeView().reload(start.select);
     }
     setKeepSession(!start.folder);
+    // Starts handed over while this window loaded wait in the back end until now.
+    await openListener;
+    for (const ask of await asksWaiting()) await openAsked(ask).catch(console.error);
   });
   onCleanup(() => {
     window.clearTimeout(saveTimer);
     closeListener.then((stop) => stop());
+    openListener.then((stop) => stop());
     folderListener.then((stop) => stop());
     dragListener.then((stop) => stop());
     searchListener.then((stop) => stop());

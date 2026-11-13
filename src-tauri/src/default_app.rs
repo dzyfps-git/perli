@@ -1,10 +1,12 @@
 //! Lets Perli open folders in place of File Explorer, and puts everything back.
 //!
 //! Windows has no setting for this, so it rests on per-user registry values, which win over the
-//! machine's own. Nothing outside `HKEY_CURRENT_USER` is ever written. `Folder\shell` stays alone,
-//! because it also catches This PC, Control Panel and the Recycle Bin, which have no path to open.
+//! machine's own. Nothing outside `HKEY_CURRENT_USER` is ever written. `Folder\shell` also catches
+//! This PC, Control Panel and other places with no path, and Perli sends those back to Explorer
+//! as it starts (see `launch` and `explorer`).
 
 use std::cmp::Reverse;
+use std::path::Path;
 
 use windows::core::Result;
 use windows::Win32::System::Registry::HKEY_CURRENT_USER as USER;
@@ -17,6 +19,8 @@ pub const RESTORE_ARGUMENT: &str = "--restore-default";
 
 const VERB: &str = "perli";
 const FOLDER_KINDS: [&str; 2] = ["Directory", "Drive"];
+/// What every kind of folder falls back on: opened by apps, by links and by "Show in folder".
+const FOLDER_VERBS: [&str; 2] = ["open", "explore"];
 /// What Win+E runs.
 const WIN_E: &str = r"CLSID\{52205fd8-5dfb-447d-801a-d0b52f2e83e1}\shell\opennewwindow\command";
 /// The backup's value that names the program the other values were written for.
@@ -39,6 +43,13 @@ fn values(exe: &str) -> Vec<Value> {
     }
     values.push(value(WIN_E.into(), "", format!(r#""{exe}""#)));
     values.push(value(WIN_E.into(), "DelegateExecute", String::new()));
+    // New values go last. A backup knows each value by its place in this list.
+    for verb in FOLDER_VERBS {
+        let key = format!(r"Folder\shell\{verb}\command");
+        values.push(value(key.clone(), "", format!(r#""{exe}" "%1""#)));
+        // Windows' own value here names Explorer's code, which would run in place of the command.
+        values.push(value(key, "DelegateExecute", String::new()));
+    }
     values
 }
 
@@ -86,11 +97,28 @@ impl Roots {
         Ok(())
     }
 
+    /// Safe to run again: `write` keeps the first backup, and adds values a newer Perli has.
     fn enable(&self, exe: &str) -> Result<()> {
-        if self.is_default() {
-            return Ok(());
-        }
         self.write(exe).inspect_err(|_| self.restore())
+    }
+
+    /// Run at each start with the program's own path. Values left by a Perli that is gone are
+    /// taken back, so folders never point at nothing, and an updated Perli writes what is new.
+    fn heal(&self, exe: &str) -> bool {
+        let Some(saved) = registry::read_text(USER, &self.backup, Some(BACKUP_EXE)) else {
+            return false;
+        };
+        if saved.eq_ignore_ascii_case(exe) {
+            if self.is_default() {
+                let _ = self.write(exe);
+            }
+            false
+        } else if Path::new(&saved).exists() {
+            false
+        } else {
+            self.restore();
+            true
+        }
     }
 
     /// Puts back what `enable` found. A value some other app has changed since is theirs now.
@@ -139,6 +167,15 @@ fn made_keys(values: &[Value]) -> Vec<String> {
 
 pub fn is_on() -> bool {
     Roots::of_user().is_default()
+}
+
+pub fn heal() {
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    if Roots::of_user().heal(&exe.to_string_lossy()) {
+        unsafe { SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, None, None) };
+    }
 }
 
 pub fn set(on: bool) -> Result<()> {
@@ -209,6 +246,49 @@ mod tests {
         }
         assert_eq!(scratch.read(WIN_E, "").unwrap(), format!(r#""{EXE}""#));
         assert_eq!(scratch.read(WIN_E, "DelegateExecute").unwrap(), "");
+        for verb in FOLDER_VERBS {
+            let key = format!(r"Folder\shell\{verb}\command");
+            assert_eq!(scratch.read(&key, "").unwrap(), format!(r#""{EXE}" "%1""#));
+            assert_eq!(scratch.read(&key, "DelegateExecute").unwrap(), "");
+        }
+    }
+
+    #[test]
+    fn an_update_adds_the_new_values_and_restore_still_brings_the_old_ones_back() {
+        let scratch = Scratch::new();
+        scratch.write(r"Drive\shell", "", "other");
+        scratch.write(r"Folder\shell\open\command", "DelegateExecute", "{theirs}");
+        // What Perli 0.2.0 wrote: everything but the `Folder` values.
+        write_text(USER, &scratch.roots.backup, BACKUP_EXE, EXE).unwrap();
+        write_text(USER, &scratch.roots.backup, "3", "other").unwrap();
+        for value in values(EXE).iter().filter(|value| !value.key.starts_with("Folder")) {
+            scratch.write(&value.key, value.name, &value.data);
+        }
+
+        assert!(!scratch.roots.heal(EXE));
+        assert_eq!(scratch.read(r"Folder\shell\open\command", "DelegateExecute").unwrap(), "");
+        scratch.roots.restore();
+
+        assert_eq!(scratch.read(r"Drive\shell", "").unwrap(), "other");
+        assert_eq!(scratch.read(r"Folder\shell\open\command", "DelegateExecute").unwrap(), "{theirs}");
+        assert_eq!(scratch.read(r"Folder\shell\open\command", ""), None);
+        assert!(!exists(USER, &scratch.roots.class(r"Folder\shell\explore")));
+    }
+
+    #[test]
+    fn a_perli_that_is_gone_gives_the_folders_back_and_one_still_there_keeps_them() {
+        let scratch = Scratch::new();
+        let here = std::env::current_exe().unwrap().to_string_lossy().into_owned();
+        scratch.roots.enable(&here).unwrap();
+        assert!(!scratch.roots.heal(r"C:\somewhere else\perli.exe"));
+        assert!(scratch.roots.is_default());
+
+        scratch.roots.restore();
+        scratch.roots.enable(r"C:
+o such folder 7f3a\perli.exe").unwrap();
+        assert!(scratch.roots.heal(&here));
+        assert!(!scratch.roots.is_default());
+        assert!(!exists(USER, &scratch.roots.backup));
     }
 
     #[test]
@@ -218,8 +298,8 @@ mod tests {
         scratch.roots.restore();
 
         assert!(!scratch.roots.is_default());
-        assert_eq!(subkeys(USER, &scratch.roots.classes), ["CLSID", "Directory", "Drive"]);
-        for kind in ["CLSID", "Directory", "Drive"] {
+        assert_eq!(subkeys(USER, &scratch.roots.classes), ["CLSID", "Directory", "Drive", "Folder"]);
+        for kind in ["CLSID", "Directory", "Drive", "Folder"] {
             assert_eq!(subkeys(USER, &scratch.roots.class(kind)), [""; 0]);
         }
         assert!(!exists(USER, &scratch.roots.backup));

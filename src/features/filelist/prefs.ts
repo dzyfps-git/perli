@@ -41,6 +41,8 @@ export const [lastLayout, setLastLayout] = stored<Layout>(
 );
 /** A card with a file's details and a preview, when the pointer rests on its row. */
 export const [hoverCards, setHoverCards] = stored("hover-cards", saved("hover-cards") !== false);
+/** Where a folder opened from outside Perli goes while Perli runs. */
+export const [openInWindow, setOpenInWindow] = stored("open-in-window", saved("open-in-window") === true);
 export const [detailsPanel, setDetailsPanel] = stored("details-panel", saved("details-panel") === true);
 
 const [sortMemory, setSortMemory] = stored<SortMemory>(
