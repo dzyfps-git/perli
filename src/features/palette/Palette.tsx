@@ -1,4 +1,4 @@
-import { createEffect, createSignal, For, on, onCleanup, onMount } from "solid-js";
+import { createEffect, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
 import { rankNames } from "../../api";
 import { saved, stored } from "../filelist/prefs";
 import "./palette.css";
@@ -6,7 +6,18 @@ import "./palette.css";
 export interface Command {
   label: string;
   keys?: string;
+  /** A Segoe Fluent Icons glyph. */
+  icon?: string;
+  /** The heading it sits under before anything is typed, and a quiet hint once something is. */
+  group?: string;
   run: () => void;
+}
+
+/** Commands of one group side by side, the groups in the order they first come up. */
+export function byGroup<T extends { group?: string }>(commands: T[]) {
+  const groups = new Map<string | undefined, T[]>();
+  for (const command of commands) groups.set(command.group, [...(groups.get(command.group) ?? []), command]);
+  return [...groups.values()].flat();
 }
 
 const optionId = (index: number) => `palette-option-${index}`;
@@ -57,7 +68,7 @@ export function Palette(props: {
     };
     if (!query) {
       const { first, rest } = recentFirst(commands, recent());
-      return show([...first, ...rest], first.length);
+      return show([...first, ...byGroup(rest)], first.length);
     }
     const names = commands.map((command) => command.label);
     rankNames(query, names)
@@ -98,6 +109,15 @@ export function Palette(props: {
   }
 
   const options = () => list.querySelectorAll<HTMLElement>(".palette-option");
+
+  /** The heading over a row, before anything is typed: the rows run lately, then one per group. */
+  function heading(index: number) {
+    if (text()) return undefined;
+    const recents = recentCount();
+    if (index < recents) return index === 0 ? "Recent" : undefined;
+    const group = shown()[index].group;
+    return index === recents || shown()[index - 1].group !== group ? (group ?? "More") : undefined;
+  }
 
   // One highlight glides from row to row, instead of each row lighting up on its own.
   createEffect(() => {
@@ -154,6 +174,14 @@ export function Palette(props: {
         <li ref={marker} class="palette-marker" role="presentation" hidden />
         <For each={shown()} fallback={<li class="palette-empty">No matches.</li>}>
           {(command, index) => (
+            <>
+            <Show when={heading(index())}>
+              {(name) => (
+                <li class="palette-heading" role="presentation">
+                  {name()}
+                </li>
+              )}
+            </Show>
             <li
               id={optionId(index())}
               class="palette-option"
@@ -164,11 +192,19 @@ export function Palette(props: {
               onClick={() => choose(command)}
             >
               <span class="palette-label">
-                {command.label}
-                {index() < recentCount() && <span class="palette-recent">Recent</span>}
+                <span class="palette-icon" aria-hidden="true">
+                  {command.icon}
+                </span>
+                <span class="palette-name">{command.label}</span>
               </span>
-              <span class="palette-keys">{command.keys}</span>
+              <span class="palette-keys">
+                <Show when={text() && command.group}>
+                  <span class="palette-group">{command.group}</span>
+                </Show>
+                {command.keys}
+              </span>
             </li>
+            </>
           )}
         </For>
       </ul>

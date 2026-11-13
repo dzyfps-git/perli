@@ -3,18 +3,24 @@
 //! no tags, and they cost nothing.
 
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::fs;
 use std::mem;
+use std::os::windows::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 use std::slice;
 use std::sync::{Mutex, PoisonError};
 
 use rusqlite::{params, Connection, ErrorCode};
 use serde::Serialize;
+use windows::core::{Owned, HSTRING};
 use windows::Win32::Foundation::{ERROR_NO_MORE_FILES, HANDLE};
 use windows::Win32::Storage::FileSystem::{
-    FileIdExtdDirectoryInfo, FileIdExtdDirectoryRestartInfo, FileIdInfo, GetFileInformationByHandleEx,
-    GetVolumeInformationByHandleW, FILE_ID_EXTD_DIR_INFO, FILE_ID_INFO, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES,
+    ExtendedFileIdType, FileIdExtdDirectoryInfo, FileIdExtdDirectoryRestartInfo, FileIdInfo, GetDriveTypeW,
+    GetFileInformationByHandleEx, GetFinalPathNameByHandleW, GetLogicalDrives, GetVolumeInformationByHandleW,
+    OpenFileById, FILE_FLAG_BACKUP_SEMANTICS, FILE_ID_128, FILE_ID_DESCRIPTOR, FILE_ID_DESCRIPTOR_0,
+    FILE_ID_EXTD_DIR_INFO, FILE_ID_INFO, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
+    FILE_SHARE_READ, FILE_SHARE_WRITE, GETFINALPATHNAMEBYHANDLE_FLAGS,
 };
 use windows::Win32::System::SystemServices::FILE_SUPPORTS_OPEN_BY_FILE_ID;
 
@@ -140,6 +146,50 @@ fn read_folder(
     Ok(tagged)
 }
 
+/// What `GetDriveTypeW` calls a drive on another computer.
+const DRIVE_REMOTE: u32 = 4;
+/// How Windows starts the paths it gives for a handle.
+const VERBATIM: &str = r"\\?\";
+
+/// The open top of each drive of this computer, by the serial number of its volume.
+// ponytail: network drives are left out, since one that is gone can take many seconds to say so.
+// Tags are for NTFS, which a share rarely passes on.
+fn volumes() -> HashMap<u64, Owned<HANDLE>> {
+    let letters = unsafe { GetLogicalDrives() };
+    let roots = (0..26u8).filter(|bit| letters & (1 << bit) != 0).map(|bit| format!("{}:\\", char::from(b'A' + bit)));
+    roots
+        .filter(|root| unsafe { GetDriveTypeW(&HSTRING::from(root.as_str())) } != DRIVE_REMOTE)
+        .filter_map(|root| {
+            let top = sys::open_folder(Path::new(&root), FILE_READ_ATTRIBUTES.0).ok()?;
+            Some((key_of(*top).ok()?.volume, top))
+        })
+        .collect()
+}
+
+/// Where the file with this ID is now, if it still exists.
+fn path_of(volume: HANDLE, file: FileId) -> Option<PathBuf> {
+    let id = FILE_ID_DESCRIPTOR {
+        dwSize: mem::size_of::<FILE_ID_DESCRIPTOR>() as u32,
+        Type: ExtendedFileIdType,
+        Anonymous: FILE_ID_DESCRIPTOR_0 { ExtendedFileId: FILE_ID_128 { Identifier: file } },
+    };
+    let share = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
+    let opened = unsafe { OpenFileById(volume, &id, FILE_READ_ATTRIBUTES.0, share, None, FILE_FLAG_BACKUP_SEMANTICS) };
+    let opened = unsafe { Owned::new(opened.ok()?) };
+    let mut path = vec![0u16; 1024];
+    loop {
+        let units = unsafe { GetFinalPathNameByHandleW(*opened, &mut path, GETFINALPATHNAMEBYHANDLE_FLAGS(0)) } as usize;
+        match units {
+            0 => return None,
+            units if units > path.len() => path.resize(units, 0),
+            units => {
+                let full = OsString::from_wide(&path[..units]).into_string().ok()?;
+                return Some(PathBuf::from(full.strip_prefix(VERBATIM).unwrap_or(&full)));
+            }
+        }
+    }
+}
+
 struct Store(Connection);
 
 impl Store {
@@ -203,6 +253,21 @@ impl Store {
             });
         }
         Ok(shared.unwrap_or_default())
+    }
+
+    /// Every file that has `tag`, with all of its tags.
+    fn with_tag(&self, tag: u32) -> rusqlite::Result<HashMap<(u64, FileId), Vec<u32>>> {
+        let mut rows = self.0.prepare_cached(
+            "SELECT volume, file, tag FROM tagged
+             WHERE (volume, file) IN (SELECT volume, file FROM tagged WHERE tag = ?)",
+        )?;
+        let mut files = HashMap::<(u64, FileId), Vec<u32>>::new();
+        let row = rows.query_map([tag], |row| Ok((row.get::<_, i64>(0)?, row.get(1)?, row.get(2)?)))?;
+        for found in row {
+            let (volume, file, tag) = found?;
+            files.entry((volume as u64, file)).or_default().push(tag);
+        }
+        Ok(files)
     }
 
     fn any_tagged(&self) -> rusqlite::Result<bool> {
@@ -291,6 +356,28 @@ pub fn set(paths: &[PathBuf], tag: u32, on: bool) -> Result<(), String> {
 pub fn common(paths: &[PathBuf]) -> Result<Vec<u32>, String> {
     let keys = file_keys(paths)?;
     existing(|store| store.common(&keys)).transpose().map_err(described).map(Option::unwrap_or_default)
+}
+
+/// The tag with this name, in any case.
+pub fn named_id(name: &str) -> Option<u32> {
+    let tags = all().unwrap_or_default();
+    tags.iter().find(|tag| tag.name.to_lowercase() == name.to_lowercase()).map(|tag| tag.id)
+}
+
+/// Where each file with `tag` is now, with all of its tags, by path. A file that is gone, or on a
+/// drive that is not here, is left out and keeps its tags.
+pub fn files_with(tag: u32) -> Vec<(PathBuf, Box<[u32]>)> {
+    let files = existing(|store| store.with_tag(tag)).and_then(Result::ok).unwrap_or_default();
+    if files.is_empty() {
+        return Vec::new();
+    }
+    let volumes = volumes();
+    let mut found: Vec<(PathBuf, Box<[u32]>)> = files
+        .into_iter()
+        .filter_map(|((volume, file), tags)| Some((path_of(**volumes.get(&volume)?, file)?, tags.into())))
+        .collect();
+    found.sort();
+    found
 }
 
 /// Each tag's place in name order, for sorting.
@@ -485,6 +572,30 @@ mod tests {
         store.set(&keys, tag, true).unwrap();
 
         assert_eq!(folder.read(&store).len(), names.len());
+    }
+
+    #[test]
+    fn a_tagged_file_is_found_by_its_id_wherever_it_went() {
+        let (store, folder) = (store(), Folder::new("found"));
+        let (a, b) = (store.create("a", 0).unwrap().id, store.create("b", 0).unwrap().id);
+        let file = folder.file("old.txt");
+        let other = folder.file("other.txt");
+        store.set(&[key(&file)], a, true).unwrap();
+        store.set(&[key(&file), key(&other)], b, true).unwrap();
+        let moved = folder.0.join("new.txt");
+        fs::rename(&file, &moved).unwrap();
+
+        let files = store.with_tag(a).unwrap();
+        assert_eq!(files.len(), 1);
+        let ((volume, id), tags) = files.into_iter().next().unwrap();
+        assert_eq!(tags, [a, b]);
+        let volumes = volumes();
+        let path = path_of(**volumes.get(&volume).unwrap(), id).unwrap();
+        assert_eq!(path.file_name().unwrap(), "new.txt");
+        assert_eq!(key(&path).file, key(&moved).file);
+
+        fs::remove_file(&moved).unwrap();
+        assert_eq!(path_of(**volumes.get(&volume).unwrap(), id), None);
     }
 
     #[test]

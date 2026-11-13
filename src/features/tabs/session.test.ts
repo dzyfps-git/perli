@@ -42,3 +42,11 @@ test("parseSession keeps at most 2 panes per tab", () => {
   assert.equal(session?.tabs[0].panes.length, 2);
   assert.equal(session?.tabs[0].active, 0);
 });
+
+test("parseSession keeps a pinned tab pinned", () => {
+  const session = parseSession(JSON.stringify({ tabs: [{ panes: [pane], pinned: true }, { panes: [pane], pinned: "yes" }] }));
+  assert.deepEqual(
+    session?.tabs.map((tab) => tab.pinned),
+    [true, undefined],
+  );
+});

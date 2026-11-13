@@ -269,6 +269,8 @@ pub struct Found {
     entries: Vec<Entry>,
     /// Null-terminated, in the same order as `entries`. Rows of one folder share theirs.
     locations: Vec<Arc<[u16]>>,
+    /// Only a search by tag knows the tags of its rows.
+    tags: tags::Tagged,
 }
 
 impl Found {
@@ -277,8 +279,15 @@ impl Found {
         self.locations.push(location);
     }
 
+    pub fn push_tagged(&mut self, entry: Entry, location: Arc<[u16]>, tags: Box<[u32]>) {
+        self.tags.insert(self.entries.len() as u32, tags);
+        self.push(entry, location);
+    }
+
     /// Moves all of `other`'s rows to the end of this one.
     pub fn append(&mut self, other: &mut Self) {
+        let after = self.entries.len() as u32;
+        self.tags.extend(other.tags.drain().map(|(row, tags)| (row + after, tags)));
         self.entries.append(&mut other.entries);
         self.locations.append(&mut other.locations);
     }
@@ -362,6 +371,7 @@ impl Listing {
         Self {
             entries: Arc::new(found.entries),
             found_in: Arc::new(found.locations),
+            tags: Arc::new(found.tags),
             ..Self::default()
         }
         .arrange(order)

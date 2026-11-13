@@ -10,6 +10,8 @@ export function morph(change: () => void, kind = "change") {
   const root = document.documentElement;
   root.dataset.morph = kind;
   const transition = document.startViewTransition(change);
+  // A change that starts while this one plays skips it, which is no fault.
+  transition.ready.catch(() => undefined);
   transition.finished.finally(() => {
     if (root.dataset.morph === kind) delete root.dataset.morph;
   });

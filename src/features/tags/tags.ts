@@ -13,6 +13,12 @@ export const refreshTags = () => listTags().then(setKnown).catch(console.error);
 
 export const tagColor = (color: number) => `var(--tag-${color})`;
 
+/** What a drop on a tag lands on, before the tag's id. It is no folder, so nothing moves. */
+export const TAG_DROP = "perli:tag:";
+
+/** What to search for to see every file with this tag. */
+export const tagQuery = (name: string) => `tag:${name}`;
+
 /** For screen readers. Empty with no tags. */
 export function tagNames(ids: number[]) {
   const names = ids.flatMap((id) => known().find((tag) => tag.id === id)?.name ?? []);

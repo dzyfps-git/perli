@@ -1,9 +1,9 @@
 import { createEffect, createSignal } from "solid-js";
-import { closeView } from "../../api";
+import { closeView, openWindow } from "../../api";
 import { morph } from "../../ui/morph";
 import { createFolderView, type FolderView } from "../navigation/folderView";
 import type { SavedPane, Session } from "./session";
-import { cycled, moved, nextActive, otherPane } from "./tabList";
+import { cycled, moved, nextActive, otherPane, pinnedFirst } from "./tabList";
 
 export type Tabs = ReturnType<typeof createTabs>;
 export type Tab = ReturnType<typeof createTab>;
@@ -15,7 +15,11 @@ function createTab(views: FolderView[], startSwapped = false) {
   const [panes, setPanes] = createSignal(views);
   const [active, setActive] = createSignal(views[0]);
   const [swapped, setSwapped] = createSignal(startSwapped);
+  const [pinned, setPinned] = createSignal(false);
   return {
+    /** A pinned tab sits first, stays narrow and does not close by accident. */
+    pinned,
+    setPinned,
     /** Tells this tab apart while it moves along the strip. */
     id: tabCount++,
     panes,
@@ -61,7 +65,7 @@ export function createTabs() {
     const placed = morph(() => {
       const result = [...tabs()];
       result.splice(result.indexOf(after) + 1, 0, tab);
-      setTabs(result);
+      setTabs(inOrder(result));
       if (!behind) setActive(tab);
     }, "tabs");
     // Back only once the tab is in the list, so a caller adding the next one after it finds it.
@@ -69,8 +73,11 @@ export function createTabs() {
     return opened[0];
   }
 
-  function close(tab: Tab) {
-    if (tabs().length === 1) return;
+  const inOrder = (list: Tab[]) => pinnedFirst(list, (tab) => tab.pinned());
+
+  /** A pinned tab stays, unless `evenPinned`. */
+  function close(tab: Tab, evenPinned = false) {
+    if (tabs().length === 1 || (tab.pinned() && !evenPinned)) return;
     morph(() => {
       const list = tabs();
       if (list.length === 1 || !list.includes(tab)) return;
@@ -109,10 +116,11 @@ export function createTabs() {
         saved.swapped,
       );
       tab.activate(tab.panes()[saved.active]);
+      tab.setPinned(saved.pinned === true);
       return tab;
     });
     for (const view of first.panes()) closeView(view.id).catch(console.error);
-    setTabs(restored);
+    setTabs(inOrder(restored));
     setActive(restored[session.active]);
   }
 
@@ -128,6 +136,7 @@ export function createTabs() {
       }),
       active: tab.panes().indexOf(tab.active()),
       swapped: tab.swapped(),
+      ...(tab.pinned() ? { pinned: true } : {}),
     }));
     return { start: { path, order: view.order() }, tabs: saved, active: tabs().indexOf(active()) };
   }
@@ -147,8 +156,25 @@ export function createTabs() {
     closeOthers(tab: Tab) {
       for (const other of tabs()) if (other !== tab) close(other);
     },
+    closeRight(tab: Tab) {
+      for (const other of tabs().slice(tabs().indexOf(tab) + 1)) close(other);
+    },
+    togglePinned(tab: Tab) {
+      morph(() => {
+        tab.setPinned(!tab.pinned());
+        setTabs(inOrder(tabs()));
+      }, "tabs");
+    },
+    /** The tab's folder opens in a window of its own, and the tab closes here. */
+    async toWindow(tab: Tab) {
+      const path = tab.active().path();
+      if (!path) return;
+      await openWindow(path, []);
+      close(tab, true);
+    },
     duplicate: (tab: Tab) => add(tab.paths(), tab),
-    move: (tab: Tab, offset: number) => setTabs(moved(tabs(), tab, offset)),
+    /** A tab moves among its own kind: pinned tabs stay ahead of the rest. */
+    move: (tab: Tab, offset: number) => setTabs(inOrder(moved(tabs(), tab, offset))),
     cycle: (offset: number) => setActive(cycled(tabs(), active(), offset)),
     activateAt(index: number) {
       const tab = tabs()[index];

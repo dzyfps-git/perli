@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { cycled, moved, nextActive, otherPane } from "./tabList.ts";
+import { cycled, moved, nextActive, otherPane, pinnedFirst } from "./tabList.ts";
 
 test("closing the active tab activates the next, then the previous", () => {
   assert.equal(nextActive(["a", "b", "c"], "b", "b"), "c");
@@ -26,4 +26,11 @@ test("otherPane finds the second pane, and nothing when there is one pane", () =
   assert.equal(otherPane(["left", "right"], "left"), "right");
   assert.equal(otherPane(["left", "right"], "right"), "left");
   assert.equal(otherPane(["left"], "left"), undefined);
+});
+
+test("pinnedFirst keeps each group in its own order", () => {
+  assert.deepEqual(
+    pinnedFirst(["a", "B", "c", "D"], (tab) => tab === tab.toUpperCase()),
+    ["B", "D", "a", "c"],
+  );
 });

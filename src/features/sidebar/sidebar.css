@@ -292,3 +292,139 @@ html[data-blurred] .place-used::before {
     animation: none;
   }
 }
+
+/* A group of bookmarks is one button, and says so with a small arrow. */
+.bookmark-opens {
+  font: 8px var(--font-icons);
+  color: var(--text-muted);
+  transition: translate var(--motion-spring);
+}
+
+.bookmark-group:hover .bookmark-opens {
+  translate: 0 2px;
+}
+
+/* While files are dragged, the bar says what it takes. */
+.bookmark-hint {
+  flex: none;
+  align-self: center;
+  padding: 0 var(--space-2);
+  color: var(--text);
+  font-size: 12px;
+  animation: bookmark-hint-in var(--motion);
+}
+
+.bookmarks[data-drop-over] {
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  outline: 1px dashed var(--accent);
+  outline-offset: -1px;
+}
+
+@keyframes bookmark-hint-in {
+  from {
+    opacity: 0;
+    translate: -8px 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bookmark-hint {
+    animation: none;
+  }
+
+  .bookmark-opens {
+    transition: none;
+  }
+}
+
+/* A tag in the sidebar wears its colour as a dot, which swells when files are held over it. */
+.place-tag-dot {
+  margin: 0;
+  transition: scale var(--motion-spring);
+}
+
+.place-tag:hover .place-tag-dot {
+  scale: 1.25;
+}
+
+.place-tag[data-drop-over] .place-tag-dot {
+  scale: 1.7;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .place-tag-dot {
+    transition: none;
+  }
+}
+
+/* A drive that can be ejected shows the button for it at its right, once it is reached. */
+.place-item {
+  position: relative;
+}
+
+.place-eject {
+  position: absolute;
+  top: 50%;
+  right: var(--space-1);
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text-muted);
+  font: 11px var(--font-icons);
+  opacity: 0;
+  translate: 4px -50%;
+  transition:
+    opacity var(--motion),
+    translate var(--motion-spring),
+    color var(--motion);
+}
+
+.place-item:hover .place-eject,
+.place-eject:focus-visible {
+  opacity: 1;
+  translate: 0 -50%;
+}
+
+.place-eject:hover {
+  color: var(--accent);
+}
+
+.place-eject:active {
+  translate: 0 calc(-50% - 2px);
+}
+
+.place-eject:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* The free space steps aside for the button. */
+.place-item[data-ejects]:hover .place-free {
+  opacity: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .place-eject {
+    transition: none;
+  }
+}
+
+/* A smart folder's funnel takes the accent, so it reads as a look at files and not a place. */
+.place-smart .place-icon {
+  color: var(--accent);
+  transition: rotate var(--motion-spring);
+}
+
+.place-smart:hover .place-icon {
+  rotate: -12deg;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .place-smart .place-icon {
+    transition: none;
+  }
+}

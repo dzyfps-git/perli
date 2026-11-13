@@ -16,7 +16,12 @@ const KINDS: { value: Filter["kinds"]; label: string }[] = [
 ];
 
 /** Rows must meet all of what is filled in. Folders have no type or size, so those leave them out. */
-export function FilterDialog(props: { view: FolderView; onClose: () => void }) {
+export function FilterDialog(props: {
+  view: FolderView;
+  onClose: () => void;
+  /** Keeps the filter, with the folder and its search, as a smart folder in the sidebar. */
+  onSave: () => void;
+}) {
   const [form, setForm] = createSignal(props.view.filterForm());
   let dialog!: HTMLDialogElement;
   let name!: HTMLInputElement;
@@ -31,6 +36,13 @@ export function FilterDialog(props: { view: FolderView; onClose: () => void }) {
   const datesAreGood = () => [form().from, form().to].every((day) => !day.trim() || !!parseDay(day));
   const formIsGood = () => sizesAreGood(form()) && datesAreGood();
   const apply = () => formIsGood() && finish(form());
+
+  /** The filter goes on first, so what is saved is what the list then shows. */
+  function save() {
+    if (!sizesAreGood(form())) return;
+    props.view.setFilterForm(form());
+    close(props.onSave);
+  }
 
   function toggleTag(id: number) {
     const chosen = form().tags;
@@ -125,6 +137,9 @@ export function FilterDialog(props: { view: FolderView; onClose: () => void }) {
       <div class="confirm-buttons filter-buttons">
         <button class="job-choice" onClick={() => finish(NO_FILTER)}>
           Clear
+        </button>
+        <button class="job-choice" disabled={!sizesAreGood(form())} onClick={save}>
+          Save as smart folder…
         </button>
         <button class="job-choice" onClick={() => close()}>
           Cancel

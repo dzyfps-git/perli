@@ -1,7 +1,7 @@
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { Effect, getCurrentWindow } from "@tauri-apps/api/window";
 import { createEffect, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
-import { isDefaultApp, setDefaultApp } from "../../api";
+import { createTag, exportSettings, importSettings, isDefaultApp, listTags, setDefaultApp } from "../../api";
 import type { Tag } from "../../api";
 import { ColorField, Switch } from "../../ui/Controls";
 import { morph } from "../../ui/morph";
@@ -54,6 +54,7 @@ import {
   type Backdrop,
   type Theme,
 } from "./appearance";
+import { missingTags, packed, remapTags, settingsOf, staleSettings, storageKey, unpacked } from "./backup";
 import { type Palette } from "./palettes";
 import { fitsSearch } from "./search";
 import {
@@ -94,6 +95,7 @@ const SECTIONS = [
   { id: "tags", label: "Tags", icon: "" },
   { id: "viewers", label: "Viewers", icon: "" },
   { id: "default", label: "Default file manager", icon: "" },
+  { id: "backup", label: "Backup", icon: "" },
   { id: "updates", label: "Updates", icon: "" },
 ] as const;
 type SectionId = (typeof SECTIONS)[number]["id"];
@@ -132,6 +134,7 @@ export function Settings(props: {
 }) {
   const [isDefault, setIsDefault] = createSignal(false);
   const [defaultFailure, setDefaultFailure] = createSignal<string>();
+  const [backupNote, setBackupNote] = createSignal<string>();
   const [hidden, setHidden] = createSignal<SectionId[]>([]);
   const [current, setCurrent] = createSignal<SectionId>("look");
   // Closing drops the page and its empty search box, so a search's hidden parts go with it.
@@ -229,6 +232,35 @@ export function Settings(props: {
     const line = body.scrollTop + body.clientHeight / 4;
     const reached = SECTIONS.filter(({ id }) => !hidden().includes(id) && (sectionOf(id)?.offsetTop ?? Infinity) <= line);
     if (reached.length > 0) setCurrent(reached.at(-1)!.id);
+  }
+
+  async function saveBackup() {
+    try {
+      const prefs = settingsOf(Object.entries(localStorage));
+      const tags = (await listTags()).map(({ name, color, id }) => ({ name, color, id }));
+      if (await exportSettings(packed({ prefs, tags }))) setBackupNote("Settings saved.");
+    } catch (failure) {
+      setBackupNote(String(failure));
+    }
+  }
+
+  /** The window starts over, because every part of Perli read its settings when it began. */
+  async function loadBackup() {
+    try {
+      const text = await importSettings();
+      if (text === null) return;
+      const { prefs: saved, tags } = unpacked(text);
+      for (const tag of missingTags(tags, await listTags())) await createTag(tag.name, tag.color);
+      const prefs = remapTags(saved, tags, await listTags());
+      // A setting the file lacks was at its start value when saved, so it goes back to that.
+      const current = settingsOf(Object.entries(localStorage));
+      for (const name of staleSettings(current, prefs)) localStorage.removeItem(storageKey(name));
+      for (const [name, value] of Object.entries(prefs)) localStorage.setItem(storageKey(name), value);
+      await props.onBeforeUpdate();
+      location.reload();
+    } catch (failure) {
+      setBackupNote(failure instanceof Error ? failure.message : String(failure));
+    }
   }
 
   async function toggleDefault() {
@@ -571,6 +603,31 @@ export function Settings(props: {
             <Show when={defaultFailure()}>
               <p class="settings-note" role="alert">
                 {defaultFailure()}
+              </p>
+            </Show>
+          </section>
+
+          <section
+            class="settings-section"
+            data-section="backup"
+            data-words="export import save restore file move computer settings json"
+          >
+            <h3>Backup</h3>
+            <p class="settings-note">
+              Every setting, your keys, bookmarks, pinned places and folder looks, and the names and colors of your tags,
+              as one file. Which files wear each tag stays on this computer.
+            </p>
+            <div class="settings-chips">
+              <button class="settings-chip" onClick={saveBackup}>
+                Export settings…
+              </button>
+              <button class="settings-chip" onClick={loadBackup}>
+                Import settings…
+              </button>
+            </div>
+            <Show when={backupNote()}>
+              <p class="settings-note" role="status">
+                {backupNote()}
               </p>
             </Show>
           </section>

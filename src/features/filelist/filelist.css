@@ -563,6 +563,7 @@ html[data-blurred] .file-row[data-cut] {
 
 /* Sits in the row's padding, so it never covers a name. */
 .file-row[data-pinned]::after,
+.file-row[data-synced]::after,
 .file-row[data-cloud]::after {
   position: absolute;
   top: 50%;
@@ -582,7 +583,19 @@ html[data-blurred] .file-row[data-cut] {
   content: "\E753";
 }
 
+/* Here in full: a quiet tick, in the green sync apps use for it. */
+.file-row[data-synced]::after {
+  content: "\E73E";
+  color: color-mix(in srgb, var(--tag-3) 70%, var(--text-muted));
+  opacity: 0.75;
+}
+
+.file-row[data-pinned]::after {
+  color: var(--tag-3);
+}
+
 .file-grid[data-layout="grid"] .file-row[data-pinned]::after,
+.file-grid[data-layout="grid"] .file-row[data-synced]::after,
 .file-grid[data-layout="grid"] .file-row[data-cloud]::after {
   top: var(--space-2);
   right: var(--space-2);

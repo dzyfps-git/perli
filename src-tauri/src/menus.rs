@@ -25,7 +25,7 @@ use windows::Win32::System::SystemServices::MK_LBUTTON;
 use windows::Win32::UI::Shell::Common::{COMDLG_FILTERSPEC, ITEMIDLIST};
 use windows::Win32::UI::Shell::{
     FileOpenDialog, FOLDERID_SendTo, IAssocHandler, IContextMenu, IContextMenu2, IContextMenu3,
-    IFileOpenDialog, IShellFolder, IShellItem, IShellItemArray, ILFree, SHAssocEnumHandlers,
+    FileSaveDialog, IFileDialog, IFileOpenDialog, IShellFolder, IShellItem, IShellItemArray, ILFree, SHAssocEnumHandlers,
     SHCreateShellItemArrayFromIDLists, SHGetIDListFromObject, SHOpenWithDialog, ShellExecuteW,
     ASSOC_FILTER, ASSOC_FILTER_NONE, ASSOC_FILTER_RECOMMENDED, SIGDN_FILESYSPATH,
     BHID_DataObject, BHID_SFObject, BHID_SFUIObject, CMF_CANRENAME, CMF_EXPLORE, CMF_NORMAL,
@@ -384,6 +384,25 @@ pub fn browse_app(main: isize) -> Result<Option<String>> {
     })
 }
 
+/// Windows' file picker for a file of Perli's settings, to save one or to open one. Nothing when
+/// the user backs out.
+pub fn pick_settings_file(main: isize, save: bool) -> Result<Option<String>> {
+    on_worker(move |_| unsafe {
+        let class = if save { &FileSaveDialog } else { &FileOpenDialog };
+        let dialog: IFileDialog = CoCreateInstance(class, None, CLSCTX_INPROC_SERVER)?;
+        dialog.SetFileTypes(&[COMDLG_FILTERSPEC { pszName: w!("Perli settings"), pszSpec: w!("*.json") }])?;
+        dialog.SetDefaultExtension(w!("json"))?;
+        if save {
+            dialog.SetFileName(w!("Perli settings.json"))?;
+        }
+        match dialog.Show(Some(HWND(main as _))) {
+            Ok(()) => Ok(Some(take_text(dialog.GetResult()?.GetDisplayName(SIGDN_FILESYSPATH)?))),
+            Err(closed) if closed.code() == ERROR_CANCELLED.to_hresult() => Ok(None),
+            Err(failure) => Err(failure),
+        }
+    })
+}
+
 /// Windows' own "How do you want to open this?" window, for one file.
 pub fn choose_app(path: PathBuf) -> Result<()> {
     on_worker(move |owner| {
@@ -707,6 +726,21 @@ pub fn show_properties(target: Target, main: isize, x: i32, y: i32) -> Result<()
         let shown = filled.ok().and_then(|()| invoke(&menu, owner, verb, point, &target.directory()));
         let _ = unsafe { DestroyMenu(popup) };
         shown
+    })
+}
+
+/// Ejects a drive the way Explorer's own menu does, so Windows says so when a file is still open.
+pub fn eject(drive: PathBuf, main: isize) -> Result<()> {
+    let target = Target::Items(vec![drive]);
+    on_worker(move |owner| {
+        let point = on_screen(HWND(main as _), 0, 0);
+        let menu = target.context_menu(owner)?;
+        let popup = unsafe { CreatePopupMenu() }?;
+        let filled = unsafe { menu.QueryContextMenu(popup, 0, FIRST_COMMAND, LAST_COMMAND, CMF_NORMAL) };
+        let verb = (s!("eject"), w!("eject"));
+        let ejected = filled.ok().and_then(|()| invoke(&menu, owner, verb, point, &HSTRING::new()));
+        let _ = unsafe { DestroyMenu(popup) };
+        ejected
     })
 }
 
