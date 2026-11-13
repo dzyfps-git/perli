@@ -119,7 +119,7 @@ impl Encoding {
                 if !more && bytes.len() % 2 == 1 {
                     return None;
                 }
-                let mut units: Vec<u16> = bytes.chunks_exact(2).map(|pair| if big { u16::from_be_bytes([pair[0], pair[1]]) } else { u16::from_le_bytes([pair[0], pair[1]]) }).collect();
+                let mut units: Vec<u16> = bytes.as_chunks::<2>().0.iter().map(|&pair| if big { u16::from_be_bytes(pair) } else { u16::from_le_bytes(pair) }).collect();
                 if more && units.last().is_some_and(|unit| (0xD800..0xDC00).contains(unit)) {
                     units.pop();
                 }
@@ -143,7 +143,7 @@ impl Encoding {
     /// How many of `bytes` run up to and through their last line end, if they have one.
     fn line_end(self, bytes: &[u8]) -> Option<usize> {
         match self {
-            Self::Utf16 { big } => bytes.chunks_exact(2).rposition(|pair| pair == if big { [0, b'\n'] } else { [b'\n', 0] }).map(|at| at * 2 + 2),
+            Self::Utf16 { big } => bytes.as_chunks::<2>().0.iter().rposition(|pair| *pair == if big { [0, b'\n'] } else { [b'\n', 0] }).map(|at| at * 2 + 2),
             // In UTF-8 and the ANSI code pages a `\n` byte is always a line end, never part of a letter.
             _ => bytes.iter().rposition(|&byte| byte == b'\n').map(|at| at + 1),
         }
