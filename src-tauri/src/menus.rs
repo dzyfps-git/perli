@@ -620,7 +620,14 @@ fn plain_label(text: &str) -> String {
     text.replace("&&", "\0").replace('&', "").replace('\0', "&").trim().to_string()
 }
 
-fn read_entries(menu: &IContextMenu, popup: HMENU, depth: u32) -> Vec<Entry> {
+/// "Send to" carries no verb, so it is known by what it holds: the files of the Send to folder,
+/// whose names are in the user's language just like the menu's.
+fn is_send_to(verb: Option<&str>, items: &[Entry], send_to: &[String]) -> bool {
+    verb.is_none() && items.iter().any(|item| send_to.contains(&item.label.to_lowercase()))
+}
+
+/// `send_to` holds the names of the Send to folder's files, in lower case.
+fn read_entries(menu: &IContextMenu, popup: HMENU, depth: u32, send_to: &[String]) -> Vec<Entry> {
     let mut entries = Vec::new();
     let mut divider = false;
     for index in 0..unsafe { GetMenuItemCount(Some(popup)) }.max(0) as u32 {
@@ -642,20 +649,21 @@ fn read_entries(menu: &IContextMenu, popup: HMENU, depth: u32) -> Vec<Entry> {
         let label = plain_label(&String::from_utf16_lossy(&text[..info.cch.min(LONGEST_LABEL as u32) as usize]));
         let offset = info.wID.checked_sub(FIRST_COMMAND).filter(|_| info.wID <= LAST_COMMAND);
         let side = !info.hSubMenu.is_invalid();
-        let verb = offset.filter(|_| !side).and_then(|offset| verb_of(menu, offset));
+        // A side menu can carry a verb too: "Open with" says `openas` in every language.
+        let verb = offset.and_then(|offset| verb_of(menu, offset));
         let known = |verbs: &[&str]| verb.as_deref().is_some_and(|verb| verbs.contains(&verb.to_lowercase().as_str()));
         // An item with no text draws itself, which only a real Windows menu can show.
-        if label.is_empty() || known(&OWN_VERBS) || known(&LISTED_ELSEWHERE) {
+        if label.is_empty() || (!side && known(&OWN_VERBS)) || known(&LISTED_ELSEWHERE) {
             continue;
         }
         let items = if side && depth < DEEPEST_MENU {
             // Many side menus are only filled when Windows says they are about to open.
             let _ = forward(WM_INITMENUPOPUP, WPARAM(info.hSubMenu.0 as usize), LPARAM(index as isize));
-            read_entries(menu, info.hSubMenu, depth + 1)
+            read_entries(menu, info.hSubMenu, depth + 1, send_to)
         } else {
             Vec::new()
         };
-        if side && items.is_empty() {
+        if side && (items.is_empty() || is_send_to(verb.as_deref(), &items, send_to)) {
             continue;
         }
         let has_picture = info.hbmpItem.0 as isize >= FIRST_REAL_BITMAP;
@@ -691,7 +699,8 @@ pub fn list_menu(target: Target) -> Result<Vec<Entry>> {
             return Err(error);
         }
         OPEN_MENU.set(Some(menu.clone()));
-        let entries = read_entries(&menu, popup, 0);
+        let send_to: Vec<String> = send_to_files().into_iter().map(|target| target.name.to_lowercase()).collect();
+        let entries = read_entries(&menu, popup, 0, &send_to);
         OPEN_MENU.set(None);
         LISTED.set(Some((menu, popup, target.directory())));
         Ok(entries)
@@ -811,6 +820,23 @@ mod tests {
         for own in ["cut", "copy", "delete", "rename", "properties"] {
             assert!(!labels.contains(&own.to_string()), "{labels:?}");
         }
+    }
+
+    #[test]
+    fn open_with_and_send_to_stay_out_of_the_windows_list_in_any_language() {
+        let item = |label: &str| Entry { id: Some(1), label: label.into(), ..Default::default() };
+        let send_to = ["bluetooth-gerät".to_string()];
+        assert!(is_send_to(None, &[item("Desktop"), item("Bluetooth-Gerät")], &send_to));
+        assert!(!is_send_to(Some("SevenZip"), &[item("Bluetooth-Gerät")], &send_to));
+        assert!(!is_send_to(None, &[item("CRC-32")], &send_to));
+
+        let folder = TempFolder::new("side");
+        let file = folder.0.join("a.html");
+        fs::write(&file, "").unwrap();
+        let entries = list_menu(Target::Items(vec![file])).unwrap();
+        let labels: Vec<_> = entries.iter().map(|entry| entry.label.to_lowercase()).collect();
+        // This runs on an English Windows; the checks above hold for the others.
+        assert!(!labels.contains(&"open with".to_string()) && !labels.contains(&"send to".to_string()), "{labels:?}");
     }
 
     #[test]

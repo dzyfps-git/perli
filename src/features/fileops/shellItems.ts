@@ -100,12 +100,6 @@ export function createShellItems(
     if (verb) run[verb]?.();
   }
 
-  /** Side menus of Windows that Perli's menu has as its own. They carry no verb to tell them by. */
-  // ponytail: matched by their English label, so another language shows them twice. Match by
-  // menu handler in menus.rs if that matters.
-  const OWN_SIDE_MENUS = ["Open with", "Send to"];
-  const isNew = (entry: ShellEntry) => !(entry.items.length > 0 && OWN_SIDE_MENUS.includes(entry.label));
-
   const fromWindows = (entry: ShellEntry, at: Point): MenuItem => ({
     label: entry.label,
     divider: entry.divider,
@@ -122,7 +116,7 @@ export function createShellItems(
     divider: true,
     async load() {
       const now = target();
-      return now ? (await shellMenuItems(now)).filter(isNew).map((entry) => fromWindows(entry, at)) : [];
+      return now ? (await shellMenuItems(now)).map((entry) => fromWindows(entry, at)) : [];
     },
   });
 
