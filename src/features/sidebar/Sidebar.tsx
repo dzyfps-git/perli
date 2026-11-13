@@ -483,7 +483,11 @@ export function Sidebar(props: {
             icon={ICON_BIN}
             onMenu={props.onMenu}
             ring={bin()?.limit ? Math.min(1, bin()!.size / bin()!.limit!) : undefined}
-            about={bin() && (bin()!.limit ? `${formatSize(bin()!.size)} of ${formatSize(bin()!.limit!)}` : formatSize(bin()!.size))}
+            about={
+              bin() &&
+              // Windows can't read the bin of a drive that isn't plugged in, so the count says so.
+              `${bin()!.limit ? `${formatSize(bin()!.size)} of ${formatSize(bin()!.limit!)}` : formatSize(bin()!.size)}, on drives plugged in now`
+            }
           />
         </Show>
       </Section>
