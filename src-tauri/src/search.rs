@@ -46,8 +46,8 @@ const TEXT_TYPES: &[&str] = &[
     "vtt", "tex", "rst", "nfo", "svg", "vue", "svelte", "env", "properties",
 ];
 
-// ponytail: each report copies every row found so far, so reports thin out as rows grow. Rows
-// that share their memory would lift this.
+/// Each report sorts every row found so far, so reports thin out as rows grow. Rows share their
+/// names, so handing them over copies no text.
 fn report_gap(rows: usize) -> Duration {
     REPORT_GAP * (1 + rows / AHEAD) as u32
 }

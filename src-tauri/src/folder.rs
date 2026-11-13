@@ -230,7 +230,7 @@ impl Sight {
 #[derive(Clone)]
 pub struct Entry {
     /// UTF-16 and null-terminated, ready for `StrCmpLogicalW`.
-    name: Box<[u16]>,
+    name: Arc<[u16]>,
     size: u64,
     /// FILETIME ticks.
     modified: u64,
@@ -277,7 +277,7 @@ impl Entry {
 
     fn from_bin_item(item: &BinItem) -> Self {
         Self {
-            name: null_terminated(item.original.file_name().unwrap_or_default().as_ref()),
+            name: null_terminated(item.original.file_name().unwrap_or_default().as_ref()).into(),
             size: item.size,
             modified: item.deleted,
             created: item.deleted,
@@ -293,7 +293,7 @@ impl Entry {
     /// A server's shares have no dates or size to show.
     fn from_share((name, out_of_sight): (String, bool)) -> Self {
         Self {
-            name: null_terminated(name.as_ref()),
+            name: null_terminated(name.as_ref()).into(),
             size: 0,
             modified: 0,
             created: 0,
