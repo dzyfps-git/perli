@@ -308,6 +308,21 @@ mod tests {
     }
 
     #[test]
+    fn a_file_only_in_the_cloud_is_never_read() {
+        use windows::core::HSTRING;
+        use windows::Win32::Storage::FileSystem::{SetFileAttributesW, FILE_ATTRIBUTE_OFFLINE};
+
+        let folder = folder("cloud");
+        let file = folder.join("note.txt");
+        fs::write(&file, "plain text").unwrap();
+        unsafe { SetFileAttributesW(&HSTRING::from(file.as_os_str()), FILE_ATTRIBUTE_OFFLINE) }.unwrap();
+        assert!(is_online_only(&file));
+        assert_eq!(text_start(&file), None, "no text start");
+        assert_eq!(crate::preview::read(&file, 0), crate::preview::Preview::Cloud, "no preview read");
+        fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
     fn a_missing_file_has_no_picture() {
         let _com = Com::enter();
         assert!(picture(&std::env::temp_dir().join("perli-no-such-file"), EDGE as i32, false).is_err());

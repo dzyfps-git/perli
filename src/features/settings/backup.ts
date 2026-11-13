@@ -5,7 +5,17 @@ const PREFIX = "perli-";
  * What is kept but is no setting: where reading stopped in each book, comic and song, the files
  * on the shelf, and the folders and commands used lately.
  */
-const NOT_SETTINGS = ["comic-pages", "book-places", "song-resume", "shelf", "recent-folders", "palette-recent"];
+const NOT_SETTINGS = [
+  "comic-pages",
+  "book-places",
+  "song-resume",
+  "shelf",
+  "recent-folders",
+  "palette-recent",
+  "servers",
+  "window-places",
+  "update-put-off",
+];
 
 export interface TagLook {
   name: string;

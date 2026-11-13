@@ -58,6 +58,10 @@ pub struct Drive {
     network: bool,
     /// It can be ejected: a card, a disc, or a disk on a USB cable.
     removable: bool,
+    /// BitLocker keeps it encrypted.
+    encrypted: bool,
+    /// Encrypted and not unlocked yet.
+    locked: bool,
 }
 
 /// A phone, camera or player that shows its files without a drive letter.
@@ -145,9 +149,21 @@ fn read_drives() -> Vec<Drive> {
             let name = display_name(&path).unwrap_or_else(|| path.clone());
             let kind = unsafe { GetDriveTypeW(&HSTRING::from(&path)) };
             let removable = kind == DRIVE_REMOVABLE || kind == DRIVE_CDROM || (kind == DRIVE_FIXED && is_usb(&path));
-            Drive { name, path, network: kind == DRIVE_REMOTE, removable }
+            let network = kind == DRIVE_REMOTE;
+            // A server can be slow to answer, and BitLocker is about this PC's own disks.
+            let protection = if network { None } else { bitlocker(&path) };
+            Drive { name, path, network, removable, encrypted: protection.is_some(), locked: protection == Some(LOCKED) }
         })
         .collect()
+}
+
+/// What `System.Volume.BitLockerProtection` says of a drive that is locked.
+const LOCKED: i32 = 6;
+
+/// BitLocker's state for an encrypted drive: on, encrypting, decrypting, paused or locked. Off
+/// (2) and none (0) are not encrypted.
+fn bitlocker(drive: &str) -> Option<i32> {
+    crate::preview::whole_number(std::path::Path::new(drive), "System.Volume.BitLockerProtection").filter(|state| ![0, 2].contains(state))
 }
 
 /// True for a disk on a USB cable, which Windows calls fixed like the ones inside.
@@ -226,6 +242,20 @@ pub fn open_device(id: &str) -> std::result::Result<(), String> {
     }
     Command::new("explorer.exe")
         .arg(format!(r"{THIS_PC}\{id}"))
+        .spawn()
+        .map(drop)
+        .map_err(|error| error.to_string())
+}
+
+/// Starts Windows' own BitLocker prompt for a locked drive, as Explorer does on a double click.
+pub fn unlock_drive(drive: &str) -> std::result::Result<(), String> {
+    let letter = drive.trim_end_matches('\\');
+    if !(letter.len() == 2 && letter.ends_with(':') && letter.starts_with(|c: char| c.is_ascii_alphabetic())) {
+        return Err("Only a drive letter can be unlocked".to_string());
+    }
+    let windows = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
+    Command::new(format!(r"{windows}\System32\BdeUnlock.exe"))
+        .arg(letter)
         .spawn()
         .map(drop)
         .map_err(|error| error.to_string())

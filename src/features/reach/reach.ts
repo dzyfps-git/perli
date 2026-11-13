@@ -2,7 +2,7 @@ import { createSignal } from "solid-js";
 import { pathsExist } from "../../api";
 import { saved, stored } from "../filelist/prefs";
 import { isBin } from "../navigation/path";
-import { visited, withPaths } from "./lists";
+import { serverOf, visited, withPaths } from "./lists";
 
 /** What the shelf, the drop chips and the path bar remember between folders, tabs and runs. */
 
@@ -34,8 +34,26 @@ export async function pruneShelf() {
 
 export const [recentFolders, setRecentFolders] = stored<string[]>("recent-folders", strings(saved("recent-folders")));
 
+/** Off, the sidebar reads no Recent list and Perli notes no folders or servers it opens. */
+export const [rememberRecent, keepRecent] = stored("remember-recent", saved("remember-recent") !== false);
+
+/** Turning it off forgets Perli's own list of folders too. Windows' list stays as it is. */
+export function setRememberRecent(on: boolean) {
+  keepRecent(on);
+  if (!on) setRecentFolders([]);
+}
+
+const SERVERS = 8;
+/** Servers that folders were opened on, newest first, for the sidebar's Network section. */
+export const [servers, setServers] = stored<string[]>("servers", strings(saved("servers")));
+export const forgetServer = (server: string) =>
+  setServers(servers().filter((kept) => kept.toLowerCase() !== server.toLowerCase()));
+
 export function noteFolder(path: string | undefined) {
-  if (path && !isBin(path) && recentFolders()[0] !== path) setRecentFolders(visited(recentFolders(), path, RECENT_FOLDERS));
+  if (!path || isBin(path) || !rememberRecent()) return;
+  if (recentFolders()[0] !== path) setRecentFolders(visited(recentFolders(), path, RECENT_FOLDERS));
+  const server = serverOf(path);
+  if (server && servers()[0]?.toLowerCase() !== server.toLowerCase()) setServers(visited(servers(), server, SERVERS));
 }
 
 function savedNicknames(): Record<string, string> {

@@ -3,7 +3,7 @@ import { saved, stored } from "../filelist/prefs";
 import { cleanSmart, type SmartFolder } from "../smart/smartList";
 import { groupsOf, holds, lookKey, moved, savedPaths, toggled, withGroup, withLook, type Groups, type Look, type Looks } from "./placeLists";
 
-export type SectionId = "pinned" | "places" | "smart" | "recent" | "tags" | "cloud" | "drives";
+export type SectionId = "pinned" | "places" | "smart" | "recent" | "tags" | "cloud" | "network" | "drives";
 
 export const SECTIONS: { id: SectionId; label: string }[] = [
   { id: "pinned", label: "Pinned" },
@@ -12,6 +12,7 @@ export const SECTIONS: { id: SectionId; label: string }[] = [
   { id: "recent", label: "Recent" },
   { id: "tags", label: "Tags" },
   { id: "cloud", label: "Cloud" },
+  { id: "network", label: "Network" },
   { id: "drives", label: "Drives" },
 ];
 
@@ -23,6 +24,8 @@ export const [bookmarks, setBookmarks] = stored("bookmarks", savedPaths(saved("b
 export const [hiddenSections, setHiddenSections] = stored("hidden-sections", savedSections("hidden-sections"));
 export const [foldedSections, setFoldedSections] = stored("folded-sections", savedSections("folded-sections"));
 export const [bookmarksBar, setBookmarksBar] = stored("bookmarks-bar", saved("bookmarks-bar") !== false);
+/** On, the bar shows each bookmark as its icon alone, with its name on hover. */
+export const [bookmarksCompact, setBookmarksCompact] = stored("bookmarks-compact", saved("bookmarks-compact") === true);
 /** Off shows the sidebar as a slim rail of icons, which slides out when the pointer or a key reaches it. */
 export const [sidebarOpen, setSidebarOpen] = stored("sidebar-open", saved("sidebar-open") === true);
 const [looks, setLooks] = stored<Looks>("folder-looks", (saved("folder-looks") as Looks | null) ?? {});

@@ -48,3 +48,6 @@ export function dayOf(time: number, now: number) {
   if (time >= start.getTime() - 86_400_000) return "Yesterday";
   return new Date(time).toLocaleDateString(undefined, { dateStyle: "medium" });
 }
+
+/** The `\\server` part of a path on another computer, or nothing. `\\?\` and `\\.\` are this PC. */
+export const serverOf = (path: string) => /^\\\\[^\\?.][^\\]*/.exec(path)?.[0];

@@ -126,6 +126,8 @@ export interface Start {
   select: string[];
   session: string | null;
   home: string | null;
+  /** Started by "Move to new window", so it keeps no window place of its own. */
+  newWindow: boolean;
 }
 
 export interface DriveSpace {
@@ -135,7 +137,16 @@ export interface DriveSpace {
 
 export interface Places {
   folders: { kind: string; path: string }[];
-  drives: { name: string; path: string; network: boolean; removable: boolean }[];
+  drives: {
+    name: string;
+    path: string;
+    network: boolean;
+    removable: boolean;
+    /** BitLocker keeps it encrypted. */
+    encrypted: boolean;
+    /** Encrypted and not unlocked yet. */
+    locked: boolean;
+  }[];
   /** Phones and the like, which have no drive letter. Explorer shows their files. */
   devices: { name: string; id: string }[];
   /** Folders a sync app keeps, such as OneDrive. */
@@ -148,6 +159,8 @@ export interface Recent {
   name: string;
   path: string;
   isDir: boolean;
+  /** When it was last opened, in milliseconds since 1970. */
+  opened: number;
 }
 
 /** A newer release, found by `checkUpdate`. */
@@ -392,12 +405,21 @@ export const ejectDrive = (path: string) => invoke<void>("eject_drive", { path }
 /** Shows a phone's files in File Explorer. */
 export const openDevice = (id: string) => invoke<void>("open_device", { id });
 
+/** Opens Windows' own BitLocker prompt for a locked drive. */
+export const unlockDrive = (path: string) => invoke<void>("unlock_drive", { path });
+
 export const checkUpdate = () => invoke<UpdateOffer | null>("check_update");
 
 /** Ends Perli once the installer starts. */
 export const installUpdate = () => invoke<void>("install_update");
 
 export const recentFiles = (limit: number) => invoke<Recent[]>("recent_files", { limit });
+
+/** Takes an item off Windows' recent list. The item itself stays. */
+export const forgetRecent = (path: string) => invoke<number>("forget_recent", { path });
+
+/** False when a server or network drive doesn't answer within a few seconds. */
+export const reachable = (path: string) => invoke<boolean>("reachable", { path });
 
 /** The first lines of a row that reads as text, or null. */
 export const peekText = (view: number, request: number, row: number) =>
@@ -691,7 +713,7 @@ export const browseApp = () => invoke<string | null>("browse_app");
 export const pickFolder = () => invoke<string | null>("pick_folder");
 
 /** Saves `text` to a file the user picks. False when they back out. */
-export const exportSettings = (text: string) => invoke<boolean>("export_settings", { text });
+export const exportSettings = (text: string, name?: string) => invoke<boolean>("export_settings", { text, name: name ?? null });
 
 /** The text of a settings file the user picks, or null when they back out. */
 export const importSettings = () => invoke<string | null>("import_settings");
@@ -821,7 +843,9 @@ export type Preview =
   | { kind: "song" }
   | { kind: "audio" }
   | { kind: "video" }
-  | { kind: "picture" };
+  | { kind: "picture" }
+  /** Only in the cloud, so nothing was read. Windows' picture of it shows, if it has one. */
+  | { kind: "cloud" };
 
 /** A line of a book's own table of contents, and which chapter it opens. */
 export interface BookHeading {

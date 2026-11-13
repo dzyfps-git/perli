@@ -436,12 +436,15 @@ struct SearchGrew {
 
 /// What the app starts with. A folder from the command line replaces the saved session.
 #[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct Start {
     folder: Option<String>,
     /// Names to select in `folder`.
     select: Vec<String>,
     session: Option<String>,
     home: Option<String>,
+    /// One more window, which opens where Windows puts it and doesn't keep its place.
+    new_window: bool,
 }
 
 /// Windows quotes a drive as `"C:\"`, and the backslash then escapes the closing quote.
@@ -463,6 +466,7 @@ impl Start {
             select: ask.select,
             session,
             home,
+            new_window: ask.new_window,
         }
     }
 
@@ -536,6 +540,7 @@ async fn open_folder(
     let resolved = folder::resolve(&path).map_err(|error| error.message())?;
     let full = resolved.clone();
     let listing = async_runtime::spawn_blocking(move || {
+        network::must_answer(&full)?;
         let read = || folder::Listing::read(&path, order.clone());
         let first = match waiting {
             Some((_, reader)) => reader
@@ -1061,6 +1066,12 @@ async fn open_device(id: String) -> Result<(), String> {
     async_runtime::spawn_blocking(move || places::open_device(&id)).await.map_err(|error| error.to_string())?
 }
 
+/// Asks for the key of a drive BitLocker keeps locked, in Windows' own prompt.
+#[tauri::command]
+fn unlock_drive(path: String) -> Result<(), String> {
+    places::unlock_drive(&path)
+}
+
 #[tauri::command]
 async fn open_link(url: String) -> Result<(), String> {
     off_main(move || shell::open_link(&url)).await
@@ -1110,9 +1121,10 @@ const MOST_SETTINGS_BYTES: u64 = 4 * 1024 * 1024;
 /// Saves Perli's settings to a file the user picks. False when they back out. The page never
 /// names the file, so it can write nowhere else.
 #[tauri::command]
-async fn export_settings(text: String, app: AppHandle) -> Result<bool, String> {
+async fn export_settings(text: String, name: Option<String>, app: AppHandle) -> Result<bool, String> {
     let main = jobs::owner(&app);
-    off_main(move || menus::pick_settings_file(main, true)).await?.map_or(Ok(false), |path| {
+    let name = name.unwrap_or_else(|| "Perli settings.json".to_string());
+    off_main(move || menus::pick_settings_file(main, Some(name))).await?.map_or(Ok(false), |path| {
         std::fs::write(path, text).map(|()| true).map_err(|error| error.to_string())
     })
 }
@@ -1121,7 +1133,7 @@ async fn export_settings(text: String, app: AppHandle) -> Result<bool, String> {
 #[tauri::command]
 async fn import_settings(app: AppHandle) -> Result<Option<String>, String> {
     let main = jobs::owner(&app);
-    let Some(path) = off_main(move || menus::pick_settings_file(main, false)).await? else {
+    let Some(path) = off_main(move || menus::pick_settings_file(main, None)).await? else {
         return Ok(None);
     };
     let size = std::fs::metadata(&path).map_err(|error| error.to_string())?.len();
@@ -1570,6 +1582,21 @@ async fn recent_files(limit: usize) -> Result<Vec<recent::Recent>, String> {
     async_runtime::spawn_blocking(move || recent::read(limit))
         .await
         .map_err(|error| error.to_string())
+}
+
+/// Takes `path` off Windows' recent list. Only the shortcuts go, never the item.
+#[tauri::command]
+async fn forget_recent(path: String) -> Result<usize, String> {
+    async_runtime::spawn_blocking(move || recent::forget(&path))
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())
+}
+
+/// False when a server or network drive doesn't answer within a few seconds.
+#[tauri::command]
+async fn reachable(path: String) -> bool {
+    async_runtime::spawn_blocking(move || network::answers(&path)).await.unwrap_or(false)
 }
 
 /// Asks the releases repo for a newer version. `PERLI_UPDATE_URL` points the check somewhere
@@ -2044,6 +2071,7 @@ fn main() {
             pick_folder,
             eject_drive,
             open_device,
+            unlock_drive,
             export_settings,
             import_settings,
             choose_app_for,
@@ -2088,6 +2116,8 @@ fn main() {
             peek_text,
             peek_folder,
             recent_files,
+            forget_recent,
+            reachable,
             check_update,
             install_update,
             set_drop_target,

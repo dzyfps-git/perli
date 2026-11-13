@@ -2,12 +2,17 @@
 //! need nothing special, because every file call already takes UNC paths.
 
 use std::ptr::null_mut;
+use std::sync::mpsc;
+use std::time::Duration;
 
 use serde::Serialize;
 use windows::core::{Error, Result, BOOL, HSTRING, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{
-    ERROR_ACCESS_DENIED, ERROR_CANCELLED, ERROR_INVALID_PASSWORD, ERROR_LOGON_FAILURE,
-    ERROR_NOT_AUTHENTICATED, E_FAIL, HWND, NO_ERROR, WIN32_ERROR,
+    ERROR_ACCESS_DENIED, ERROR_BAD_NETPATH, ERROR_BAD_NET_RESP, ERROR_CANCELLED,
+    ERROR_HOST_UNREACHABLE, ERROR_INVALID_PASSWORD, ERROR_LOGON_FAILURE, ERROR_NETNAME_DELETED,
+    ERROR_NETWORK_UNREACHABLE, ERROR_NOT_AUTHENTICATED, ERROR_NOT_CONNECTED, ERROR_NO_NETWORK,
+    ERROR_NO_NET_OR_BAD_PATH, ERROR_REM_NOT_LIST, ERROR_SEM_TIMEOUT, ERROR_UNEXP_NET_ERR, E_FAIL,
+    HWND, NO_ERROR, WIN32_ERROR,
 };
 use windows::Win32::NetworkManagement::NetManagement::{NetApiBufferFree, MAX_PREFERRED_LENGTH};
 use windows::Win32::NetworkManagement::WNet::{
@@ -22,6 +27,68 @@ use windows::Win32::Storage::FileSystem::{
 use windows::Win32::System::WindowsProgramming::DRIVE_REMOTE;
 
 use crate::ops::Com;
+
+/// How long another computer gets to answer before a folder on it is called out of reach.
+const ANSWER_WAIT: Duration = Duration::from_secs(4);
+
+/// What Windows says when nothing at the other end answered, as against an answer such as "no
+/// such folder" or "access denied".
+const NO_ANSWER: [WIN32_ERROR; 11] = [
+    ERROR_BAD_NETPATH,
+    ERROR_BAD_NET_RESP,
+    ERROR_HOST_UNREACHABLE,
+    ERROR_NETNAME_DELETED,
+    ERROR_NETWORK_UNREACHABLE,
+    ERROR_NOT_CONNECTED,
+    ERROR_NO_NETWORK,
+    ERROR_NO_NET_OR_BAD_PATH,
+    ERROR_REM_NOT_LIST,
+    ERROR_SEM_TIMEOUT,
+    ERROR_UNEXP_NET_ERR,
+];
+
+fn answered(asked: &std::io::Result<std::fs::Metadata>) -> bool {
+    match asked {
+        Ok(_) => true,
+        Err(error) => !error.raw_os_error().is_some_and(|code| NO_ANSWER.contains(&WIN32_ERROR(code as u32))),
+    }
+}
+
+/// `\\server` alone is no path Windows can look at, whether the server is on or off. Its
+/// `IPC$` share is, and only a server that is on gives an answer about it.
+fn asked_about(path: &str) -> String {
+    if is_server(path) { format!(r"{path}\IPC$") } else { path.to_string() }
+}
+
+/// False when `path` is out of reach, or asking about it takes longer than a few seconds, as it
+/// does for a server that is off. Any answer counts, even "no such folder". The question goes on
+/// in the background, since Windows can't be stopped from waiting.
+// ponytail: a sleepy NAS that needs longer to wake reads as out of reach once; Try again finds it.
+pub fn answers(path: &str) -> bool {
+    let (sender, receiver) = mpsc::channel();
+    let path = asked_about(path);
+    std::thread::spawn(move || {
+        let _ = sender.send(answered(&std::fs::metadata(&path)));
+    });
+    receiver.recv_timeout(ANSWER_WAIT).unwrap_or(false)
+}
+
+/// Fails with a plain message when `path` is on another computer that isn't answering, so a
+/// folder open says so in seconds instead of waiting on Windows for a minute.
+pub fn must_answer(path: &str) -> Result<()> {
+    if !is_remote(path) || answers(path) {
+        return Ok(());
+    }
+    Err(Error::new(E_FAIL, format!("{} isn't answering. It may be off, or out of reach of this PC.", place_of(path))))
+}
+
+/// The `\\server` or `Z:` part of `path`, to say what isn't answering.
+pub fn place_of(path: &str) -> String {
+    match path.strip_prefix(r"\\") {
+        Some(rest) => format!(r"\\{}", rest.split('\\').next().unwrap_or(rest)),
+        None => path.get(..2).unwrap_or(path).to_string(),
+    }
+}
 
 /// What Windows' dialogs return when the user cancels them.
 const CANCELLED: WIN32_ERROR = WIN32_ERROR(u32::MAX);
@@ -258,6 +325,18 @@ pub fn unmap(letter: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_an_answer_counts_as_answering() {
+        let failed = |code: u32| answered(&Err(std::io::Error::from_raw_os_error(code as i32)));
+        assert!(!failed(ERROR_BAD_NETPATH.0), "no such server");
+        assert!(!failed(ERROR_NETWORK_UNREACHABLE.0), "no way there");
+        assert!(failed(2), "no such file is an answer");
+        assert!(failed(ERROR_ACCESS_DENIED.0), "so is access denied");
+        assert!(answered(&std::fs::metadata(".")));
+        assert_eq!(asked_about(r"\\nas"), r"\\nas\IPC$");
+        assert_eq!(asked_about(r"\\nas\music"), r"\\nas\music");
+    }
 
     #[test]
     fn letters_run_from_z_down_to_d() {

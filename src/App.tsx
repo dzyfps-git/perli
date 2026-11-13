@@ -132,9 +132,12 @@ import { DiskMap } from "./features/diskmap/DiskMap";
 import { readTyped } from "./features/reach/lists";
 import {
   forgetNickname,
+  forgetServer,
   nicknames,
   noteFolder,
   recentFolders,
+  rememberRecent,
+  setRememberRecent,
   setNickname,
   setShelfOpen,
   shelfOpen,
@@ -150,7 +153,8 @@ import { sweptText } from "./features/fileops/progress";
 import { now } from "./features/preview/nowPlaying";
 import { BACKDROPS, SCALES, setBackdrop, setUiScale } from "./features/settings/appearance";
 import { Settings } from "./features/settings/Settings";
-import { startUpdates, updateState } from "./features/settings/updates";
+import { putOffUpdate, setUpdateSheet, startUpdates, updateSheet, updateState } from "./features/settings/updates";
+import { UpdateSheet } from "./features/settings/UpdateSheet";
 import { BookmarksBar } from "./features/sidebar/BookmarksBar";
 import { holds, placeLabel } from "./features/sidebar/placeLists";
 import {
@@ -168,6 +172,8 @@ import {
   pinned,
   SECTIONS,
   setBookmarksBar,
+  setBookmarksCompact,
+  bookmarksCompact,
   setLook,
   setSidebarOpen,
   sidebarOpen,
@@ -399,6 +405,7 @@ export function App() {
     !!previewing() ||
     keysOpen() ||
     !!mapping() ||
+    updateSheet() ||
     activityOpen() ||
     // Every sheet opens as a modal dialog, so one left off the list above still counts.
     !!document.querySelector("dialog:modal");
@@ -757,13 +764,28 @@ export function App() {
     if (folder && index !== undefined) preview(view, { snapshot: folder.request, index });
   }
 
-  function showRecentMenu(event: MouseEvent, view: FolderView, recent: Recent) {
+  function showRecentMenu(event: MouseEvent, view: FolderView, recent: Recent, forget: () => void) {
     event.preventDefault();
     const open = recent.isDir ? () => view.open(recent.path) : () => openFile(recent.path).catch(jobs.report);
     const items: MenuItem[] = [
       { label: "Open", action: open },
       ...(recent.isDir ? [{ label: "Open to side", action: () => tabs.openToSide(recent.path) }] : []),
       { label: "Show in folder", action: () => showInFolder(view, recent.path) },
+      { label: "Remove from recent", divider: true, action: forget },
+    ];
+    setMenu({ x: event.clientX, y: event.clientY, items });
+  }
+
+  /** A server from the Network section. Its shares show when it opens. */
+  function showServerMenu(event: MouseEvent, view: FolderView, server: string) {
+    event.preventDefault();
+    const items: MenuItem[] = [
+      { label: "Open", action: () => view.open(server) },
+      { label: "Open in new tab", action: () => tabs.add([server]) },
+      { label: "Open to side", action: () => tabs.openToSide(server) },
+      { label: "Copy path", action: () => quietly(copyFolderPath(server)) },
+      { label: pinned().some((path) => samePath(path, server)) ? "Unpin" : "Pin", action: () => togglePinned(server) },
+      { label: "Forget server", divider: true, action: () => forgetServer(server) },
     ];
     setMenu({ x: event.clientX, y: event.clientY, items });
   }
@@ -776,6 +798,8 @@ export function App() {
         action: () => toggleSection(section.id),
       })),
       { label: "Bookmarks bar", divider: true, checked: bookmarksBar(), action: () => setBookmarksBar(!bookmarksBar()) },
+      { label: "Bookmarks as icons", checked: bookmarksCompact(), action: () => setBookmarksCompact(!bookmarksCompact()) },
+      { label: "Remember recent places", checked: rememberRecent(), action: () => setRememberRecent(!rememberRecent()) },
     ];
     setMenu({ x: event.clientX, y: event.clientY, items });
   }
@@ -1796,6 +1820,7 @@ export function App() {
   const Pane = (props: { tab: Tab; view: FolderView }) => {
     const { tab, view } = props;
     const activate = () => tab.activate(view);
+    const [retrying, setRetrying] = createSignal(false);
     return (
       <section
         class="pane"
@@ -1827,9 +1852,19 @@ export function App() {
         </Show>
         <div class="file-area">
           <Show when={view.error()}>
-            <p class="message" role="alert">
-              {view.error()}
-            </p>
+            <div class="message" role="alert">
+              <p>{view.error()}</p>
+              <button
+                class="job-choice"
+                disabled={retrying()}
+                onClick={() => {
+                  setRetrying(true);
+                  void view.retry().finally(() => setRetrying(false));
+                }}
+              >
+                {retrying() ? "Trying…" : "Try again"}
+              </button>
+            </div>
           </Show>
           {/* A real arrival starts the list over. A reload only swaps its rows, so nothing blinks. */}
           <Show when={view.folder() && view.arrival()} keyed>
@@ -1929,7 +1964,8 @@ export function App() {
         <Sidebar
           view={tabs.activeView()}
           onMenu={(event, path) => showFolderMenu(event, tabs.activeView(), path)}
-          onRecentMenu={(event, recent) => showRecentMenu(event, tabs.activeView(), recent)}
+          onRecentMenu={(event, recent, forget) => showRecentMenu(event, tabs.activeView(), recent, forget)}
+          onServerMenu={(event, server) => showServerMenu(event, tabs.activeView(), server)}
           onSectionMenu={showSectionMenu}
           onTag={(tag) => showTagged(tabs.activeView(), tag)}
           onTagMenu={showTagMenu}
@@ -1962,6 +1998,11 @@ export function App() {
           onNewTab={(path) => tabs.add([path])}
           onMenu={(event, path) => showFolderMenu(event, tabs.activeView(), path)}
           onGroup={showBookmarkGroup}
+          onMore={(anchor, items) => {
+            const box = anchor.getBoundingClientRect();
+            const compact = { label: "Icons only", divider: true, checked: bookmarksCompact(), action: () => setBookmarksCompact(!bookmarksCompact()) };
+            setMenu({ x: box.left, y: box.bottom + 4, items: [...items, compact] });
+          }}
         />
         <For each={tabs.tabs()}>
           {(tab) => (
@@ -2053,6 +2094,9 @@ export function App() {
       </Show>
       <Show when={filtering()} keyed>
         {(view) => <FilterDialog view={view} onClose={() => setFiltering(undefined)} onSave={() => saveSmart(view)} />}
+      </Show>
+      <Show when={updateSheet()}>
+        <UpdateSheet onBeforeUpdate={flushSession} onLater={putOffUpdate} onClose={() => setUpdateSheet(false)} />
       </Show>
       <Show when={naming()} keyed>
         {(ask) => <NameSheet ask={ask} onClose={() => setNaming(undefined)} />}

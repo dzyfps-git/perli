@@ -97,11 +97,38 @@
 
 /* A strip of folders above the panes, one click away from any tab. */
 .bookmarks {
+  position: relative;
   display: flex;
   gap: var(--space-1);
   padding: 0 var(--space-1) var(--space-1) 0;
-  overflow-x: auto;
-  scrollbar-width: none;
+  overflow: hidden;
+}
+
+/* What doesn't fit keeps its room, so measuring stays steady, and waits behind the » button. */
+.bookmark[data-over] {
+  visibility: hidden;
+}
+
+.bookmark-more {
+  position: absolute;
+  inset: 0 var(--space-1) auto auto;
+  justify-content: center;
+  width: 28px;
+  padding: 0;
+  color: var(--text-muted);
+  font-size: 15px;
+}
+
+.bookmarks[data-compact] .bookmark {
+  padding: 0 6px;
+}
+
+.bookmarks[data-compact] .bookmark:not(.bookmark-more) .place-label {
+  display: none;
+}
+
+.bookmarks[data-compact] .bookmark .place-icon {
+  font-size: 14px;
 }
 
 .bookmark {
@@ -634,5 +661,83 @@ html[data-blurred] .place-used::before {
   .look-color,
   .look-icon {
     transition: none;
+  }
+}
+
+/* Recent, under the day each item was opened. */
+.place-day {
+  padding: var(--space-1) var(--space-2) 2px calc(var(--space-2) + 22px);
+  color: var(--text-muted);
+  font-size: 10.5px;
+  opacity: 0.8;
+}
+
+/* A lock or a dot sits on the icon's corner, as Explorer marks a drive, so the rail shows it too. */
+/* A small disc on the icon's corner, like the reach dot, so the lock reads at a glance. */
+.place-badge {
+  position: absolute;
+  inset: calc(50% - 2px) auto auto calc(var(--space-2) + 8px);
+  display: grid;
+  place-items: center;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--surface);
+  color: var(--text);
+  font-family: var(--font-icons);
+  font-size: 8px;
+  line-height: 1;
+}
+
+.place-reach {
+  position: absolute;
+  inset: calc(50% + 1px) auto auto calc(var(--space-2) + 10px);
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  box-shadow: 0 0 0 2px var(--surface);
+  transition: background var(--motion);
+}
+
+.place-reach[data-reach="yes"] {
+  background: var(--success);
+}
+
+.place-reach[data-reach="no"] {
+  background: var(--danger);
+}
+
+.place-reach[data-reach="asking"] {
+  animation: place-asking 1.2s ease-in-out infinite alternate;
+}
+
+@keyframes place-asking {
+  from {
+    opacity: 0.35;
+  }
+}
+
+.place-picture {
+  display: block;
+  width: 16px;
+  height: 16px;
+}
+
+/* A pinned place being dragged lifts off the list and the others make way. The list clips, so
+   an edge stands in for a shadow. */
+.place-item[data-dragging] {
+  z-index: 2;
+}
+
+.place-item[data-dragging] .place {
+  background: var(--surface-hover);
+  box-shadow: inset 0 0 0 1px var(--accent);
+  cursor: grabbing;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .place-reach[data-reach="asking"] {
+    animation: none;
   }
 }

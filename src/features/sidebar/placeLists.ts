@@ -71,3 +71,25 @@ export function withLook(looks: Looks, path: string, change: Look): Looks {
   else delete next[key];
   return next;
 }
+
+/** `path` taken out of `list` and put back at `index` of what is left, as a drag drops it. */
+export function movedTo(list: string[], path: string, index: number) {
+  const from = list.findIndex((item) => same(item, path));
+  if (from < 0) return list;
+  const rest = list.filter((_, at) => at !== from);
+  rest.splice(Math.max(0, Math.min(index, rest.length)), 0, list[from]);
+  return rest;
+}
+
+/** Items under Today, Yesterday and Earlier by when they were opened, leaving out an empty day. */
+export function byDay<T extends { opened: number }>(items: T[], now: Date) {
+  const midnight = (back: number) => new Date(now.getFullYear(), now.getMonth(), now.getDate() - back).getTime();
+  const days = [
+    { label: "Today", from: midnight(0) },
+    { label: "Yesterday", from: midnight(1) },
+    { label: "Earlier", from: -Infinity },
+  ];
+  return days
+    .map((day) => ({ label: day.label, items: items.filter((item) => days.find((first) => item.opened >= first.from) === day) }))
+    .filter((day) => day.items.length > 0);
+}

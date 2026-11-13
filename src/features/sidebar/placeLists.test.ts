@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { groupsOf, holds, lookKey, moved, placeLabel, savedPaths, toggled, withGroup, withLook } from "./placeLists.ts";
+import { byDay, groupsOf, holds, lookKey, moved, movedTo, placeLabel, savedPaths, toggled, withGroup, withLook } from "./placeLists.ts";
 
 test("toggling adds at the end and takes out whatever the case", () => {
   const list = toggled(toggled([], "C:\\A"), "D:\\B");
@@ -48,4 +48,23 @@ test("bookmark groups are kept by path, whatever its case", () => {
   const groups = withGroup(withGroup({}, "C:\\Work\\", "Jobs"), "D:\\Art", "Fun");
   assert.deepEqual(groupsOf(["d:\\art", "C:\\WORK", "C:\\Other"], groups), ["Fun", "Jobs"]);
   assert.deepEqual(withGroup(groups, "c:\\work", undefined), { "d:\\art": "Fun" });
+});
+
+test("a dragged place lands where it is dropped, whatever its case", () => {
+  const list = ["C:\\a", "C:\\b", "C:\\c", "C:\\d"];
+  assert.deepEqual(movedTo(list, "c:\\A", 2), ["C:\\b", "C:\\c", "C:\\a", "C:\\d"]);
+  assert.deepEqual(movedTo(list, "C:\\d", 0), ["C:\\d", "C:\\a", "C:\\b", "C:\\c"]);
+  assert.deepEqual(movedTo(list, "C:\\b", 99), ["C:\\a", "C:\\c", "C:\\d", "C:\\b"], "past the end is the end");
+  assert.equal(movedTo(list, "C:\\z", 0), list, "a place not in the list changes nothing");
+});
+
+test("recent items fall under today, yesterday and earlier", () => {
+  const now = new Date(2026, 10, 13, 9, 30);
+  const at = (day: number, hour: number) => ({ opened: new Date(2026, 10, day, hour).getTime() });
+  const days = byDay([at(13, 8), at(13, 0), at(12, 23), at(12, 0), at(11, 23), { opened: 0 }], now);
+  assert.deepEqual(
+    days.map((day) => [day.label, day.items.length]),
+    [["Today", 2], ["Yesterday", 2], ["Earlier", 2]],
+  );
+  assert.deepEqual(byDay([at(1, 1)], now).map((day) => day.label), ["Earlier"], "an empty day has no heading");
 });

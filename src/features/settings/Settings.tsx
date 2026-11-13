@@ -44,7 +44,8 @@ import {
 } from "../filelist/prefs";
 import { keyText } from "../keys/keybinds";
 import { VIEWER_SETTINGS } from "../preview/viewerPrefs";
-import { setSidebarOpen, sidebarOpen } from "../sidebar/saved";
+import { bookmarksCompact, setBookmarksCompact, setSidebarOpen, sidebarOpen } from "../sidebar/saved";
+import { rememberRecent, setRememberRecent } from "../reach/reach";
 import { TagSettings } from "../tags/TagSettings";
 import {
   accent,
@@ -55,16 +56,20 @@ import {
   BACKDROPS,
   changePalette,
   deletePalette,
+  drawnTheme,
   ownPalette,
   palettes,
+  readClock,
   readWindowsColor,
   SCALES,
   setAccent,
   setBackdrop,
+  setPalettes,
   setTheme,
   setUiScale,
   theme,
   THEMES,
+  turnedSinceRead,
   uiScale,
   WINDOWS_ACCENT,
   type Accent,
@@ -72,7 +77,7 @@ import {
   type Theme,
 } from "./appearance";
 import { missingTags, packed, remapTags, settingsOf, staleSettings, storageKey, unpacked } from "./backup";
-import { type Palette } from "./palettes";
+import { paletteFromPixels, paletteFromText, paletteText, untilTurn, type Palette } from "./palettes";
 import { fitsSearch } from "./search";
 import {
   checkOnStart,
@@ -83,6 +88,7 @@ import {
   updateFailure,
   updateOffer,
   updateState,
+  setUpdateSheet,
 } from "./updates";
 import "./settings.css";
 
@@ -153,6 +159,9 @@ export function Settings(props: {
   const [isDefault, setIsDefault] = createSignal(false);
   const [defaultFailure, setDefaultFailure] = createSignal<string>();
   const [backupNote, setBackupNote] = createSignal<string>();
+  /** What became of the last palette taken from a picture or a file. */
+  const [paletteNote, setPaletteNote] = createSignal<string>();
+  let pictureInput: HTMLInputElement | undefined;
   const [hidden, setHidden] = createSignal<SectionId[]>([]);
   const [current, setCurrent] = createSignal<SectionId>("look");
   // Closing drops the page and its empty search box, so a search's hidden parts go with it.
@@ -165,7 +174,7 @@ export function Settings(props: {
 
   createEffect(() => {
     const root = document.documentElement;
-    root.dataset.theme = theme();
+    root.dataset.theme = drawnTheme();
     root.dataset.accent = accent();
     // These accents have no rule in the style sheet, so their colors go on the page itself.
     const colors = accentColors(accent());
@@ -176,7 +185,7 @@ export function Settings(props: {
 
   // The window frame and Mica follow Windows unless told otherwise.
   createEffect(
-    on(theme, (value, previous) => {
+    on(drawnTheme, (value, previous) => {
       if (previous === undefined && value === "system") return;
       getCurrentWindow()
         .setTheme(value === "system" ? null : value)
@@ -221,6 +230,34 @@ export function Settings(props: {
     if (props.shown) queueMicrotask(() => searchInput?.focus({ preventScroll: true }));
   });
 
+  // "By the hour" turns on time, its colours flowing down from the top like the light changing.
+  createEffect(() => {
+    if (theme() !== "hour") return;
+    let timer = 0;
+    const turn = () => {
+      const root = document.documentElement;
+      root.style.setProperty("--reveal-x", "50%");
+      root.style.setProperty("--reveal-y", "0px");
+      morph(readClock, "theme");
+    };
+    const wait = () => {
+      timer = window.setTimeout(() => (turn(), wait()), untilTurn(new Date()));
+    };
+    // A PC that slept past a turn finds it on waking, and timers may have drifted.
+    const woke = () => {
+      if (turnedSinceRead()) turn();
+      window.clearTimeout(timer);
+      wait();
+    };
+    readClock();
+    wait();
+    window.addEventListener("focus", woke);
+    onCleanup(() => {
+      window.clearTimeout(timer);
+      window.removeEventListener("focus", woke);
+    });
+  });
+
   function chooseTheme(next: Theme, from: HTMLElement) {
     if (next === theme()) return;
     const { left, top, width, height } = from.getBoundingClientRect();
@@ -228,6 +265,46 @@ export function Settings(props: {
     root.style.setProperty("--reveal-x", `${left + width / 2}px`);
     root.style.setProperty("--reveal-y", `${top + height / 2}px`);
     morph(() => setTheme(next), "theme");
+  }
+
+  /** The palette shown takes its colours from a picture, read small since only its colour counts. */
+  async function paletteFromPicture(file: File) {
+    const palette = ownPalette();
+    if (!palette) return;
+    try {
+      const edge = 64;
+      const bitmap = await createImageBitmap(file, { resizeWidth: edge, resizeHeight: edge });
+      const canvas = new OffscreenCanvas(edge, edge);
+      const context = canvas.getContext("2d")!;
+      context.drawImage(bitmap, 0, 0);
+      bitmap.close();
+      changePalette({ ...palette, colors: paletteFromPixels(context.getImageData(0, 0, edge, edge).data) });
+      setPaletteNote(`Colours taken from ${file.name}.`);
+    } catch {
+      setPaletteNote("That picture couldn't be read.");
+    }
+  }
+
+  async function exportPalette(palette: Palette) {
+    try {
+      if (await exportSettings(paletteText(palette), `${palette.name}.json`)) setPaletteNote(`${palette.name} saved.`);
+    } catch (failure) {
+      setPaletteNote(String(failure));
+    }
+  }
+
+  async function importPalette() {
+    try {
+      const text = await importSettings();
+      if (text === null) return;
+      const palette = paletteFromText(text, palettes());
+      if (!palette) return setPaletteNote("That file holds no palette.");
+      setPalettes([...palettes(), palette]);
+      setAccent(palette.id);
+      setPaletteNote(`${palette.name} added.`);
+    } catch (failure) {
+      setPaletteNote(String(failure));
+    }
   }
 
   /** Hides the parts that don't have every word typed, in their text or their extra words. */
@@ -296,7 +373,7 @@ export function Settings(props: {
     }
   }
 
-  const shownTheme = () => tryTheme() ?? theme();
+  const shownTheme = () => drawnTheme(tryTheme() ?? theme());
   const shownAccent = () => tryAccent() ?? accent();
 
   const AccentChoice = (choice: { id: Accent; label: string }) => (
@@ -411,6 +488,12 @@ export function Settings(props: {
               </For>
             </div>
 
+            <Show when={theme() === "hour"}>
+              <p class="settings-note">
+                Light from 7:00 until 19:00 and dark through the night. It turns on its own, colours flowing down from
+                the top.
+              </p>
+            </Show>
             <h4 id="settings-accent">Accent</h4>
             <div class="settings-chips" role="radiogroup" aria-labelledby="settings-accent">
               <For each={ACCENTS}>{(choice) => <AccentChoice id={choice.id} label={choice.label} />}</For>
@@ -418,6 +501,9 @@ export function Settings(props: {
               <For each={palettes()}>{(palette) => <AccentChoice id={palette.id} label={palette.name} />}</For>
               <button class="settings-chip" onClick={addPalette}>
                 New palette
+              </button>
+              <button class="settings-chip" onClick={() => void importPalette()}>
+                Import palette…
               </button>
             </div>
             <Show when={accent() === WINDOWS_ACCENT}>
@@ -448,12 +534,34 @@ export function Settings(props: {
                         />
                       )}
                     </For>
+                    <input
+                      ref={pictureInput}
+                      type="file"
+                      accept="image/*"
+                      hidden
+                      onChange={(event) => {
+                        const file = event.currentTarget.files?.[0];
+                        event.currentTarget.value = "";
+                        if (file) void paletteFromPicture(file);
+                      }}
+                    />
+                    <button class="settings-chip" onClick={() => pictureInput?.click()}>
+                      From a picture…
+                    </button>
+                    <button class="settings-chip" onClick={() => void exportPalette(palette())}>
+                      Export…
+                    </button>
                     <button class="settings-chip" onClick={() => deletePalette(palette().id)}>
                       Delete palette
                     </button>
                   </div>
                 );
               }}
+            </Show>
+            <Show when={paletteNote()}>
+              <p class="settings-note" role="status">
+                {paletteNote()}
+              </p>
             </Show>
 
             <h4 id="settings-backdrop">Window backdrop</h4>
@@ -637,6 +745,18 @@ export function Settings(props: {
               checked={sidebarOpen()}
               onChange={setSidebarOpen}
             />
+            <Switch
+              label="Show bookmarks as icons"
+              note="The bar holds more when each bookmark is its icon alone. Its name shows when the pointer rests on it, and what doesn't fit waits under »."
+              checked={bookmarksCompact()}
+              onChange={setBookmarksCompact}
+            />
+            <Switch
+              label="Remember recent places"
+              note="Off, the sidebar shows no Recent files and no servers you opened, and Perli forgets the folders it noted for the path bar. Windows keeps its own list."
+              checked={rememberRecent()}
+              onChange={setRememberRecent}
+            />
           </section>
 
           <section class="settings-section" data-section="tags" data-words="label color">
@@ -727,10 +847,12 @@ export function Settings(props: {
                 }[updateState()]
               }
             </p>
-            <Show when={updateState() === "ready" && updateOffer()?.notes}>
-              <p class="settings-note">{updateOffer()?.notes}</p>
-            </Show>
             <div class="settings-chips">
+              <Show when={updateState() === "ready"}>
+                <button class="settings-chip" onClick={() => setUpdateSheet(true)}>
+                  What's new…
+                </button>
+              </Show>
               <Show
                 when={updateState() === "ready" || updateState() === "installing"}
                 fallback={

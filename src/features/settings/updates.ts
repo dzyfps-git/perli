@@ -17,6 +17,11 @@ export const updateOffer = offer;
 export const updateFailure = failure;
 export const currentVersion = version;
 export const [checkOnStart, setCheckOnStart] = stored("update-check", saved("update-check") !== false);
+/** The version whose notes were put off with Later, so they don't come up again on their own. */
+const [putOff, setPutOff] = stored("update-put-off", typeof saved("update-put-off") === "string" ? (saved("update-put-off") as string) : "");
+/** The sheet with the new version's notes is up. */
+export const [updateSheet, setUpdateSheet] = createSignal(false);
+export const putOffUpdate = () => setPutOff(offer()?.version ?? "");
 
 /** A quiet check says nothing when it fails, since being offline is normal. */
 export async function lookForUpdate(quiet = false) {
@@ -27,6 +32,8 @@ export async function lookForUpdate(quiet = false) {
     const found = await checkUpdate();
     setOffer(found ?? undefined);
     setState(found ? "ready" : "current");
+    // A version found on its own shows what it brings once. Asked for, Settings says so already.
+    if (found && quiet && putOff() !== found.version) setUpdateSheet(true);
   } catch (error) {
     setState(quiet ? "idle" : "failed");
     if (!quiet) setFailure(String(error));
