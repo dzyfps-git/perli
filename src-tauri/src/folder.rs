@@ -512,7 +512,14 @@ impl Listing {
         }
     }
 
-    fn arrange(mut self, order: Order) -> Self {
+    fn arrange(self, order: Order) -> Self {
+        let by_tag = order.key == SortKey::Tags || order.group_by == GroupBy::Tag;
+        let places = if by_tag { tags::places() } else { HashMap::new() };
+        self.arrange_with(order, &places)
+    }
+
+    /// `places` is each tag's place in name order, needed only to sort or group by tag.
+    fn arrange_with(mut self, order: Order, places: &HashMap<u32, u64>) -> Self {
         let entries = &self.entries;
         let name = order.filter.name.to_lowercase();
         let sight = order.sight();
@@ -527,18 +534,34 @@ impl Listing {
         let ranks = match order.key {
             SortKey::Type => type_ranks(entries),
             SortKey::Size if sizes::any() => self.sizes(),
-            SortKey::Tags => self.tag_ranks(&tags::places()),
+            SortKey::Tags => self.tag_ranks(places),
             _ => Vec::new(),
         };
-        let grouped = order.group_by != GroupBy::None;
-        let (group_of, group_keys) = self.group_places(&order);
-        let group = |row: u32| group_of[row as usize];
+        let mut groups = Vec::new();
         // Grouped rows leave folders opened in place, which the UI doesn't offer then.
-        if parents.is_empty() || grouped {
-            visible.sort_unstable_by(|&a, &b| {
-                let by_group = if grouped { group(a).cmp(&group(b)) } else { Ordering::Equal };
-                by_group.then_with(|| compare(entries, locations, &ranks, a, b, &order))
-            });
+        if order.group_by != GroupBy::None {
+            let (group_of, also_in, group_keys) = self.group_places(&order, places);
+            let mut placed: Vec<(u32, u32)> = visible.iter().map(|&row| (group_of[row as usize], row)).collect();
+            if !also_in.is_empty() {
+                let mut fits = vec![false; entries.len()];
+                for &row in &visible {
+                    fits[row as usize] = true;
+                }
+                placed.extend(also_in.iter().filter(|&&(_, row)| fits[row as usize]));
+            }
+            placed.sort_unstable_by(|a, b| a.0.cmp(&b.0).then_with(|| compare(entries, locations, &ranks, a.1, b.1, &order)));
+            visible.clear();
+            for run in placed.chunk_by(|a, b| a.0 == b.0) {
+                let key = group_keys[run[0].0 as usize].clone();
+                let folded = order.folded.contains(&key);
+                let total = run.len() as u32;
+                groups.push(Group { key, start: visible.len() as u32, count: if folded { 0 } else { total }, total });
+                if !folded {
+                    visible.extend(run.iter().map(|&(_, row)| row));
+                }
+            }
+        } else if parents.is_empty() {
+            visible.sort_unstable_by(|&a, &b| compare(entries, locations, &ranks, a, b, &order));
         } else {
             // Each folder's rows are sorted among themselves and follow it. A row the filter keeps
             // brings back the folders it sits in, so it is never hidden by its folder's name.
@@ -565,31 +588,18 @@ impl Listing {
                 next.extend(inside.remove(&row).unwrap_or_default());
             }
         }
-        let mut groups = Vec::new();
-        if grouped {
-            let mut kept = Vec::with_capacity(visible.len());
-            for run in visible.chunk_by(|&a, &b| group(a) == group(b)) {
-                let key = group_keys[group(run[0]) as usize].clone();
-                let folded = order.folded.contains(&key);
-                let total = run.len() as u32;
-                groups.push(Group { key, start: kept.len() as u32, count: if folded { 0 } else { total }, total });
-                if !folded {
-                    kept.extend_from_slice(run);
-                }
-            }
-            visible = kept;
-        }
         self.visible = visible;
         self.groups = groups;
         self.order = order;
         self
     }
 
-    /// Each entry's group, as a place in the keys that is also where the group goes.
-    fn group_places(&self, order: &Order) -> (Vec<u32>, Vec<String>) {
+    /// Each entry's group, as a place in the keys that is also where the group goes. The middle
+    /// list holds the other groups, as (group, entry), of an entry that stands in more than one.
+    fn group_places(&self, order: &Order, places: &HashMap<u32, u64>) -> (Vec<u32>, Vec<(u32, u32)>, Vec<String>) {
         let numbered = |count: usize| (0..count).map(|at| at.to_string()).collect::<Vec<_>>();
         let each = |place: &dyn Fn(usize) -> usize| (0..self.entries.len()).map(|entry| place(entry) as u32).collect::<Vec<u32>>();
-        match order.group_by {
+        let (places, keys) = match order.group_by {
             GroupBy::None => (Vec::new(), Vec::new()),
             GroupBy::Date => {
                 let edges: Vec<u64> = order.group_edges.iter().map(|&edge| ticks(edge)).collect();
@@ -630,18 +640,22 @@ impl Listing {
                 (each(&place), keys)
             }
             GroupBy::Tag => {
-                // ponytail: a row with many tags goes under the first one only. Explorer repeats it
-                // under each, which would need rows that stand in more than one place.
-                let places = tags::places();
+                // A row with many tags stands under each of them, as in Explorer.
                 let mut ids: Vec<u32> = places.keys().copied().collect();
                 ids.sort_unstable_by_key(|id| places[id]);
-                let place = |entry: usize| {
-                    let ranks = self.tags_of(entry as u32).iter().filter_map(|tag| places.get(tag));
-                    ranks.min().map_or(ids.len(), |&rank| rank as usize)
-                };
+                let ranks = |entry: usize| self.tags_of(entry as u32).iter().filter_map(|tag| places.get(tag).map(|&rank| rank as u32));
+                let place = |entry: usize| ranks(entry).min().map_or(ids.len(), |rank| rank as usize);
+                let mut also_in = Vec::new();
+                for entry in 0..self.entries.len() {
+                    let first = place(entry) as u32;
+                    let mut more: Vec<u32> = ranks(entry).filter(|&rank| rank != first).collect();
+                    more.sort_unstable();
+                    more.dedup();
+                    also_in.extend(more.into_iter().map(|rank| (rank, entry as u32)));
+                }
                 let mut keys: Vec<String> = ids.iter().map(u32::to_string).collect();
                 keys.push("none".into());
-                (each(&place), keys)
+                return (each(&place), also_in, keys);
             }
             GroupBy::Folder => {
                 let locations = self.locations();
@@ -653,7 +667,8 @@ impl Listing {
                 let keys = folders.iter().map(|folder| String::from_utf16_lossy(&folder[..folder.len() - 1])).collect();
                 (each(&place), keys)
             }
-        }
+        };
+        (places, Vec::new(), keys)
     }
 
     pub fn shape(&self) -> Shape {
@@ -710,11 +725,14 @@ impl Listing {
         self.visible.iter().map(|&row| &self.entries[row as usize])
     }
 
-    /// The positions in `entries` of the rows the UI named. Rows no longer shown are left out.
+    /// The positions in `entries` of the rows the UI named, each once, since a row with many tags
+    /// can stand in many groups. Rows no longer shown are left out.
     fn chosen<'a>(&'a self, rows: &'a [u32]) -> impl Iterator<Item = usize> + 'a {
+        let mut seen = HashSet::new();
         rows.iter()
             .filter_map(|&row| self.visible.get(row as usize))
             .map(|&entry| entry as usize)
+            .filter(move |&entry| seen.insert(entry))
     }
 
     fn full_path(&self, entry: usize) -> PathBuf {
@@ -1446,6 +1464,19 @@ mod tests {
             ..Listing::default()
         }
         .arrange(order)
+    }
+
+    #[test]
+    fn a_row_with_two_tags_stands_under_both_and_is_chosen_once() {
+        let folder = TempFolder::new("group-tags");
+        let order = Order { group_by: GroupBy::Tag, ..Order::default() };
+        let places = HashMap::from([(9, 0), (7, 1)]);
+        let listing = tagged_listing(&folder, Order::default()).arrange_with(order, &places);
+
+        assert_eq!(names(&listing), ["c", "a", "c", "b"]);
+        let groups: Vec<_> = listing.groups.iter().map(|group| (group.key.as_str(), group.start, group.total)).collect();
+        assert_eq!(groups, [("9", 0, 1), ("7", 1, 2), ("none", 3, 1)]);
+        assert_eq!(listing.paths(&[0, 2, 1]), [folder.0.join("c"), folder.0.join("a")], "c is chosen once");
     }
 
     #[test]
