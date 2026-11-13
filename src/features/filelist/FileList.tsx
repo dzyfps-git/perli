@@ -61,7 +61,7 @@ import { typesLearned, typeText } from "./typeNames";
 import "./filelist.css";
 
 const PAGE_SIZE = 256;
-// ponytail: fixed page cache, plenty for one list, revisit if many tabs stay open.
+/** Pages of rows kept per list, the least lately painted going first: 8,192 rows, many screens. */
 const MAX_PAGES = 32;
 const OVERSCAN = 8;
 const ROWS_IN_MS = 220;
@@ -109,9 +109,6 @@ const STACK_LEANS = [
   [0.13, 10],
 ] as const;
 const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
-/** How many selected names a folder keeps for coming back to it. */
-const KEPT_NAMES = 200;
-
 /** Each view's last folder, and where on screen the row that left it was, for the zoom. */
 const leftFrom = new Map<number, { folder: string; y?: number }>();
 const openedAt = new Map<number, number>();
@@ -510,10 +507,17 @@ export function FileList(props: {
       .finally(() => loading.delete(page));
   }
 
+  let newestPage = -1;
   function rowAt(index: number) {
     const page = Math.floor(index / PAGE_SIZE);
     const rows = pages.get(page);
     if (!rows) loadPage(page);
+    // A page painted again moves to the back of the line, so the pages on screen never go.
+    else if (page !== newestPage) {
+      pages.delete(page);
+      pages.set(page, rows);
+      newestPage = page;
+    }
     return rows?.[index % PAGE_SIZE];
   }
 
@@ -1415,10 +1419,9 @@ export function FileList(props: {
       window.clearTimeout(jumpTimer);
       leftFrom.set(props.view, { folder, y: openedAt.get(props.view) });
       openedAt.delete(props.view);
-      // Only rows already read have names to keep. ponytail: the first 200, plenty to come back to.
+      // Only rows already read have names to keep, at most the pages kept.
       const names = selection
         .rows()
-        .slice(0, KEPT_NAMES)
         .flatMap((index) => pages.get(Math.floor(index / PAGE_SIZE))?.[index % PAGE_SIZE]?.name ?? []);
       props.onLeave?.(folder, names, grid.scrollTop);
     });
