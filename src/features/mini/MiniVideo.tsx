@@ -4,7 +4,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { createEffect, createMemo, createSignal, onCleanup, onMount, Show } from "solid-js";
 import { besideText, miniFit, miniTake, openAudio } from "../../api";
 import { saved, stored } from "../filelist/prefs";
-import { clock, remember, resumes } from "../preview/playback";
+import { clock, remember, RESUME_FROM_SECONDS, RESUME_MARGIN_SECONDS, resumePlace, resumes } from "../preview/playback";
 import { cuesOf, type Cue } from "../preview/timedText";
 import { playNext, setSubtitles, subtitles } from "../preview/viewerPrefs";
 import { caughtUp, placeOf, upNextShown, type Film, type HandBack, type Handover, type MiniPlace } from "./handover";
@@ -29,8 +29,6 @@ const TOAST_MS = 1100;
 /** A press that moves this far is a drag of the window, not a click. */
 const DRAG_PIXELS = 4;
 const ARRIVE_MS = 520;
-const RESUME_FROM_SECONDS = 10 * 60;
-const RESUME_MARGIN_SECONDS = 30;
 
 const [volume, setVolume] = stored("song-volume", (saved("song-volume") as number | null) ?? 1);
 const [place, setPlace] = stored<MiniPlace>("mini-place", placeOf(saved("mini-place")));
@@ -60,6 +58,8 @@ export function MiniVideo() {
   let seen = 0;
   let startAt = 0;
   let startPlaying = true;
+  /** Gone on to the next film: it picks up where it was left, once its length is known. */
+  let onward = false;
   let idle: number | undefined;
   let toastTimer: number | undefined;
   let frame = 0;
@@ -71,7 +71,7 @@ export function MiniVideo() {
   });
   const upNext = () => (upNextShown(time(), length(), next().length > 0) ? next()[0] : undefined);
 
-  function take(handed: Handover | null) {
+  function take(handed: Handover | null, goingOn = false) {
     if (!handed || handed.seq <= seen) return;
     seen = handed.seq;
     keepResume();
@@ -84,6 +84,7 @@ export function MiniVideo() {
     setEnded(false);
     setLength(0);
     startAt = caughtUp(handed);
+    onward = goingOn;
     startPlaying = handed.playing;
     video.src = handed.url;
     // It springs in, the way the window it came from closed into it.
@@ -105,7 +106,7 @@ export function MiniVideo() {
       ...coming,
       seq: seen + 1,
       url: convertFileSrc(shown),
-      time: resumes()[coming.path] ?? 0,
+      time: 0,
       at: Date.now(),
       playing: true,
       speed: speed(),
@@ -114,7 +115,7 @@ export function MiniVideo() {
       subtitles: text ?? undefined,
       aspect: now.aspect,
       next: after,
-    });
+    }, true);
   }
 
   /** A long film keeps its place, as the full player's does. */
@@ -297,7 +298,7 @@ export function MiniVideo() {
               setFilm({ ...handed, aspect: shape });
               void miniFit(place().width, shape, place().corner).catch(console.error);
             }
-            seek(startAt);
+            seek(onward && handed ? resumePlace(resumes()[handed.path], video.duration) : startAt);
             if (startPlaying) void video.play().catch(() => {});
           }}
           onPlay={() => {

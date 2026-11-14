@@ -4,7 +4,7 @@ import { caughtUp, type Film } from "../mini/handover";
 import { baseName } from "../navigation/path";
 import { audio, setVolume, volume } from "./nowPlaying";
 import { laneDrag } from "./Player";
-import { clock, remember, resumes } from "./playback";
+import { clock, remember, RESUME_FROM_SECONDS, RESUME_MARGIN_SECONDS, resumePlace, resumes } from "./playback";
 import { hushMini, popOut, takeBack } from "./popOut";
 import { cuesOf, type Cue } from "./timedText";
 import { setSubtitles, subtitles, videoMuted, videoPopOut, VIEWER_SETTINGS } from "./viewerPrefs";
@@ -21,8 +21,6 @@ const ICON_POP_OUT = "";
 const SPEEDS = [1, 1.25, 1.5, 2, 0.25, 0.5, 0.75];
 const STEP_SECONDS = 5;
 const BIG_STEP_SECONDS = 30;
-const RESUME_FROM_SECONDS = 10 * 60;
-const RESUME_MARGIN_SECONDS = 30;
 const RESUME_SAVE_MS = 5000;
 /** Until the film says how fast its frames come, a frame step takes this long. */
 const FRAME_SECONDS = 1 / 30;
@@ -76,7 +74,8 @@ export function VideoView(live: VideoViewProps) {
   let frameSeconds = FRAME_SECONDS;
   let savedTimer: ReturnType<typeof setTimeout> | undefined;
   let subtitleText: string | undefined;
-  let popped = false;
+  /** A handover under way; another asked for meanwhile is dropped. */
+  let handing = false;
 
   props
     .load()
@@ -144,12 +143,14 @@ export function VideoView(live: VideoViewProps) {
     video.playbackRate = speed();
     props.note(video.videoWidth ? `${video.videoWidth} × ${video.videoHeight}` : undefined);
     const back = takeBack(props.path);
-    const at = resumes()[props.path];
     if (back) {
       setSpeed(back.speed);
       seek(caughtUp(back));
       if (!back.playing) video.pause();
-    } else if (video.duration > RESUME_FROM_SECONDS && at > RESUME_MARGIN_SECONDS && at < video.duration - RESUME_MARGIN_SECONDS) seek(at);
+    } else {
+      const at = resumePlace(resumes()[props.path], video.duration);
+      if (at) seek(at);
+    }
     measure();
   }
 
@@ -167,8 +168,8 @@ export function VideoView(live: VideoViewProps) {
   /** The film goes on in the small window, from this very moment, and stops here. */
   async function handOver() {
     const src = url();
-    if (popped || !src) return;
-    popped = true;
+    if (handing || !src) return;
+    handing = true;
     const film = {
       path: props.path,
       name: baseName(props.path),
@@ -183,8 +184,13 @@ export function VideoView(live: VideoViewProps) {
       aspect: video.videoWidth && video.videoHeight ? video.videoWidth / video.videoHeight : 16 / 9,
     };
     video.pause();
-    const next = await props.next().catch(() => []);
-    await popOut({ ...film, next });
+    try {
+      const next = await props.next().catch(() => []);
+      await popOut({ ...film, next });
+    } finally {
+      // Played here again, the film can go out again.
+      handing = false;
+    }
   }
 
   function popOutNow() {

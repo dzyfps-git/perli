@@ -1,5 +1,7 @@
 import { saved } from "../filelist/prefs";
 
+export { RESUME_FROM_SECONDS, RESUME_MARGIN_SECONDS, resumePlace } from "./resume";
+
 /** Where long films and songs were left, kept for this many files. */
 const MOST_RESUMES = 100;
 
