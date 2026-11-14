@@ -88,7 +88,13 @@ fn fill(sequencer: &mut MidiFileSequencer, frames: usize, stream: &Arc<Stream>) 
             block.extend_from_slice(&sample(*l));
             block.extend_from_slice(&sample(*r));
         }
-        stream.lock().0.extend_from_slice(&block);
+        let mut made = stream.lock();
+        // Let go of, so nothing more is made.
+        if made.1 {
+            return;
+        }
+        made.0.extend_from_slice(&block);
+        drop(made);
         stream.grown.notify_all();
         done += count;
     }
@@ -109,6 +115,12 @@ const CHUNK_BYTES: usize = 1 << 20;
 impl Stream {
     fn lock(&self) -> std::sync::MutexGuard<'_, (Vec<u8>, bool)> {
         self.made.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Ends the making, and wakes every ask still waiting with what there is.
+    fn stop(&self) {
+        self.lock().1 = true;
+        self.grown.notify_all();
     }
 
     /// The bytes from `start` up to `end`, waiting until they are made.
@@ -163,8 +175,12 @@ impl Streams {
         self.songs().get(&number).cloned()
     }
 
+    /// A seek far ahead can still hold the song, so it stops here rather than when the last
+    /// hold goes.
     pub fn forget(&self, number: u64) {
-        self.songs().remove(&number);
+        if let Some(stream) = self.songs().remove(&number) {
+            stream.stop();
+        }
     }
 }
 
@@ -593,6 +609,38 @@ mod tests {
 
         streams.forget(number);
         assert!(streams.get(number).is_none());
+        std::fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
+    fn letting_go_of_a_song_stops_making_it_even_while_a_seek_waits() {
+        let folder = std::env::temp_dir().join(format!("perli-midi-stop-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let song = folder.join("long.mid");
+        // A note held for longer than the longest song, so the WAV runs to `MOST_SECONDS`.
+        let mut long = one_note();
+        long.splice(26..27, [0xFF, 0xFF, 0xFF, 0x7F]);
+        let length = (long.len() - 22) as u32;
+        long[18..22].copy_from_slice(&length.to_be_bytes());
+        std::fs::write(&song, long).unwrap();
+        let font = Path::new(env!("CARGO_MANIFEST_DIR")).join("resources").join(SOUND_FONT);
+        let streams = Streams::default();
+        let number = streams.add(stream(&font, &song, Playing::default()).unwrap());
+
+        // A seek near the end holds the song while it waits.
+        let seek = streams.get(number).unwrap();
+        let (sent, waited) = std::sync::mpsc::channel();
+        std::thread::spawn(move || sent.send(seek.answer(Some(&format!("bytes={}-", seek.total - 4))).status()));
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let watched = streams.get(number).unwrap();
+        streams.forget(number);
+
+        let status = waited.recv_timeout(std::time::Duration::from_secs(1)).expect("the seek still waits");
+        assert_eq!(status, 416);
+        let made = watched.lock().0.len();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert_eq!(watched.lock().0.len(), made, "still making it");
+        assert!(made < watched.total);
         std::fs::remove_dir_all(folder).unwrap();
     }
 
