@@ -816,7 +816,7 @@ async fn measure(paths: Vec<PathBuf>) -> Result<Measured, String> {
 
 /// The sizes of the selected rows added up, as the list shows them, for the status line.
 #[tauri::command]
-fn selection_size(selection: Selection, views: State<'_, Views>) -> Result<u64, String> {
+fn selection_size(selection: Selection, views: State<'_, Views>) -> Result<(usize, u64), String> {
     views.read(&selection, folder::Listing::rows_size)
 }
 

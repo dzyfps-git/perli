@@ -1875,6 +1875,7 @@ export function App() {
                 snapshot={view.folder()!.request}
                 rearranged={view.folder()!.rearranged}
                 count={view.folder()!.count}
+                items={view.folder()!.items}
                 selected={view.folder()!.selected}
                 reveal={view.folder()!.reveal}
                 rename={view.folder()!.rename}

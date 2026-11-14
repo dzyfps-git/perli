@@ -139,6 +139,9 @@ pub struct Group {
 #[serde(rename_all = "camelCase")]
 pub struct Shape {
     pub count: usize,
+    /// How many files the rows stand for. Fewer than `count` when a file stands under more than
+    /// one tag.
+    pub items: usize,
     /// The system switch changes what the hidden switch would show.
     pub hidden_count: usize,
     pub groups: Vec<Group>,
@@ -718,6 +721,7 @@ impl Listing {
     pub fn shape(&self) -> Shape {
         Shape {
             count: self.len(),
+            items: self.items(),
             hidden_count: self.hidden_count(),
             groups: self.groups.clone(),
             largest: self.visible.iter().map(|&row| self.size_of(row as usize)).max().unwrap_or(0),
@@ -862,9 +866,19 @@ impl Listing {
         }
     }
 
-    /// What `rows` add up to, as the list shows their sizes. Nothing on disk is read.
-    pub fn rows_size(&self, rows: &[u32]) -> u64 {
-        self.chosen(rows).map(|entry| self.size_of(entry)).sum()
+    /// How many files `rows` are, and what they add up to as the list shows their sizes.
+    /// Nothing on disk is read.
+    pub fn rows_size(&self, rows: &[u32]) -> (usize, u64) {
+        self.chosen(rows).fold((0, 0), |(count, bytes), entry| (count + 1, bytes + self.size_of(entry)))
+    }
+
+    /// Only grouping by tag shows a file more than once.
+    fn items(&self) -> usize {
+        if self.order.group_by != GroupBy::Tag {
+            return self.len();
+        }
+        let mut seen = vec![false; self.entries.len()];
+        self.visible.iter().filter(|&&row| !std::mem::replace(&mut seen[row as usize], true)).count()
     }
 
     /// The Recycle Bin items at `rows`. Other folders have none.
@@ -1629,6 +1643,8 @@ mod tests {
         let groups: Vec<_> = listing.groups.iter().map(|group| (group.key.as_str(), group.start, group.total)).collect();
         assert_eq!(groups, [("9", 0, 1), ("7", 1, 2), ("none", 3, 1)]);
         assert_eq!(listing.paths(&[0, 2, 1]), [folder.0.join("c"), folder.0.join("a")], "c is chosen once");
+        assert_eq!((listing.shape().count, listing.shape().items), (4, 3), "c is one item");
+        assert_eq!(listing.rows_size(&[0, 2]).0, 1, "both of c's rows are one selected");
         let lined_up = [folder.0.join("c"), folder.0.join("a"), folder.0.join("c"), folder.0.join("b"), PathBuf::new()];
         assert_eq!(listing.row_paths(&[0, 1, 2, 3, 99]), lined_up, "one answer for each row the list shows");
     }

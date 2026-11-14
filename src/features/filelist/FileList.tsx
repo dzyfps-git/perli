@@ -322,6 +322,8 @@ export function FileList(props: {
   onFold: (key: string, every: boolean) => void;
   /** The biggest size a row shows, for the size bars. */
   largest: number;
+  /** How many files the rows stand for. A file under two tags has two rows. */
+  items: number;
   /** Rows show where each is, under their names, as a flat view does. */
   paths?: boolean;
   /** The grid is an even wall of pictures, edge to edge, with no names. */
@@ -895,11 +897,14 @@ export function FileList(props: {
     window.clearTimeout(sizeTimer);
     const ticket = ++sizeTicket;
     if (count === picked().count && count === 0) return;
-    setPicked({ count, bytes: count === 0 ? 0 : picked().bytes });
-    if (count === 0 || count > MOST_SIZED_ROWS) return setPicked({ count, bytes: 0 });
+    // Rows of the same file count once, which only the listing knows, so until it answers the
+    // count stays as it was.
+    const repeats = props.items < props.count;
+    if (!repeats || count === 0) setPicked({ count, bytes: count === 0 ? 0 : picked().bytes });
+    if (count === 0 || (count > MOST_SIZED_ROWS && !repeats)) return setPicked({ count, bytes: 0 });
     sizeTimer = window.setTimeout(() => {
       selectionSize({ view: props.view, request: shown, rows: selection.rows() })
-        .then((bytes) => ticket === sizeTicket && setPicked({ count, bytes }))
+        .then(([items, bytes]) => ticket === sizeTicket && setPicked({ count: items, bytes: count > MOST_SIZED_ROWS ? 0 : bytes }))
         // A reload in between forgets the snapshot, and the next change asks again.
         .catch(() => undefined);
     }, WHISPER_WAIT_MS);
@@ -915,10 +920,10 @@ export function FileList(props: {
   const whisperText = () => {
     const { count, bytes } = picked();
     if (count > 0) {
-      const of = count > 1 || props.count > 1 ? ` of ${props.count.toLocaleString()}` : "";
+      const of = count > 1 || props.items > 1 ? ` of ${props.items.toLocaleString()}` : "";
       return `${count.toLocaleString()}${of} selected${bytes > 0 ? ` · ${formatSize(bytes)}` : ""}`;
     }
-    return props.match ? counted(props.count, "match", "matches") : counted(props.count, "item", "items");
+    return props.match ? counted(props.items, "match", "matches") : counted(props.items, "item", "items");
   };
   /** An empty list says so itself, in its middle. */
   const barShown = () => selectionBar() && picked().count > 0 && !editor();
@@ -1665,7 +1670,7 @@ export function FileList(props: {
       <Show when={barShown()}>
         <SelectionBar
           count={picked().count}
-          of={props.count}
+          of={props.items}
           bytes={picked().bytes}
           items={props.barItems()}
           onClear={() => {

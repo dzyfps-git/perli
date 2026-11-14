@@ -10,6 +10,8 @@ export interface Opened {
   /** The resolved full path. */
   path: string;
   count: number;
+  /** How many files the rows stand for, fewer than `count` when a file stands under two tags. */
+  items: number;
   /** Hidden entries in the folder, shown or not. */
   hiddenCount: number;
   /** The rows under each header, in order. Empty when the rows are not grouped. */
@@ -82,6 +84,7 @@ export interface Group {
 /** What a new order of the same rows tells the list. */
 export interface Arranged {
   count: number;
+  items: number;
   hiddenCount: number;
   groups: Group[];
   largest: number;
@@ -658,7 +661,8 @@ export const rowProps = (view: number, request: number, rows: number[], names: s
 export const folderPictures = (path: string) => invoke<string[]>("folder_pictures", { path });
 
 /** The bytes of the selected files, from the listing alone. Folders count as nothing. */
-export const selectionSize = (selection: Selection) => invoke<number>("selection_size", { selection });
+/** How many files the rows are, each once, and their size. */
+export const selectionSize = (selection: Selection) => invoke<[number, number]>("selection_size", { selection });
 
 /** The accent color picked in Windows, as `#rrggbb`. */
 export const windowsAccent = () => invoke<string | null>("windows_accent");
