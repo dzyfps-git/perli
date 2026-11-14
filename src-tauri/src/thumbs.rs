@@ -270,8 +270,8 @@ pub fn encode(bitmap: HBITMAP) -> Result<Vec<u8>> {
 /// Windows gives BGRA with alpha already applied, and a canvas wants neither. A picture with no
 /// transparency at all can come with alpha zero throughout.
 fn to_rgba(pixels: &mut [u8]) {
-    let no_alpha = pixels.chunks_exact(4).all(|pixel| pixel[3] == 0);
-    for pixel in pixels.chunks_exact_mut(4) {
+    let no_alpha = pixels.as_chunks::<4>().0.iter().all(|pixel| pixel[3] == 0);
+    for pixel in pixels.as_chunks_mut::<4>().0 {
         pixel.swap(0, 2);
         match pixel[3] {
             0 if no_alpha => pixel[3] = 255,

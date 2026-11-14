@@ -95,11 +95,14 @@ impl Drop for Sandbox {
 }
 
 /// Answers questions from a list, then skips. `during` runs on every progress report.
+/// Runs on each progress report, to change things mid-job.
+type During = Box<dyn Fn(&Progress)>;
+
 #[derive(Default)]
 pub(super) struct Script {
     replies: RefCell<VecDeque<Reply>>,
     questions: RefCell<Vec<Question>>,
-    during: Option<Box<dyn Fn(&Progress)>>,
+    during: Option<During>,
     verify: bool,
 }
 
@@ -759,6 +762,40 @@ fn a_copy_lists_what_it_skipped_after_a_problem_for_a_later_try() {
     assert_eq!(outcome.failed, [Failed { source: locked.clone(), folder: to.clone(), moving: false }]);
     assert_eq!(sandbox.names("to"), ["fine.txt"]);
     drop(held);
+}
+
+/// Takes away the user's right to list `folder` until dropped.
+struct Unlistable(PathBuf);
+
+impl Unlistable {
+    fn new(folder: &Path) -> Self {
+        let user = std::env::var("USERNAME").unwrap();
+        let denied = Command::new("icacls").arg(folder).args(["/deny", &format!("{user}:(RD)")]).output().unwrap();
+        assert!(denied.status.success(), "{denied:?}");
+        Self(folder.to_path_buf())
+    }
+}
+
+impl Drop for Unlistable {
+    fn drop(&mut self) {
+        let user = std::env::var("USERNAME").unwrap();
+        let _ = Command::new("icacls").arg(&self.0).args(["/remove:d", &user]).output();
+    }
+}
+
+#[test]
+fn a_folder_that_cant_be_listed_is_listed_as_skipped() {
+    let sandbox = Sandbox::new();
+    sandbox.file(r"from\tree\fine.txt", "y");
+    let closed = sandbox.folder(r"from\tree\closed");
+    let to = sandbox.folder("to");
+    let held = Unlistable::new(&closed);
+
+    let outcome = run_with(Job::Copy { sources: vec![sandbox.path(r"from\tree")], folder: to.clone() }, &Script::always(Answer::Skip));
+    drop(held);
+
+    assert_eq!(outcome.failed, [Failed { source: closed, folder: to.join("tree"), moving: false }]);
+    assert_eq!(read(&sandbox.path(r"to\tree\fine.txt")), "y");
 }
 
 #[test]
@@ -2182,7 +2219,7 @@ fn recycled_file_lands_in_the_bin_and_undo_restores_it() {
 #[test]
 fn several_items_recycle_in_one_job_and_a_folder_goes_whole() {
     let sandbox = Sandbox::new();
-    let paths = vec![sandbox.file(r"here\a.txt", "a"), sandbox.file(r"here\tree\b.txt", "b")];
+    let paths = [sandbox.file(r"here\a.txt", "a"), sandbox.file(r"here\tree\b.txt", "b")];
     let tree = sandbox.path(r"here\tree");
 
     let outcome = go(Job::Recycle {

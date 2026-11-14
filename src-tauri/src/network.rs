@@ -2,8 +2,9 @@
 //! need nothing special, because every file call already takes UNC paths.
 
 use std::ptr::null_mut;
-use std::sync::mpsc;
-use std::time::Duration;
+use std::collections::HashMap;
+use std::sync::{mpsc, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use windows::core::{Error, Result, BOOL, HSTRING, PCWSTR, PWSTR};
@@ -61,15 +62,38 @@ fn asked_about(path: &str) -> String {
     if is_server(path) { format!(r"{path}\IPC$") } else { path.to_string() }
 }
 
+/// How long a place that answered after its wait ran out counts as answering without asking.
+const LATE_KEPT: Duration = Duration::from_secs(60);
+
+/// Places that answered only after their wait ran out, such as a NAS waking from sleep, by when.
+static LATE: Mutex<Option<HashMap<String, Instant>>> = Mutex::new(None);
+
+fn heard_late(place: String) {
+    LATE.lock().unwrap_or_else(PoisonError::into_inner).get_or_insert_default().insert(place, Instant::now());
+}
+
+fn answered_lately(place: &str) -> bool {
+    let late = LATE.lock().unwrap_or_else(PoisonError::into_inner);
+    late.as_ref().and_then(|late| late.get(place)).is_some_and(|at| at.elapsed() < LATE_KEPT)
+}
+
 /// False when `path` is out of reach, or asking about it takes longer than a few seconds, as it
 /// does for a server that is off. Any answer counts, even "no such folder". The question goes on
-/// in the background, since Windows can't be stopped from waiting.
-// ponytail: a sleepy NAS that needs longer to wake reads as out of reach once; Try again finds it.
+/// in the background, since Windows can't be stopped from waiting. A place that answers after the
+/// wait, such as a NAS waking up, is noted, so Try again finds it at once.
 pub fn answers(path: &str) -> bool {
+    let place = place_of(path).to_lowercase();
+    if answered_lately(&place) {
+        return true;
+    }
     let (sender, receiver) = mpsc::channel();
     let path = asked_about(path);
     std::thread::spawn(move || {
-        let _ = sender.send(answered(&std::fs::metadata(&path)));
+        let heard = answered(&std::fs::metadata(&path));
+        // Nobody is waiting any more, so the answer came late.
+        if sender.send(heard).is_err() && heard {
+            heard_late(place);
+        }
     });
     receiver.recv_timeout(ANSWER_WAIT).unwrap_or(false)
 }
@@ -423,6 +447,15 @@ mod tests {
             assert!(found.mapped.iter().any(|known| known.letter.eq_ignore_ascii_case(&drive.letter)), "{drive:?}");
         }
         assert!(!found.free.iter().any(|letter| found.mapped.iter().any(|drive| drive.letter == *letter)), "{found:?}");
+    }
+
+    #[test]
+    fn a_place_that_answered_late_answers_at_once_next_time() {
+        let path = r"\\perli-test-sleepy-nas\share\folder";
+        heard_late(place_of(path).to_lowercase());
+        let asked = Instant::now();
+        assert!(answers(path));
+        assert!(asked.elapsed() < Duration::from_millis(100));
     }
 
     #[test]

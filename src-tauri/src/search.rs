@@ -46,8 +46,8 @@ const TEXT_TYPES: &[&str] = &[
     "vtt", "tex", "rst", "nfo", "svg", "vue", "svelte", "env", "properties",
 ];
 
-// ponytail: each report copies every row found so far, so reports thin out as rows grow. Rows
-// that share their memory would lift this.
+/// Each report sorts every row found so far, so reports thin out as rows grow. Rows share their
+/// names, so handing them over copies no text.
 fn report_gap(rows: usize) -> Duration {
     REPORT_GAP * (1 + rows / AHEAD) as u32
 }
@@ -574,6 +574,13 @@ mod tests {
 
     fn fit(query: &str, name: &str) -> Option<i32> {
         Query::new(query).fit(&name.encode_utf16().collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn the_best_fit_scores_as_name_match_ts_lights_it() {
+        // nameMatch.test.ts lights f4, b6, r8 and M4, v6 for these; those are the scores here.
+        assert_eq!(fit("fbr", "fax_fab_r"), Some(11));
+        assert_eq!(fit("mv", "xmasMovie"), Some(6));
     }
 
     fn start(searches: &Searches, tree: &Tree, query: &str, order: Order) -> (Listing, mpsc::Receiver<Walk>) {

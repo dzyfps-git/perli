@@ -261,7 +261,7 @@ impl Sight {
 #[derive(Clone)]
 pub struct Entry {
     /// UTF-16 and null-terminated, ready for `StrCmpLogicalW`.
-    name: Box<[u16]>,
+    name: Arc<[u16]>,
     size: u64,
     /// FILETIME ticks.
     modified: u64,
@@ -308,7 +308,7 @@ impl Entry {
 
     fn from_bin_item(item: &BinItem) -> Self {
         Self {
-            name: null_terminated(item.original.file_name().unwrap_or_default().as_ref()),
+            name: null_terminated(item.original.file_name().unwrap_or_default().as_ref()).into(),
             size: item.size,
             modified: item.deleted,
             created: item.deleted,
@@ -324,7 +324,7 @@ impl Entry {
     /// A server's shares have no dates or size to show.
     fn from_share((name, out_of_sight): (String, bool)) -> Self {
         Self {
-            name: null_terminated(name.as_ref()),
+            name: null_terminated(name.as_ref()).into(),
             size: 0,
             modified: 0,
             created: 0,
@@ -1763,7 +1763,7 @@ mod tests {
         let bytes = listing.encode_rows(0, 1);
         let location_bytes = u32::from_le_bytes(bytes[33..37].try_into().unwrap()) as usize;
         let location: Vec<u16> = bytes[48..48 + location_bytes]
-            .chunks_exact(2)
+            .as_chunks::<2>().0.iter()
             .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
             .collect();
         assert_eq!(String::from_utf16(&location).unwrap(), r"C:\home");

@@ -124,8 +124,8 @@ fn parse(bytes: &[u8]) -> Vec<Item> {
             stat: Stat::of_file(if has(FD_FILESIZE.0) { size } else { 0 }, if has(FD_WRITESTIME.0) { ticks } else { 0 }),
         }
     };
-    let entries = bytes.get(4..).unwrap_or_default().chunks_exact(size_of::<FILEDESCRIPTORW>());
-    entries.take(count as usize).map(item).collect()
+    let (entries, _) = bytes.get(4..).unwrap_or_default().as_chunks::<{ size_of::<FILEDESCRIPTORW>() }>();
+    entries.iter().take(count as usize).map(|entry| item(entry)).collect()
 }
 
 fn read_items(data: &IDataObject) -> Result<Vec<Item>> {

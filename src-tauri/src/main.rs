@@ -170,7 +170,12 @@ impl Views {
             .get(&selection.view)
             .and_then(|view| view.listing(selection.request))
             .ok_or("This folder is no longer open")?;
-        Ok(read(listing, &selection.rows))
+        if selection.ranges.is_empty() {
+            return Ok(read(listing, &selection.rows));
+        }
+        let ranged = selection.ranges.iter().flat_map(|&[first, last]| first..=last);
+        let rows: Vec<u32> = selection.rows.iter().copied().chain(ranged).collect();
+        Ok(read(listing, &rows))
     }
 }
 
@@ -194,6 +199,9 @@ struct Selection {
     view: u32,
     request: u64,
     rows: Vec<u32>,
+    /// Runs of rows, first and last both in, for selections too big to send row by row.
+    #[serde(default)]
+    ranges: Vec<[u32; 2]>,
 }
 
 /// What the UI can ask of the file engine.
@@ -513,6 +521,8 @@ async fn list_places() -> Result<places::Places, String> {
         .map_err(|error| error.message())
 }
 
+// Tauri hands each argument and state over by name, so one struct would change what the UI sends.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 async fn open_folder(
     view: u32,
@@ -1320,7 +1330,7 @@ async fn file_users(selection: Selection, views: State<'_, Views>) -> Result<Vec
 }
 
 fn row_path(views: &Views, view: u32, request: u64, row: u32) -> Result<PathBuf, String> {
-    let selection = Selection { view, request, rows: vec![row] };
+    let selection = Selection { view, request, rows: vec![row], ranges: Vec::new() };
     let path = views.read(&selection, folder::Listing::paths)?.pop();
     path.ok_or_else(|| "That row is gone".into())
 }
@@ -1610,7 +1620,7 @@ async fn checksum(
 /// The first lines of a text file, for its hover card.
 #[tauri::command]
 async fn peek_text(view: u32, request: u64, row: u32, views: State<'_, Views>) -> Result<Option<String>, String> {
-    let selection = Selection { view, request, rows: vec![row] };
+    let selection = Selection { view, request, rows: vec![row], ranges: Vec::new() };
     let path = views.read(&selection, folder::Listing::paths)?.pop();
     let path = path.ok_or("That row is gone")?;
     async_runtime::spawn_blocking(move || thumbs::text_start(&path))
@@ -1753,28 +1763,28 @@ async fn common_tags(target: ShellTarget, views: State<'_, Views>) -> Result<Vec
 /// The rows whose names fit `pattern`.
 #[tauri::command]
 fn rows_matching(view: u32, request: u64, pattern: String, views: State<'_, Views>) -> Result<Vec<u32>, String> {
-    let selection = Selection { view, request, rows: Vec::new() };
+    let selection = Selection { view, request, rows: Vec::new(), ranges: Vec::new() };
     views.read(&selection, |listing, _| listing.matching(&pattern))
 }
 
 /// The rows that fit `filter`, for picking all of one kind, tag or day.
 #[tauri::command]
 fn rows_where(view: u32, request: u64, filter: folder::Filter, views: State<'_, Views>) -> Result<Vec<u32>, String> {
-    let selection = Selection { view, request, rows: Vec::new() };
+    let selection = Selection { view, request, rows: Vec::new(), ranges: Vec::new() };
     views.read(&selection, |listing, _| listing.fitting(&filter))
 }
 
 /// How many rows fit `filter`, to tell a folder of songs or pictures by.
 #[tauri::command]
 fn count_where(view: u32, request: u64, filter: folder::Filter, views: State<'_, Views>) -> Result<usize, String> {
-    let selection = Selection { view, request, rows: Vec::new() };
+    let selection = Selection { view, request, rows: Vec::new(), ranges: Vec::new() };
     views.read(&selection, |listing, _| listing.fitting(&filter).len())
 }
 
 /// What the extra columns show for `rows`, such as a song's artist or when a picture was taken.
 #[tauri::command]
 async fn row_props(view: u32, request: u64, rows: Vec<u32>, names: Vec<String>, views: State<'_, Views>) -> Result<Vec<Vec<Option<String>>>, String> {
-    let paths = views.read(&Selection { view, request, rows }, folder::Listing::row_paths)?;
+    let paths = views.read(&Selection { view, request, rows, ranges: Vec::new() }, folder::Listing::row_paths)?;
     blocking(move || Ok(preview::props_of(&paths, &names))).await
 }
 
@@ -2011,7 +2021,9 @@ fn main() {
     let posed = ask.plain_folder().filter(|_| !ask.new_window && default_app::is_on()).map(str::to_string);
     let door = if ask.new_window { None } else { launch::Door::claim() };
     if door.is_none() && !ask.new_window && launch::hand_off(&ask) {
-        posed.map(pose_for);
+        if let Some(posed) = posed {
+            pose_for(posed);
+        }
         return;
     }
     if let Some(folder) = posed {

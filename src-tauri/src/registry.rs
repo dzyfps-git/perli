@@ -55,7 +55,7 @@ pub fn read_value(root: HKEY, key: &str, name: Option<&str>, kinds: REG_ROUTINE_
 
 pub fn read_text(root: HKEY, key: &str, name: Option<&str>) -> Option<String> {
     let bytes = read_value(root, key, name, RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ)?;
-    let units: Vec<u16> = bytes.chunks_exact(2).map(|pair| u16::from_le_bytes([pair[0], pair[1]])).collect();
+    let units: Vec<u16> = bytes.as_chunks::<2>().0.iter().map(|pair| u16::from_le_bytes([pair[0], pair[1]])).collect();
     let end = units.iter().position(|&unit| unit == 0).unwrap_or(units.len());
     Some(String::from_utf16_lossy(&units[..end]))
 }

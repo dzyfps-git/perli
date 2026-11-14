@@ -127,6 +127,10 @@ export function playMoves(
   layer: HTMLElement,
   leave: Leave = "shrink",
   quiet = false,
+  /** How far the list scrolled in between, so a row that kept its place in the list stays put. */
+  scrolled = 0,
+  /** The list's bottom edge on screen, when rows went: rows new to the screen came from past it. */
+  edge?: number,
 ) {
   const spring = getComputedStyle(document.documentElement).getPropertyValue("--spring").trim() || "ease-out";
   const deleted = performance.now() - deletedAt < DELETE_WINDOW_MS;
@@ -136,7 +140,14 @@ export function playMoves(
   const here = new Set<string>();
   for (const [key, element] of after) {
     here.add(key);
-    const was = before.get(key);
+    const seenBefore = before.get(key);
+    const was = seenBefore && { top: seenBefore.top - scrolled, left: seenBefore.left };
+    if (!was && edge !== undefined && !back) {
+      // Closing ranks after rows went, so it was there all along, just out of sight below.
+      const { top } = element.getBoundingClientRect();
+      element.animate({ translate: [`0 ${Math.max(edge - top, 0)}px`, "0 0"] }, { duration: MOVE_MS, easing: "cubic-bezier(0.3, 1.1, 0.5, 1)" });
+      continue;
+    }
     if (!was) {
       // Back rows come one after another, so the eye can follow them home.
       if (back) element.animate(BACK_FRAMES, { duration: ARRIVE_MS, delay: Math.min(arrived++, 8) * 40, easing: spring, fill: "backwards" });

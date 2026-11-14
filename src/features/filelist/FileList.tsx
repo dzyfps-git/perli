@@ -51,7 +51,7 @@ import {
 } from "./prefs";
 import { ago, isoText } from "../../ui/dates";
 import { SelectionBar, type BarItem } from "../reach/SelectionBar";
-import { createSelection } from "./selection";
+import { createSelection, runsOf } from "./selection";
 import { cachedThumb, createThumbLoader } from "./thumbs";
 import { matchSpans } from "./nameMatch";
 import { readProgress } from "../preview/viewerPrefs";
@@ -61,7 +61,7 @@ import { typesLearned, typeText } from "./typeNames";
 import "./filelist.css";
 
 const PAGE_SIZE = 256;
-// ponytail: fixed page cache, plenty for one list, revisit if many tabs stay open.
+/** Pages of rows kept per list, the least lately painted going first: 8,192 rows, many screens. */
 const MAX_PAGES = 32;
 const OVERSCAN = 8;
 const ROWS_IN_MS = 220;
@@ -86,8 +86,7 @@ const ROOMY_LINE = 18;
 const WHISPER_MS = 2400;
 /** A burst of selection changes is added up once, this long after the last one. */
 const WHISPER_WAIT_MS = 120;
-// ponytail: past this many selected rows the status line names no size, since sending the rows
-// alone would cost more than the answer is worth. Add up on the Rust side from ranges if asked for.
+/** Past this many selected rows they go to be added up as runs, not one by one. */
 const MOST_SIZED_ROWS = 20_000;
 /** How far rows start from their place when a folder zooms in or out, as a share of their
  *  distance from the row that was opened. */
@@ -110,9 +109,6 @@ const STACK_LEANS = [
   [0.13, 10],
 ] as const;
 const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
-/** How many selected names a folder keeps for coming back to it. */
-const KEPT_NAMES = 200;
-
 /** Each view's last folder, and where on screen the row that left it was, for the zoom. */
 const leftFrom = new Map<number, { folder: string; y?: number }>();
 const openedAt = new Map<number, number>();
@@ -517,10 +513,17 @@ export function FileList(props: {
       .finally(() => loading.delete(page));
   }
 
+  let newestPage = -1;
   function rowAt(index: number) {
     const page = Math.floor(index / PAGE_SIZE);
     const rows = pages.get(page);
     if (!rows) loadPage(page);
+    // A page painted again moves to the back of the line, so the pages on screen never go.
+    else if (page !== newestPage) {
+      pages.delete(page);
+      pages.set(page, rows);
+      newestPage = page;
+    }
     return rows?.[index % PAGE_SIZE];
   }
 
@@ -901,10 +904,12 @@ export function FileList(props: {
     // count stays as it was.
     const repeats = props.items < props.count;
     if (!repeats || count === 0) setPicked({ count, bytes: count === 0 ? 0 : picked().bytes });
-    if (count === 0 || (count > MOST_SIZED_ROWS && !repeats)) return setPicked({ count, bytes: 0 });
+    if (count === 0) return setPicked({ count, bytes: 0 });
     sizeTimer = window.setTimeout(() => {
-      selectionSize({ view: props.view, request: shown, rows: selection.rows() })
-        .then(([items, bytes]) => ticket === sizeTicket && setPicked({ count: items, bytes: count > MOST_SIZED_ROWS ? 0 : bytes }))
+      const rows = selection.rows();
+      const asked = count > MOST_SIZED_ROWS ? { rows: [], ranges: runsOf(rows) } : { rows };
+      selectionSize({ view: props.view, request: shown, ...asked })
+        .then(([items, bytes]) => ticket === sizeTicket && setPicked({ count: items, bytes }))
         // A reload in between forgets the snapshot, and the next change asks again.
         .catch(() => undefined);
     }, WHISPER_WAIT_MS);
@@ -1125,11 +1130,11 @@ export function FileList(props: {
 
     // Rows changing in place play their change. Opening, sorting and scrolling don't. A search
     // plays only from the top of the list, where the rows that stop matching can be seen to go.
-    // ponytail: rows past the screen's edge just appear, and a reveal that scrolls plays nothing.
     const scrolled = grid.scrollTop;
     const still = props.match ? scrolled === 0 : !props.top;
     const moving = still && !props.rearranged && firstPaintDone && !reducedMotion.matches;
-    const before = moving ? seen(rowsShown(), props.count < lastCount) : undefined;
+    const closing = props.count < lastCount;
+    const before = moving ? seen(rowsShown(), closing) : undefined;
     lastCount = props.count;
 
     pages.clear();
@@ -1151,9 +1156,12 @@ export function FileList(props: {
     builtFor = "";
     resize();
     selectionChanged(true, props.reveal);
-    if (before && grid.scrollTop === scrolled) {
+    // A reveal may have scrolled, which the moves take into account. One that jumps a screen or
+    // more lands somewhere new, where there is nothing to follow.
+    if (before && Math.abs(grid.scrollTop - scrolled) < grid.clientHeight) {
       // In a search, rows that no longer match drift off and the rest close ranks without a show.
-      playMoves(before, rowsShown(), spacer, props.match ? "drift" : "shrink", !!props.match);
+      const edge = closing && !props.match ? grid.getBoundingClientRect().bottom : undefined;
+      playMoves(before, rowsShown(), spacer, props.match ? "drift" : "shrink", !!props.match, grid.scrollTop - scrolled, edge);
     }
     const next = renameNext;
     renameNext = undefined;
@@ -1437,10 +1445,9 @@ export function FileList(props: {
       window.clearTimeout(jumpTimer);
       leftFrom.set(props.view, { folder, y: openedAt.get(props.view) });
       openedAt.delete(props.view);
-      // Only rows already read have names to keep. ponytail: the first 200, plenty to come back to.
+      // Only rows already read have names to keep, at most the pages kept.
       const names = selection
         .rows()
-        .slice(0, KEPT_NAMES)
         .flatMap((index) => pages.get(Math.floor(index / PAGE_SIZE))?.[index % PAGE_SIZE]?.name ?? []);
       props.onLeave?.(folder, names, grid.scrollTop);
     });

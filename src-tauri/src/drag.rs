@@ -10,13 +10,13 @@ use serde::{Deserialize, Serialize};
 use windows::core::{implement, Ref, Result, BOOL};
 use windows::Win32::Foundation::{HWND, LPARAM, POINT, POINTL};
 use windows::Win32::Graphics::Gdi::ScreenToClient;
-use windows::Win32::System::Com::{IDataObject, DVASPECT_CONTENT, FORMATETC, TYMED_HGLOBAL};
+use windows::Win32::System::Com::{IDataObject, DVASPECT_CONTENT, FORMATETC, STGMEDIUM, STGMEDIUM_0, TYMED_HGLOBAL};
 use windows::Win32::System::Ole::{
     IDropSource, IDropTarget, IDropTarget_Impl, RegisterDragDrop, ReleaseStgMedium, RevokeDragDrop,
     CF_HDROP, DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_LINK, DROPEFFECT_MOVE, DROPEFFECT_NONE, MK_ALT,
 };
 use windows::Win32::System::SystemServices::{MK_CONTROL, MK_RBUTTON, MK_SHIFT, MODIFIERKEYS_FLAGS};
-use windows::Win32::UI::Shell::SHDoDragDrop;
+use windows::Win32::UI::Shell::{SHCreateDataObject, SHDoDragDrop};
 use windows::Win32::UI::WindowsAndMessaging::EnumChildWindows;
 
 use crate::folder::BIN_PATH;
@@ -389,12 +389,34 @@ pub fn attach(main: isize, drags: Arc<Drags>, listener: impl Fn(Event) + 'static
     }
 }
 
+/// Past this many files a drag only lists their paths, because asking the shell about each one
+/// on the main thread takes seconds. Any program that takes dropped files reads the list.
+const SHELL_DRAG_MOST: usize = 2_000;
+
+/// A data object that holds only the list of paths, the way the clipboard does.
+fn paths_only(paths: &[PathBuf]) -> Result<IDataObject> {
+    let data: IDataObject = unsafe { SHCreateDataObject(None, None, None::<&IDataObject>) }?;
+    let format = FORMATETC {
+        cfFormat: CF_HDROP.0,
+        ptd: ptr::null_mut(),
+        dwAspect: DVASPECT_CONTENT.0,
+        lindex: -1,
+        tymed: TYMED_HGLOBAL.0 as u32,
+    };
+    let medium = STGMEDIUM {
+        tymed: TYMED_HGLOBAL.0 as u32,
+        u: STGMEDIUM_0 { hGlobal: unsafe { clipboard::global(&clipboard::encode(paths)) }? },
+        pUnkForRelease: std::mem::ManuallyDrop::new(None),
+    };
+    // With `true` the data object owns the memory from here.
+    unsafe { data.SetData(&raw const format, &raw const medium, true) }?;
+    Ok(data)
+}
+
 /// Starts a drag of `paths` out of Perli and runs until the user lets go. Whatever takes the
 /// files does any moving itself, so there is nothing to do here afterward.
-// ponytail: asks the shell about each path on the main thread, which is slow past some thousands
-// of rows. A data object of Perli's own that only lists paths would not be.
 pub fn start(paths: &[PathBuf], main: isize) -> Result<()> {
-    let data = menus::data_object(paths)?;
+    let data = if paths.len() > SHELL_DRAG_MOST { paths_only(paths)? } else { menus::data_object(paths)? };
     let allowed = DROPEFFECT_COPY | DROPEFFECT_MOVE | DROPEFFECT_LINK;
     unsafe { SHDoDragDrop(Some(HWND(main as _)), &data, None::<&IDropSource>, allowed) }.map(drop)
 }
@@ -421,6 +443,13 @@ mod tests {
 
     fn on_c() -> Vec<PathBuf> {
         vec![PathBuf::from(r"C:\from\a.txt")]
+    }
+
+    #[test]
+    fn a_drag_of_many_files_lists_their_paths() {
+        let _com = Com::enter();
+        let paths: Vec<PathBuf> = (0..SHELL_DRAG_MOST + 1).map(|n| PathBuf::from(format!(r"C:\from\{n}.txt"))).collect();
+        assert_eq!(files_in(&paths_only(&paths).unwrap()), paths);
     }
 
     #[test]
@@ -512,7 +541,7 @@ mod tests {
     fn a_drag_follows_the_ui_and_leaves_the_source_alone() {
         let scene = Scene::new("flow");
         let into = scene.folder.join("into");
-        let data = menus::data_object(&[scene.file.clone()]).unwrap();
+        let data = menus::data_object(std::slice::from_ref(&scene.file)).unwrap();
         let drags = Arc::new(Drags::default());
         let heard = Rc::new(RefCell::new(Vec::new()));
         let log = heard.clone();
@@ -619,7 +648,7 @@ mod tests {
     fn the_right_button_is_remembered_from_the_start_of_the_drag() {
         let scene = Scene::new("right");
         let into = scene.folder.join("into");
-        let data = menus::data_object(&[scene.file.clone()]).unwrap();
+        let data = menus::data_object(std::slice::from_ref(&scene.file)).unwrap();
         let drags = Arc::new(Drags::default());
         let heard = Rc::new(RefCell::new(Vec::new()));
         let log = heard.clone();
@@ -664,7 +693,7 @@ mod tests {
     #[test]
     fn leaving_forgets_the_drag() {
         let scene = Scene::new("leave");
-        let data = menus::data_object(&[scene.file.clone()]).unwrap();
+        let data = menus::data_object(std::slice::from_ref(&scene.file)).unwrap();
         let drags = Arc::new(Drags::default());
         let target: IDropTarget = Target::new(HWND::default(), drags.clone(), Box::new(|_| ())).into();
 

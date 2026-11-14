@@ -677,6 +677,11 @@ pub fn guard(_path: &Path) {}
 #[cfg(test)]
 pub use test_guard::guard;
 
+/// The folder a path sits in, never empty.
+pub fn parent(path: &Path) -> PathBuf {
+    path.parent().unwrap_or(path).to_path_buf()
+}
+
 /// Every test names its temp folder here. Anything that writes outside it panics, and so does
 /// any write on a thread that named none.
 #[cfg(test)]
@@ -719,9 +724,4 @@ pub mod test_guard {
     pub fn crossing_drives() -> bool {
         CROSSING.get()
     }
-}
-
-/// The folder a path sits in, never empty.
-pub fn parent(path: &Path) -> PathBuf {
-    path.parent().unwrap_or(path).to_path_buf()
 }

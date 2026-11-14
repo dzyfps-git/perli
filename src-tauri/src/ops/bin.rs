@@ -49,7 +49,7 @@ pub(super) fn parse_info(bytes: &[u8]) -> Option<(u64, u64, PathBuf)> {
         _ => return None,
     };
     let units: Vec<u16> = name
-        .chunks_exact(2)
+        .as_chunks::<2>().0.iter()
         .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
         .take_while(|&unit| unit != 0)
         .collect();
@@ -157,7 +157,7 @@ impl Run<'_> {
 
     pub(super) fn purge(&mut self, items: Vec<BinItem>) -> Flow {
         for entry in items {
-            self.delete_paths(&[entry.item.clone()])?;
+            self.delete_paths(std::slice::from_ref(&entry.item))?;
             if matches!(sys::stat(&entry.item), Ok(None)) {
                 let _ = sys::delete_file(&info_path(&entry.item));
             }

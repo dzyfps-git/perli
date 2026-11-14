@@ -181,6 +181,8 @@ export interface Selection {
   view: number;
   request: number;
   rows: number[];
+  /** Runs of rows, first and last both in, for selections too big to send row by row. */
+  ranges?: [number, number][];
 }
 
 /** What the UI can ask of the file engine. Folders are paths, and files are always rows. */

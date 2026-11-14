@@ -3,6 +3,8 @@ import { test } from "node:test";
 import {
   baseName,
   followed,
+  followTarget,
+  sameFolder,
   BIN_PATH,
   isDriveRoot,
   join,
@@ -129,3 +131,24 @@ test("a linked pane goes as deep, or as far up, as its partner", () => {
   assert.equal(followed("C:\\a", "C:\\a", "D:\\x"), undefined);
   assert.equal(followed("C:\\a", BIN_PATH, "D:\\x"), undefined);
 });
+
+test("a folder is the same however its slashes are written", () => {
+  assert.ok(sameFolder("C:\\a\\b\\", "c:/A/b"));
+  assert.ok(sameFolder("C:", "C:\\"));
+  assert.ok(sameFolder("\\\\nas\\share\\", "\\\\NAS\\share"));
+  assert.ok(!sameFolder("C:\\a", "C:\\ab"));
+});
+
+test("a linked pane follows the user, never the tab's own lead (R42.1, R42.2)", () => {
+  // The user goes deeper: the other pane goes the same way in its own folder.
+  assert.equal(followTarget("C:\\a", "C:\\a\\b", undefined, true, "D:\\x"), "D:\\x\\b");
+  // Unlinked, nothing follows.
+  assert.equal(followTarget("C:\\a", "C:\\a\\b", undefined, false, "D:\\x"), undefined);
+  // Arriving where the tab led it, as "Same folder in other pane" does, bounces nothing back,
+  // even when the path comes back written another way (N9).
+  assert.equal(followTarget("D:\\x", "C:\\a", "C:\\a", true, "C:\\a"), undefined);
+  assert.equal(followTarget("D:\\x", "C:\\a\\b", "c:/a/b/", true, "C:\\a"), undefined);
+  // The user going on while the tab's lead is still on its way still leads.
+  assert.equal(followTarget("C:\\a", "C:\\a\\c", "C:\\a\\b", true, "D:\\x"), "D:\\x\\c");
+});
+

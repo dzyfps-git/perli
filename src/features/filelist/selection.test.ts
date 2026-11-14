@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createSelection } from "./selection.ts";
+import { createSelection, runsOf } from "./selection.ts";
 
 test("rows lists the focused row first and restore brings the selection back", () => {
   const selection = createSelection();
@@ -73,4 +73,14 @@ test("Ctrl+click after Ctrl+A takes only that row out", () => {
   // And the same click again puts it back.
   selection.toggle(2);
   assert.equal(selection.size(), 5);
+});
+
+test("rows become runs of neighbors, in order", () => {
+  assert.deepEqual(runsOf([]), []);
+  assert.deepEqual(runsOf([5, 1, 2, 3, 9, 8]), [
+    [1, 3],
+    [5, 5],
+    [8, 9],
+  ]);
+  assert.deepEqual(runsOf(Array.from({ length: 100_000 }, (_, row) => row)), [[0, 99_999]]);
 });

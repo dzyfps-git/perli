@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::mem;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, PoisonError, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -19,25 +19,54 @@ const REPORT_GAP: Duration = Duration::from_secs(1);
 /// The disk map hears of the folders weighed so far this often.
 const MAP_GAP: Duration = Duration::from_millis(200);
 
-// ponytail: grows with every folder looked at and each total stays until the next scan. Dropping
-// the least recently used would cap it.
-static KNOWN: LazyLock<RwLock<HashMap<PathBuf, u64>>> = LazyLock::new(|| RwLock::new(load()));
+/// Each total with when it was added up, by a count that only grows, so the oldest go first.
+static KNOWN: LazyLock<RwLock<HashMap<PathBuf, (u64, u64)>>> = LazyLock::new(|| RwLock::new(load()));
+static ADDED: AtomicU64 = AtomicU64::new(1);
+/// Past this many totals the oldest quarter goes, so the map can't grow without end.
+const MOST_KNOWN: usize = 100_000;
+/// A running scan writes its totals to disk no more often than this. The end of a scan always does.
+const SAVE_GAP: Duration = Duration::from_secs(30);
 
 /// Where totals wait between sessions.
 const SAVED: &str = "folder-sizes.json";
 
 /// The last session's totals, which stand until a scan adds those folders up again. Tests start
 /// from none, and leave the user's own alone.
-fn load() -> HashMap<PathBuf, u64> {
+fn load() -> HashMap<PathBuf, (u64, u64)> {
     let text = session::data_file(SAVED).filter(|_| !cfg!(test)).and_then(|file| fs::read_to_string(file).ok());
-    text.and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default()
+    let saved: HashMap<PathBuf, u64> = text.and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default();
+    // Saved totals count as older than any added up in this session.
+    saved.into_iter().map(|(path, bytes)| (path, (bytes, 0))).collect()
+}
+
+/// Keeps `bytes` as the total of `path`, dropping the oldest quarter when there are too many.
+fn keep(known: &mut HashMap<PathBuf, (u64, u64)>, path: PathBuf, bytes: u64) {
+    known.insert(path, (bytes, ADDED.fetch_add(1, Ordering::Relaxed)));
+    if known.len() > MOST_KNOWN {
+        // Down to three quarters exactly, even where ages tie, as every total loaded from last
+        // time does.
+        let going = known.len() - MOST_KNOWN * 3 / 4;
+        let mut ages: Vec<(u64, PathBuf)> = known.iter().map(|(path, &(_, at))| (at, path.clone())).collect();
+        ages.select_nth_unstable(going);
+        for (_, path) in &ages[..going] {
+            known.remove(path);
+        }
+    }
+}
+
+/// Where `save` writes. Tests write to a file of their own and leave the user's alone.
+fn saved_file() -> Option<PathBuf> {
+    if cfg!(test) {
+        Some(std::env::temp_dir().join(format!("perli-test-{}-{SAVED}", std::process::id())))
+    } else {
+        session::data_file(SAVED)
+    }
 }
 
 /// Writes under the lock, so a `forget` can't land between reading the totals and writing them.
 /// No totals means forgotten, so there is no file to bring back.
-// ponytail: writes every total each time, which a big map pays for once a second while a scan runs.
 fn save() {
-    let Some(file) = session::data_file(SAVED).filter(|_| !cfg!(test)) else { return };
+    let Some(file) = saved_file() else { return };
     let known = KNOWN.read().unwrap_or_else(PoisonError::into_inner);
     if known.is_empty() {
         return;
@@ -46,8 +75,15 @@ fn save() {
     if let Some(folder) = file.parent() {
         let _ = fs::create_dir_all(folder);
     }
-    if let Ok(text) = serde_json::to_string(&*known) {
-        let _ = fs::write(file, text);
+    let totals: HashMap<&PathBuf, u64> = known.iter().map(|(path, &(bytes, _))| (path, bytes)).collect();
+    let Ok(text) = serde_json::to_string(&totals) else { return };
+    // Written beside it and swapped in, so a crash or a reader never meets half a file. One
+    // writer at a time, since scans of two views can save at once.
+    static SAVING: Mutex<()> = Mutex::new(());
+    let _one = SAVING.lock().unwrap_or_else(PoisonError::into_inner);
+    let fresh = file.with_extension("new");
+    if fs::write(&fresh, text).is_ok() {
+        let _ = fs::rename(&fresh, &file);
     }
 }
 
@@ -61,7 +97,7 @@ pub fn any() -> bool {
 }
 
 pub fn of(path: &Path) -> Option<u64> {
-    KNOWN.read().unwrap_or_else(PoisonError::into_inner).get(&key(path)).copied()
+    KNOWN.read().unwrap_or_else(PoisonError::into_inner).get(&key(path)).map(|&(bytes, _)| bytes)
 }
 
 pub fn forget() {
@@ -109,7 +145,7 @@ fn scan(folder: &Path, stop: &AtomicBool, report: impl Fn()) {
             folders.push(folder.join(entry.file_name()));
         }
     });
-    let mut reported = Instant::now();
+    let (mut reported, mut saved) = (Instant::now(), Instant::now());
     for found in folders {
         let Some(bytes) = total(&found, stop) else {
             // A stopped scan keeps the totals it finished.
@@ -124,12 +160,15 @@ fn scan(folder: &Path, stop: &AtomicBool, report: impl Fn()) {
                 save();
                 return;
             }
-            known.insert(key(&found), bytes);
+            keep(&mut known, key(&found), bytes);
         }
         if reported.elapsed() >= REPORT_GAP {
             report();
-            save();
             reported = Instant::now();
+        }
+        if saved.elapsed() >= SAVE_GAP {
+            save();
+            saved = Instant::now();
         }
     }
     report();
@@ -250,6 +289,26 @@ mod tests {
     }
 
     #[test]
+    fn past_the_most_totals_the_oldest_quarter_goes() {
+        let mut known = HashMap::new();
+        for n in 0..=MOST_KNOWN {
+            keep(&mut known, PathBuf::from(n.to_string()), n as u64);
+        }
+        assert!(known.len() <= MOST_KNOWN * 3 / 4, "{}", known.len());
+        assert!(!known.contains_key(Path::new("0")), "the oldest goes");
+        assert_eq!(known.get(Path::new(&MOST_KNOWN.to_string())).map(|&(bytes, _)| bytes), Some(MOST_KNOWN as u64));
+    }
+
+    #[test]
+    fn totals_loaded_from_last_time_go_a_quarter_at_a_time_too() {
+        // Every saved total loads as equally old.
+        let mut known: HashMap<PathBuf, (u64, u64)> = (0..MOST_KNOWN).map(|n| (PathBuf::from(n.to_string()), (1, 0))).collect();
+        keep(&mut known, PathBuf::from("new"), 2);
+        assert_eq!(known.len(), MOST_KNOWN * 3 / 4);
+        assert!(known.contains_key(Path::new("new")));
+    }
+
+    #[test]
     fn a_scan_adds_up_everything_under_each_folder() {
         let tree = Tree::new("adds");
         scanned(&tree);
@@ -319,6 +378,18 @@ mod tests {
         let tree = Tree::new("stop");
         assert_eq!(total(&tree.0, &AtomicBool::new(true)), None);
         assert_eq!(total(&tree.0, &AtomicBool::new(false)), Some(129));
+    }
+
+    #[test]
+    fn a_stopped_scan_writes_the_totals_it_has() {
+        let tree = Tree::new("saved");
+        let file = saved_file().unwrap();
+        let kept = key(&tree.0.join("kept"));
+        keep(&mut KNOWN.write().unwrap(), kept.clone(), 5);
+        scan(&tree.0, &AtomicBool::new(true), || ());
+        let saved: HashMap<PathBuf, u64> = serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!(saved.get(&kept), Some(&5));
+        let _ = fs::remove_file(&file);
     }
 
     #[test]
