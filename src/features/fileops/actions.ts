@@ -39,8 +39,17 @@ export function createFileActions(
   /** Items in the Recycle Bin can only be restored or deleted. */
   const movable = (view: FolderView) => (view.isBin() ? undefined : selected(view));
 
+  /** A ZIP opened as a folder only gives its files out. Says so rather than doing nothing. */
+  function writable(view: FolderView) {
+    if (!view.isZip()) return !view.isBin();
+    jobs.notify("This ZIP is read-only", "Copy files out of it, or extract it all, to change them", true);
+    return false;
+  }
+  const changeable = (view: FolderView) => (writable(view) ? selected(view) : undefined);
+
   return {
     selected,
+    writable,
 
     copy(view: FolderView) {
       const selection = movable(view);
@@ -48,7 +57,7 @@ export function createFileActions(
     },
 
     cut(view: FolderView) {
-      const selection = movable(view);
+      const selection = changeable(view);
       const folder = view.folder()?.path;
       if (!selection || !folder) return;
       setClipboard(selection, true)
@@ -59,20 +68,21 @@ export function createFileActions(
 
     /** Pastes into `folder`, or else the folder on show. */
     paste(view: FolderView, folder = view.folder()?.path) {
-      if (view.isBin() || !folder) return;
+      if (!folder || !writable(view)) return;
       start(view, { kind: "paste", folder });
     },
 
     /** Shortcuts to the clipboard's files, which stay put; a cut keeps waiting for its paste. */
     pasteShortcut(view: FolderView, folder = view.folder()?.path) {
-      if (view.isBin() || !folder) return;
+      if (!folder || !writable(view)) return;
       start(view, { kind: "pasteShortcut", folder });
     },
 
     toOtherPane(view: FolderView, kind: "copy" | "move") {
-      const selection = movable(view);
-      const folder = otherView()?.folder()?.path;
-      if (selection && folder && !otherView()?.isBin()) start(view, { kind, selection, folder });
+      const selection = kind === "move" ? changeable(view) : movable(view);
+      const other = otherView();
+      const folder = other?.folder()?.path;
+      if (selection && folder && writable(other!)) start(view, { kind, selection, folder });
     },
 
     /** Copies the selection to `folder`, which needs no other pane. */
@@ -93,7 +103,7 @@ export function createFileActions(
 
     /** One row is renamed in place, and more get the dialog. */
     startRename(view: FolderView) {
-      const picked = movable(view);
+      const picked = changeable(view);
       if (picked?.rows.length === 1) view.list()?.rename();
       else if (picked) {
         // Numbers go down the list, whatever order the rows were picked in.
@@ -104,15 +114,21 @@ export function createFileActions(
 
     /** With `at`, a small popover there asks for the level and a password first. */
     compress(view: FolderView, at?: { x: number; y: number }) {
-      const selection = movable(view);
+      const selection = changeable(view);
       if (!selection) return;
       if (!at) return start(view, { kind: "zip", selection });
       askZip({ selection, ...at, confirm: (level, password) => start(view, { kind: "zip", selection, level, password }) });
     },
 
     extract(view: FolderView, ownFolder: boolean, smart = false) {
-      const selection = movable(view);
+      const selection = changeable(view);
       if (selection) start(view, { kind: "unzip", selection, ownFolder, smart });
+    },
+
+    /** Everything in the ZIP on show, into a folder of its own beside it. */
+    extractAll(view: FolderView) {
+      const path = view.archive();
+      if (path) start(view, { kind: "extractZip", path });
     },
 
     saveTemplate(view: FolderView) {
@@ -128,30 +144,30 @@ export function createFileActions(
 
     newItem(view: FolderView, directory: boolean) {
       const folder = view.folder()?.path;
-      if (folder && !view.isBin()) start(view, { kind: "new", folder, directory });
+      if (folder && writable(view)) start(view, { kind: "new", folder, directory });
     },
 
     /** A new file of a type Windows knows. */
     newFrom(view: FolderView, extension: string) {
       const folder = view.folder()?.path;
-      if (folder && !view.isBin()) start(view, { kind: "template", folder, extension });
+      if (folder && writable(view)) start(view, { kind: "template", folder, extension });
     },
 
     /** A new file from one the user keeps in their templates folder. A `{date}` in its name is today. */
     newFromOwn(view: FolderView, name: string) {
       const folder = view.folder()?.path;
-      if (folder && !view.isBin()) start(view, { kind: "ownTemplate", folder, name, date: dayText(Date.now()) });
+      if (folder && writable(view)) start(view, { kind: "ownTemplate", folder, name, date: dayText(Date.now()) });
     },
 
     /** A new file from the text or picture on the clipboard. */
     newFromClipboard(view: FolderView) {
       const folder = view.folder()?.path;
-      if (folder && !view.isBin()) start(view, { kind: "fromClipboard", folder });
+      if (folder && writable(view)) start(view, { kind: "fromClipboard", folder });
     },
 
     /** The Recycle Bin is the last stop, so deleting from it always asks first. */
     remove(view: FolderView, permanently: boolean) {
-      const selection = selected(view);
+      const selection = view.isZip() ? changeable(view) : selected(view);
       if (!selection) return;
       if (!permanently && !view.isBin()) {
         start(view, { kind: "recycle", selection });

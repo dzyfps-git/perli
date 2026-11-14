@@ -128,7 +128,7 @@ function spotAt(x: number, y: number, views: FolderView[]): Spot | undefined {
   const view = views.find((item) => String(item.id) === pane?.dataset.view);
   const path = view?.folder()?.path;
   // A search's rows are from all over, so nothing there says where a drop would land.
-  if (!pane || !view || !path || view.query()) return undefined;
+  if (!pane || !view || !path || view.query() || view.isZip()) return undefined;
   // A folder in the Recycle Bin is deleted, so the bin as a whole takes the drop.
   const row = view.isBin() ? null : under?.closest<HTMLElement>(".file-row[data-folder]");
   const name = row?.querySelector(".file-name")?.textContent;

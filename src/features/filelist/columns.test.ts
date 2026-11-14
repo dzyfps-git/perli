@@ -9,6 +9,7 @@ import {
   nextGrouping,
   nextSort,
   restoreColumns,
+  savedShare,
   startColumns,
   typeLabel,
 } from "./columns.ts";
@@ -97,4 +98,15 @@ test("a folder of songs puts artist and length before size, and keeps the rest t
 test("restoreColumns never hides the name column", () => {
   const restored = restoreColumns([{ id: "name", width: 0, visible: false }]);
   assert.equal(restored[0].visible, true);
+});
+
+test("savedShare is how much smaller packing made a file, never below nothing", () => {
+  assert.equal(savedShare(250, 1000), 75);
+  assert.equal(savedShare(710, 1000), 29);
+  // Nearly all gone still leaves something, so it never reads 100.
+  assert.equal(savedShare(326, 109_000), 99);
+  assert.equal(savedShare(1000, 1000), 0);
+  // A stored file can come out a little bigger than it went in.
+  assert.equal(savedShare(1010, 1000), 0);
+  assert.equal(savedShare(0, 0), undefined);
 });

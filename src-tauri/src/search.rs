@@ -21,7 +21,7 @@ use crate::folder::Filter;
 use crate::folder::{self, Entry, Found, GroupBy, Listing, Order, Sight, SortKey};
 use crate::network;
 use crate::ops::sys::{self, Stat};
-use crate::tags;
+use crate::{tags, zipped};
 
 /// How many rows past the user the walk keeps ready. Scrolling never catches up, so the list
 /// feels endless, while a search nobody scrolls goes no further than this.
@@ -425,6 +425,30 @@ fn tagged(name: &str, scope: Scope, folder: &Path) -> Found {
     found
 }
 
+/// The names in a ZIP opened as a folder that hold the query, read from the archive's own list
+/// at once. A scope wider than the folder looks all the way down it, as nothing outside a ZIP
+/// is one of its rows.
+fn in_zip(archive: &Path, inner: &str, shown: &Path, asked: &Asked) -> Result<Found> {
+    let failed = |message: String| windows::core::Error::new(windows::Win32::Foundation::E_FAIL, message);
+    let (nodes, _) = zipped::list(archive, inner, asked.scope != Scope::Folder).map_err(failed)?;
+    let query = Query::new(&asked.query);
+    let mut found = Found::default();
+    let mut locations = HashMap::<String, Arc<[u16]>>::new();
+    for node in nodes {
+        let parent = node.parent.clone();
+        let entry = Entry::from_zip(node);
+        if !query.is_in(&entry, shown) {
+            continue;
+        }
+        let location = locations.entry(parent.clone()).or_insert_with(|| {
+            let folder = parent.split('/').filter(|part| !part.is_empty()).fold(shown.to_path_buf(), |path, part| path.join(part));
+            folder::null_terminated(&folder).into()
+        });
+        found.push(entry, location.clone());
+    }
+    Ok(found)
+}
+
 /// A filter can leave so few rows that scrolling never asks for more. Groups count every row
 /// they hold, and a folded one shows none, so scrolling can't ask for those either.
 fn needs_every_row(order: &Order) -> bool {
@@ -481,6 +505,13 @@ impl Searches {
         let shown_folder = PathBuf::from(folder::resolve(path)?);
         if let Some(name) = asked.query.strip_prefix(TAGGED) {
             let found = tagged(name, asked.scope, &shown_folder);
+            self.stop(view);
+            self.all().insert(view, Arc::new(Search::new(found.clone(), usize::MAX)));
+            report(Walk::Done);
+            return Ok(Listing::searched(found, order));
+        }
+        if let Some((archive, inner)) = zipped::split(&shown_folder) {
+            let found = in_zip(&archive, &inner, &shown_folder, &asked)?;
             self.stop(view);
             self.all().insert(view, Arc::new(Search::new(found.clone(), usize::MAX)));
             report(Walk::Done);

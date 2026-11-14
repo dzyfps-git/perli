@@ -393,6 +393,10 @@ export function QuickPreview(props: {
       test: (password) => archiveTest(view, shot, at, password),
       drag: (entry, password) => dragEntry(view, shot, at, entry, password),
       keys: (handler) => (viewKeys = handler),
+      // ponytail: a ZIP inside a ZIP opens in its app, and a folder named like x.zip loses the button too.
+      onOpenFolder: /\.zip(\\|$)/i.test(props.at.folder)
+        ? undefined
+        : () => (props.docked ? props.onOpen(row()!) : shut(() => props.onOpen(row()!))),
     };
   }
 

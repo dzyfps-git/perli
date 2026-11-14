@@ -269,7 +269,7 @@ export function createFolderView(id: number, saved?: SavedPane) {
   /** Adds up the folders shown, if the user wants that. */
   function scanFolder() {
     const shown = folder()?.path;
-    if (shown && folderSizes() && !isBin(shown)) scanSizes(id, shown).catch(console.error);
+    if (shown && folderSizes() && !isBin(shown) && !folder()?.archive) scanSizes(id, shown).catch(console.error);
   }
 
   /** Nothing about the shown rows changes until the folder has read fine. `scrollTo` is where
@@ -312,7 +312,7 @@ export function createFolderView(id: number, saved?: SavedPane) {
       setTrail(nextTrail(trail(), opened.path));
       if (before && !samePath(before, opened.path)) follower?.(before, opened.path);
       scanFolder();
-      if (isBin(opened.path)) setColumnSet("plain");
+      if (isBin(opened.path) || opened.archive) setColumnSet("plain");
       else noteColumnSet(opened).catch(console.error);
       return opened;
     } catch (failure) {
@@ -569,6 +569,10 @@ export function createFolderView(id: number, saved?: SavedPane) {
     arrival,
     path,
     isBin: () => isBin(folder()?.path),
+    /** A folder inside a ZIP, or the ZIP itself, which can be read and copied out of only. */
+    isZip: () => !!folder()?.archive,
+    archive: () => folder()?.archive ?? undefined,
+    locked: () => !!folder()?.locked,
     openSaved() {
       if (saved && !savedOpened) untrack(() => open(saved.path));
       savedOpened = true;

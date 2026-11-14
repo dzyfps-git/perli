@@ -97,7 +97,7 @@ fn zip_time(ticks: u64) -> Option<DateTime> {
     .ok()
 }
 
-fn ticks_of(time: DateTime) -> u64 {
+pub fn ticks_of(time: DateTime) -> u64 {
     sys::local_ticks(&SYSTEMTIME {
         wYear: time.year(),
         wMonth: time.month().into(),
@@ -111,7 +111,7 @@ fn ticks_of(time: DateTime) -> u64 {
 }
 
 /// `relative` if every part of it is a plain name Windows would accept.
-pub(super) fn safe(relative: PathBuf) -> Option<PathBuf> {
+pub fn safe(relative: PathBuf) -> Option<PathBuf> {
     let plain = |part: Component<'_>| match part {
         Component::Normal(name) => name.to_str().is_some_and(|name| names::check(name).is_ok()),
         _ => false,
@@ -264,26 +264,26 @@ impl Run<'_> {
 
     /// With `only`, just those entries come out, each as if its own folder were the top.
     /// One inside a folder also picked comes out with that folder, not again on its own.
-    pub(super) fn unzip(&mut self, archives: Vec<PathBuf>, own_folder: bool, smart: bool, only: &[String], password: Option<&str>) -> Flow {
+    pub(super) fn unzip(&mut self, archives: Vec<PathBuf>, own_folder: bool, smart: bool, only: &[String], password: Option<&str>, into: Option<&Path>) -> Flow {
         self.add_total(archives.len() as u64, 0);
         for archive in archives {
             if only.is_empty() {
-                self.unzip_one(&archive, own_folder, smart, None, password)?;
+                self.unzip_one(&archive, own_folder, smart, None, password, into)?;
             }
             for name in outermost(only) {
-                self.unzip_one(&archive, own_folder, false, Some(name), password)?;
+                self.unzip_one(&archive, own_folder, false, Some(name), password, into)?;
             }
             self.step(1, 0);
         }
         Ok(())
     }
 
-    fn unzip_one(&mut self, archive: &Path, own_folder: bool, smart: bool, only: Option<&str>, password: Option<&str>) -> Flow {
+    fn unzip_one(&mut self, archive: &Path, own_folder: bool, smart: bool, only: Option<&str>, password: Option<&str>, into: Option<&Path>) -> Flow {
         let Some(mut zip) = self.attempt(archive, None, |_| open_archive(archive))? else {
             return Ok(());
         };
         let own_folder = own_folder || (smart && tops(&zip) > 1);
-        let folder = sys::parent(archive);
+        let folder = into.map_or_else(|| sys::parent(archive), Path::to_path_buf);
         let zone = sys::read_zone(archive);
         let mut landing = Landing::new(folder.clone(), Some(archive.to_path_buf()), zone);
         if own_folder {

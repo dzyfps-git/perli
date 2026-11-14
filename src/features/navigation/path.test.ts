@@ -7,6 +7,7 @@ import {
   sameFolder,
   BIN_PATH,
   isDriveRoot,
+  isZipName,
   join,
   nextTrail,
   parentOf,
@@ -152,3 +153,10 @@ test("a linked pane follows the user, never the tab's own lead (R42.1, R42.2)", 
   assert.equal(followTarget("C:\\a", "C:\\a\\c", "C:\\a\\b", true, "D:\\x"), "D:\\x\\c");
 });
 
+
+test("isZipName takes any case and only the end of the name", () => {
+  assert.equal(isZipName("pack.zip"), true);
+  assert.equal(isZipName("PACK.ZIP"), true);
+  assert.equal(isZipName("pack.zip.txt"), false);
+  assert.equal(isZipName("zip"), false);
+});

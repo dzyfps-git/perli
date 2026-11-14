@@ -643,3 +643,130 @@
 .pattern-end {
   flex: 1;
 }
+
+/* A ZIP opened as a folder: a slim strip that wipes in under the path bar and says it is read-only. */
+.zip-bar {
+  position: relative;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 34px;
+  padding: var(--space-1) var(--space-3);
+  border-bottom: 1px solid var(--border);
+  background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 12%, transparent), transparent 75%);
+  font-size: 12px;
+  animation: zip-bar-in 420ms var(--spring);
+}
+
+@keyframes zip-bar-in {
+  from {
+    opacity: 0;
+    clip-path: inset(0 100% 0 0);
+  }
+}
+
+.zip-bar-icon {
+  color: var(--accent);
+  font: 15px var(--font-icons);
+  animation: zip-icon-in 560ms var(--spring) 90ms backwards;
+}
+
+@keyframes zip-icon-in {
+  from {
+    opacity: 0;
+    scale: 0.4;
+    rotate: -24deg;
+  }
+}
+
+.zip-bar-name {
+  min-width: 0;
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.zip-bar-pill {
+  flex: none;
+  padding: 1px var(--space-2);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.zip-bar-gap {
+  flex: 1;
+}
+
+.zip-bar-button {
+  gap: 6px;
+}
+
+.zip-bar-glyph {
+  font: 11px var(--font-icons);
+}
+
+.zip-bar-extract {
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  color: var(--text);
+}
+
+/* The arrow drops once, the way the files would. */
+.zip-bar-extract:hover .zip-bar-glyph {
+  animation: zip-drop 520ms var(--spring);
+}
+
+@keyframes zip-drop {
+  40% {
+    translate: 0 3px;
+  }
+}
+
+/* The password card hangs under the bar, over the list. */
+.zip-password {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: var(--space-3);
+  width: 340px;
+  height: 236px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-large);
+  box-shadow: var(--shadow);
+}
+
+/* The crumb of the ZIP itself wears a small badge. */
+.crumb-zip {
+  margin-left: 5px;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  vertical-align: 1px;
+  animation: zip-icon-in 480ms var(--spring);
+}
+
+.archive-as-folder {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.archive-as-folder span {
+  font-family: var(--font-icons);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .zip-bar,
+  .zip-bar-icon,
+  .zip-bar-extract:hover .zip-bar-glyph,
+  .crumb-zip {
+    animation: none;
+  }
+}

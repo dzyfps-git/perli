@@ -23,6 +23,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use serde::{Deserialize, Serialize};
 use windows::core::{Error, Result};
 
+pub use archive::{safe as safe_relative, ticks_of as zip_ticks};
 pub use bin::{limit as bin_limit, read as read_bin, BinItem};
 pub use incoming::{offers_files, Incoming};
 pub use names::{check_rename, check_renames};
@@ -48,8 +49,9 @@ pub enum Job {
     Zip { sources: Vec<PathBuf>, level: ZipLevel, password: Option<String> },
     /// Each archive beside itself, loose or in a new folder of its own. `smart` gives an archive
     /// its own folder only when more than one item sits at its top. With `only`, just that entry
-    /// of each, a file or a folder with all it holds, lands beside the archive.
-    Unzip { archives: Vec<PathBuf>, own_folder: bool, smart: bool, only: Vec<String>, password: Option<String> },
+    /// of each, a file or a folder with all it holds, lands beside the archive. With `into`, they land
+    /// there instead, the way a copy out of a ZIP opened as a folder lands.
+    Unzip { archives: Vec<PathBuf>, own_folder: bool, smart: bool, only: Vec<String>, password: Option<String>, into: Option<PathBuf> },
     /// Files dragged in with no paths of their own.
     Receive { incoming: Incoming, folder: PathBuf },
     Recycle { paths: Vec<PathBuf> },
@@ -338,8 +340,8 @@ impl<'a> Run<'a> {
             Job::Template { folder, template } => self.new_from(&folder, &template),
             Job::Shortcut { sources, folder } => self.shortcuts(&sources, &folder),
             Job::Zip { sources, level, password } => self.zip(sources, level, password.as_deref()),
-            Job::Unzip { archives, own_folder, smart, only, password } => {
-                self.unzip(archives, own_folder, smart, &only, password.as_deref())
+            Job::Unzip { archives, own_folder, smart, only, password, into } => {
+                self.unzip(archives, own_folder, smart, &only, password.as_deref(), into.as_deref())
             }
             Job::Receive { incoming, folder } => self.receive(incoming, &folder),
             Job::Recycle { paths } => {

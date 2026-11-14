@@ -1126,6 +1126,7 @@ fn unzip(archive: &Path, own_folder: bool) -> Job {
         smart: false,
         only: Vec::new(),
         password: None,
+        into: None,
     }
 }
 
@@ -1173,7 +1174,7 @@ fn one_entry_extracts_beside_the_archive_on_its_own() {
     let entries: [(&str, &[u8]); 4] =
         [("docs/a.txt", b"a"), ("docs/img/b.png", b"b"), ("docs/img/c.png", b"c"), ("docs/imgs.txt", b"not inside img")];
     zip_of(&archive, &entries);
-    let only = |name: &str| Job::Unzip { archives: vec![archive.clone()], own_folder: false, smart: false, only: vec![name.into()], password: None };
+    let only = |name: &str| Job::Unzip { archives: vec![archive.clone()], own_folder: false, smart: false, only: vec![name.into()], password: None, into: None };
 
     let file = go(only("docs/a.txt"));
     assert_eq!(read(&sandbox.path(r"out\a.txt")), "a");
@@ -1220,7 +1221,7 @@ fn smart_extract_makes_a_folder_only_for_many_items_on_top() {
     zip_of(&one, &[("album/a.jpg", b"a"), ("album/b.jpg", b"b")]);
     let many = sandbox.path(r"out\many.zip");
     zip_of(&many, &[("a.jpg", b"a"), ("b.jpg", b"b")]);
-    let smart = |archive: &Path| Job::Unzip { archives: vec![archive.to_path_buf()], own_folder: false, smart: true, only: Vec::new(), password: None };
+    let smart = |archive: &Path| Job::Unzip { archives: vec![archive.to_path_buf()], own_folder: false, smart: true, only: Vec::new(), password: None, into: None };
 
     go(smart(&one));
     go(smart(&many));

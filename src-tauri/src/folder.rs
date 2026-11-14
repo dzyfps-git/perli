@@ -18,7 +18,7 @@ use windows::Win32::Storage::FileSystem::{
 use windows::Win32::UI::Shell::{PathMatchSpecW, StrCmpLogicalW};
 
 use crate::ops::{self, BinItem};
-use crate::{network, shell, sizes, tags};
+use crate::{network, shell, sizes, tags, zipped};
 
 /// Stands for the Recycle Bin, which has no folder of its own to open.
 pub const BIN_PATH: &str = "shell:RecycleBinFolder";
@@ -64,6 +64,8 @@ pub enum SortKey {
     Length,
     Taken,
     Dimensions,
+    /// What each row takes up packed in its ZIP.
+    Packed,
 }
 
 impl SortKey {
@@ -321,6 +323,22 @@ impl Entry {
         }
     }
 
+    /// A row of a ZIP opened as a folder.
+    pub fn from_zip(node: zipped::Node) -> Self {
+        Self {
+            name: null_terminated(node.name.as_ref()).into(),
+            size: node.size,
+            modified: node.modified,
+            created: node.modified,
+            is_dir: node.folder,
+            hidden: false,
+            system: false,
+            cloud: false,
+            pinned: false,
+            custom: false,
+        }
+    }
+
     /// A server's shares have no dates or size to show.
     fn from_share((name, out_of_sight): (String, bool)) -> Self {
         Self {
@@ -391,6 +409,15 @@ struct Bin {
     locations: Vec<Arc<[u16]>>,
 }
 
+/// What a ZIP opened as a folder knows beyond a normal folder.
+pub struct Zipped {
+    pub archive: PathBuf,
+    /// Anything in the archive needs a password.
+    pub locked: bool,
+    /// Each entry's packed size, in the same order as `Listing::entries`.
+    packed: Vec<u64>,
+}
+
 /// Rows from many folders, with where each one is.
 #[derive(Clone, Default)]
 pub struct Found {
@@ -454,6 +481,7 @@ pub struct Listing {
     folder: PathBuf,
     entries: Arc<Vec<Entry>>,
     bin: Option<Arc<Bin>>,
+    zip: Option<Arc<Zipped>>,
     /// Where a search found each of `entries`. Empty for a plain folder.
     found_in: Arc<Vec<Arc<[u16]>>>,
     /// With folders opened in place: the entry each one sits under, or `TOP`. Empty otherwise.
@@ -481,6 +509,9 @@ impl Listing {
             return Self::read_bin(order);
         }
         let full = resolve(path)?;
+        if let Some((archive, inner)) = zipped::split(Path::new(&full)) {
+            return Self::read_zip(full, archive, &inner, order);
+        }
         let (mut entries, mut tagged) = if network::is_server(&full) {
             (read_shares(&full)?, tags::Tagged::new())
         } else {
@@ -519,6 +550,30 @@ impl Listing {
             ..Self::default()
         };
         Ok(listing.arrange(order))
+    }
+
+    fn read_zip(full: String, archive: PathBuf, inner: &str, order: Order) -> Result<Self> {
+        let failed = |message: String| windows::core::Error::new(windows::Win32::Foundation::E_FAIL, message);
+        let (nodes, locked) = zipped::list(&archive, inner, false).map_err(failed)?;
+        let packed = nodes.iter().map(|node| node.packed).collect();
+        let listing = Self {
+            folder: full.into(),
+            entries: Arc::new(nodes.into_iter().map(Entry::from_zip).collect()),
+            zip: Some(Arc::new(Zipped { archive, locked, packed })),
+            ..Self::default()
+        };
+        Ok(listing.arrange(order))
+    }
+
+    /// The ZIP this folder is in, if it is in one.
+    pub fn zipped(&self) -> Option<&Zipped> {
+        self.zip.as_deref()
+    }
+
+    /// Each row's packed size, positional like `row_paths`. Outside a ZIP there are none.
+    pub fn packed(&self, rows: &[u32]) -> Vec<Option<u64>> {
+        let packed = |row: &u32| Some(self.zip.as_ref()?.packed[*self.visible.get(*row as usize)? as usize]);
+        rows.iter().map(packed).collect()
     }
 
     fn read_bin(order: Order) -> Result<Self> {
@@ -587,6 +642,7 @@ impl Listing {
             SortKey::Type => type_ranks(entries),
             SortKey::Size if sizes::any() => self.sizes(),
             SortKey::Tags => self.tag_ranks(places),
+            SortKey::Packed => self.zip.as_ref().map(|zip| zip.packed.clone()).unwrap_or_else(|| vec![0; entries.len()]),
             key => key.property().map(|name| self.prop_ranks(name)).unwrap_or_default(),
         };
         let mut groups = Vec::new();
@@ -1103,7 +1159,8 @@ fn compare(
             | SortKey::Album
             | SortKey::Length
             | SortKey::Taken
-            | SortKey::Dimensions => ranks[first as usize].cmp(&ranks[second as usize]),
+            | SortKey::Dimensions
+            | SortKey::Packed => ranks[first as usize].cmp(&ranks[second as usize]),
             SortKey::Location => natural(location_of(locations, first), location_of(locations, second)),
             SortKey::Found => first.cmp(&second),
         };
@@ -1145,6 +1202,12 @@ pub fn pictures_in(folder: &Path, most: usize) -> Vec<PathBuf> {
 pub fn subfolders(path: &Path, sight: Sight) -> std::io::Result<Vec<String>> {
     use std::os::windows::fs::MetadataExt;
 
+    if let Some((archive, inner)) = zipped::split(path) {
+        let (nodes, _) = zipped::list(&archive, &inner, false).map_err(std::io::Error::other)?;
+        let mut names: Vec<String> = nodes.into_iter().filter(|node| node.folder).map(|node| node.name).collect();
+        names.sort_by(|a, b| natural(&null_terminated(a.as_ref()), &null_terminated(b.as_ref())));
+        return Ok(names);
+    }
     let mut names: Vec<Box<[u16]>> = std::fs::read_dir(path)?
         .flatten()
         .filter(|entry| {

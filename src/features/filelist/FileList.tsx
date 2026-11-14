@@ -18,7 +18,7 @@ import { ColumnHeader, SortStrip } from "./ColumnHeader";
 import { formatSize } from "../../ui/format";
 import { tagColor, tagNames, tags } from "../tags/tags";
 import type { ListHandle, RowAt } from "../navigation/folderView";
-import { isBin, join, parentOf, relativeTo, samePath } from "../navigation/path";
+import { isBin, isZipName, join, parentOf, relativeTo, samePath } from "../navigation/path";
 import { dayOf } from "../reach/lists";
 import { allLooks, lookOf } from "../sidebar/saved";
 import { coverPosition } from "../sidebar/placeLists";
@@ -30,6 +30,7 @@ import {
   isProp,
   MIN_COLUMN_WIDTH,
   PROP_NAMES,
+  savedShare,
   type Column,
   type ColumnId,
   type ColumnSet,
@@ -113,6 +114,8 @@ const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
 /** Each view's last folder, and where on screen the row that left it was, for the zoom. */
 const leftFrom = new Map<number, { folder: string; y?: number }>();
 const openedAt = new Map<number, number>();
+/** The band of a ZIP's row, by view, which the ZIP's own rows grow out of once it opens. */
+const grewFrom = new Map<number, { folder: string; top: number; bottom: number }>();
 
 const counted = (count: number, one: string, many: string) => `${count.toLocaleString()} ${count === 1 ? one : many}`;
 
@@ -545,6 +548,11 @@ export function FileList(props: {
       propsTimer = window.setTimeout(readProps, PROPS_WAIT_MS);
       return "";
     }
+    if (id === "packed") {
+      const saved = value === "" ? undefined : savedShare(Number(value), row.size);
+      // Nothing saved (stored, or a password made it bigger) shows the packed size alone.
+      return value === "" ? "" : saved ? `${formatSize(Number(value))} · ${saved}% less` : formatSize(Number(value));
+    }
     return id === "taken" ? dateText(Number(value)) : value;
   }
 
@@ -831,12 +839,23 @@ export function FileList(props: {
     const earned = props.rearranged || now - lastFolderOpen > ROWS_IN_PAUSE_MS;
     lastFolderOpen = now;
     const zoomed = zoom();
+    const band = grewFrom.get(props.view);
+    grewFrom.delete(props.view);
     if (!earned || reducedMotion.matches) return;
 
     if (zoomed) {
       // Rows spread out from the row that was opened, or close in from further out. Each row
       // moves on its own, because the spacer they sit in can be far taller than the screen.
       const box = grid.getBoundingClientRect();
+      // A ZIP opens out of its own row: the list is that band first, then all of it.
+      if (band && samePath(props.folder, band.folder)) {
+        const top = Math.max(0, band.top - box.top);
+        const bottom = Math.max(0, box.bottom - band.bottom);
+        grid.animate(
+          { clipPath: [`inset(${top}px 0 ${bottom}px 0 round 10px)`, "inset(0 0 0 0 round 0px)"] },
+          { duration: ZOOM_MS + 80, easing: "cubic-bezier(0.2, 0.9, 0.3, 1)" },
+        );
+      }
       const origin = zoomed.y ?? box.top + box.height / 2;
       for (const { element } of pool) {
         const { top } = element.getBoundingClientRect();
@@ -1053,7 +1072,10 @@ export function FileList(props: {
     if (!row) return;
     // Where the folder zooms out from, if this opens one here.
     const element = pool[index % pool.length]?.element.getBoundingClientRect();
-    if (row.isDir && !toSide && element) openedAt.set(props.view, element.top + element.height / 2);
+    const zip = !row.isDir && isZipName(row.name);
+    if ((row.isDir || zip) && !toSide && element) openedAt.set(props.view, element.top + element.height / 2);
+    if (zip && !toSide && element) grewFrom.set(props.view, { folder: join(row.location || props.folder, row.name), top: element.top, bottom: element.bottom });
+    else grewFrom.delete(props.view);
     props.onOpen(row, toSide);
   }
 

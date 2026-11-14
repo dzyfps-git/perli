@@ -8,6 +8,9 @@ export const BIN_PATH = "shell:RecycleBinFolder";
 
 export const isBin = (path: string | undefined) => path === BIN_PATH;
 
+/** A name Perli opens as a folder of its own, the way Explorer does. */
+export const isZipName = (name: string) => /\.zip$/i.test(name);
+
 export const isDriveRoot = (path: string) => /^[a-z]:\\$/i.test(path);
 
 /** Splits `C:\Users\me` into one crumb per folder, starting at the drive or the `\\server`. */

@@ -618,6 +618,7 @@ fn drives_of(job: &Job) -> Vec<String> {
         Job::Copy { sources, folder } => sources.iter().map(PathBuf::as_path).chain([folder.as_path()]).collect(),
         Job::Move { sources, folder } if sources.iter().all(|source| drive(source) == drive(folder)) => Vec::new(),
         Job::Move { sources, folder } => sources.iter().map(PathBuf::as_path).chain([folder.as_path()]).collect(),
+        Job::Unzip { archives, into: Some(into), .. } => archives.iter().map(PathBuf::as_path).chain([into.as_path()]).collect(),
         Job::Zip { sources: paths, .. } | Job::Unzip { archives: paths, .. } => paths.iter().map(PathBuf::as_path).collect(),
         Job::Receive { folder, .. } => vec![folder.as_path()],
         _ => Vec::new(),
@@ -632,6 +633,7 @@ fn drives_of(job: &Job) -> Vec<String> {
 fn target_of(job: &Job) -> Option<String> {
     match job {
         Job::Copy { folder, .. } | Job::Move { folder, .. } | Job::Receive { folder, .. } => Some(text(folder)),
+        Job::Unzip { into: Some(into), .. } => Some(text(into)),
         Job::Zip { sources: paths, .. } | Job::Unzip { archives: paths, .. } => {
             paths.first().map(|path| text(&ops::sys::parent(path)))
         }

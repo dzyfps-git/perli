@@ -71,7 +71,7 @@ import { DisconnectDrive, MapDrive } from "./features/dialogs/NetworkDrives";
 import { Properties } from "./features/dialogs/Properties";
 import { NO_FILTER, toFilter } from "./features/filelist/filter";
 import { FilterChips } from "./features/pathbar/FilterChips";
-import { BIN_COLUMNS, FLAT_COLUMNS, nextGrouping, nextSort, SEARCH_COLUMNS } from "./features/filelist/columns";
+import { BIN_COLUMNS, FLAT_COLUMNS, nextGrouping, nextSort, SEARCH_COLUMNS, ZIP_COLUMNS } from "./features/filelist/columns";
 import { GROUP_CHOICES, groupLabel } from "./features/filelist/groups";
 import type { Empty } from "./features/filelist/EmptyState";
 import { FileList } from "./features/filelist/FileList";
@@ -118,11 +118,12 @@ import {
 } from "./features/filelist/prefs";
 import { SelectPattern } from "./features/filelist/SelectPattern";
 import { FLAT_QUERY, type FolderView, type RowAt } from "./features/navigation/folderView";
-import { BIN_PATH, isBin, isDriveRoot, join, parentOf, baseName, relativeTo, samePath, type Crumb } from "./features/navigation/path";
+import { BIN_PATH, isBin, isDriveRoot, isZipName, join, parentOf, baseName, relativeTo, samePath, type Crumb } from "./features/navigation/path";
 import { Palette, type Command } from "./features/palette/Palette";
 import { wordsFor, type Verb } from "./features/palette/words";
 import { PaneDivider } from "./features/tabs/PaneDivider";
 import { PathBar, type Suggested, type Suggestion } from "./features/pathbar/PathBar";
+import { ZipBar } from "./features/pathbar/ZipBar";
 import { commandFor, keyText } from "./features/keys/keybinds";
 import { comboOf, KEYS } from "./features/keys/keys";
 import { KeySheet } from "./features/keys/KeySheet";
@@ -266,6 +267,23 @@ const FOLDER_ONLY = new Set([
   "diskMap",
   "toFileDialog",
 ]);
+/** Commands that change files, or need a folder on a disk, which a ZIP opened as a folder is not. */
+const ZIP_HIDES = new Set([
+  "cut",
+  "paste",
+  "duplicate",
+  "rename",
+  "delete",
+  "deleteForGood",
+  "newFolder",
+  "newFolderWith",
+  "newFile",
+  "shelve",
+  "moveToOther",
+  "terminal",
+  "diskMap",
+  "toFileDialog",
+]);
 /** A key with no Ctrl or Alt in it types a letter, so it must not run a command while typing. */
 const typesText = (combo: string) => !/Ctrl|Alt|^F\d+$/.test(combo);
 const blockBrowserZoom = (event: WheelEvent) => event.ctrlKey && event.preventDefault();
@@ -273,7 +291,15 @@ const trackWindowFocus = (event: FocusEvent) =>
   document.documentElement.toggleAttribute("data-blurred", event.type === "blur");
 /** The columns a view keeps to itself, which the user can't change. */
 const ownColumns = (view: FolderView) =>
-  view.isBin() ? BIN_COLUMNS : view.query() === FLAT_QUERY ? FLAT_COLUMNS : view.query() ? SEARCH_COLUMNS : undefined;
+  view.isBin()
+    ? BIN_COLUMNS
+    : view.query() === FLAT_QUERY
+      ? FLAT_COLUMNS
+      : view.query()
+        ? SEARCH_COLUMNS
+        : view.isZip()
+          ? ZIP_COLUMNS
+          : undefined;
 /** A folder's kept columns, or the ones a search or the bin always has. */
 const shownColumns = (view: FolderView) => ownColumns(view) ?? columnsOf(view.columnSet());
 
@@ -538,7 +564,8 @@ export function App() {
   function openRow(view: FolderView, row: Row, toSide: boolean) {
     if (view.isBin()) return;
     const path = rowPath(view, row);
-    if (!row.isDir) openFile(path).catch(console.error);
+    const asFolder = row.isDir || (isZipName(row.name) && !view.isZip());
+    if (!asFolder) openFile(path).catch(jobs.report);
     else if (toSide) tabs.openToSide(path);
     else view.open(path);
   }
@@ -573,7 +600,7 @@ export function App() {
   /** Where files from the shelf can land: a real folder, not the Recycle Bin or a search. */
   const dropFolder = () => {
     const view = tabs.activeView();
-    return view.isBin() || view.query() ? undefined : view.folder()?.path;
+    return view.isBin() || view.isZip() || view.query() ? undefined : view.folder()?.path;
   };
   /** Says what went wrong, and still lets the caller know that it did. */
   const failed = (failure: unknown) => {
@@ -581,7 +608,7 @@ export function App() {
     throw failure;
   };
   // The folders seen lately are places to drop on and to move to.
-  createEffect(() => noteFolder(tabs.activeView().folder()?.path));
+  createEffect(() => noteFolder(tabs.activeView().isZip() ? undefined : tabs.activeView().folder()?.path));
   // With the arrows turned off, nothing could close a folder opened in place.
   createEffect(on(inlineFolders, (on) => on || tabs.allViews().forEach((view) => view.collapseAll()), { defer: true }));
   const toggleSidebar = () => setSidebarOpen(!sidebarOpen());
@@ -842,6 +869,26 @@ export function App() {
     }
 
     const path = rowPath(view, row);
+    if (view.isZip()) {
+      const items: MenuItem[] = [
+        { label: "Open", action: () => openRow(view, row, false) },
+        { label: "Quick preview", action: () => previewSelected(view) },
+        ...(row.isDir
+          ? [
+              { label: "Open to side", action: () => openRow(view, row, true) },
+              { label: "Open in background tab", action: () => openBehind(view, row) },
+              { label: "Search here", action: () => searchIn(view, path) },
+            ]
+          : [shell.openWithItem(view)]),
+        { label: "Copy", divider: true, keys: keyText("copy"), action: () => actions.copy(view) },
+        ...(tabs.active().other() ? [{ label: "Copy to other pane", action: () => actions.toOtherPane(view, "copy") }] : []),
+        { label: "Copy name", action: () => quietly(copyName(view)) },
+        { label: "Select same", items: sameItems(view, row) },
+        ...(view.list()?.selection().rows.length === 2 && !row.isDir ? [{ label: "Compare", keys: keyText("compare"), action: () => quietly(compare(view)) }] : []),
+        { label: "Extract all", divider: true, action: () => actions.extractAll(view) },
+      ];
+      return setMenu({ x, y, items });
+    }
     const [canPaste, toolItems] = await Promise.all([clipboardCanPaste(), shell.fileToolItems(view, row, { x, y })]);
     const items: MenuItem[] = [
       { label: "Open", action: () => openRow(view, row, false) },
@@ -1110,7 +1157,7 @@ export function App() {
           },
         ],
       },
-      ...(own
+      ...(own && !view.isZip()
         ? []
         : [
             {
@@ -1151,7 +1198,16 @@ export function App() {
       { label: undoLabel("Undo", jobs.undoText()), disabled: jobs.latestStep() === null, action: () => actions.undo(view) },
       { label: undoLabel("Redo", jobs.redoText()), disabled: !jobs.canRedo(), action: () => actions.redo(view) },
     ];
-    const fileItems: MenuItem[] = view.isBin()
+    const fileItems: MenuItem[] = view.isZip()
+      ? [
+          { label: "Extract all", action: () => actions.extractAll(view) },
+          { label: "Search here", action: () => view.askSearch() },
+          { label: "Select by pattern…", action: () => setSelectingPattern(view) },
+          { label: "Invert selection", action: () => invertSelection(view) },
+          { label: "Filter…", action: () => setFiltering(view) },
+          ...undo,
+        ]
+      : view.isBin()
       ? [
           {
             label: "Empty Recycle Bin",
@@ -1173,7 +1229,7 @@ export function App() {
           { label: "Activity log", action: () => setActivityOpen(true) },
           { label: "Disk map", action: () => setMapping(view.folder()?.path) },
         ];
-    const shellItems = view.isBin() ? [] : shell.backgroundItems(view, { x, y });
+    const shellItems = view.isBin() || view.isZip() ? [] : shell.backgroundItems(view, { x, y });
     setMenu({ x, y, items: [...fileItems, ...viewItems(view), ...shellItems] });
   }
 
@@ -1191,6 +1247,7 @@ export function App() {
       };
     }
     if (view.isBin()) return { art: "bin", text: "The Recycle Bin is empty.", actions: [] };
+    if (view.isZip() && !view.query()) return { art: "folder", text: "This folder in the ZIP is empty.", actions: [] };
     if (view.query()) {
       const flat = view.query() === FLAT_QUERY;
       return {
@@ -1338,7 +1395,7 @@ export function App() {
   function duplicate(view: FolderView) {
     const folder = view.folder()?.path;
     // Search rows live in many folders, and a copy belongs beside its own file.
-    if (folder && !view.query()) actions.copyTo(view, folder);
+    if (folder && !view.query() && actions.writable(view)) actions.copyTo(view, folder);
   }
 
   async function copyPath(view: FolderView) {
@@ -1382,13 +1439,13 @@ export function App() {
   function gather(view: FolderView) {
     const selection = picked(view);
     const folder = view.folder()?.path;
-    if (selection && folder && !view.query()) {
+    if (selection && folder && !view.query() && actions.writable(view)) {
       startJob({ kind: "newFolderFrom", selection, folder, moveIn: true }, view.id).catch(jobs.report);
     }
   }
 
   async function putOnShelf(view: FolderView) {
-    const selection = picked(view);
+    const selection = view.isZip() ? undefined : picked(view);
     if (selection) shelve(await selectionPaths(selection));
   }
 
@@ -1421,7 +1478,7 @@ export function App() {
 
   function terminalHere(view: FolderView, shell?: Terminal) {
     const path = view.folder()?.path;
-    if (path && !view.isBin()) openTerminal(path, shell ?? terminalChoice()).catch(jobs.report);
+    if (path && !view.isBin() && !view.isZip()) openTerminal(path, shell ?? terminalChoice()).catch(jobs.report);
   }
 
   async function toggleFullScreen() {
@@ -1454,7 +1511,7 @@ export function App() {
     undo: () => actions.undo(here()),
     redo: () => actions.redo(here()),
     activity: () => setActivityOpen(true),
-    diskMap: () => setMapping(here().folder()?.path),
+    diskMap: () => here().isZip() || setMapping(here().folder()?.path),
     toFileDialog: () => {
       const folder = here().folder()?.path;
       if (!folder) return;
@@ -1567,6 +1624,12 @@ export function App() {
         item("Delete permanently", () => actions.remove(view, true), "deleteForGood"),
       ];
     }
+    if (view.isZip()) {
+      return [
+        item("Copy", () => actions.copy(view), "copy"),
+        ...(two && compareKind(two.map((row) => row.name), two.map((row) => kindOf(row.name, row.isDir))) ? [item("Compare", () => quietly(compare(view)), "compare")] : []),
+      ];
+    }
     const moveTo = (anchor: HTMLElement) => {
       const from = view.folder()?.path;
       const other = tabs.active().other();
@@ -1670,9 +1733,18 @@ export function App() {
     const more = (group: string, list: Command[]) =>
       list.map((command) => ({ group, icon: iconFor(command.label), ...command }));
     const known = places();
-    const keyed = KEYS.filter((command) => !command.fixed && !command.quiet && !(view.isBin() && FOLDER_ONLY.has(command.id)));
+    const keyed = KEYS.filter(
+      (command) => !command.fixed && !command.quiet && !(view.isBin() && FOLDER_ONLY.has(command.id)) && !(view.isZip() && ZIP_HIDES.has(command.id)),
+    );
     const inFolder: Command[] = view.isBin()
       ? []
+      : view.isZip()
+      ? [
+          { label: "Extract all", run: () => actions.extractAll(view) },
+          { label: "Copy name", run: () => quietly(copyName(view)) },
+          { label: "Flat view", run: () => toggleFlat(view) },
+          ...keepCommands(view),
+        ]
       : [
           { label: "Compress to ZIP", run: () => actions.compress(view) },
           { label: "Compress with options…", run: () => actions.compress(view, { x: innerWidth / 2 - 180, y: innerHeight / 3 }) },
@@ -1878,6 +1950,9 @@ export function App() {
           <SelectPattern view={view} onClose={() => setSelectingPattern(undefined)} />
         </Show>
         <div class="file-area">
+          <Show when={view.isZip()}>
+            <ZipBar view={view} onExtract={() => actions.extractAll(view)} />
+          </Show>
           <Show when={view.error()}>
             <div class="message" role="alert">
               <p>{view.error()}</p>
@@ -1929,7 +2004,7 @@ export function App() {
                 expanded={view.expanded()}
                 // Rows gathered under headers can't also nest under their folders.
                 onExpand={
-                  inlineFolders() && !view.query() && !view.isBin() && view.groupBy() === "none"
+                  inlineFolders() && !view.query() && !view.isBin() && !view.isZip() && view.groupBy() === "none"
                     ? (path) => void view.toggleExpand(path)
                     : undefined
                 }
