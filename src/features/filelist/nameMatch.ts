@@ -8,8 +8,9 @@ const ALNUM = /[\p{L}\p{N}]/u;
 const isLower = (letter: string) => letter !== letter.toUpperCase() && letter === letter.toLowerCase();
 const isUpper = (letter: string) => letter !== letter.toLowerCase() && letter === letter.toUpperCase();
 
-/** The positions the query's letters take from `start`, each the next one along, with their score. */
-function fitFrom(name: string, lowered: string, wanted: string, start: number) {
+/** The positions the query's letters take from `start`, each the next one along, with their score.
+ *  Letters are whole characters, as search.rs's `char`s are, so an emoji is one. */
+function fitFrom(name: string[], lowered: string[], wanted: string[], start: number) {
   const places: number[] = [];
   let [at, fit] = [start, 0];
   for (const letter of wanted) {
@@ -20,7 +21,7 @@ function fitFrom(name: string, lowered: string, wanted: string, start: number) {
     const before = name[found - 1];
     if (found === 0 || !ALNUM.test(before) || (isLower(before) && isUpper(name[found]))) fit += WORD_START;
     places.push(found);
-    at = found + letter.length;
+    at = found + 1;
   }
   return { places, fit };
 }
@@ -34,17 +35,23 @@ export function matchSpans(name: string, query: string): [number, number][] {
   if (!wanted || lowered.length !== name.length) return [];
   const whole = lowered.indexOf(wanted);
   if (whole >= 0) return [[whole, whole + wanted.length]];
+  const [letters, low, want] = [Array.from(name), Array.from(lowered), Array.from(wanted)];
+  if (low.length !== letters.length) return [];
   let best: { places: number[]; fit: number } | undefined;
-  for (let start = lowered.indexOf(wanted[0]); start >= 0; start = lowered.indexOf(wanted[0], start + 1)) {
-    const tried = fitFrom(name, lowered, wanted, start);
+  for (let start = low.indexOf(want[0]); start >= 0; start = low.indexOf(want[0], start + 1)) {
+    const tried = fitFrom(letters, low, want, start);
     // Rust's `max` keeps the last of equal fits, so this does too.
     if (tried && (!best || tried.fit >= best.fit)) best = tried;
   }
+  // Where each letter starts in the name's UTF-16, which is what the page's ranges count.
+  const units = [0];
+  for (const letter of letters) units.push(units.at(-1)! + letter.length);
   const spans: [number, number][] = [];
   for (const found of best?.places ?? []) {
+    const [start, end] = [units[found], units[found + 1]];
     const last = spans.at(-1);
-    if (last && last[1] === found) last[1] = found + 1;
-    else spans.push([found, found + 1]);
+    if (last && last[1] === start) last[1] = end;
+    else spans.push([start, end]);
   }
   return spans;
 }

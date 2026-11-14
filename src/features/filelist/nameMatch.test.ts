@@ -21,3 +21,7 @@ test("the letters lit are the ones search's best fit scored, not the first found
   // A capital after a small letter starts a word too.
   assert.deepEqual(matchSpans("xmasMovie", "mv"), [[4, 5], [6, 7]]);
 });
+
+test("a letter outside the basic plane lights whole, never half of it", () => {
+  assert.deepEqual(matchSpans("😀xb", "😀b"), [[0, 2], [3, 4]]);
+});
