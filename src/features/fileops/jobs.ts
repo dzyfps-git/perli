@@ -211,13 +211,18 @@ export function createJobs(views: () => FolderView[], host: JobsHost) {
 
   const listener = onJobEvent(onEvent);
   onCleanup(() => listener.then((stop) => stop()));
-  // The undo log outlives the app, so Undo can work before any job runs.
-  undoState().then(undoable).catch(console.error);
+  // The undo log outlives the app, so Undo can work before any job runs. Every window shares
+  // it, so a window coming back to the front picks up what the others did meanwhile.
+  const refresh = () => undoState().then(undoable).catch(console.error);
+  refresh();
+  window.addEventListener("focus", refresh);
+  onCleanup(() => window.removeEventListener("focus", refresh));
 
   return {
     cards,
     latestStep,
     canRedo,
+    refresh,
     /** What Undo and Redo would do now, for their hover text and menu labels. */
     undoText,
     redoText,
