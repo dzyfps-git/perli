@@ -845,12 +845,21 @@ impl Listing {
     /// What is on disk for each of `rows`: its full path, built from the raw name so that odd
     /// names survive, or its `$R` item in the Recycle Bin.
     pub fn paths(&self, rows: &[u32]) -> Vec<PathBuf> {
-        self.chosen(rows)
-            .map(|entry| match &self.bin {
-                Some(bin) => bin.items[entry].item.clone(),
-                None => self.full_path(entry),
-            })
-            .collect()
+        self.chosen(rows).map(|entry| self.path_of(entry)).collect()
+    }
+
+    /// One path for each of `rows`, in their order, repeats kept, for answers the UI lines up
+    /// with its rows. A row no longer shown gets an empty path.
+    pub fn row_paths(&self, rows: &[u32]) -> Vec<PathBuf> {
+        let path = |row: &u32| self.visible.get(*row as usize).map_or_else(PathBuf::new, |&entry| self.path_of(entry as usize));
+        rows.iter().map(path).collect()
+    }
+
+    fn path_of(&self, entry: usize) -> PathBuf {
+        match &self.bin {
+            Some(bin) => bin.items[entry].item.clone(),
+            None => self.full_path(entry),
+        }
     }
 
     /// What `rows` add up to, as the list shows their sizes. Nothing on disk is read.
@@ -1620,6 +1629,8 @@ mod tests {
         let groups: Vec<_> = listing.groups.iter().map(|group| (group.key.as_str(), group.start, group.total)).collect();
         assert_eq!(groups, [("9", 0, 1), ("7", 1, 2), ("none", 3, 1)]);
         assert_eq!(listing.paths(&[0, 2, 1]), [folder.0.join("c"), folder.0.join("a")], "c is chosen once");
+        let lined_up = [folder.0.join("c"), folder.0.join("a"), folder.0.join("c"), folder.0.join("b"), PathBuf::new()];
+        assert_eq!(listing.row_paths(&[0, 1, 2, 3, 99]), lined_up, "one answer for each row the list shows");
     }
 
     #[test]

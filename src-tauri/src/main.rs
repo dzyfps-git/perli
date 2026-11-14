@@ -1713,7 +1713,7 @@ fn count_where(view: u32, request: u64, filter: folder::Filter, views: State<'_,
 /// What the extra columns show for `rows`, such as a song's artist or when a picture was taken.
 #[tauri::command]
 async fn row_props(view: u32, request: u64, rows: Vec<u32>, names: Vec<String>, views: State<'_, Views>) -> Result<Vec<Vec<Option<String>>>, String> {
-    let paths = views.read(&Selection { view, request, rows }, folder::Listing::paths)?;
+    let paths = views.read(&Selection { view, request, rows }, folder::Listing::row_paths)?;
     blocking(move || Ok(preview::props_of(&paths, &names))).await
 }
 
