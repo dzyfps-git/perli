@@ -88,6 +88,8 @@ export function Minimap(props: MinimapProps) {
       style={{ width: `${size().width}px`, height: `${size().height}px` }}
       aria-hidden="true"
       onPointerDown={onPointerDown}
+      // The stage under the map plays a film or turns a comic page on a click.
+      onClick={(event) => event.stopPropagation()}
       onWheel={(event) => event.stopPropagation()}
       onDblClick={(event) => event.stopPropagation()}
     >

@@ -26,15 +26,6 @@ export interface FontViewProps {
 
 let made = 0;
 
-/** Loads a font's bytes under a name of its own for this window, and gives that name. */
-async function loadFace(bytes: ArrayBuffer, added: FontFace[]) {
-  const face = new FontFace(`perli-font-${++made}`, bytes);
-  await face.load();
-  document.fonts.add(face);
-  added.push(face);
-  return face.family;
-}
-
 const hex = (point: number) => `U+${point.toString(16).toUpperCase().padStart(4, "0")}`;
 /** Code points with no picture of their own: the control characters. */
 const drawable = (point: number) => point >= 0x20 && !(point >= 0x7f && point < 0xa0);
@@ -57,6 +48,18 @@ export function FontView(live: FontViewProps) {
   const [count, setCount] = createSignal(CHUNK);
   const [others, setOthers] = createSignal<{ name: string; family: string }[]>([]);
   let gone = false;
+
+  /** Loads a font's bytes under a name of its own for this window, and gives that name. */
+  async function loadFace(bytes: ArrayBuffer) {
+    const face = new FontFace(`perli-font-${++made}`, bytes);
+    await face.load();
+    // A load that ends after the preview has gone would stay in the window for good.
+    if (!gone) {
+      document.fonts.add(face);
+      added.push(face);
+    }
+    return face.family;
+  }
   let copiedTimer: ReturnType<typeof setTimeout> | undefined;
   let more: HTMLDivElement | undefined;
 
@@ -75,7 +78,7 @@ export function FontView(live: FontViewProps) {
       setProblem(undefined);
       setCount(CHUNK);
       setAxes(Object.fromEntries(facts().axes.map((axis) => [axis.tag, axis.default])));
-      if (!families.has(face)) families.set(face, props.load(face).then((bytes) => loadFace(bytes, added)));
+      if (!families.has(face)) families.set(face, props.load(face).then(loadFace));
       families
         .get(face)!
         .then((name) => !gone && picked() === face && setFamily(name))
@@ -93,7 +96,7 @@ export function FontView(live: FontViewProps) {
           fonts.map((font) =>
             font
               .load()
-              .then((bytes) => loadFace(bytes, added))
+              .then(loadFace)
               .then((name) => ({ name: font.name, family: name }))
               .catch(() => undefined),
           ),

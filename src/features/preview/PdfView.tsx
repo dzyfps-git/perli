@@ -152,7 +152,7 @@ export function PdfView(live: PdfViewProps) {
 
   onMount(() => {
     watch = new IntersectionObserver(onSeen, { root: scroller, rootMargin: "100% 0px" });
-    const room = new ResizeObserver(() => setStage({ width: scroller.clientWidth, height: scroller.clientHeight }));
+    const room = new ResizeObserver(() => keepPlace(() => setStage({ width: scroller.clientWidth, height: scroller.clientHeight })));
     room.observe(scroller);
     onCleanup(() => room.disconnect());
     if (!scroller.closest(".preview-docked")) scroller.focus({ preventScroll: true });
@@ -212,6 +212,19 @@ export function PdfView(live: PdfViewProps) {
   createEffect(on(current, (at) => doc() && keepPage(props.path, at), { defer: true }));
 
   const pageElement = (at: number) => scroller.querySelector<HTMLElement>(`[data-page="${at}"]`);
+
+  /**
+   * Makes a change that resizes pages (a page found to be bigger than the first, a side panel
+   * opening) and keeps the spot being read where it was on screen.
+   */
+  function keepPlace(change: () => void) {
+    const at = current();
+    const before = pageElement(at);
+    const into = before ? (scroller.scrollTop - before.offsetTop) / scale() : 0;
+    change();
+    const after = pageElement(at);
+    if (after) scroller.scrollTop = after.offsetTop + into * scale();
+  }
 
   function go(at: number, top = 0) {
     const target = pageElement(Math.min(Math.max(at, 0), count() - 1));
@@ -294,7 +307,7 @@ export function PdfView(live: PdfViewProps) {
       const natural = proxy.getViewport({ scale: 1 });
       const size = sizes()[at];
       if (size.width !== natural.width || size.height !== natural.height) {
-        setSizes(sizes().map((one, place) => (place === at ? { width: natural.width, height: natural.height } : one)));
+        keepPlace(() => setSizes(sizes().map((one, place) => (place === at ? { width: natural.width, height: natural.height } : one))));
         return;
       }
       const viewport = proxy.getViewport({ scale: shown });
