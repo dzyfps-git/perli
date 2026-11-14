@@ -184,7 +184,16 @@ export function createFileActions(
       });
     },
 
-    undo: (view: FolderView) => undoJob(view.id).catch(report),
-    redo: (view: FolderView) => redoJob(view.id).catch(report),
+    // Only the step this window shows, so a newer one another window made is never undone
+    // unseen. If that step is gone, the refresh shows what Undo would do now.
+    undo(view: FolderView) {
+      const step = jobs.latestStep();
+      if (step === null) return void jobs.refresh();
+      undoJob(view.id, step).catch(report).finally(jobs.refresh);
+    },
+    redo(view: FolderView) {
+      if (!jobs.canRedo()) return void jobs.refresh();
+      redoJob(view.id).catch(report);
+    },
   };
 }

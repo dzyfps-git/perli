@@ -103,6 +103,8 @@ impl Closing {
 struct Snapshot {
     request: u64,
     listing: folder::Listing,
+    /// The folders it shows, which the watch follows while these rows are on screen.
+    watch: Option<Watch>,
 }
 
 #[derive(Default)]
@@ -115,16 +117,18 @@ struct View {
 }
 
 impl View {
-    fn begin(&mut self, request: u64, shown: u64) {
+    /// Returns what the shown rows watch, for the watch to stay on while this read runs.
+    fn begin(&mut self, request: u64, shown: u64) -> Option<Watch> {
         self.latest = self.latest.max(request);
         self.snapshots.retain(|snapshot| snapshot.request == shown);
+        self.snapshots.first().and_then(|snapshot| snapshot.watch.clone())
     }
 
     /// Says whether `listing` is the newest read, which moves the view on to it.
-    fn finish(&mut self, request: u64, listing: folder::Listing) -> bool {
+    fn finish(&mut self, request: u64, listing: folder::Listing, watch: Option<Watch>) -> bool {
         let newest = request == self.latest;
         if newest {
-            self.snapshots.push(Snapshot { request, listing });
+            self.snapshots.push(Snapshot { request, listing, watch });
         }
         newest
     }
@@ -523,14 +527,14 @@ async fn open_folder(
     app: AppHandle,
 ) -> Result<Opened, String> {
     let started = Instant::now();
-    let watch = watch_of(&path);
-    views
+    let shown_watch = views
         .0
         .write()
         .unwrap_or_else(|error| error.into_inner())
         .entry(view)
         .or_default()
         .begin(request, shown);
+    watches.follow(view, shown_watch);
 
     let waiting = preload
         .0
@@ -539,23 +543,27 @@ async fn open_folder(
         .take_if(|(preloaded, _)| *preloaded == path);
     let resolved = folder::resolve(&path).map_err(|error| error.message())?;
     let full = resolved.clone();
-    let listing = async_runtime::spawn_blocking(move || {
+    let (listing, watch) = async_runtime::spawn_blocking(move || {
         network::must_answer(&full)?;
+        let watch = watch_of(&path, &order.expanded);
         let read = || folder::Listing::read(&path, order.clone());
         let first = match waiting {
-            Some((_, reader)) => reader
-                .join()
-                .unwrap_or_else(|_| read())
-                .map(|listing| listing.arranged(order.clone())),
+            Some((_, reader)) => match reader.join().unwrap_or_else(|_| read()) {
+                // Rows of folders opened in place come only with a read.
+                Ok(listing) if listing.expanded() != order.expanded => read(),
+                first => first.map(|listing| listing.arranged(order.clone())),
+            },
             None => read(),
         };
-        first.or_else(|failure| {
-            if network::reconnect(&full, &failure, jobs::owner(&app)) {
-                read()
-            } else {
-                Err(failure)
-            }
-        })
+        first
+            .or_else(|failure| {
+                if network::reconnect(&full, &failure, jobs::owner(&app)) {
+                    read()
+                } else {
+                    Err(failure)
+                }
+            })
+            .map(|listing| (listing, watch))
     })
     .await
     .map_err(|error| error.to_string())?
@@ -569,7 +577,7 @@ async fn open_folder(
     };
     let mut views = views.0.write().unwrap_or_else(|error| error.into_inner());
     if let Some(current) = views.get_mut(&view) {
-        if current.finish(request, listing) {
+        if current.finish(request, listing, watch.clone()) {
             searches.stop(view);
             watches.set(view, watch);
         }
@@ -577,14 +585,13 @@ async fn open_folder(
     Ok(opened)
 }
 
-/// What a view watches once `path` has read fine. Make it before the read, and hand it over only
-/// after, because a failed open leaves the old folder or search on screen, and that one must go
-/// on as it was.
-// ponytail: a finished read the UI drops for a newer open that then fails leaves the watch on the
-// dropped folder until the next open. Handing over when the UI takes the rows would close that.
-fn watch_of(path: &str) -> Option<Watch> {
+/// What a view watches once `path` and the folders opened in it have read fine. Make it before
+/// the read, off the async threads as it lists them, and hand it over only after, because a failed open leaves the old folder or search
+/// on screen, and that one must go on as it was. Each read's rows keep theirs, so a read the UI
+/// drops can't keep the watch either: the next read starts by going back to the rows shown.
+fn watch_of(path: &str, expanded: &[String]) -> Option<Watch> {
     let resolved = folder::resolve(path).ok().filter(|_| path != folder::BIN_PATH)?;
-    Some(Watch::new(resolved.into()))
+    Some(Watch::new(std::iter::once(PathBuf::from(resolved)).chain(expanded.iter().map(PathBuf::from))))
 }
 
 /// Puts the shown folder in a new order as a new snapshot, the same way an open would.
@@ -602,10 +609,11 @@ async fn arrange_view(
     let before = {
         let mut views = views.0.write().unwrap_or_else(|error| error.into_inner());
         let current = views.entry(view).or_default();
-        current.begin(request, shown);
-        current.listing(shown).cloned()
+        let watch = current.begin(request, shown);
+        current.listing(shown).cloned().map(|listing| (listing, watch))
     }
     .ok_or("This folder is no longer open")?;
+    let (before, watch) = before;
 
     let (listing, arranged) = async_runtime::spawn_blocking(move || {
         let listing = before.clone().arranged(order);
@@ -620,7 +628,7 @@ async fn arrange_view(
 
     let mut views = views.0.write().unwrap_or_else(|error| error.into_inner());
     if let Some(current) = views.get_mut(&view) {
-        current.finish(request, listing);
+        current.finish(request, listing, watch);
     }
     Ok(arranged)
 }
@@ -651,21 +659,21 @@ async fn reload_view(
     searches: State<'_, Searches>,
     app: AppHandle,
 ) -> Result<Reloaded, String> {
-    let watch = if search.is_some() { None } else { watch_of(&path) };
     if search.is_none() {
         searches.stop(view);
     }
     let keys = {
         let mut views = views.0.write().unwrap_or_else(|error| error.into_inner());
         let current = views.entry(view).or_default();
-        current.begin(request, shown);
+        watches.follow(view, current.begin(request, shown));
         match current.listing(shown) {
             Some(listing) if select.is_empty() => listing.keys(&selected),
             _ => select.iter().map(|name| name.encode_utf16().collect()).collect(),
         }
     };
 
-    let (listing, reloaded) = async_runtime::spawn_blocking(move || {
+    let (listing, reloaded, watch) = async_runtime::spawn_blocking(move || {
+        let watch = if search.is_some() { None } else { watch_of(&path, &order.expanded) };
         let listing = match search {
             Some(asked) => find(&app, view, asked, &path, order),
             None => folder::Listing::read(&path, order),
@@ -675,7 +683,7 @@ async fn reload_view(
                 shape: listing.shape(),
                 selected: listing.rows_keyed(&keys),
             };
-            (listing, reloaded)
+            (listing, reloaded, watch)
         })
     })
     .await
@@ -684,7 +692,7 @@ async fn reload_view(
 
     let mut views = views.0.write().unwrap_or_else(|error| error.into_inner());
     if let Some(current) = views.get_mut(&view) {
-        if current.finish(request, listing) {
+        if current.finish(request, listing, watch.clone()) {
             watches.set(view, watch);
         }
     }
@@ -1377,15 +1385,34 @@ async fn archive_test(view: u32, request: u64, row: u32, password: Option<String
 }
 
 const DRAG_FOLDER: &str = "perli-drag";
+/// How long what a drag took out of a ZIP stays, as the app it went to may still be reading it.
+const DRAG_KEEP: Duration = Duration::from_secs(60 * 60);
+const DRAG_SWEEP_GAP: Duration = Duration::from_secs(10 * 60);
+
+fn since_1970() -> Duration {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default()
+}
+
+/// Removes each drag's folder in `root` older than `keep`. Its name is when it was made.
+fn sweep_drags(root: &Path, keep: Duration) {
+    let now = since_1970().as_nanos();
+    for entry in std::fs::read_dir(root).into_iter().flatten().flatten() {
+        let made = entry.file_name().to_str().and_then(|name| name.parse::<u128>().ok());
+        if made.is_none_or(|made| now.saturating_sub(made) > keep.as_nanos()) {
+            // One still open in another app goes on a later sweep.
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+}
 
 /// Drags one file out of a ZIP: it is taken out to a temporary folder first, as Windows drags files.
 #[tauri::command]
 async fn drag_entry(view: u32, request: u64, row: u32, entry: String, password: Option<String>, views: State<'_, Views>, app: AppHandle) -> Result<(), String> {
     let path = row_path(&views, view, request, row)?;
     let taken = blocking(move || {
-        // ponytail: what a drag takes out stays until Perli next starts, since the app it was
-        // dropped on may still be copying after the drop.
-        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |now| now.as_nanos());
+        // A sweep takes it away after DRAG_KEEP, since the app it was dropped on may still be
+        // copying it or have it open after the drop.
+        let stamp = since_1970().as_nanos();
         let folder = std::env::temp_dir().join(DRAG_FOLDER).join(stamp.to_string());
         std::fs::create_dir_all(&folder).map_err(|error| error.to_string())?;
         inside::take_out(&path, &entry, password.as_deref(), &folder)
@@ -1696,6 +1723,19 @@ async fn set_tag_paths(paths: Vec<PathBuf>, tag: u32, on: bool) -> Result<(), St
     with_tags(move || tags::set(&paths, tag, on)).await
 }
 
+/// Every tagged file here by path, with its tags, for a backup.
+#[tauri::command]
+async fn tagged_files() -> Result<Vec<(String, Box<[u32]>)>, String> {
+    let files = with_tags(|| Ok(tags::every_file())).await?;
+    Ok(files.into_iter().map(|(path, tags)| (path.to_string_lossy().into_owned(), tags)).collect())
+}
+
+/// Puts a backup's tags back on the files here, by path. Says how many files got them.
+#[tauri::command]
+async fn restore_tagged(files: Vec<(PathBuf, Vec<u32>)>) -> Result<usize, String> {
+    with_tags(move || tags::restore(&files)).await
+}
+
 /// Asks the sync app to keep the selected rows on this device, or to free their space.
 #[tauri::command]
 async fn keep_on_device(selection: Selection, keep: bool, views: State<'_, Views>) -> Result<(), String> {
@@ -1936,6 +1976,8 @@ fn open_window(folder: String, select: Vec<String>) -> Result<(), String> {
 /// How long Perli answers for the Explorer window another app expects after it asks Windows to
 /// show a file in its folder. The ask comes well within this.
 const POSING_TIME: Duration = Duration::from_secs(10);
+/// How long after the start the tags of deleted files are dropped.
+const TAG_SWEEP_AFTER: Duration = Duration::from_secs(60);
 
 /// Passes on what another app wants selected in `folder`, to the Perli that holds the door. That
 /// can be this one, whose door opens a moment after it starts.
@@ -1977,6 +2019,11 @@ fn main() {
     }
     thread::spawn(default_app::heal);
     parts::start_sweep();
+    // Once the start is long over, so it never competes with it.
+    thread::spawn(|| {
+        thread::sleep(TAG_SWEEP_AFTER);
+        tags::sweep();
+    });
     let start = Start::read(ask);
     let preload = start.first_folder().map(|(path, order)| {
         let reader = path.clone();
@@ -2028,8 +2075,12 @@ fn main() {
         })
         .manage(Preload(Mutex::new(preload)))
         .setup(move |app| {
-            // What earlier drags out of a ZIP left behind.
+            // What earlier drags out of a ZIP left behind, then what this run's drags leave.
             let _ = std::fs::remove_dir_all(std::env::temp_dir().join(DRAG_FOLDER));
+            std::thread::spawn(|| loop {
+                std::thread::sleep(DRAG_SWEEP_GAP);
+                sweep_drags(&std::env::temp_dir().join(DRAG_FOLDER), DRAG_KEEP);
+            });
             if let Some(door) = door {
                 let asked = app.handle().clone();
                 door.listen(move |ask| {
@@ -2163,6 +2214,8 @@ fn main() {
             delete_tag,
             set_tag,
             set_tag_paths,
+            tagged_files,
+            restore_tagged,
             keep_on_device,
             common_tags,
             rows_matching,
@@ -2236,14 +2289,42 @@ mod tests {
     fn shown_snapshot_survives_a_dropped_result_and_a_failed_open() {
         let mut view = View::default();
         view.begin(1, 0);
-        view.finish(1, folder::Listing::default());
+        view.finish(1, folder::Listing::default(), None);
 
         // B finishes, but the UI starts C before accepting it, and C fails.
         view.begin(2, 1);
-        view.finish(2, folder::Listing::default());
+        view.finish(2, folder::Listing::default(), None);
         view.begin(3, 1);
 
         assert_eq!(held(&view), [1]);
+    }
+
+    #[test]
+    fn a_drag_sweep_takes_only_old_folders() {
+        let root = std::env::temp_dir().join(format!("perli-drag-sweep-{}", std::process::id()));
+        let now = since_1970().as_nanos();
+        let (old, new) = (root.join((now - 2_000_000_000).to_string()), root.join(now.to_string()));
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::create_dir_all(&new).unwrap();
+        std::fs::write(old.join("a.txt"), "a").unwrap();
+
+        sweep_drags(&root, Duration::from_secs(1));
+        assert!(!old.exists());
+        assert!(new.exists());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_read_starts_by_handing_back_what_the_shown_rows_watch() {
+        let mut view = View::default();
+        view.begin(1, 0);
+        view.finish(1, folder::Listing::default(), Some(Watch::new([PathBuf::from(r"C:\shown")])));
+        view.begin(2, 1);
+        view.finish(2, folder::Listing::default(), Some(Watch::new([PathBuf::from(r"C:\dropped")])));
+
+        // The UI never took B's rows, so C's start puts the watch back on A's folder.
+        let back = view.begin(3, 1).expect("A's watch");
+        assert!(back.same_folders(&Watch::new([PathBuf::from(r"C:\shown")])));
     }
 
     #[test]
@@ -2252,8 +2333,8 @@ mod tests {
         view.begin(1, 0);
         view.begin(2, 0);
 
-        assert!(view.finish(2, folder::Listing::default()));
-        assert!(!view.finish(1, folder::Listing::default()));
+        assert!(view.finish(2, folder::Listing::default(), None));
+        assert!(!view.finish(1, folder::Listing::default(), None));
         assert_eq!(held(&view), [2]);
     }
 
@@ -2261,9 +2342,9 @@ mod tests {
     fn old_snapshot_stays_until_rows_of_the_new_one_are_asked_for() {
         let mut view = View::default();
         view.begin(1, 0);
-        view.finish(1, folder::Listing::default());
+        view.finish(1, folder::Listing::default(), None);
         view.begin(2, 1);
-        view.finish(2, folder::Listing::default());
+        view.finish(2, folder::Listing::default(), None);
 
         assert!(!view.replaced_by(1));
         assert!(view.replaced_by(2));

@@ -14,7 +14,7 @@ use std::sync::{Mutex, PoisonError};
 use rusqlite::{params, Connection, ErrorCode};
 use serde::Serialize;
 use windows::core::{Owned, HSTRING};
-use windows::Win32::Foundation::{ERROR_NO_MORE_FILES, HANDLE};
+use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_INVALID_PARAMETER, ERROR_NO_MORE_FILES, HANDLE};
 use windows::Win32::Storage::FileSystem::{
     ExtendedFileIdType, FileIdExtdDirectoryInfo, FileIdExtdDirectoryRestartInfo, FileIdInfo, GetDriveTypeW,
     GetFileInformationByHandleEx, GetFinalPathNameByHandleW, GetLogicalDrives, GetVolumeInformationByHandleW,
@@ -166,8 +166,7 @@ fn volumes() -> HashMap<u64, Owned<HANDLE>> {
         .collect()
 }
 
-/// Where the file with this ID is now, if it still exists.
-fn path_of(volume: HANDLE, file: FileId) -> Option<PathBuf> {
+fn open_by_id(volume: HANDLE, file: FileId) -> windows::core::Result<Owned<HANDLE>> {
     let id = FILE_ID_DESCRIPTOR {
         dwSize: mem::size_of::<FILE_ID_DESCRIPTOR>() as u32,
         Type: ExtendedFileIdType,
@@ -175,7 +174,21 @@ fn path_of(volume: HANDLE, file: FileId) -> Option<PathBuf> {
     };
     let share = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
     let opened = unsafe { OpenFileById(volume, &id, FILE_READ_ATTRIBUTES.0, share, None, FILE_FLAG_BACKUP_SEMANTICS) };
-    let opened = unsafe { Owned::new(opened.ok()?) };
+    opened.map(|handle| unsafe { Owned::new(handle) })
+}
+
+/// True only when Windows says no file on `volume` has this ID. A file that is there but can't
+/// be opened, such as one another app holds or one the user may not read, is not gone.
+fn gone(volume: HANDLE, file: FileId) -> bool {
+    open_by_id(volume, file).is_err_and(|error| NO_SUCH_ID.contains(&error.code()))
+}
+
+/// What `OpenFileById` says for an ID no file has.
+const NO_SUCH_ID: [windows::core::HRESULT; 2] = [ERROR_INVALID_PARAMETER.to_hresult(), ERROR_FILE_NOT_FOUND.to_hresult()];
+
+/// Where the file with this ID is now, if it still exists.
+fn path_of(volume: HANDLE, file: FileId) -> Option<PathBuf> {
+    let opened = open_by_id(volume, file).ok()?;
     let mut path = vec![0u16; 1024];
     loop {
         let units = unsafe { GetFinalPathNameByHandleW(*opened, &mut path, GETFINALPATHNAMEBYHANDLE_FLAGS(0)) } as usize;
@@ -274,8 +287,36 @@ impl Store {
         self.0.query_row("SELECT EXISTS(SELECT 1 FROM tagged)", [], |row| row.get(0))
     }
 
-    // ponytail: rows of deleted files stay here for good, and every read of a folder on the volume
-    // loads them all. A sweep through OpenFileById would drop them.
+    /// Every tagged file with all of its tags.
+    fn tagged(&self) -> rusqlite::Result<HashMap<(u64, FileId), Vec<u32>>> {
+        let mut rows = self.0.prepare_cached("SELECT volume, file, tag FROM tagged")?;
+        let mut files = HashMap::<(u64, FileId), Vec<u32>>::new();
+        let row = rows.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get(1)?, row.get(2)?)))?;
+        for found in row {
+            let (volume, file, tag) = found?;
+            files.entry((volume as u64, file)).or_default().push(tag);
+        }
+        Ok(files)
+    }
+
+    /// Every tagged file, once.
+    fn files(&self) -> rusqlite::Result<Vec<(u64, FileId)>> {
+        let mut rows = self.0.prepare_cached("SELECT DISTINCT volume, file FROM tagged")?;
+        let files = rows.query_map([], |row| Ok((row.get::<_, i64>(0)? as u64, row.get(1)?)))?.collect();
+        files
+    }
+
+    fn forget(&self, files: &[(u64, FileId)]) -> rusqlite::Result<()> {
+        let all_at_once = self.0.unchecked_transaction()?;
+        let mut statement = all_at_once.prepare("DELETE FROM tagged WHERE volume = ? AND file = ?")?;
+        for (volume, file) in files {
+            statement.execute(params![*volume as i64, file])?;
+        }
+        drop(statement);
+        all_at_once.commit()
+    }
+
+    /// Every read of a folder loads the volume's rows, so `sweep` keeps them to files that exist.
     fn on_volume(&self, volume: u64) -> rusqlite::Result<HashMap<FileId, Vec<u32>>> {
         let mut rows = self.0.prepare_cached("SELECT file, tag FROM tagged WHERE volume = ?")?;
         let mut files = HashMap::<FileId, Vec<u32>>::new();
@@ -367,7 +408,33 @@ pub fn named_id(name: &str) -> Option<u32> {
 /// Where each file with `tag` is now, with all of its tags, by path. A file that is gone, or on a
 /// drive that is not here, is left out and keeps its tags.
 pub fn files_with(tag: u32) -> Vec<(PathBuf, Box<[u32]>)> {
-    let files = existing(|store| store.with_tag(tag)).and_then(Result::ok).unwrap_or_default();
+    placed(existing(|store| store.with_tag(tag)).and_then(Result::ok).unwrap_or_default())
+}
+
+/// Every tagged file that is here now, by path, with its tags. A backup carries these, since a
+/// file's ID means nothing on another computer.
+pub fn every_file() -> Vec<(PathBuf, Box<[u32]>)> {
+    placed(existing(Store::tagged).and_then(Result::ok).unwrap_or_default())
+}
+
+/// Puts tags back on files by path, as a backup holds them. A path that isn't here, or isn't on
+/// NTFS, is passed over. Says how many files got their tags.
+pub fn restore(files: &[(PathBuf, Vec<u32>)]) -> Result<usize, String> {
+    let keyed: Vec<(Key, &[u32])> = files.iter().filter_map(|(path, tags)| Some((file_key(path).ok()?, tags.as_slice()))).collect();
+    if keyed.is_empty() {
+        return Ok(0);
+    }
+    opened(|store| {
+        for (key, tags) in &keyed {
+            for &tag in *tags {
+                store.set(slice::from_ref(key), tag, true)?;
+            }
+        }
+        Ok(keyed.len())
+    })
+}
+
+fn placed(files: HashMap<(u64, FileId), Vec<u32>>) -> Vec<(PathBuf, Box<[u32]>)> {
     if files.is_empty() {
         return Vec::new();
     }
@@ -378,6 +445,24 @@ pub fn files_with(tag: u32) -> Vec<(PathBuf, Box<[u32]>)> {
         .collect();
     found.sort();
     found
+}
+
+/// The tagged files among `files` that are gone for good. Only drives that are here are asked,
+/// so an unplugged drive keeps its tags until it comes back.
+fn gone_of(files: Vec<(u64, FileId)>, volumes: &HashMap<u64, Owned<HANDLE>>) -> Vec<(u64, FileId)> {
+    files.into_iter().filter(|(volume, file)| volumes.get(volume).is_some_and(|top| gone(**top, *file))).collect()
+}
+
+/// Drops the tags of files that no longer exist, so they don't weigh on every folder read. The
+/// store is only locked to read the list and to drop, never while Windows is asked.
+pub fn sweep() {
+    let Some(Ok(files)) = existing(Store::files) else { return };
+    let gone = gone_of(files, &volumes());
+    if !gone.is_empty() {
+        if let Some(Err(error)) = existing(|store| store.forget(&gone)) {
+            eprintln!("dropping the tags of deleted files failed: {error}");
+        }
+    }
 }
 
 /// Each tag's place in name order, for sorting.
@@ -398,6 +483,7 @@ pub fn in_folder(folder: &Path, entries: &[Entry]) -> Tagged {
 
 #[cfg(test)]
 mod tests {
+    use std::os::windows::fs::OpenOptionsExt;
     use std::process::Command;
 
     use super::*;
@@ -596,6 +682,26 @@ mod tests {
 
         fs::remove_file(&moved).unwrap();
         assert_eq!(path_of(**volumes.get(&volume).unwrap(), id), None);
+    }
+
+    #[test]
+    fn only_files_that_are_gone_lose_their_tags() {
+        let (store, folder) = (store(), Folder::new("sweep"));
+        let tag = store.create("a", 0).unwrap().id;
+        let (kept, deleted, held) = (folder.file("kept.txt"), folder.file("deleted.txt"), folder.file("held.txt"));
+        store.set(&[key(&kept), key(&deleted), key(&held)], tag, true).unwrap();
+        let away = (key(&kept).volume ^ 1, key(&kept).file);
+        store.set(&[Key { volume: away.0, file: away.1 }], tag, true).unwrap();
+        fs::remove_file(&deleted).unwrap();
+        // A file another app holds with no sharing at all is still there.
+        let _locked = fs::OpenOptions::new().read(true).share_mode(0).open(&held).unwrap();
+
+        let gone = gone_of(store.files().unwrap(), &volumes());
+        store.forget(&gone).unwrap();
+
+        assert_eq!(gone.len(), 1, "only the deleted file, never the held one or a drive that isn't here");
+        assert_eq!(folder.read(&store), [("held.txt".to_string(), vec![tag]), ("kept.txt".to_string(), vec![tag])]);
+        assert!(store.files().unwrap().contains(&away), "a drive not plugged in keeps its tags");
     }
 
     #[test]

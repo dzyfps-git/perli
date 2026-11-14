@@ -347,9 +347,14 @@ impl Run<'_> {
             // A cancel shows up as a failed item, and must not turn into a prompt.
             self.check()?;
             for (path, slot) in trouble {
+                let handed = self.elevated.len();
                 if self.recycle_trouble(&path, slot)? {
                     waiting.push(path);
                 } else {
+                    // An undo lists what it left in place. A recycle has nothing to try again.
+                    if self.undoing {
+                        self.note_skip(&path, &path, false, handed);
+                    }
                     self.step(1, 0);
                 }
             }

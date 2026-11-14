@@ -93,6 +93,8 @@ enum Change {
         created: Vec<String>,
         kept: Vec<String>,
         failed: Vec<Retry>,
+        /// False for a restore or an undo, whose skips are only listed.
+        retries: bool,
         cancelled: bool,
         /// The undo step this job added.
         step: Option<u64>,
@@ -101,7 +103,7 @@ enum Change {
     },
 }
 
-/// What a copy or a move skipped, which the UI can try again.
+/// What a job skipped. The UI can try it again after a copy or a move.
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Retry {
@@ -241,13 +243,34 @@ struct UndoLog {
     /// What the steps taken for the running undo did, for its redo step.
     #[serde(skip)]
     undone: Option<String>,
+    /// The file as this window last read or wrote it, so a change by another window shows.
+    #[serde(skip)]
+    seen: Option<Stamp>,
+}
+
+/// When a file last changed, and its length.
+type Stamp = (SystemTime, u64);
+
+fn stamp(file: &Path) -> Option<Stamp> {
+    let facts = fs::metadata(file).ok()?;
+    Some((facts.modified().unwrap_or(UNIX_EPOCH), facts.len()))
 }
 
 impl UndoLog {
-    fn load() -> Self {
-        let file = session::data_file(UNDO_FILE);
-        let text = file.and_then(|file| fs::read_to_string(file).ok());
-        text.map_or_else(Self::default, |text| Self::parse(&text))
+    fn load(file: &Path) -> Self {
+        let seen = stamp(file);
+        let text = fs::read_to_string(file).ok();
+        let log = text.map_or_else(Self::default, |text| Self::parse(&text));
+        Self { seen, ..log }
+    }
+
+    /// Takes in what another window wrote since this one last looked. The running undo's
+    /// description is this window's own, so it stays.
+    fn refresh(&mut self, file: &Path) {
+        if stamp(file) != self.seen {
+            let undone = self.undone.take();
+            *self = Self { undone, ..Self::load(file) };
+        }
     }
 
     /// Damaged text starts fresh, because a lost undo log harms nothing.
@@ -270,14 +293,11 @@ impl UndoLog {
         log.to_string()
     }
 
-    // ponytail: rewrites the whole log per job and two windows overwrite each other. Fine for
-    // 100 steps of normal size, append-only per step if huge steps make this slow.
-    fn save(&self) {
-        if let Some(file) = session::data_file(UNDO_FILE) {
-            if let Err(error) = session::write(&file, &self.text()) {
-                eprintln!("saving the undo log failed: {error}");
-            }
+    fn save(&mut self, file: &Path) {
+        if let Err(error) = session::write(file, &self.text()) {
+            eprintln!("saving the undo log failed: {error}");
         }
+        self.seen = stamp(file);
     }
 
     /// Stores what a job did, if anything, and gives the id of a new undo step. A cancelled job
@@ -372,6 +392,8 @@ pub struct Jobs {
     /// only under the `running` lock.
     closed: AtomicBool,
     undo: Mutex<UndoLog>,
+    /// Where the log is kept, shared by every Perli window. None keeps it in memory only.
+    undo_file: Option<PathBuf>,
     /// Reads the saved log off the main thread, so a big one can't slow the start.
     loading: Mutex<Option<JoinHandle<UndoLog>>>,
     /// How many running copy-like jobs use each drive.
@@ -382,20 +404,70 @@ pub struct Jobs {
     one_per_drive: AtomicBool,
 }
 
+/// The undo log while one window uses it. Every Perli window shares one log file, so this holds
+/// a lock the other windows wait on, starts from what they last wrote, and writes back any change
+/// before the lock goes.
+struct SharedLog<'a> {
+    log: MutexGuard<'a, UndoLog>,
+    file: Option<&'a Path>,
+    changed: bool,
+    _held: Option<fs::File>,
+}
+
+impl std::ops::Deref for SharedLog<'_> {
+    type Target = UndoLog;
+    fn deref(&self) -> &UndoLog {
+        &self.log
+    }
+}
+
+impl std::ops::DerefMut for SharedLog<'_> {
+    fn deref_mut(&mut self) -> &mut UndoLog {
+        self.changed = true;
+        &mut self.log
+    }
+}
+
+impl Drop for SharedLog<'_> {
+    fn drop(&mut self) {
+        if let (true, Some(file)) = (self.changed, self.file) {
+            self.log.save(file);
+        }
+    }
+}
+
+/// Holds the lock every Perli window takes before it reads or writes the log at `file`. A lock
+/// that can't be had leaves the log as one window's own, which is how it was before windows
+/// shared it.
+fn hold(file: &Path) -> Option<fs::File> {
+    let _ = fs::create_dir_all(file.parent()?);
+    let lock = fs::OpenOptions::new().create(true).truncate(false).write(true).open(file.with_extension("lock")).ok()?;
+    lock.lock().ok()?;
+    Some(lock)
+}
+
 impl Jobs {
     pub fn loading_history() -> Self {
+        let file = session::data_file(UNDO_FILE);
+        let read = file.clone();
         Self {
-            loading: Mutex::new(Some(thread::spawn(UndoLog::load))),
+            loading: Mutex::new(Some(thread::spawn(move || read.map(|file| UndoLog::load(&file)).unwrap_or_default()))),
+            undo_file: file,
             ..Self::default()
         }
     }
 
-    fn log(&self) -> MutexGuard<'_, UndoLog> {
+    fn log(&self) -> SharedLog<'_> {
         let mut log = lock(&self.undo);
         if let Some(loading) = lock(&self.loading).take() {
             *log = loading.join().unwrap_or_default();
         }
-        log
+        let file = self.undo_file.as_deref();
+        let held = file.and_then(hold);
+        if let Some(file) = file {
+            log.refresh(file);
+        }
+        SharedLog { log, file, changed: false, _held: held }
     }
 
     pub fn undoable(&self) -> Undoable {
@@ -672,11 +744,11 @@ impl Bridge {
             touched,
             kept,
             failed,
+            retries,
             cancelled,
         } = outcome;
         let mut log = jobs.log();
         let step = log.record(plan.history, done);
-        log.save();
         let undoable = log.undoable();
         drop(log);
         // Only now is the job over, so closing waits for its undo step to be saved.
@@ -686,6 +758,7 @@ impl Bridge {
             created,
             kept: kept.iter().map(|path| text(path)).collect(),
             failed: failed.iter().take(SELECT_LIMIT).map(Retry::from).collect(),
+            retries,
             cancelled,
             step,
             undoable,
@@ -994,6 +1067,26 @@ mod tests {
     }
 
     #[test]
+    fn windows_share_one_log_and_never_lose_each_others_steps() {
+        let folder = std::env::temp_dir().join(format!("perli-undo-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&folder);
+        let file = folder.join("undo.json");
+        let window = || Jobs { undo_file: Some(file.clone()), ..Jobs::default() };
+        let (first, second) = (window(), window());
+
+        let one = first.log().record(History::New, step(1));
+        let two = second.log().record(History::New, step(2));
+        assert!(two > one, "ids stay unique across windows");
+        assert_eq!(first.log().latest(), two, "the first window sees the second's step");
+
+        // An undo in one window takes the step away from the other too.
+        assert_eq!(first.log().take(None), Some(step(2)));
+        assert_eq!(second.log().latest(), one);
+        assert_eq!(UndoLog::load(&file).steps.len(), 1);
+        let _ = fs::remove_dir_all(&folder);
+    }
+
+    #[test]
     fn damaged_log_starts_fresh() {
         for text in ["", "{", r#"{"next":"x"}"#, r#"{"next":1,"steps":[{"id":0}],"redo":[]}"#] {
             assert_eq!(UndoLog::parse(text).latest(), None);
@@ -1061,6 +1154,7 @@ mod tests {
                 created: Vec::new(),
                 kept: Vec::new(),
                 failed: Vec::new(),
+                retries: true,
                 cancelled: false,
                 step: None,
                 undoable: Undoable {
