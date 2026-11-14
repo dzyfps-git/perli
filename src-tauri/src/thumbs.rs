@@ -6,6 +6,7 @@ use std::mem::size_of;
 use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -76,6 +77,10 @@ impl Pool {
     /// Hands `work` on, and starts one more thread if every one there is stuck.
     fn send(&self, work: Work) {
         let _ = self.sender.send(work);
+        self.grow();
+    }
+
+    fn grow(&self) {
         if needs_another(&locked(&self.busy), Instant::now()) {
             self.add_worker();
         }
@@ -113,13 +118,36 @@ pub async fn cover(path: PathBuf, edge: u32) -> Vec<u8> {
 }
 
 async fn load(path: PathBuf, edge: u32, own: bool) -> Vec<u8> {
-    let (sender, mut result) = async_runtime::channel(1);
+    let (sender, result) = async_runtime::channel(1);
     let edge = edge.clamp(1, MAX_EDGE) as i32;
-    let work = Box::new(move || {
-        let _ = sender.blocking_send(picture(&path, edge, own).unwrap_or_default());
-    });
+    let started = Arc::new(AtomicBool::new(false));
+    let work = {
+        let started = started.clone();
+        Box::new(move || {
+            started.store(true, Ordering::Relaxed);
+            let _ = sender.blocking_send(picture(&path, edge, own).unwrap_or_default());
+        })
+    };
     locked(queue()).send(work);
-    result.recv().await.unwrap_or_default()
+    answer(result, &started, STUCK, || locked(queue()).grow()).await
+}
+
+/// The picture, or nothing once its handler has been on it for `stuck`, so the list's slot for
+/// it frees up even when no other request comes. Work still waiting gets a new thread if every
+/// one there is stuck.
+async fn answer(
+    mut result: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    started: &AtomicBool,
+    stuck: Duration,
+    grow: impl Fn(),
+) -> Vec<u8> {
+    loop {
+        match tokio::time::timeout(stuck, result.recv()).await {
+            Ok(picture) => return picture.unwrap_or_default(),
+            Err(_) if started.load(Ordering::Relaxed) => return Vec::new(),
+            Err(_) => grow(),
+        }
+    }
 }
 
 const PEEK_NAMES: usize = 6;
@@ -378,6 +406,31 @@ mod tests {
     fn a_missing_file_has_no_picture() {
         let _com = Com::enter();
         assert!(picture(&std::env::temp_dir().join("perli-no-such-file"), EDGE as i32, false).is_err());
+    }
+
+    #[test]
+    fn a_stuck_picture_answers_nothing_so_its_slot_frees() {
+        let (sender, result) = async_runtime::channel::<Vec<u8>>(1);
+        let started = AtomicBool::new(true);
+        let stuck = Duration::from_millis(50);
+        // Before, this waited for the handler forever.
+        let picture = async_runtime::block_on(answer(result, &started, stuck, || {}));
+        assert!(picture.is_empty());
+        drop(sender);
+    }
+
+    #[test]
+    fn work_still_waiting_asks_for_a_thread_and_keeps_waiting() {
+        let (sender, result) = async_runtime::channel::<Vec<u8>>(1);
+        let started = AtomicBool::new(false);
+        let asked = std::cell::Cell::new(0);
+        let picture = async_runtime::block_on(answer(result, &started, Duration::from_millis(20), || {
+            asked.set(asked.get() + 1);
+            if asked.get() == 2 {
+                sender.try_send(vec![7]).unwrap();
+            }
+        }));
+        assert_eq!((picture, asked.get()), (vec![7], 2));
     }
 
     #[test]
