@@ -1,7 +1,7 @@
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { Effect, getCurrentWindow } from "@tauri-apps/api/window";
 import { createEffect, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
-import { createTag, exportSettings, importSettings, isDefaultApp, listTags, setDefaultApp, terminals } from "../../api";
+import { createTag, exportSettings, importSettings, isDefaultApp, listTags, restoreTagged, setDefaultApp, taggedFiles, terminals } from "../../api";
 import type { Tag, Terminal } from "../../api";
 import { ColorField, Switch } from "../../ui/Controls";
 import { morph } from "../../ui/morph";
@@ -76,7 +76,7 @@ import {
   type Backdrop,
   type Theme,
 } from "./appearance";
-import { missingTags, packed, remapTags, settingsOf, staleSettings, storageKey, unpacked } from "./backup";
+import { missingTags, packed, remapTags, settingsOf, staleSettings, storageKey, taggedHere, unpacked } from "./backup";
 import { paletteFromPixels, paletteFromText, paletteText, untilTurn, type Palette } from "./palettes";
 import { fitsSearch } from "./search";
 import {
@@ -337,7 +337,8 @@ export function Settings(props: {
     try {
       const prefs = settingsOf(Object.entries(localStorage));
       const tags = (await listTags()).map(({ name, color, id }) => ({ name, color, id }));
-      if (await exportSettings(packed({ prefs, tags }))) setBackupNote("Settings saved.");
+      const tagged = (await taggedFiles()).map(([path, tags]) => ({ path, tags }));
+      if (await exportSettings(packed({ prefs, tags, tagged }))) setBackupNote("Settings saved.");
     } catch (failure) {
       setBackupNote(String(failure));
     }
@@ -348,9 +349,12 @@ export function Settings(props: {
     try {
       const text = await importSettings();
       if (text === null) return;
-      const { prefs: saved, tags } = unpacked(text);
+      const { prefs: saved, tags, tagged = [] } = unpacked(text);
       for (const tag of missingTags(tags, await listTags())) await createTag(tag.name, tag.color);
-      const prefs = remapTags(saved, tags, await listTags());
+      const here = await listTags();
+      const prefs = remapTags(saved, tags, here);
+      // Files at the same paths here get their tags back; the rest are passed over.
+      await restoreTagged(taggedHere(tagged, tags, here).map(({ path, tags }): [string, number[]] => [path, tags]));
       // A setting the file lacks was at its start value when saved, so it goes back to that.
       const current = settingsOf(Object.entries(localStorage));
       for (const name of staleSettings(current, prefs)) localStorage.removeItem(storageKey(name));

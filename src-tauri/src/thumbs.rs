@@ -5,9 +5,11 @@ use std::fs;
 use std::mem::size_of;
 use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Sender};
-use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use tauri::async_runtime;
 use windows::core::{Error, Interface, Result};
@@ -27,9 +29,12 @@ use crate::ops::{shell_item, Com};
 pub const EDGE: u32 = 256;
 /// The quick preview asks for no more than this.
 const MAX_EDGE: u32 = 4096;
-// ponytail: no timeout, so a stuck handler keeps its thread and four of them end the pictures
-// until a restart. The list itself is never affected. A process of its own could be killed.
 const WORKERS: usize = 4;
+/// A handler that takes this long is taken for stuck. Windows gives no way to stop it, so its
+/// thread is left to it and a new one takes its place.
+const STUCK: Duration = Duration::from_secs(15);
+/// Stuck threads stay, so past this many in all no new one starts.
+const MOST_THREADS: usize = 16;
 /// Where the pixels start in what `read` gives.
 const HEADER_BYTES: usize = 8;
 /// Enough for the lines a hover card shows.
@@ -38,24 +43,66 @@ const PEEK_LINES: usize = 12;
 
 type Work = Box<dyn FnOnce() + Send>;
 
+/// The threads that ask handlers for pictures, and when each started the one it is on.
+struct Pool {
+    sender: Sender<Work>,
+    receiver: Arc<Mutex<Receiver<Work>>>,
+    busy: Arc<Mutex<Vec<Option<Instant>>>>,
+}
+
+fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+impl Pool {
+    fn add_worker(&self) {
+        let (receiver, busy) = (self.receiver.clone(), self.busy.clone());
+        let slot = {
+            let mut busy = locked(&busy);
+            busy.push(None);
+            busy.len() - 1
+        };
+        thread::spawn(move || {
+            let _com = Com::enter();
+            loop {
+                let work = locked(&receiver).recv();
+                let Ok(work) = work else { return };
+                locked(&busy)[slot] = Some(Instant::now());
+                work();
+                locked(&busy)[slot] = None;
+            }
+        });
+    }
+
+    /// Hands `work` on, and starts one more thread if every one there is stuck.
+    fn send(&self, work: Work) {
+        let _ = self.sender.send(work);
+        self.grow();
+    }
+
+    fn grow(&self) {
+        if needs_another(&locked(&self.busy), Instant::now()) {
+            self.add_worker();
+        }
+    }
+}
+
+/// True when no thread is free or still in time, and there is room for one more.
+fn needs_another(busy: &[Option<Instant>], now: Instant) -> bool {
+    let stuck = |started: &Option<Instant>| started.is_some_and(|started| now - started >= STUCK);
+    busy.len() < MOST_THREADS && busy.iter().all(stuck)
+}
+
 /// Started by the first picture, so that a list view costs nothing.
-fn queue() -> &'static Mutex<Sender<Work>> {
-    static QUEUE: OnceLock<Mutex<Sender<Work>>> = OnceLock::new();
+fn queue() -> &'static Mutex<Pool> {
+    static QUEUE: OnceLock<Mutex<Pool>> = OnceLock::new();
     QUEUE.get_or_init(|| {
         let (sender, receiver) = mpsc::channel::<Work>();
-        let receiver = Arc::new(Mutex::new(receiver));
+        let pool = Pool { sender, receiver: Arc::new(Mutex::new(receiver)), busy: Arc::default() };
         for _ in 0..WORKERS {
-            let receiver = receiver.clone();
-            thread::spawn(move || {
-                let _com = Com::enter();
-                loop {
-                    let work = receiver.lock().unwrap_or_else(PoisonError::into_inner).recv();
-                    let Ok(work) = work else { return };
-                    work();
-                }
-            });
+            pool.add_worker();
         }
-        Mutex::new(sender)
+        Mutex::new(pool)
     })
 }
 
@@ -71,13 +118,36 @@ pub async fn cover(path: PathBuf, edge: u32) -> Vec<u8> {
 }
 
 async fn load(path: PathBuf, edge: u32, own: bool) -> Vec<u8> {
-    let (sender, mut result) = async_runtime::channel(1);
+    let (sender, result) = async_runtime::channel(1);
     let edge = edge.clamp(1, MAX_EDGE) as i32;
-    let work = Box::new(move || {
-        let _ = sender.blocking_send(picture(&path, edge, own).unwrap_or_default());
-    });
-    let _ = queue().lock().unwrap_or_else(PoisonError::into_inner).send(work);
-    result.recv().await.unwrap_or_default()
+    let started = Arc::new(AtomicBool::new(false));
+    let work = {
+        let started = started.clone();
+        Box::new(move || {
+            started.store(true, Ordering::Relaxed);
+            let _ = sender.blocking_send(picture(&path, edge, own).unwrap_or_default());
+        })
+    };
+    locked(queue()).send(work);
+    answer(result, &started, STUCK, || locked(queue()).grow()).await
+}
+
+/// The picture, or nothing once its handler has been on it for `stuck`, so the list's slot for
+/// it frees up even when no other request comes. Work still waiting gets a new thread if every
+/// one there is stuck.
+async fn answer(
+    mut result: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    started: &AtomicBool,
+    stuck: Duration,
+    grow: impl Fn(),
+) -> Vec<u8> {
+    loop {
+        match tokio::time::timeout(stuck, result.recv()).await {
+            Ok(picture) => return picture.unwrap_or_default(),
+            Err(_) if started.load(Ordering::Relaxed) => return Vec::new(),
+            Err(_) => grow(),
+        }
+    }
 }
 
 const PEEK_NAMES: usize = 6;
@@ -220,6 +290,16 @@ fn to_rgba(pixels: &mut [u8]) {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_new_thread_starts_only_when_every_one_is_stuck() {
+        let now = Instant::now() + STUCK * 2;
+        let (free, fresh, stuck) = (None, Some(now - STUCK / 2), Some(now - STUCK));
+        assert!(!needs_another(&[stuck, stuck, stuck, free], now));
+        assert!(!needs_another(&[stuck, stuck, stuck, fresh], now));
+        assert!(needs_another(&[stuck, stuck, stuck, stuck], now));
+        assert!(!needs_another(&vec![stuck; MOST_THREADS], now), "never past the cap");
+    }
+
     fn folder(name: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!("perli-thumbs-{name}-{}", std::process::id()));
         fs::create_dir_all(&path).unwrap();
@@ -326,6 +406,31 @@ mod tests {
     fn a_missing_file_has_no_picture() {
         let _com = Com::enter();
         assert!(picture(&std::env::temp_dir().join("perli-no-such-file"), EDGE as i32, false).is_err());
+    }
+
+    #[test]
+    fn a_stuck_picture_answers_nothing_so_its_slot_frees() {
+        let (sender, result) = async_runtime::channel::<Vec<u8>>(1);
+        let started = AtomicBool::new(true);
+        let stuck = Duration::from_millis(50);
+        // Before, this waited for the handler forever.
+        let picture = async_runtime::block_on(answer(result, &started, stuck, || {}));
+        assert!(picture.is_empty());
+        drop(sender);
+    }
+
+    #[test]
+    fn work_still_waiting_asks_for_a_thread_and_keeps_waiting() {
+        let (sender, result) = async_runtime::channel::<Vec<u8>>(1);
+        let started = AtomicBool::new(false);
+        let asked = std::cell::Cell::new(0);
+        let picture = async_runtime::block_on(answer(result, &started, Duration::from_millis(20), || {
+            asked.set(asked.get() + 1);
+            if asked.get() == 2 {
+                sender.try_send(vec![7]).unwrap();
+            }
+        }));
+        assert_eq!((picture, asked.get()), (vec![7], 2));
     }
 
     #[test]

@@ -24,10 +24,18 @@ export interface TagLook {
   id?: number;
 }
 
+/** A tagged file by its path, with the numbers of its tags on the computer it was saved on. */
+export interface TaggedFile {
+  path: string;
+  tags: number[];
+}
+
 export interface Backup {
   /** Each setting as it is stored, by its name without the prefix. */
   prefs: Record<string, string>;
   tags: TagLook[];
+  /** Which files have which tags. Older files have none. */
+  tagged?: TaggedFile[];
 }
 
 /** The settings among everything stored. `entries` are storage keys and their values. */
@@ -42,7 +50,7 @@ export const packed = (backup: Backup) => JSON.stringify({ app: "Perli", kind: "
 
 /** Reads a file of settings, keeping only what is usable. Throws when it is not one. */
 export function unpacked(text: string): Backup {
-  let file: { app?: unknown; kind?: unknown; prefs?: unknown; tags?: unknown };
+  let file: { app?: unknown; kind?: unknown; prefs?: unknown; tags?: unknown; tagged?: unknown };
   try {
     file = JSON.parse(text);
   } catch {
@@ -57,9 +65,14 @@ export function unpacked(text: string): Backup {
   const tags = (Array.isArray(file.tags) ? file.tags : []).filter(
     (tag): tag is TagLook => typeof tag?.name === "string" && Number.isInteger(tag.color) && tag.color >= 0,
   );
+  const tagged = (Array.isArray(file.tagged) ? file.tagged : []).filter(
+    (one): one is TaggedFile =>
+      typeof one?.path === "string" && Array.isArray(one.tags) && one.tags.every((id: unknown) => Number.isInteger(id)),
+  );
   return {
     prefs: Object.fromEntries(prefs),
     tags: tags.map(({ name, color, id }) => ({ name, color, ...(Number.isInteger(id) ? { id } : {}) })),
+    tagged: tagged.map(({ path, tags }) => ({ path, tags })),
   };
 }
 
@@ -90,12 +103,7 @@ const TAG_HOLDERS: Record<string, (value: unknown, map: (ids: number[]) => numbe
  */
 export function remapTags(prefs: Record<string, string>, saved: TagLook[], here: { id: number; name: string }[]) {
   if (!saved.some((tag) => tag.id !== undefined)) return prefs;
-  const numbers = new Map<number, number>();
-  for (const tag of saved) {
-    const found = here.find((other) => other.name.toLowerCase() === tag.name.toLowerCase());
-    if (tag.id !== undefined && found) numbers.set(tag.id, found.id);
-  }
-  const map = (ids: number[]) => ids.flatMap((id) => (numbers.has(id) ? [numbers.get(id)!] : []));
+  const map = tagNumbers(saved, here);
   const next = { ...prefs };
   for (const [name, remap] of Object.entries(TAG_HOLDERS)) {
     if (!(name in next)) continue;
@@ -106,6 +114,22 @@ export function remapTags(prefs: Record<string, string>, saved: TagLook[], here:
     }
   }
   return next;
+}
+
+/** Changes tag numbers of the saving computer to those of the tags with the same names here. */
+export function tagNumbers(saved: TagLook[], here: { id: number; name: string }[]) {
+  const numbers = new Map<number, number>();
+  for (const tag of saved) {
+    const found = here.find((other) => other.name.toLowerCase() === tag.name.toLowerCase());
+    if (tag.id !== undefined && found) numbers.set(tag.id, found.id);
+  }
+  return (ids: number[]) => ids.flatMap((id) => (numbers.has(id) ? [numbers.get(id)!] : []));
+}
+
+/** A backup's tagged files with this computer's tag numbers. Files left with no tag drop out. */
+export function taggedHere(tagged: TaggedFile[], saved: TagLook[], here: { id: number; name: string }[]) {
+  const map = tagNumbers(saved, here);
+  return tagged.map(({ path, tags }) => ({ path, tags: map(tags) })).filter(({ tags }) => tags.length > 0);
 }
 
 /** The stored settings a restore must take away, because the file has none of them. */
