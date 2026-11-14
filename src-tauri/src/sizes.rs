@@ -43,14 +43,17 @@ fn load() -> HashMap<PathBuf, (u64, u64)> {
 fn keep(known: &mut HashMap<PathBuf, (u64, u64)>, path: PathBuf, bytes: u64) {
     known.insert(path, (bytes, ADDED.fetch_add(1, Ordering::Relaxed)));
     if known.len() > MOST_KNOWN {
-        let mut ages: Vec<u64> = known.values().map(|&(_, at)| at).collect();
-        let (_, &mut cut, _) = ages.select_nth_unstable(MOST_KNOWN / 4);
-        known.retain(|_, &mut (_, at)| at > cut);
+        // Down to three quarters exactly, even where ages tie, as every total loaded from last
+        // time does.
+        let going = known.len() - MOST_KNOWN * 3 / 4;
+        let mut ages: Vec<(u64, PathBuf)> = known.iter().map(|(path, &(_, at))| (at, path.clone())).collect();
+        ages.select_nth_unstable(going);
+        for (_, path) in &ages[..going] {
+            known.remove(path);
+        }
     }
 }
 
-/// Writes under the lock, so a `forget` can't land between reading the totals and writing them.
-/// No totals means forgotten, so there is no file to bring back.
 /// Where `save` writes. Tests write to a file of their own and leave the user's alone.
 fn saved_file() -> Option<PathBuf> {
     if cfg!(test) {
@@ -60,6 +63,8 @@ fn saved_file() -> Option<PathBuf> {
     }
 }
 
+/// Writes under the lock, so a `forget` can't land between reading the totals and writing them.
+/// No totals means forgotten, so there is no file to bring back.
 fn save() {
     let Some(file) = saved_file() else { return };
     let known = KNOWN.read().unwrap_or_else(PoisonError::into_inner);
@@ -292,6 +297,15 @@ mod tests {
         assert!(known.len() <= MOST_KNOWN * 3 / 4, "{}", known.len());
         assert!(!known.contains_key(Path::new("0")), "the oldest goes");
         assert_eq!(known.get(Path::new(&MOST_KNOWN.to_string())).map(|&(bytes, _)| bytes), Some(MOST_KNOWN as u64));
+    }
+
+    #[test]
+    fn totals_loaded_from_last_time_go_a_quarter_at_a_time_too() {
+        // Every saved total loads as equally old.
+        let mut known: HashMap<PathBuf, (u64, u64)> = (0..MOST_KNOWN).map(|n| (PathBuf::from(n.to_string()), (1, 0))).collect();
+        keep(&mut known, PathBuf::from("new"), 2);
+        assert_eq!(known.len(), MOST_KNOWN * 3 / 4);
+        assert!(known.contains_key(Path::new("new")));
     }
 
     #[test]
