@@ -53,6 +53,9 @@ export interface Look {
   icon?: string;
   /** A picture shown for the folder in place of its icon. */
   cover?: string;
+  /** Which end of the cover a tile keeps when it crops it: the top or left (start), or the
+   *  bottom or right (end). The middle when not set. */
+  coverAt?: "start" | "end";
   /** Every folder inside, at any depth, takes this color and icon unless it has its own. */
   inside?: boolean;
 }
@@ -69,12 +72,18 @@ export function withLook(looks: Looks, path: string, change: Look): Looks {
   if (look.color === undefined) delete look.color;
   if (look.icon === undefined) delete look.icon;
   if (look.cover === undefined) delete look.cover;
+  // Where to crop goes with the cover it was set for.
+  if (look.coverAt === undefined || look.cover === undefined || ("cover" in change && !("coverAt" in change))) delete look.coverAt;
   // Only a color or an icon has anything to hand down.
   if (!look.inside || (look.color === undefined && look.icon === undefined)) delete look.inside;
   if (Object.keys(look).length > 0) next[key] = look;
   else delete next[key];
   return next;
 }
+
+/** Where a tile crops a cover, as CSS object-position. Both axes, since a picture is cut only
+ *  along its longer one. */
+export const coverPosition = (at: Look["coverAt"]) => (at === "start" ? "0% 0%" : at === "end" ? "100% 100%" : "");
 
 /** The look `path` shows: its own color and icon, or else those of the nearest folder above
  *  that hands its look to the folders inside. A cover is never handed down. */

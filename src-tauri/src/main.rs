@@ -1126,6 +1126,13 @@ async fn pick_folder(app: AppHandle) -> Result<Option<String>, String> {
     off_main(move || menus::pick_folder(main)).await
 }
 
+/// Windows' file picker for a cover of `folder`. Nothing when the user backs out.
+#[tauri::command]
+async fn pick_picture(folder: PathBuf, app: AppHandle) -> Result<Option<String>, String> {
+    let main = jobs::owner(&app);
+    off_main(move || menus::pick_picture(main, folder)).await
+}
+
 /// Windows' file picker for an app. Nothing when the user backs out.
 #[tauri::command]
 async fn browse_app(app: AppHandle) -> Result<Option<String>, String> {
@@ -1796,10 +1803,15 @@ async fn row_props(view: u32, request: u64, rows: Vec<u32>, names: Vec<String>, 
     blocking(move || Ok(preview::props_of(&paths, &names))).await
 }
 
-/// A few pictures right inside `path`, for a folder tile to show a stack of.
+/// The most pictures the cover picker offers. A folder with more is better served by Browse.
+const MOST_COVER_CHOICES: usize = 200;
+
+/// A few pictures right inside `path`, for a folder tile to show a stack of, or up to `most`
+/// for the cover picker.
 #[tauri::command]
-async fn folder_pictures(path: PathBuf) -> Result<Vec<PathBuf>, String> {
-    blocking(move || Ok(folder::pictures_in(&path, FOLDER_STACK))).await
+async fn folder_pictures(path: PathBuf, most: Option<usize>) -> Result<Vec<PathBuf>, String> {
+    let most = most.unwrap_or(FOLDER_STACK).min(MOST_COVER_CHOICES);
+    blocking(move || Ok(folder::pictures_in(&path, most))).await
 }
 
 /// Adds up the folders in `path`, and says so as totals come in.
@@ -2173,6 +2185,7 @@ fn main() {
             open_paths_with_exe,
             browse_app,
             pick_folder,
+            pick_picture,
             eject_drive,
             open_device,
             unlock_drive,

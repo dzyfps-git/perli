@@ -21,6 +21,7 @@ import type { ListHandle, RowAt } from "../navigation/folderView";
 import { isBin, join, parentOf, relativeTo, samePath } from "../navigation/path";
 import { dayOf } from "../reach/lists";
 import { allLooks, lookOf } from "../sidebar/saved";
+import { coverPosition } from "../sidebar/placeLists";
 import { EmptyState, type Empty } from "./EmptyState";
 import { HoverCard, type CardAsk } from "./HoverCard";
 import {
@@ -704,6 +705,7 @@ export function FileList(props: {
     pooled.element.toggleAttribute("data-stack", stacked);
     const path = row && join(row.location || props.folder, row.name);
     const key = look?.cover ? `cover|${look.cover}` : stacked ? `stack|${path}|${row!.modified}` : pictured ? thumbKey(row) : undefined;
+    if (pooled.thumb) pooled.thumb.style.objectPosition = look?.cover ? coverPosition(look.coverAt) : "";
     showThumb(pooled, key);
     // A book or comic part read shows how far, as a thin bar under its icon.
     const read = row && !row.isDir ? readProgress()[join(row.location || props.folder, row.name)] : undefined;

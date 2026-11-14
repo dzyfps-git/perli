@@ -26,7 +26,7 @@ use windows::Win32::UI::Shell::Common::{COMDLG_FILTERSPEC, ITEMIDLIST};
 use windows::Win32::UI::Shell::{
     FileOpenDialog, FOLDERID_SendTo, IAssocHandler, IContextMenu, IContextMenu2, IContextMenu3,
     FileSaveDialog, IFileDialog, IFileOpenDialog, IShellFolder, IShellItem, IShellItemArray, ILFree, SHAssocEnumHandlers,
-    SHCreateShellItemArrayFromIDLists, SHGetIDListFromObject, SHOpenWithDialog, ShellExecuteW,
+    SHCreateItemFromParsingName, SHCreateShellItemArrayFromIDLists, SHGetIDListFromObject, SHOpenWithDialog, ShellExecuteW,
     ASSOC_FILTER, ASSOC_FILTER_NONE, ASSOC_FILTER_RECOMMENDED, SIGDN_FILESYSPATH,
     BHID_DataObject, BHID_SFObject, BHID_SFUIObject, CMF_CANRENAME, CMF_EXPLORE, CMF_NORMAL,
     CMINVOKECOMMANDINFO,
@@ -393,6 +393,27 @@ pub fn browse_app(main: isize) -> Result<Option<String>> {
         let dialog: IFileOpenDialog = CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER)?;
         dialog.SetFileTypes(&[COMDLG_FILTERSPEC { pszName: w!("Apps"), pszSpec: w!("*.exe") }])?;
         dialog.SetTitle(w!("Choose an app"))?;
+        match dialog.Show(Some(HWND(main as _))) {
+            Ok(()) => Ok(Some(take_text(dialog.GetResult()?.GetDisplayName(SIGDN_FILESYSPATH)?))),
+            Err(closed) if closed.code() == ERROR_CANCELLED.to_hresult() => Ok(None),
+            Err(failure) => Err(failure),
+        }
+    })
+}
+
+/// Windows' file picker for a folder's cover, opened in `start`. Nothing when the user backs out.
+pub fn pick_picture(main: isize, start: PathBuf) -> Result<Option<String>> {
+    on_worker(move |_| unsafe {
+        let dialog: IFileOpenDialog = CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER)?;
+        dialog.SetFileTypes(&[COMDLG_FILTERSPEC {
+            pszName: w!("Pictures"),
+            pszSpec: w!("*.jpg;*.jpeg;*.png;*.gif;*.webp;*.bmp;*.heic;*.avif;*.tif;*.tiff"),
+        }])?;
+        dialog.SetTitle(w!("Choose a cover"))?;
+        // A folder that is gone just leaves Windows' own choice of where to start.
+        if let Ok(folder) = SHCreateItemFromParsingName::<_, _, IShellItem>(&HSTRING::from(start.as_os_str()), None) {
+            dialog.SetFolder(&folder)?;
+        }
         match dialog.Show(Some(HWND(main as _))) {
             Ok(()) => Ok(Some(take_text(dialog.GetResult()?.GetDisplayName(SIGDN_FILESYSPATH)?))),
             Err(closed) if closed.code() == ERROR_CANCELLED.to_hresult() => Ok(None),
