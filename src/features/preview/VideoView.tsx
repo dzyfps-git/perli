@@ -7,7 +7,9 @@ import { laneDrag } from "./Player";
 import { clock, remember, RESUME_FROM_SECONDS, RESUME_MARGIN_SECONDS, resumePlace, resumes } from "./playback";
 import { hushMini, popOut, takeBack } from "./popOut";
 import { cuesOf, type Cue } from "./timedText";
-import { setSubtitles, subtitles, videoMuted, videoPopOut, VIEWER_SETTINGS } from "./viewerPrefs";
+import { Minimap } from "./Minimap";
+import { minimapShown, setSubtitles, subtitles, videoMuted, videoPopOut, VIEWER_SETTINGS } from "./viewerPrefs";
+import { clampPan, panFor, viewWindow, type Size } from "./zoomView";
 
 const ICON_PLAY = "";
 const ICON_PAUSE = "";
@@ -26,6 +28,12 @@ const RESUME_SAVE_MS = 5000;
 const FRAME_SECONDS = 1 / 30;
 const SCOUT_WIDTH = 160;
 const SAVED_SHOWN_MS = 2400;
+const MOST_ZOOM = 8;
+const ZOOM_STEP = 1.25;
+/** How far one notch of the wheel zooms, as for pictures. */
+const WHEEL = 0.0015;
+/** A press that moves further than this pans, and doesn't play or pause. */
+const DRAG_PX = 4;
 
 export interface VideoViewProps {
   path: string;
@@ -76,6 +84,15 @@ export function VideoView(live: VideoViewProps) {
   let subtitleText: string | undefined;
   /** A handover under way; another asked for meanwhile is dropped. */
   let handing = false;
+  let stage!: HTMLDivElement;
+  /** A press on the stage that panned, so its click doesn't play or pause. */
+  let dragged = false;
+  /** How many times the fitted film it shows at; 1 fits. */
+  const [zoom, setZoom] = createSignal(1);
+  const [pan, setPan] = createSignal({ x: 0, y: 0 });
+  const [stageSize, setStageSize] = createSignal<Size>({ width: 0, height: 0 });
+  const [fitted, setFitted] = createSignal<Size>({ width: 0, height: 0 });
+  const shownSize = () => ({ width: fitted().width * zoom(), height: fitted().height * zoom() });
 
   props
     .load()
@@ -229,6 +246,40 @@ export function VideoView(live: VideoViewProps) {
     scoutPicture.getContext("2d")!.drawImage(scout, 0, 0, scoutPicture.width, scoutPicture.height);
   }
 
+  /** Zooms to `next` times the fitted film, keeping the point `at` (from the stage's middle) where it is. */
+  function zoomTo(next: number, at = { x: 0, y: 0 }) {
+    const before = zoom();
+    const after = Math.min(Math.max(next, 1), MOST_ZOOM);
+    const from = pan();
+    const ratio = after / before;
+    setZoom(after);
+    const moved = { x: at.x - (at.x - from.x) * ratio, y: at.y - (at.y - from.y) * ratio };
+    setPan(after === 1 ? { x: 0, y: 0 } : clampPan(moved, stageSize(), shownSize()));
+  }
+
+  function onWheel(event: WheelEvent) {
+    if (!event.ctrlKey) return;
+    event.preventDefault();
+    const box = stage.getBoundingClientRect();
+    zoomTo(zoom() * Math.exp(-event.deltaY * WHEEL), { x: event.clientX - box.left - box.width / 2, y: event.clientY - box.top - box.height / 2 });
+  }
+
+  /** While zoomed in, a drag moves the film about; a press that stays put plays or pauses. */
+  function onStagePointerDown(event: PointerEvent) {
+    dragged = false;
+    if (event.button !== 0 || zoom() === 1) return;
+    stage.setPointerCapture(event.pointerId);
+    const start = { x: event.clientX, y: event.clientY, pan: pan() };
+    const move = (moved: PointerEvent) => {
+      const by = { x: moved.clientX - start.x, y: moved.clientY - start.y };
+      if (!dragged && Math.hypot(by.x, by.y) < DRAG_PX) return;
+      dragged = true;
+      setPan(clampPan({ x: start.pan.x + by.x, y: start.pan.y + by.y }, stageSize(), shownSize()));
+    };
+    stage.addEventListener("pointermove", move);
+    stage.addEventListener("pointerup", () => stage.removeEventListener("pointermove", move), { once: true });
+  }
+
   props.keys((event) => {
     if (event.altKey) return false;
     const key = event.key;
@@ -247,6 +298,9 @@ export function VideoView(live: VideoViewProps) {
     else if (key === "m" || key === "M") setMuted(!muted());
     else if ((key === "c" || key === "C") && cues().length) setSubtitles(!subtitles());
     else if (key === "i" || key === "I") popOutNow();
+    else if (key === "+" || key === "=") zoomTo(zoom() * ZOOM_STEP);
+    else if (key === "-") zoomTo(zoom() / ZOOM_STEP);
+    else if (key === "z" || key === "Z") zoomTo(1);
     else if (/^[0-9]$/.test(key)) seek((length() * Number(key)) / 10);
     else return false;
     return true;
@@ -262,6 +316,13 @@ export function VideoView(live: VideoViewProps) {
   });
 
   onMount(() => {
+    const measure = new ResizeObserver(() => {
+      setStageSize({ width: stage.clientWidth, height: stage.clientHeight });
+      setFitted({ width: video.offsetWidth, height: video.offsetHeight });
+    });
+    measure.observe(stage);
+    measure.observe(video);
+    onCleanup(() => measure.disconnect());
     video.focus({ preventScroll: true });
     props.leave(() => {
       if (!video.paused && videoPopOut()) void handOver().catch(console.error);
@@ -289,7 +350,15 @@ export function VideoView(live: VideoViewProps) {
 
   return (
     <div class="video-view" data-playing={playing() || undefined}>
-      <div class="video-stage" onClick={toggle} onDblClick={(event) => event.stopPropagation()}>
+      <div
+        ref={stage}
+        class="video-stage"
+        data-zoomed={zoom() > 1 || undefined}
+        onClick={() => (dragged ? (dragged = false) : toggle())}
+        onDblClick={(event) => event.stopPropagation()}
+        onWheel={onWheel}
+        onPointerDown={onStagePointerDown}
+      >
         <video
           ref={video}
           class="video-film"
@@ -306,7 +375,22 @@ export function VideoView(live: VideoViewProps) {
           onLoadedMetadata={onMetadata}
           onSeeked={tick}
           onError={() => setProblem("This film can't play here. Windows' own player may open it.")}
+          style={zoom() > 1 ? { transform: `translate(${pan().x}px, ${pan().y}px) scale(${zoom()})` } : undefined}
         />
+        <Show when={zoom() > 1}>
+          <button class="zoom-chip video-zoom" aria-label="Zoom, click to fit" aria-keyshortcuts="Z" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => (event.stopPropagation(), zoomTo(1))}>
+            {Math.round(zoom() * 100)}%
+          </button>
+          <Show when={minimapShown()}>
+            <Minimap
+              source={() => video}
+              aspect={() => (fitted().height ? fitted().width / fitted().height : 16 / 9)}
+              view={() => viewWindow(stageSize(), shownSize(), pan())}
+              onMove={(center) => setPan(clampPan(panFor(center, shownSize()), stageSize(), shownSize()))}
+              live
+            />
+          </Show>
+        </Show>
         <Show when={subtitles() && cue()}>{(shown) => <p class="video-cue">{shown().text}</p>}</Show>
         <Show when={saved()}>
           <p class="video-saved" role="status">

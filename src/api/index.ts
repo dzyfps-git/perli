@@ -909,6 +909,11 @@ export type Preview =
   | { kind: "comic"; pages: string[] }
   | { kind: "book"; title: string; chapters: string[]; contents: BookHeading[] }
   | { kind: "model" }
+  /** A SQLite database's tables and views, or why they can't be read. */
+  | { kind: "database"; tables: DbTable[]; failure: string | null }
+  | { kind: "parquet" }
+  | { kind: "font"; faces: FontFacts[] }
+  | { kind: "pdf" }
   | { kind: "song" }
   | { kind: "audio" }
   | { kind: "video" }
@@ -1022,6 +1027,64 @@ export const bookChapter = (view: number, request: number, row: number, entry: s
 /** A 3D model's bytes or, with `part`, those of a file beside it that the model points to. */
 export const modelFile = (view: number, request: number, row: number, part?: string) =>
   invoke<ArrayBuffer>("model_file", { view, request, row, part: part ?? null });
+
+/** A table or view of a SQLite database, with the statement that made it. */
+export interface DbTable {
+  name: string;
+  view: boolean;
+  sql: string;
+}
+
+/** Rows read from a database: at most 5,000, with `more` when there are others. */
+export interface DbRows {
+  columns: string[];
+  /** Each column's declared type, for a table's own rows. */
+  types: string[];
+  rows: (string | null)[][];
+  more: boolean;
+}
+
+/** What one face of a font says about itself. Text it doesn't give is empty. */
+export interface FontFacts {
+  family: string;
+  style: string;
+  fullName: string;
+  version: string;
+  designer: string;
+  maker: string;
+  copyright: string;
+  license: string;
+  description: string;
+  /** The face's own sample text, if its maker gave one. */
+  sample: string;
+  glyphs: number;
+  unitsPerEm: number;
+  weight: number;
+  /** From 1, ultra-condensed, to 9, ultra-expanded; 5 is normal. */
+  width: number;
+  italic: boolean;
+  monospaced: boolean;
+  outlines: string;
+  embedding: string;
+  /** The characters it draws, as runs of first and last code points. */
+  characters: [number, number][];
+  axes: { tag: string; name: string; min: number; default: number; max: number }[];
+}
+
+/** One face of a row's font to draw with; a face of a collection comes on its own. */
+export const fontFace = (view: number, request: number, row: number, index: number) =>
+  invoke<ArrayBuffer>("font_face", { view, request, row, index });
+
+/** A row's file as a path the window may stream, reading only the parts it needs. */
+export const openStreamed = (view: number, request: number, row: number) => invoke<string>("open_streamed", { view, request, row });
+
+export const dbCount = (view: number, request: number, row: number, table: string) => invoke<number>("db_count", { view, request, row, table });
+
+export const dbRows = (view: number, request: number, row: number, table: string, order: { column: number; down: boolean } | null, filters: string[]) =>
+  invoke<DbRows>("db_rows", { view, request, row, table, order, filters });
+
+/** What the user's own statement finds. The database is open read-only, so it can't change it. */
+export const dbQuery = (view: number, request: number, row: number, sql: string) => invoke<DbRows>("db_query", { view, request, row, sql });
 
 /** A MIDI song's notes in order of start, as columns: start and length in seconds, key, channel. */
 export interface Notes {

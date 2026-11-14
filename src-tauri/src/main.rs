@@ -6,6 +6,7 @@ mod explorer;
 mod filedialog;
 mod drag;
 mod folder;
+mod fonts;
 mod jobs;
 mod launch;
 mod menus;
@@ -27,6 +28,7 @@ mod shell;
 mod sizes;
 mod snap;
 mod sound;
+mod tables;
 mod tags;
 mod tearoff;
 mod templates;
@@ -1648,6 +1650,52 @@ async fn model_file(view: u32, request: u64, row: u32, part: Option<String>, vie
     Ok(Response::new(bytes))
 }
 
+/// One face of a row's font, as the window loads it: a face of a collection comes on its own.
+#[tauri::command]
+async fn font_face(view: u32, request: u64, row: u32, index: u32, views: State<'_, Views>) -> Result<Response, String> {
+    let path = row_file(&views, view, request, row).await?;
+    let bytes = blocking(move || fonts::face_file(&path, index)).await?;
+    Ok(Response::new(bytes))
+}
+
+/// A row's file, opened to the window's asset protocol so a viewer reads only the parts it needs.
+#[tauri::command]
+async fn open_streamed(view: u32, request: u64, row: u32, app: AppHandle, views: State<'_, Views>) -> Result<String, String> {
+    let path = row_file(&views, view, request, row).await?;
+    app.asset_protocol_scope().allow_file(&path).map_err(|error| error.to_string())?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+/// How many rows a database's table or view holds.
+#[tauri::command]
+async fn db_count(view: u32, request: u64, row: u32, table: String, views: State<'_, Views>) -> Result<u64, String> {
+    let path = row_file(&views, view, request, row).await?;
+    blocking(move || tables::count(&path, &table)).await
+}
+
+/// A database table's first rows, sorted and filtered by the database itself.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+async fn db_rows(
+    view: u32,
+    request: u64,
+    row: u32,
+    table: String,
+    order: Option<tables::Order>,
+    filters: Vec<String>,
+    views: State<'_, Views>,
+) -> Result<tables::Rows, String> {
+    let path = row_file(&views, view, request, row).await?;
+    blocking(move || tables::rows(&path, &table, order, &filters)).await
+}
+
+/// What the user's own statement finds in a database, which stays read-only.
+#[tauri::command]
+async fn db_query(view: u32, request: u64, row: u32, sql: String, views: State<'_, Views>) -> Result<tables::Rows, String> {
+    let path = row_file(&views, view, request, row).await?;
+    blocking(move || tables::query(&path, &sql)).await
+}
+
 /// A MIDI file as one WAV, by the number the window streams it under from `song://`, played
 /// through the bundled SoundFont or, with `font`, through a `.sf2` file of the user's own.
 #[tauri::command]
@@ -2410,6 +2458,11 @@ fn main() {
             archive_picture,
             book_chapter,
             model_file,
+            open_streamed,
+            font_face,
+            db_count,
+            db_rows,
+            db_query,
             song_audio,
             song_info,
             song_notes,

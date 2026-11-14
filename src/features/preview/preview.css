@@ -894,6 +894,15 @@
   color: var(--text-muted);
 }
 
+/* The viewer's own note (a font's glyph count, a page number) takes the room left and is cut short, so it never pushes the buttons onto a line of their own. */
+.preview-footer .preview-page {
+  flex: 1 1 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* Code colors come from the theme's own accent and tag colors, not a highlight.js theme. */
 .hljs-comment,
 .hljs-quote,
@@ -1234,7 +1243,7 @@
 
 /* The tools float over what is shown, and step back once the pointer and the keys rest. They
    stay while the pointer is on them, a key has them, or their cog is open. */
-.preview-body[data-idle] :is(.preview-tools, .model-clips):not(:hover, :focus-within, :has(:popover-open)) {
+.preview-body[data-idle] :is(.preview-tools, .model-clips, .minimap):not(:hover, :focus-within, :has(:popover-open)) {
   opacity: 0;
 }
 
@@ -1997,6 +2006,43 @@ th[aria-sort="descending"] .table-sort::after {
   rotate: 180deg;
 }
 
+/* Numbers line up on their ones, the way a sheet sets them. */
+.preview-table [data-number] {
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.preview-table th[data-number] .table-sort {
+  flex-direction: row-reverse;
+}
+
+.preview-table td[data-null] {
+  color: var(--text-muted);
+  font-style: italic;
+  opacity: 0.7;
+}
+
+.table-type {
+  padding: 0 var(--space-1);
+  border-radius: calc(var(--radius) / 2);
+  background: var(--surface-hover);
+  color: var(--text-muted);
+  font-size: 0.85em;
+  font-weight: 400;
+}
+
+/* The row numbers stay in sight while a wide table scrolls across. */
+.preview-table .table-number {
+  position: sticky;
+  left: 0;
+  background: var(--overlay-tint);
+  backdrop-filter: var(--blur);
+}
+
+.preview-table thead .table-number {
+  z-index: 2;
+}
+
 .table-sort:hover {
   color: var(--accent);
 }
@@ -2476,13 +2522,37 @@ th[aria-sort="descending"] .table-sort::after {
   flex: 1;
   min-height: 0;
   place-items: center;
+  overflow: hidden;
   background: #000;
+}
+
+.video-stage[data-zoomed] {
+  cursor: grab;
+}
+
+.video-stage[data-zoomed]:active {
+  cursor: grabbing;
 }
 
 .video-film {
   max-width: 100%;
   max-height: 100%;
   outline: none;
+}
+
+.video-stage .video-zoom {
+  position: absolute;
+  top: var(--space-3);
+  left: var(--space-3);
+  z-index: 2;
+  border: 1px solid var(--border);
+  background: var(--overlay-tint);
+  backdrop-filter: var(--blur);
+  animation: resume-in var(--motion-spring);
+}
+
+.preview-body[data-idle] .video-zoom:not(:hover, :focus-visible) {
+  opacity: 0;
 }
 
 .video-cue {
@@ -2618,7 +2688,7 @@ th[aria-sort="descending"] .table-sort::after {
   animation: resume-in var(--motion-spring);
 }
 
-.comic-view[data-strip] .comic-end {
+.comic-view[data-strip] :is(.comic-end, .minimap) {
   bottom: 96px;
 }
 
@@ -2935,4 +3005,716 @@ th[aria-sort="descending"] .table-sort::after {
 
 ::highlight(book-highlight) {
   background-color: color-mix(in srgb, #ffd54a 55%, transparent);
+}
+
+/* A database: its tables down the side, the picked one beside them. Docked beside the list,
+   the tables run along the top instead. */
+.db-view {
+  display: grid;
+  grid-template-columns: minmax(140px, 200px) 1fr;
+  height: 100%;
+}
+
+.db-view > .preview-note {
+  grid-column: 1 / -1;
+}
+
+.db-tables {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: var(--space-2);
+  overflow: auto;
+  border-right: 1px solid var(--border);
+}
+
+.db-table {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-2);
+  border: 0;
+  border-radius: calc(var(--radius) - 2px);
+  background: none;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  transition: background-color var(--motion);
+}
+
+.db-table:hover {
+  background: var(--surface-hover);
+}
+
+.db-table[aria-current] {
+  background: var(--surface-selected);
+}
+
+.db-table-icon {
+  color: var(--text-muted);
+  font-family: var(--font-icons);
+}
+
+.db-table[aria-current] .db-table-icon {
+  color: var(--accent);
+}
+
+.db-table-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.db-table-count {
+  color: var(--text-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.db-main {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.db-scroll {
+  flex: 1;
+  min-height: 0;
+  transition: opacity var(--motion);
+}
+
+/* While rows are on their way, the old ones dim rather than vanish. */
+.db-scroll[data-reading] {
+  opacity: 0.55;
+}
+
+.db-query,
+.db-schema {
+  margin: var(--space-2) var(--space-3) 0;
+  padding: var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  animation: db-panel-in var(--motion-spring);
+}
+
+/* Room for the floating tools above the first panel. */
+.db-main > :is(.db-query, .db-schema):nth-child(2) {
+  margin-top: 44px;
+}
+
+.db-query textarea {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 64px;
+  resize: vertical;
+  padding: var(--space-1);
+  border: 0;
+  outline: none;
+  background: none;
+  color: var(--text);
+  font: 12.5px "Cascadia Mono", Consolas, monospace;
+}
+
+.db-query-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.db-query-hint {
+  flex: 1;
+  color: var(--text-muted);
+  font-size: 11.5px;
+}
+
+.db-run span {
+  font-family: var(--font-icons);
+  font-size: 10px;
+}
+
+.db-schema {
+  max-height: 30%;
+  overflow: auto;
+  font: 12px "Cascadia Mono", Consolas, monospace;
+  white-space: pre-wrap;
+}
+
+.db-query + .db-schema {
+  margin-top: var(--space-2);
+}
+
+@keyframes db-panel-in {
+  from {
+    opacity: 0;
+    translate: 0 -6px;
+    scale: 0.98;
+  }
+}
+
+.preview-docked {
+  .db-view {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto 1fr;
+  }
+
+  .db-tables {
+    flex-direction: row;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .db-table {
+    flex: none;
+  }
+}
+
+/* The whole of a zoomed picture, page or film, small in a corner, with what shows marked. */
+.minimap {
+  position: absolute;
+  right: var(--space-3);
+  bottom: var(--space-3);
+  z-index: 2;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--overlay-tint);
+  backdrop-filter: var(--blur);
+  box-shadow: 0 6px 20px rgb(0 0 0 / 0.25);
+  cursor: pointer;
+  touch-action: none;
+  transition: opacity 400ms ease-out;
+  animation: minimap-in var(--motion-spring);
+}
+
+.minimap canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  opacity: 0.85;
+}
+
+.minimap-view {
+  position: absolute;
+  box-sizing: border-box;
+  border: 1.5px solid var(--accent);
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  /* Everything but the part on show sits under a soft shade. */
+  box-shadow: 0 0 0 999px rgb(0 0 0 / 0.28);
+  cursor: grab;
+}
+
+.minimap:active .minimap-view {
+  cursor: grabbing;
+}
+
+@keyframes minimap-in {
+  from {
+    opacity: 0;
+    scale: 0.85;
+    translate: 8px 8px;
+  }
+}
+
+/* A font: its sample at sizes, its characters, and what it says about itself. */
+.preview-body:has(.font-view) {
+  padding: 0;
+}
+
+.font-view {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
+  padding: var(--space-4) var(--space-4) var(--space-4);
+  overflow: auto;
+  animation: details-in var(--motion-slide);
+}
+
+.font-faces {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+
+.font-face-chip {
+  padding: 2px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-muted);
+  font: 12px/20px var(--font);
+  transition: background-color var(--motion), color var(--motion);
+}
+
+.font-face-chip:hover {
+  background: var(--surface-hover);
+}
+
+.font-face-chip[aria-selected="true"] {
+  background: var(--surface-selected);
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+}
+
+.font-title {
+  margin: 0;
+  font-size: 40px;
+  font-weight: normal;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+
+.font-sample {
+  width: 100%;
+  box-sizing: border-box;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-hover);
+  color: var(--text);
+  font-size: 22px;
+  transition: border-color var(--motion);
+}
+
+.font-sample::placeholder {
+  color: var(--text);
+  opacity: 0.55;
+}
+
+.font-sample:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+
+.font-axes {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: var(--space-2) var(--space-4);
+}
+
+.font-axis {
+  display: grid;
+  grid-template-columns: 90px 1fr 44px;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.font-axis output {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.font-sizes {
+  display: flex;
+  flex-direction: column;
+}
+
+.font-size-line {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  min-width: 0;
+  padding-block: 2px;
+}
+
+.font-size-line p {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.font-size-label {
+  flex: 0 0 28px;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.font-compare .font-size-label {
+  flex-basis: 140px;
+  overflow: hidden;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.font-compare p {
+  font-size: 28px;
+}
+
+.font-section h3 {
+  margin: var(--space-3) 0 var(--space-2);
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.font-loupe {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-height: 72px;
+  margin-bottom: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--overlay-tint);
+  backdrop-filter: var(--blur);
+}
+
+.font-loupe-glyph {
+  min-width: 64px;
+  font-size: 56px;
+  line-height: 1;
+  text-align: center;
+}
+
+.font-loupe-code {
+  font: 13px var(--font);
+  font-variant-numeric: tabular-nums;
+}
+
+.font-loupe-hint {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.font-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(44px, 1fr));
+  gap: 2px;
+  font-size: 22px;
+}
+
+.font-grid span {
+  display: grid;
+  height: 44px;
+  place-items: center;
+  border-radius: var(--space-1);
+  cursor: copy;
+  transition: background-color var(--motion), scale var(--motion);
+}
+
+.font-grid span:hover {
+  background: var(--surface-hover);
+  scale: 1.12;
+}
+
+.font-facts {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: var(--space-1) var(--space-4);
+  margin: 0;
+  font-size: 12px;
+}
+
+.font-facts dt {
+  color: var(--text-muted);
+}
+
+.font-facts dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-line;
+  user-select: text;
+}
+/* A PDF: its pages one under another, with the page strip or its outline beside them. */
+.preview-body:has(.pdf-view) {
+  display: flex;
+  padding: 0;
+  overflow: hidden;
+}
+
+.pdf-view {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+.pdf-side {
+  flex: none;
+  width: 168px;
+  overflow: auto;
+  border-right: 1px solid var(--border);
+  animation: details-in var(--motion-slide);
+}
+
+.pdf-thumbs {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+}
+
+.pdf-thumb {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: var(--space-1);
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 11px;
+  transition: background-color var(--motion);
+}
+
+.pdf-thumb:hover {
+  background: var(--surface-hover);
+}
+
+.pdf-thumb[aria-selected="true"] {
+  background: var(--surface-selected);
+  color: var(--text);
+}
+
+.pdf-thumb canvas {
+  width: 112px;
+  background: white;
+  box-shadow: 0 1px 4px rgb(0 0 0 / 0.25);
+}
+
+.pdf-outline ul {
+  margin: 0;
+  padding-left: var(--space-3);
+  list-style: none;
+}
+
+.pdf-outline > ul {
+  padding: var(--space-2);
+}
+
+.pdf-heading {
+  display: block;
+  width: 100%;
+  padding: 3px var(--space-2);
+  border: 0;
+  border-radius: var(--space-1);
+  background: transparent;
+  color: var(--text);
+  font: 12px/1.35 var(--font);
+  text-align: left;
+}
+
+.pdf-heading:hover {
+  background: var(--surface-hover);
+}
+
+.pdf-main {
+  position: relative;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.pdf-scroll {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  /* A scroll bar coming and going would change the width a fit is measured against. */
+  scrollbar-gutter: stable;
+  background: color-mix(in srgb, var(--text) 6%, var(--surface));
+}
+
+.pdf-scroll:focus {
+  outline: none;
+}
+
+.pdf-facts {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--space-1);
+  margin: var(--space-3) var(--space-4) 0;
+  padding-right: 200px;
+}
+
+.pdf-facts span {
+  padding: 1px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+/* Wider than the view, the pages start at its left edge, so all of them can be scrolled to. */
+.pdf-pages {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--pdf-gap);
+  box-sizing: border-box;
+  width: max-content;
+  min-width: 100%;
+}
+
+.pdf-row {
+  display: flex;
+  gap: var(--pdf-gap);
+}
+
+.pdf-page {
+  position: relative;
+  flex: none;
+  background: white;
+  box-shadow: 0 1px 6px rgb(0 0 0 / 0.22);
+}
+
+.pdf-page canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.pdf-scroll[data-night] .pdf-page {
+  background: #1e1e1e;
+}
+
+.pdf-scroll[data-night] .pdf-page canvas {
+  filter: invert(0.88) hue-rotate(180deg);
+}
+
+.pdf-go {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  color: var(--text-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.pdf-go input {
+  width: 4ch;
+  padding: 2px 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--space-1);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: right;
+}
+
+.pdf-go input:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+
+.pdf-password {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  width: min(320px, 80%);
+  padding: var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-large);
+  background: var(--overlay-tint);
+  backdrop-filter: var(--blur);
+  box-shadow: 0 10px 30px rgb(0 0 0 / 0.3);
+  translate: -50% -50%;
+  animation: resume-in var(--motion-spring);
+}
+
+.pdf-password p {
+  margin: 0;
+}
+
+.pdf-password input {
+  padding: 6px var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--space-1);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+}
+
+.pdf-resume {
+  position: absolute;
+  bottom: var(--space-4);
+  left: 50%;
+  translate: -50% 0;
+}
+
+/* pdf.js's text over each page: clear, there only to be selected and found. */
+.textLayer {
+  position: absolute;
+  inset: 0;
+  overflow: clip;
+  line-height: 1;
+  text-align: initial;
+  transform-origin: 0 0;
+  forced-color-adjust: none;
+  --min-font-size: 1;
+  --text-scale-factor: calc(var(--total-scale-factor) * var(--min-font-size));
+  --min-font-size-inv: calc(1 / var(--min-font-size));
+}
+
+.textLayer :is(span, br) {
+  position: absolute;
+  color: transparent;
+  white-space: pre;
+  cursor: text;
+  transform-origin: 0% 0%;
+  user-select: text;
+}
+
+.textLayer > :not(.markedContent),
+.textLayer .markedContent span:not(.markedContent) {
+  --font-height: 0;
+  --scale-x: 1;
+  --rotate: 0deg;
+  z-index: 1;
+  font-size: calc(var(--text-scale-factor) * var(--font-height));
+  transform: rotate(var(--rotate)) scaleX(var(--scale-x)) scale(var(--min-font-size-inv));
+}
+
+.textLayer .markedContent {
+  display: contents;
+}
+
+.textLayer ::selection {
+  background: color-mix(in srgb, var(--accent) 35%, transparent);
+  color: transparent;
+}
+
+.textLayer br::selection {
+  background: transparent;
+}
+
+.textLayer .endOfContent {
+  position: absolute;
+  inset: 100% 0 0;
+  z-index: 0;
+  display: block;
+  cursor: default;
+  user-select: none;
+}
+
+.textLayer.selecting .endOfContent {
+  top: 0;
 }

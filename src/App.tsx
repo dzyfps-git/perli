@@ -582,7 +582,8 @@ export function App() {
     const snapshot = () => view.folder()?.request ?? at.snapshot;
     const count = () => view.folder()?.count ?? folder.count;
     const selected = () => view.folder()?.selected?.[0];
-    setPreviewing({ view, at: { view: view.id, snapshot, index: at.index, count, selected, folder: folder.path } });
+    const chosen = [...(view.list()?.selection().rows ?? [])];
+    setPreviewing({ view, at: { view: view.id, snapshot, index: at.index, count, selected, folder: folder.path, chosen } });
   }
 
   /** The focused row, which the list's selection gives first. */

@@ -56,6 +56,14 @@ pub enum Preview {
     Book { title: String, chapters: Vec<String>, contents: Vec<inside::Heading> },
     /// A 3D model, drawn by the window from the file's bytes.
     Model,
+    /// A SQLite database's tables and views, or why they can't be read.
+    Database { tables: Vec<crate::tables::Table>, failure: Option<String> },
+    /// A Parquet file, which the window reads the parts of that it shows.
+    Parquet,
+    /// A font's faces, each with what it says about itself. The window loads a face to draw with.
+    Font { faces: Vec<crate::fonts::Facts> },
+    /// A PDF, which the window reads the parts of that it shows.
+    Pdf,
     /// A MIDI file, played through the bundled SoundFont.
     Song,
     /// A sound file the window plays itself, streamed from disk.
@@ -230,6 +238,12 @@ pub fn read(path: &Path, offset: u64) -> Preview {
             return preview;
         }
     }
+    if offset == 0 && crate::tables::is_database(path) {
+        return match crate::tables::tables(path) {
+            Ok(tables) => Preview::Database { tables, failure: None },
+            Err(failure) => Preview::Database { tables: Vec::new(), failure: Some(failure) },
+        };
+    }
     let size = path.metadata().map_or(0, |data| data.len());
     if offset == 0 && is_markdown(path) && size <= MARKDOWN_BYTES {
         let read = std::fs::read(path).ok();
@@ -256,6 +270,10 @@ fn inside_of(path: &Path) -> Option<Preview> {
         },
         "glb" | "gltf" | "obj" | "stl" | "usdz" | "usd" | "usda" | "usdc" | "fbx" | "ply" | "3mf" => Some(Preview::Model),
         "mid" | "midi" => Some(Preview::Song),
+        "parquet" | "parq" => Some(Preview::Parquet),
+        "pdf" => Some(Preview::Pdf),
+        // A font that can't be read still shows Windows' own picture of it.
+        "ttf" | "otf" | "woff" | "woff2" | "ttc" | "otc" => crate::fonts::faces(path).ok().map(|faces| Preview::Font { faces }),
         "mp3" | "m4a" | "aac" | "wav" | "flac" | "ogg" | "oga" | "opus" | "weba" | "aif" | "aiff" | "aifc" => Some(Preview::Audio),
         "mp4" | "m4v" | "webm" | "mov" | "mkv" | "ogv" => Some(Preview::Video),
         _ if crate::packs::kind_of(path.file_name()?).is_some() => listed(),

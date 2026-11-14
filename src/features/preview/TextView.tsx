@@ -4,7 +4,8 @@ import { formatSize } from "../../ui/format";
 import { createFind, lineIn, scrollToRange } from "./FindBar";
 import { asTable, asTree, numbers, setAsTable, setAsTree, setNumbers, setWrap, VIEWER_SETTINGS, wrap } from "./viewerPrefs";
 import { pieceColorer } from "./highlight";
-import { arrange, guessDelimiter, lineEnding, parseTable, type TableOrder } from "./table";
+import { DataGrid } from "./DataGrid";
+import { guessDelimiter, lineEnding, parseTable } from "./table";
 
 const ICON_FIND = "";
 const ICON_WRAP = "";
@@ -75,8 +76,6 @@ export function TextView(live: TextViewProps) {
   const [following, setFollowing] = createSignal(false);
   /** What the last copy says it did. */
   const [copied, setCopied] = createSignal<string>();
-  const [order, setOrder] = createSignal<TableOrder>();
-  const [filters, setFilters] = createSignal<string[]>([]);
   const [filtering, setFiltering] = createSignal(false);
   /** Everything loaded so far, for the table and the line count. */
   const [text, setText] = createSignal(props.first.text);
@@ -91,7 +90,6 @@ export function TextView(live: TextViewProps) {
     return count;
   });
   const gutter = createMemo(() => Array.from({ length: lines() }, (_, at) => at + 1).join("\n"));
-  const shownRows = createMemo(() => arrange(rows().slice(1, MOST_ROWS + 1), order(), filtering() ? filters() : []));
   const canTree = () => props.language === "json" && whole() && text().length <= MOST_TREE;
   const tree = () => !table() && canTree() && asTree();
   /** The file as JSON, or why it is not. */
@@ -211,12 +209,6 @@ export function TextView(live: TextViewProps) {
     }, FOLLOW_MS);
     onCleanup(() => clearInterval(timer));
   });
-
-  function sortBy(column: number) {
-    const now = order();
-    // Up, then down, then as the file has them.
-    setOrder(now?.column !== column ? { column, down: false } : now.down ? undefined : { column, down: true });
-  }
 
   function showGoTo() {
     find.close();
@@ -343,14 +335,11 @@ export function TextView(live: TextViewProps) {
           </pre>
         </div>
         <Show when={table()}>
-          <CsvTable
+          <DataGrid
             head={rows()[0] ?? []}
-            rows={shownRows()}
-            cut={rows().length > MOST_ROWS + 1}
-            order={order()}
-            onSort={sortBy}
-            filters={filtering() ? filters() : undefined}
-            onFilter={(column, value) => setFilters(Object.assign([...filters()], { [column]: value }))}
+            rows={rows().slice(1, MOST_ROWS + 1)}
+            note={rows().length > MOST_ROWS + 1 ? `The first ${MOST_ROWS.toLocaleString()} rows.` : undefined}
+            filtering={filtering()}
             body={(element) => (tableBody = element)}
           />
         </Show>
@@ -406,71 +395,5 @@ function JsonNode(props: { name?: string; value: unknown; depth: number; roomy?:
         </Show>
       </details>
     </Show>
-  );
-}
-
-function CsvTable(props: {
-  head: string[];
-  rows: { row: string[]; number: number }[];
-  /** The file has more rows than are shown. */
-  cut: boolean;
-  order: TableOrder | undefined;
-  onSort: (column: number) => void;
-  /** What each column is filtered by, when the filter row shows. */
-  filters: string[] | undefined;
-  onFilter: (column: number, value: string) => void;
-  body: (element: HTMLElement) => void;
-}) {
-  const head = () => props.head;
-  const way = (column: number) => (props.order?.column !== column ? "none" : props.order.down ? "descending" : "ascending");
-  return (
-    <div class="preview-archive preview-table">
-      <Show when={props.cut}>
-        <p class="preview-archive-sum">The first {MOST_ROWS.toLocaleString()} rows.</p>
-      </Show>
-      <table>
-        <thead>
-          <tr>
-            <th class="table-number">#</th>
-            <For each={head()}>
-              {(name, column) => (
-                <th aria-sort={way(column())}>
-                  <button class="table-sort" onClick={() => props.onSort(column())}>
-                    {name}
-                  </button>
-                </th>
-              )}
-            </For>
-          </tr>
-          <Show when={props.filters}>
-            <tr class="table-filters">
-              <th class="table-number">{props.rows.length.toLocaleString()}</th>
-              <For each={head()}>
-                {(name, column) => (
-                  <th>
-                    <input
-                      aria-label={`Filter ${name}`}
-                      placeholder="Filter"
-                      value={props.filters![column()] ?? ""}
-                      onInput={(event) => props.onFilter(column(), event.currentTarget.value)}
-                    />
-                  </th>
-                )}
-              </For>
-            </tr>
-          </Show>
-        </thead>
-        <tbody ref={props.body}>
-          <For each={props.rows}>
-            {(item) => (
-              <tr>
-                <td class="table-number">{item.number}</td>
-                <For each={item.row}>{(field) => <td>{field}</td>}</For>
-              </tr>
-            )}
-          </For>
-        </tbody>
-      </table>
-    </div>
   );
 }

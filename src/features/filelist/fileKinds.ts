@@ -54,7 +54,7 @@ const KINDS = {
   ],
   installer: [285, "M12 3v10M8 9l4 4 4-4M4 15v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3", "msi msp"],
   library: [PLAIN, "M12 3l9 4.5-9 4.5-9-4.5zM3 12l9 4.5 9-4.5M3 16.5l9 4.5 9-4.5", "dll sys ocx drv so lib a o pdb"],
-  font: [10, "M5 19l7-15 7 15M8 13h8", "ttf otf woff woff2 ttc fon"],
+  font: [10, "M5 19l7-15 7 15M8 13h8", "ttf otf woff woff2 ttc otc fon"],
   book: [120, "M5 4h11a3 3 0 0 1 3 3v13H8a3 3 0 0 1-3-3zM5 17a3 3 0 0 1 3-3h11", "epub mobi azw3 fb2 djvu cbz cbr cb7"],
   model: [
     170,
@@ -70,7 +70,7 @@ const KINDS = {
   database: [
     200,
     "M4 6c0-1.7 3.6-3 8-3s8 1.3 8 3-3.6 3-8 3-8-1.3-8-3zM4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3",
-    "db sqlite sqlite3 mdb accdb dbf",
+    "db sqlite sqlite3 db3 mdb accdb dbf parquet parq",
   ],
   disk: [
     240,

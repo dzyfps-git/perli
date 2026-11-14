@@ -60,18 +60,21 @@ export interface TableOrder {
 
 const names = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
 
+/** A field of a table. Null is a database's empty, which is not the same as an empty text. */
+export type Cell = string | null;
+
 /**
  * The rows of a table's body as shown: only those where each column holds its filter's text,
  * in `order` if there is one. Each row keeps the number it has in the file. Numbers sort as
  * numbers, and empty fields go last either way.
  */
-export function arrange(body: string[][], order: TableOrder | undefined, filters: string[]) {
+export function arrange(body: Cell[][], order: TableOrder | undefined, filters: string[]) {
   const wanted = filters.map((filter) => filter.trim().toLowerCase());
   const kept = body
     .map((row, at) => ({ row, number: at + 1 }))
     .filter(({ row }) => wanted.every((filter, column) => !filter || (row[column] ?? "").toLowerCase().includes(filter)));
   if (!order) return kept;
-  const field = (item: { row: string[] }) => (item.row[order.column] ?? "").trim();
+  const field = (item: { row: Cell[] }) => (item.row[order.column] ?? "").trim();
   return kept.sort((a, b) => {
     const [left, right] = [field(a), field(b)];
     if (!left || !right) return left ? -1 : right ? 1 : a.number - b.number;
@@ -86,4 +89,79 @@ export function lineEnding(text: string) {
   const windows = text.includes("\r\n");
   const unix = /(^|[^\r])\n/.test(text);
   return windows && unix ? "Mixed" : windows ? "CRLF" : "LF";
+}
+
+const isNumber = (field: string) => field.trim() !== "" && Number.isFinite(Number(field));
+
+/** Columns whose every filled field is a number, judged from the first `most` rows. */
+export function numberColumns(rows: Cell[][], columns: number, most = 200): boolean[] {
+  const sample = rows.slice(0, most);
+  return Array.from({ length: columns }, (_, column) => {
+    const filled = sample.map((row) => row[column]).filter((field): field is string => !!field?.trim());
+    return filled.length > 0 && filled.every(isNumber);
+  });
+}
+
+/** What a column holds, in a line: how many fields are empty, and its least and most. */
+export function columnFacts(rows: Cell[][], column: number): string {
+  const filled = rows.map((row) => row[column]).filter((field): field is string => !!field?.trim());
+  const empty = rows.length - filled.length;
+  const parts = [`${rows.length.toLocaleString()} rows`];
+  if (empty) parts.push(`${empty.toLocaleString()} empty`);
+  if (filled.length) {
+    const numbers = filled.every(isNumber);
+    const sorted = numbers ? filled.map(Number).sort((a, b) => a - b).map(String) : [...filled].sort(names.compare);
+    const short = (field: string) => (field.length > 24 ? `${field.slice(0, 23)}…` : field);
+    parts.push(`${short(sorted[0])} to ${short(sorted.at(-1)!)}`);
+    if (!numbers) parts.push(`${new Set(filled).size.toLocaleString()} different`);
+  }
+  return parts.join(" · ");
+}
+
+/** Rows as CSV or TSV text, quoted the way `parseTable` reads them back. */
+export function asDelimited(rows: Cell[][], delimiter: string): string {
+  const quote = (field: Cell) => {
+    const text = field ?? "";
+    return /["\r\n]/.test(text) || text.includes(delimiter) ? `"${text.replaceAll('"', '""')}"` : text;
+  };
+  return rows.map((row) => row.map(quote).join(delimiter)).join("\r\n");
+}
+
+/** A longer text in one field is cut here, with an ellipsis, as the database's fields are. */
+const MOST_CHARS = 4000;
+/** A nested value shows this much of itself in one field. */
+const MOST_NESTED = 200;
+
+const cut = (text: string, most: number) => (text.length > most ? `${text.slice(0, most)}…` : text);
+
+/** Any value read from a file, as a table shows it. Bytes say how many; nested values show as JSON. */
+export function cellText(value: unknown): Cell {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "string") return cut(value, MOST_CHARS);
+  if (value instanceof Date) return Number.isNaN(value.getTime()) ? String(value) : value.toISOString().replace(".000Z", "Z");
+  if (value instanceof Uint8Array) return `[Binary, ${value.length.toLocaleString()} bytes]`;
+  if (typeof value !== "object") return String(value);
+  const json = JSON.stringify(value, (_, inner: unknown) =>
+    typeof inner === "bigint" ? inner.toString() : inner instanceof Uint8Array ? `[Binary, ${inner.length} bytes]` : inner,
+  );
+  return cut(json, MOST_NESTED);
+}
+
+/** A Parquet column as its schema has it, enough to name its type. */
+export interface ParquetColumn {
+  type?: string;
+  converted_type?: string;
+  logical_type?: { type: string; bitWidth?: number; isSigned?: boolean };
+}
+
+/** A Parquet column's type as people say it: by its meaning where the file gives one. */
+export function parquetType(column: ParquetColumn, nested: boolean): string {
+  const logical = column.logical_type;
+  if (logical?.type === "INTEGER") return `${logical.isSigned === false ? "UINT" : "INT"}${logical.bitWidth ?? ""}`;
+  if (logical) return logical.type;
+  if (nested) return column.converted_type === "LIST" || column.converted_type === "MAP" ? column.converted_type : "STRUCT";
+  if (column.converted_type) return column.converted_type === "UTF8" ? "STRING" : column.converted_type;
+  if (column.type === "BYTE_ARRAY") return "BINARY";
+  if (column.type === "FIXED_LEN_BYTE_ARRAY") return "FIXED";
+  return column.type ?? "";
 }
