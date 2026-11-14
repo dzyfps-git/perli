@@ -13,12 +13,33 @@ export function saved(key: string): unknown {
   }
 }
 
+/** A change from another window is being taken in, and what follows from it stays here. */
+let echoing = false;
+
+/**
+ * A setting kept between starts. Every Perli window and the film's small window share the
+ * settings, so a change made in one shows in the others at once rather than being written over
+ * later with what they held.
+ */
 export function stored<T>(key: string, start: T) {
   const [value, setValue] = createSignal<T>(start);
   const set = (next: T) => {
     setValue(() => next);
-    localStorage.setItem(`perli-${key}`, JSON.stringify(next));
+    // What this window works out from another's change, that window works out too. Sent back,
+    // two windows that work out different things would answer each other without end.
+    if (!echoing) localStorage.setItem(`perli-${key}`, JSON.stringify(next));
   };
+  addEventListener("storage", (event) => {
+    if (event.key !== `perli-${key}` || event.newValue === null) return;
+    echoing = true;
+    try {
+      setValue(() => JSON.parse(event.newValue!) as T);
+    } catch {
+      // Something else wrote there. The value held stays.
+    } finally {
+      echoing = false;
+    }
+  });
   return [value, set] as const;
 }
 

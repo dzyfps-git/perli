@@ -1,9 +1,13 @@
 import { createEffect, createMemo, createSignal, onCleanup, onMount, Show } from "solid-js";
 import { ToolCog } from "../../ui/Controls";
+import { caughtUp, type Film } from "../mini/handover";
+import { baseName } from "../navigation/path";
 import { audio, setVolume, volume } from "./nowPlaying";
-import { clock, laneDrag, remember, resumes } from "./Player";
+import { laneDrag } from "./Player";
+import { clock, remember, resumes } from "./playback";
+import { hushMini, popOut, takeBack } from "./popOut";
 import { cuesOf, type Cue } from "./timedText";
-import { setSubtitles, subtitles, videoMuted, VIEWER_SETTINGS } from "./viewerPrefs";
+import { setSubtitles, subtitles, videoMuted, videoPopOut, VIEWER_SETTINGS } from "./viewerPrefs";
 
 const ICON_PLAY = "";
 const ICON_PAUSE = "";
@@ -13,6 +17,7 @@ const ICON_VOLUME = "";
 const ICON_MUTED = "";
 const ICON_CAPTIONS = "";
 const ICON_FRAME = "";
+const ICON_POP_OUT = "";
 const SPEEDS = [1, 1.25, 1.5, 2, 0.25, 0.5, 0.75];
 const STEP_SECONDS = 5;
 const BIG_STEP_SECONDS = 30;
@@ -34,6 +39,12 @@ export interface VideoViewProps {
   saveFrame: (seconds: number, png: ArrayBuffer) => Promise<string>;
   keys: (handler: ((event: KeyboardEvent) => boolean) | undefined) => void;
   note: (text: string | undefined) => void;
+  /** The films after this one in its folder, for the small window to play on to. */
+  next: () => Promise<Film[]>;
+  /** Takes what to do as the preview closes: a film that plays goes on in the small window. */
+  leave: (handler: (() => void) | undefined) => void;
+  /** The film has gone to the small window, so the preview can go. */
+  onPopped: () => void;
 }
 
 /**
@@ -64,6 +75,8 @@ export function VideoView(live: VideoViewProps) {
   let lastSave = 0;
   let frameSeconds = FRAME_SECONDS;
   let savedTimer: ReturnType<typeof setTimeout> | undefined;
+  let subtitleText: string | undefined;
+  let popped = false;
 
   props
     .load()
@@ -71,7 +84,7 @@ export function VideoView(live: VideoViewProps) {
     .catch((reason) => gone || setProblem(String(reason)));
   props
     .subtitles()
-    .then((text) => gone || !text || setCues(cuesOf(text)))
+    .then((text) => gone || !text || ((subtitleText = text), setCues(cuesOf(text))))
     .catch(() => {});
 
   const cue = createMemo(() => {
@@ -130,16 +143,53 @@ export function VideoView(live: VideoViewProps) {
     setLength(video.duration);
     video.playbackRate = speed();
     props.note(video.videoWidth ? `${video.videoWidth} × ${video.videoHeight}` : undefined);
+    const back = takeBack(props.path);
     const at = resumes()[props.path];
-    if (video.duration > RESUME_FROM_SECONDS && at > RESUME_MARGIN_SECONDS && at < video.duration - RESUME_MARGIN_SECONDS) seek(at);
+    if (back) {
+      setSpeed(back.speed);
+      seek(caughtUp(back));
+      if (!back.playing) video.pause();
+    } else if (video.duration > RESUME_FROM_SECONDS && at > RESUME_MARGIN_SECONDS && at < video.duration - RESUME_MARGIN_SECONDS) seek(at);
     measure();
   }
 
   function onPlay() {
     setPlaying(true);
-    // A film with sound and a song at once would be noise, so the song waits.
-    if (!video.muted) audio.pause();
+    // A film with sound and a song at once would be noise, so the song waits, and so does a
+    // film in the small window.
+    if (!video.muted) {
+      audio.pause();
+      hushMini();
+    }
     run();
+  }
+
+  /** The film goes on in the small window, from this very moment, and stops here. */
+  async function handOver() {
+    const src = url();
+    if (popped || !src) return;
+    popped = true;
+    const film = {
+      path: props.path,
+      name: baseName(props.path),
+      url: src,
+      time: video.currentTime,
+      at: Date.now(),
+      playing: !video.paused,
+      speed: speed(),
+      loop: loop(),
+      muted: muted(),
+      subtitles: subtitleText,
+      aspect: video.videoWidth && video.videoHeight ? video.videoWidth / video.videoHeight : 16 / 9,
+    };
+    video.pause();
+    const next = await props.next().catch(() => []);
+    await popOut({ ...film, next });
+  }
+
+  function popOutNow() {
+    void handOver().catch(console.error);
+    props.onPopped();
   }
 
   async function grab() {
@@ -190,6 +240,7 @@ export function VideoView(live: VideoViewProps) {
     else if (key === "l" || key === "L") setLoop(!loop());
     else if (key === "m" || key === "M") setMuted(!muted());
     else if ((key === "c" || key === "C") && cues().length) setSubtitles(!subtitles());
+    else if (key === "i" || key === "I") popOutNow();
     else if (/^[0-9]$/.test(key)) seek((length() * Number(key)) / 10);
     else return false;
     return true;
@@ -204,7 +255,12 @@ export function VideoView(live: VideoViewProps) {
     if (at !== undefined) look(at);
   });
 
-  onMount(() => video.focus({ preventScroll: true }));
+  onMount(() => {
+    video.focus({ preventScroll: true });
+    props.leave(() => {
+      if (!video.paused && videoPopOut()) void handOver().catch(console.error);
+    });
+  });
 
   onCleanup(() => {
     gone = true;
@@ -216,6 +272,7 @@ export function VideoView(live: VideoViewProps) {
     video.load();
     props.keys(undefined);
     props.note(undefined);
+    props.leave(undefined);
   });
 
   const secondsAt = (event: PointerEvent) => {
@@ -326,6 +383,9 @@ export function VideoView(live: VideoViewProps) {
               {ICON_CAPTIONS}
             </button>
           </Show>
+          <button class="strip-icon" aria-label="Play on in a small window" aria-keyshortcuts="I" onClick={popOutNow}>
+            {ICON_POP_OUT}
+          </button>
           <button class="strip-icon" aria-label="Save this frame as a picture" aria-keyshortcuts="Control+S" onClick={() => void grab()}>
             {ICON_FRAME}
           </button>

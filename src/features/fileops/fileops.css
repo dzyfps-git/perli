@@ -939,7 +939,7 @@
   }
 }
 
-/* The small popover that asks how hard to squeeze a new ZIP, and for a password. */
+/* The small popover that asks for the kind of a new archive, how hard to squeeze it, and a password. */
 .new-gallery.zip-options {
   width: min(340px, calc(100vw - 16px));
   padding: var(--space-2) var(--space-3) var(--space-3);
@@ -957,9 +957,40 @@
   gap: var(--space-1);
 }
 
-.zip-level[aria-checked="true"] {
+.zip-levels.zip-locks {
+  grid-template-columns: repeat(2, 1fr);
+}
+
+.zip-levels > [aria-checked="true"] {
   border-color: var(--accent);
   background: color-mix(in srgb, var(--accent) 16%, var(--surface));
+  transition:
+    background var(--motion),
+    border-color var(--motion);
+}
+
+/* Rows that come and go with the kind (squeeze, lock) unfold rather than pop. */
+.zip-reveal {
+  animation: zip-reveal var(--motion-glide) both;
+}
+
+@keyframes zip-reveal {
+  from {
+    opacity: 0;
+    translate: 0 -4px;
+    clip-path: inset(0 0 100% 0);
+  }
+  to {
+    opacity: 1;
+    translate: 0 0;
+    clip-path: inset(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .zip-reveal {
+    animation: none;
+  }
 }
 
 .zip-note {

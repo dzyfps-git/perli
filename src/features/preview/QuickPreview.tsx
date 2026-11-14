@@ -35,7 +35,7 @@ import { formatSize } from "../../ui/format";
 import { openSheet } from "../../ui/sheet";
 import { typeText } from "../filelist/typeNames";
 import type { FolderView } from "../navigation/folderView";
-import { join, parentOf, resolveRelative } from "../navigation/path";
+import { archiveKind, isArchiveName, join, parentOf, resolveRelative } from "../navigation/path";
 import { languageOf } from "./highlight";
 import { tableDelimiter } from "./table";
 import { neighbours, previewSize, setNeighbours, setPreviewSize } from "./viewerPrefs";
@@ -48,6 +48,7 @@ import type { ArchiveViewProps } from "./ArchiveView";
 import type { PlayerProps } from "./Player";
 import type { VideoViewProps } from "./VideoView";
 import { song, wav, type Track } from "./nowPlaying";
+import type { Film } from "../mini/handover";
 import "./preview.css";
 
 /** Which row the preview starts on. A reload while it is open moves it on to the new rows. */
@@ -81,6 +82,8 @@ const PictureView = lazy(() => import("./PictureView").then((module) => ({ defau
 const VideoView = lazy(() => import("./VideoView").then((module) => ({ default: module.VideoView })));
 
 /** Files the player plays, for Play next to skip to. */
+/** The films the window plays, as Rust's preview kinds name them. */
+const FILM = /\.(mp4|m4v|webm|mov|mkv|ogv)$/i;
 const AUDIO = /\.(mid|midi|mp3|m4a|aac|wav|flac|ogg|oga|opus|weba|aiff?|aifc)$/i;
 const PICTURES = /\.(jpe?g|png|gif|webp|bmp|tiff?|heic|heif|avif|ico|jxl|svg)$/i;
 /** Pictures that can move, and what the window calls them. */
@@ -92,7 +95,7 @@ const SLIDE_SHOW_MS = 4000;
 /** Sound the window cannot play, which Rust hands over as a WAV. */
 const AIFF = /\.(aiff?|aifc)$/i;
 const SOUND_SETS = /\.sf2$/i;
-const COMICS = /\.cbz$/i;
+const COMICS = /\.(cbz|cbr|cb7)$/i;
 /** The queue is the songs among this many rows of the folder. */
 const MOST_QUEUE = 5000;
 const QUEUE_BATCH = 500;
@@ -156,7 +159,13 @@ export function QuickPreview(props: {
   let dialog!: HTMLDialogElement;
   /** Sends the sheet back to the row it grew from. Only the preview over the list has it. */
   let fold: ((after?: () => void) => void) | undefined;
-  const shut = (after?: () => void) => (fold ? fold(after) : (props.onClose(), after?.()));
+  /** A film that plays as the preview closes goes on in the small window, unless the file is
+   *  opening in an app of its own. */
+  let leaveVideo: (() => void) | undefined;
+  const shut = (after?: () => void, popOut = true) => {
+    if (popOut) leaveVideo?.();
+    return fold ? fold(after) : (props.onClose(), after?.());
+  };
   let body!: HTMLDivElement;
   /** Which way the last step went, for the slide. */
   let stepped = 0;
@@ -373,16 +382,35 @@ export function QuickPreview(props: {
       saveFrame: (seconds, png) => saveFrame(view, shot, at, seconds, png),
       keys: (handler) => (viewKeys = handler),
       note: setNote,
+      next: () => folderFilms(view, shot, at),
+      leave: (handler) => (leaveVideo = handler),
+      // Beside the list the pane stays, showing the film's first frame.
+      onPopped: () => props.docked || shut(undefined, false),
     };
   }
 
-  function archive(entries: ArchiveEntry[], more: boolean): ArchiveViewProps {
+  /** The films after row `from` of the folder, in list order. Cloud films stay where they are. */
+  async function folderFilms(view: number, shot: number, from: number) {
+    const films: Film[] = [];
+    const count = Math.min(props.at.count(), from + 1 + MOST_QUEUE);
+    for (let at = from + 1; at < count; at += QUEUE_BATCH) {
+      const rows = await fetchRows(view, shot, at, Math.min(QUEUE_BATCH, count - at));
+      for (const item of rows) if (!item.isDir && !item.isCloud && FILM.test(item.name)) films.push({ path: pathOf(item), name: item.name });
+      if (!rows.length) break;
+    }
+    return films;
+  }
+
+  function archive({ entries, more, hidden, lock }: Extract<Preview, { kind: "archive" }>): ArchiveViewProps {
     const { view } = props.at;
     const at = index();
     const shot = snapshot;
     return {
       entries,
       more,
+      hidden,
+      lock,
+      kind: archiveKind(row()?.name ?? ""),
       picture: (entry, edge, password) => fetchArchivePicture(view, shot, at, entry, edge, password),
       text: (entry, password) => archiveText(view, shot, at, entry, password),
       check: (entry, password) => archivePassword(view, shot, at, entry, password),
@@ -393,10 +421,11 @@ export function QuickPreview(props: {
       test: (password) => archiveTest(view, shot, at, password),
       drag: (entry, password) => dragEntry(view, shot, at, entry, password),
       keys: (handler) => (viewKeys = handler),
-      // ponytail: a ZIP inside a ZIP opens in its app, and a folder named like x.zip loses the button too.
-      onOpenFolder: /\.zip(\\|$)/i.test(props.at.folder)
+      // ponytail: an archive inside an archive opens in its app, and a folder named like x.zip
+      // loses the button too.
+      onOpenFolder: props.at.folder.split("\\").some(isArchiveName) || !isArchiveName(row()?.name ?? "")
         ? undefined
-        : () => (props.docked ? props.onOpen(row()!) : shut(() => props.onOpen(row()!))),
+        : () => (props.docked ? props.onOpen(row()!) : shut(() => props.onOpen(row()!), false)),
     };
   }
 
@@ -547,6 +576,7 @@ export function QuickPreview(props: {
       onPointerMove={stir}
       onPointerDown={stir}
       onClose={props.onClose}
+      onCancel={() => leaveVideo?.()}
       onClick={(event) => event.target === dialog && !props.docked && shut()}
     >
       <div
@@ -577,7 +607,7 @@ export function QuickPreview(props: {
               )}
               {preview.kind === "comic" && <ComicView {...comic(row()!, preview.pages)} />}
               {preview.kind === "book" && <BookView {...book(row()!, preview)} />}
-              {preview.kind === "archive" && <ArchiveView {...archive(preview.entries, preview.more)} />}
+              {preview.kind === "archive" && <ArchiveView {...archive(preview)} />}
               {preview.kind === "model" && (
                 <ModelStage
                   name={row()!.name}
@@ -617,7 +647,7 @@ export function QuickPreview(props: {
               Open
             </button>
             <Show when={props.onOpenWith}>
-              <button class="preview-chip" onClick={() => shut(() => props.onOpenWith!(pathOf(row()!)))}>
+              <button class="preview-chip" onClick={() => shut(() => props.onOpenWith!(pathOf(row()!)), false)}>
                 Open with
               </button>
             </Show>

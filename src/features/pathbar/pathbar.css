@@ -644,7 +644,7 @@
   flex: 1;
 }
 
-/* A ZIP opened as a folder: a slim strip that wipes in under the path bar and says it is read-only. */
+/* An archive opened as a folder: a slim strip that wipes in under the path bar and says it is read-only. */
 .zip-bar {
   position: relative;
   z-index: 3;
@@ -698,6 +698,13 @@
   letter-spacing: 0.02em;
 }
 
+/* Which part of a set this is, quieter than what it can do. */
+.zip-bar-part {
+  background: color-mix(in srgb, var(--text) 9%, transparent);
+  font-variant-numeric: tabular-nums;
+  animation: zip-icon-in 480ms var(--spring) 140ms backwards;
+}
+
 .zip-bar-gap {
   flex: 1;
 }
@@ -727,7 +734,7 @@
 }
 
 /* The password card hangs under the bar, over the list. */
-.zip-password {
+.zip-bar-password {
   position: absolute;
   top: calc(100% + 6px);
   right: var(--space-3);

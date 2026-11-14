@@ -27,6 +27,7 @@ use zip::result::ZipError;
 use zip::ZipArchive;
 
 use crate::ops::Com;
+use crate::packs;
 use crate::preview::{escape, is_web_link};
 
 pub(crate) type Zip = ZipArchive<BufReader<File>>;
@@ -56,14 +57,9 @@ pub struct Entry {
 /// What the UI looks for to ask for the password again.
 pub const WRONG_PASSWORD: &str = "Wrong password";
 
-/// ponytail: the `zip` crate is built without `aes-crypto`, to keep the installer small; turn
-/// it on if AES-locked ZIPs turn out to be common.
-const AES_LOCKED: &str = "This ZIP is locked with AES, which Perli can't open yet.";
-
 pub(crate) fn reason(error: ZipError) -> String {
     match error {
         ZipError::InvalidPassword => WRONG_PASSWORD.into(),
-        ZipError::UnsupportedArchive(text) if text.starts_with("AES") => AES_LOCKED.into(),
         other => other.to_string(),
     }
 }
@@ -142,10 +138,50 @@ pub fn is_picture(name: &str) -> bool {
     PICTURES.contains(&extension(name).as_str())
 }
 
-/// The entries of a ZIP, and whether there were more than the list holds.
-pub fn entries(path: &Path) -> Result<(Vec<Entry>, bool), String> {
-    let zip = open(path)?;
+/// Whether `packs` reads this archive, rather than the ZIP code here.
+fn is_pack(path: &Path) -> bool {
+    packs::kind_of(path.as_os_str()).is_some()
+}
+
+/// What the quick preview lists of an archive.
+#[derive(Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Contents {
+    pub entries: Vec<Entry>,
+    /// There were more than the list holds.
+    pub more: bool,
+    /// Even the names are locked, so nothing shows without the password.
+    pub hidden: bool,
+    /// How its locked files are locked, such as "AES-256" or "ZipCrypto". `None` if none are.
+    pub lock: Option<&'static str>,
+}
+
+/// FILETIME ticks as this PC's date and time, the way the list shows a ZIP's.
+fn when(ticks: u64) -> Option<String> {
+    let time = crate::ops::sys::local_time(ticks).filter(|_| ticks > 0)?;
+    Some(format!("{}-{:02}-{:02} {:02}:{:02}", time.wYear, time.wMonth, time.wDay, time.wHour, time.wMinute))
+}
+
+/// The entries of an archive, as many as the list holds.
+pub fn entries(path: &Path) -> Result<Contents, String> {
+    if is_pack(path) {
+        let listed = packs::list(path, None)?;
+        let entry = |item: &packs::Item| Entry {
+            // A folder's name ends in `/`, as a ZIP's does.
+            name: if item.folder { format!("{}/", item.name) } else { item.name.clone() },
+            size: item.size,
+            folder: item.folder,
+            modified: when(item.ticks),
+            locked: item.locked,
+        };
+        // 7z locks with AES-256 alone. RAR 5 does too, and RAR 4 with AES-128.
+        let lock = listed.locked().then_some(if packs::kind_of(path.as_os_str()) == Some(packs::Kind::SevenZ) { "AES-256" } else { "AES" });
+        let entries = listed.items.iter().take(MOST_ENTRIES).map(entry).collect();
+        return Ok(Contents { entries, more: listed.items.len() > MOST_ENTRIES, hidden: listed.hidden, lock });
+    }
+    let mut zip = open(path)?;
     let mut list = Vec::new();
+    let mut first_locked = None;
     for index in 0..zip.len().min(MOST_ENTRIES) {
         let entry = zip.by_index_data(index).map_err(|error| error.to_string())?;
         let modified = entry.last_modified().map(|time| {
@@ -153,9 +189,20 @@ pub fn entries(path: &Path) -> Result<(Vec<Entry>, bool), String> {
             format!("{year}-{month:02}-{day:02} {:02}:{:02}", time.hour(), time.minute())
         });
         let name = entry.name().map_err(|error| error.to_string())?.into_owned();
+        if entry.encrypted() && !entry.is_dir() {
+            first_locked.get_or_insert(index);
+        }
         list.push(Entry { name, size: entry.size(), folder: entry.is_dir(), modified, locked: entry.encrypted() });
     }
-    Ok((list, zip.len() > MOST_ENTRIES))
+    let lock = first_locked.map(|index| match zip.get_aes_verification_key_and_salt(index) {
+        Ok(Some(aes)) => match aes.aes_mode {
+            zip::AesMode::Aes128 => "AES-128",
+            zip::AesMode::Aes192 => "AES-192",
+            zip::AesMode::Aes256 => "AES-256",
+        },
+        _ => "ZipCrypto",
+    });
+    Ok(Contents { entries: list, more: zip.len() > MOST_ENTRIES, hidden: false, lock })
 }
 
 fn natural(a: &str, b: &str) -> Ordering {
@@ -164,14 +211,16 @@ fn natural(a: &str, b: &str) -> Ordering {
 
 /// The pictures of a comic, in the order a person would read them: `page 2` before `page 10`.
 pub fn pages(path: &Path) -> Result<Vec<String>, String> {
-    let zip = open(path)?;
-    let mut names: Vec<String> = zip
-        .file_names()
-        .flatten()
-        .filter(|name| !name.ends_with('/') && PICTURES.contains(&extension(name).as_str()))
+    let files: Vec<String> = if is_pack(path) {
+        packs::list(path, None)?.items.iter().filter(|item| !item.folder).map(|item| item.name.clone()).collect()
+    } else {
+        open(path)?.file_names().flatten().filter(|name| !name.ends_with('/')).map(|name| name.into_owned()).collect()
+    };
+    let mut names: Vec<String> = files
+        .into_iter()
+        .filter(|name| PICTURES.contains(&extension(name).as_str()))
         // Mac archives carry a hidden copy of each file's extra data.
         .filter(|name| !name.starts_with("__MACOSX/"))
-        .map(|name| name.into_owned())
         .collect();
     names.sort_by(|a, b| natural(a, b));
     Ok(names)
@@ -180,6 +229,9 @@ pub fn pages(path: &Path) -> Result<Vec<String>, String> {
 /// The start of a text file inside the archive, for a look without taking it out. `None` if it
 /// is not text.
 pub fn text(path: &Path, name: &str, password: Option<&str>) -> Result<Option<String>, String> {
+    if is_pack(path) {
+        return Ok(crate::preview::as_text(&packs::read(path, name, MOST_TEXT_BYTES, false, password)?, true));
+    }
     let mut zip = open(path)?;
     let entry = entry(&mut zip, name, password)?;
     let mut bytes = Vec::new();
@@ -190,6 +242,9 @@ pub fn text(path: &Path, name: &str, password: Option<&str>) -> Result<Option<St
 /// Reads all of a locked file, so its checksum proves `password`. A wrong one can pass the quick
 /// header check of ZipCrypto and show only once the file is read through.
 pub fn check_password(path: &Path, name: &str, password: &str) -> Result<(), String> {
+    if is_pack(path) {
+        return packs::check_password(path, password);
+    }
     let mut zip = open(path)?;
     let mut entry = entry(&mut zip, name, Some(password))?;
     std::io::copy(&mut entry, &mut std::io::sink()).map_err(|error| read_failed(error, path, name, Some(password)))?;
@@ -213,8 +268,18 @@ fn read_locked(zip: &mut Zip, name: &str, most: u64, password: Option<&str>) -> 
 /// One picture inside an archive, `edge` pixels on its longest side at most, in the format
 /// `thumbs::read` describes.
 pub fn picture(path: &Path, name: &str, edge: u32, password: Option<&str>) -> Result<Vec<u8>, String> {
-    let bytes = read_locked(&mut open(path)?, name, MOST_PICTURE_BYTES, password)?;
+    let bytes = if is_pack(path) { pack_file(path, name, password)? } else { read_locked(&mut open(path)?, name, MOST_PICTURE_BYTES, password)? };
     decode(&bytes, edge.clamp(1, MOST_EDGE)).map_err(|error| error.message())
+}
+
+/// A picture of an archive `packs` reads, from where it was all taken out if it is solid.
+fn pack_file(path: &Path, name: &str, password: Option<&str>) -> Result<Vec<u8>, String> {
+    let taken = crate::zipped::whole(path).zip(crate::ops::safe_relative(name.split('/').collect())).map(|(whole, relative)| whole.join(relative));
+    match taken.and_then(|file| Some((std::fs::metadata(&file).ok()?.len(), file))) {
+        Some((size, _)) if size > MOST_PICTURE_BYTES => Err(format!("{name} is too big to show")),
+        Some((_, file)) => std::fs::read(file).map_err(|error| error.to_string()),
+        None => packs::read(path, name, MOST_PICTURE_BYTES, true, password),
+    }
 }
 
 /// What a test of an archive found: how many files read back whole, which did not, and how many
@@ -226,8 +291,12 @@ pub struct Tested {
     pub locked: u32,
 }
 
-/// Reads every file of a ZIP to its end, which checks each against the checksum the archive keeps.
+/// Reads every file of an archive to its end, which checks each against the checksum the
+/// archive keeps.
 pub fn test(path: &Path, password: Option<&str>) -> Result<Tested, String> {
+    if is_pack(path) {
+        return packs::test(path, password);
+    }
     let mut zip = open(path)?;
     let mut found = Tested { sound: 0, damaged: Vec::new(), locked: 0 };
     for index in 0..zip.len() {
@@ -257,8 +326,20 @@ pub fn test(path: &Path, password: Option<&str>) -> Result<Tested, String> {
     Ok(found)
 }
 
-/// Writes one file of a ZIP into `folder` under its own name, for a drag out of the preview.
+/// Writes one file of an archive into `folder` under its own name, for a drag out of the preview.
 pub fn take_out(path: &Path, name: &str, password: Option<&str>, folder: &Path) -> Result<PathBuf, String> {
+    if is_pack(path) {
+        let own = name.rsplit('/').next().map(PathBuf::from).and_then(crate::ops::safe_relative).ok_or("This name in the archive isn't safe to use")?;
+        let target = folder.join(own);
+        let mut wrote = false;
+        packs::walk(path, password, |item| !item.folder && item.name == name, |item, body| {
+            let mut file = File::create(&target).map_err(|error| error.to_string())?;
+            body.pour(&mut file).map_err(|error| packs::read_error(error, item, password))?;
+            wrote = true;
+            Ok::<_, String>(false)
+        })?;
+        return if wrote { Ok(target) } else { Err("Only a file can be dragged out".into()) };
+    }
     let mut zip = open(path)?;
     let mut entry = entry(&mut zip, name, password)?;
     let own = entry.enclosed_name().and_then(|inside| inside.file_name().map(PathBuf::from)).ok_or("This name in the archive isn't safe to use")?;
@@ -273,12 +354,12 @@ pub fn take_out(path: &Path, name: &str, password: Option<&str>, folder: &Path) 
 
 /// Whether the list shows this file's own cover in place of an icon.
 pub fn has_cover(path: &Path) -> bool {
-    matches!(path.extension().map(|extension| extension.to_string_lossy().to_lowercase()).as_deref(), Some("epub" | "cbz"))
+    matches!(path.extension().map(|extension| extension.to_string_lossy().to_lowercase()).as_deref(), Some("epub" | "cbz" | "cbr" | "cb7"))
 }
 
 /// A book's cover or a comic's first page, in the format `thumbs::read` describes.
 pub fn cover(path: &Path, edge: u32) -> Option<Vec<u8>> {
-    let name = if path.extension()?.eq_ignore_ascii_case("cbz") {
+    let name = if !path.extension()?.eq_ignore_ascii_case("epub") {
         pages(path).ok()?.into_iter().next()?
     } else {
         book_cover(&mut open(path).ok()?)?
@@ -801,7 +882,8 @@ mod tests {
         zip.write_all(b"plain").unwrap();
         zip.finish().unwrap();
 
-        let (list, _) = entries(&path).unwrap();
+        let list = entries(&path).unwrap().entries;
+        assert_eq!(entries(&path).unwrap().lock, Some("ZipCrypto"));
         assert_eq!(list.iter().map(|entry| entry.locked).collect::<Vec<_>>(), [true, false]);
         assert!(text(&path, "secret.txt", None).is_err());
         assert_eq!(text(&path, "secret.txt", Some("open sesame")).unwrap().as_deref(), Some("treasure"));
@@ -810,9 +892,25 @@ mod tests {
         let lucky = (0..5000).map(|n| format!("wrong {n}")).find(|tried| zip.by_name_decrypt("secret.txt", tried.as_bytes()).is_ok()).unwrap();
         assert_eq!(text(&path, "secret.txt", Some(&lucky)), Err(WRONG_PASSWORD.to_string()));
         assert_eq!(text(&path, "secret.txt", Some("nope")), Err(WRONG_PASSWORD.to_string()));
-        assert_eq!(reason(ZipError::UnsupportedArchive("AES encrypted files cannot be decrypted without the aes-crypto feature.")), AES_LOCKED);
         assert_eq!(test(&path, None).unwrap(), Tested { sound: 1, damaged: vec![], locked: 1 });
         assert_eq!(test(&path, Some("open sesame")).unwrap(), Tested { sound: 2, damaged: vec![], locked: 0 });
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn an_aes_zip_opens_with_its_password() {
+        let path = std::env::temp_dir().join(format!("perli-inside-{}-aes.zip", std::process::id()));
+        let mut zip = ZipWriter::new(File::create(&path).unwrap());
+        let locked = SimpleFileOptions::default().with_aes_encryption(zip::AesMode::Aes256, "open sesame");
+        zip.start_file("secret.txt", locked).unwrap();
+        zip.write_all(b"treasure").unwrap();
+        zip.finish().unwrap();
+
+        assert!(entries(&path).unwrap().entries[0].locked);
+        assert_eq!(entries(&path).unwrap().lock, Some("AES-256"));
+        assert_eq!(text(&path, "secret.txt", Some("open sesame")).unwrap().as_deref(), Some("treasure"));
+        assert_eq!(text(&path, "secret.txt", Some("nope")), Err(WRONG_PASSWORD.to_string()));
+        assert_eq!(check_password(&path, "secret.txt", "open sesame"), Ok(()));
         std::fs::remove_file(path).unwrap();
     }
 
@@ -1054,7 +1152,7 @@ mod tests {
         assert!(picture(&path, "notes.txt", 100, None).is_err());
         assert_eq!(cover(&path, 100).unwrap(), bytes, "a comic's cover is its first page");
         assert!(has_cover(&path) && !has_cover(Path::new("a.zip")));
-        let (list, more) = entries(&path).unwrap();
+        let Contents { entries: list, more, .. } = entries(&path).unwrap();
         assert_eq!((list.len(), more), (5, false));
         assert_eq!((list[0].name.as_str(), list[0].size, list[0].folder), ("p10.bmp", bmp.len() as u64, false));
         std::fs::remove_file(path).unwrap();

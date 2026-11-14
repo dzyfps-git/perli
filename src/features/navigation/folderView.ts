@@ -99,6 +99,8 @@ export interface ListHandle {
   focus: () => void;
   /** Selects `rows` in place of what was selected. */
   select: (rows: number[]) => void;
+  /** The names selected and how far down the list is, while it is on screen. */
+  left: () => Kept | undefined;
 }
 
 export interface ShownFolder extends Opened {
@@ -114,7 +116,7 @@ export interface ShownFolder extends Opened {
 }
 
 /** What a folder left behind, for coming back to it. */
-interface Kept {
+export interface Kept {
   names: string[];
   scrollTop: number;
 }
@@ -131,8 +133,8 @@ export function createFolderView(id: number, saved?: SavedPane) {
   /** The folder whose open failed last, which Try again opens. Nothing when a reload failed. */
   let failedAt: string | undefined;
   const [trail, setTrail] = createSignal("");
-  const [backStack, setBackStack] = createSignal<string[]>([]);
-  const [forwardStack, setForwardStack] = createSignal<string[]>([]);
+  const [backStack, setBackStack] = createSignal<string[]>(saved?.back ?? []);
+  const [forwardStack, setForwardStack] = createSignal<string[]>(saved?.forward ?? []);
   const [sort, setSortValue] = createSignal(saved?.sort ?? lastSort());
   const [layout, setLayoutValue] = createSignal(saved?.layout ?? lastLayout());
   const [editingPath, setEditingPath] = createSignal(false);
@@ -574,8 +576,29 @@ export function createFolderView(id: number, saved?: SavedPane) {
     archive: () => folder()?.archive ?? undefined,
     locked: () => !!folder()?.locked,
     openSaved() {
-      if (saved && !savedOpened) untrack(() => open(saved.path));
+      if (saved && !savedOpened) {
+        // A tab moved from another window opens as it was left there.
+        const left = saved.select || saved.scrollTop ? { names: saved.select ?? [], scrollTop: saved.scrollTop ?? 0 } : undefined;
+        if (left) kept.set(saved.path.toLowerCase(), left);
+        untrack(() => (left ? comeBack(saved.path) : open(saved.path)));
+      }
       savedOpened = true;
+    },
+    /** All a pane is, for a tab moving to another window: a search leaves its folder plain. */
+    handover(): SavedPane | undefined {
+      const shown = path();
+      if (!shown) return undefined;
+      const left = query() ? undefined : (list?.left() ?? kept.get(shown.toLowerCase()));
+      return {
+        path: shown,
+        sort: sort(),
+        layout: layout(),
+        ...(expanded().length > 0 ? { expanded: expanded() } : {}),
+        ...(backStack().length > 0 ? { back: backStack() } : {}),
+        ...(forwardStack().length > 0 ? { forward: forwardStack() } : {}),
+        ...(left?.names.length ? { select: left.names } : {}),
+        ...(left?.scrollTop ? { scrollTop: left.scrollTop } : {}),
+      };
     },
     order,
     error,

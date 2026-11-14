@@ -7,7 +7,10 @@ import {
   sameFolder,
   BIN_PATH,
   isDriveRoot,
-  isZipName,
+  archiveKind,
+  archiveStem,
+  isArchiveName,
+  partNumber,
   join,
   nextTrail,
   parentOf,
@@ -154,9 +157,20 @@ test("a linked pane follows the user, never the tab's own lead (R42.1, R42.2)", 
 });
 
 
-test("isZipName takes any case and only the end of the name", () => {
-  assert.equal(isZipName("pack.zip"), true);
-  assert.equal(isZipName("PACK.ZIP"), true);
-  assert.equal(isZipName("pack.zip.txt"), false);
-  assert.equal(isZipName("zip"), false);
+test("isArchiveName takes any case and only the end of the name", () => {
+  assert.equal(isArchiveName("pack.zip"), true);
+  assert.equal(isArchiveName("PACK.ZIP"), true);
+  assert.equal(isArchiveName("pack.zip.txt"), false);
+  assert.equal(isArchiveName("zip"), false);
+  for (const name of ["a.7z", "a.7z.002", "a.part2.rar", "a.tar", "a.tar.gz", "a.TGZ", "a.tar.zst", "a.tbz", "a.cab"]) {
+    assert.equal(isArchiveName(name), true, name);
+  }
+  // A comic opens to be read, and a lone gzip holds one file, not a folder.
+  for (const name of ["a.cbr", "a.cb7", "a.cbz", "a.gz", "a.7z.1"]) assert.equal(isArchiveName(name), false, name);
+});
+
+test("an archive's kind, part and stem come from its name", () => {
+  assert.deepEqual(["a.zip", "a.7z.003", "a.RAR", "a.tar.xz", "a.cab", "a.cbz", "a.cb7", "a.cbr"].map(archiveKind), ["ZIP", "7z", "RAR", "TAR", "CAB", "ZIP", "7z", "RAR"]);
+  assert.deepEqual(["a.part03.rar", "a.7z.002", "a.rar"].map(partNumber), [3, 2, undefined]);
+  assert.deepEqual(["Pics.TAR.GZ", "set.part02.rar", "split.7z.001", "a.b.cab", "plain.zip"].map(archiveStem), ["Pics", "set", "split", "a.b", "plain"]);
 });

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { parseSession } from "./session.ts";
+import { parseMoved, parseSession } from "./session.ts";
 
 const pane = { path: "C:\\a", sort: { key: "size", descending: true }, layout: "grid" };
 
@@ -75,4 +75,21 @@ test("parseSession keeps the folders opened in place, and only their names", () 
   );
   assert.deepEqual(session?.tabs[0].panes[0].expanded, ["C:\a\b"]);
   assert.equal(session?.tabs[0].panes[1].expanded, undefined);
+});
+
+test("parseMoved keeps the tab's history, selection, scroll and the window's place", () => {
+  const moving = { ...pane, back: ["C:\b", 3], forward: [], select: ["x.txt"], scrollTop: 420 };
+  const moved = parseMoved(
+    JSON.stringify({ tab: { panes: [moving], active: 0, linked: true }, place: { x: -1700, y: 40, width: 900, height: 600, maximized: true } }),
+  );
+  assert.deepEqual(moved, {
+    tab: { panes: [{ ...pane, back: ["C:\b"], select: ["x.txt"], scrollTop: 420 }], active: 0, swapped: false, linked: true },
+    place: { x: -1700, y: 40, width: 900, height: 600, maximized: true },
+  });
+});
+
+test("parseMoved drops a place that makes no sense, and a tab with no folder", () => {
+  const moved = parseMoved(JSON.stringify({ tab: { panes: [{ ...pane, scrollTop: -5 }] }, place: { x: 1, y: 2, width: 0, height: 9 } }));
+  assert.deepEqual(moved, { tab: { panes: [pane], active: 0, swapped: false } });
+  for (const text of [null, "", "nope", "{}", '{"tab":{"panes":[{"path":4}]}}']) assert.equal(parseMoved(text), undefined);
 });

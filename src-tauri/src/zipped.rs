@@ -1,21 +1,26 @@
-//! A ZIP opened as a folder, the way Explorer opens one. Its rows have paths such as
-//! `C:\dir\pack.zip\docs\a.txt`, which back, forward and up treat like any other folder's.
-//! Nothing inside ever changes. What needs a real file gets one taken out to a cache.
+//! An archive opened as a folder, the way Explorer opens one: a ZIP, or any kind `packs` reads.
+//! Its rows have paths such as `C:\dir\pack.zip\docs\a.txt`, which back, forward and up treat
+//! like any other folder's. Nothing inside ever changes. What needs a real file gets one taken
+//! out to a cache.
 
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Component, Path, PathBuf};
-use std::sync::{LazyLock, Mutex, Once, PoisonError};
+use std::sync::{Arc, LazyLock, Mutex, Once, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::packs::{self, Item, Listed};
 use crate::{inside, ops};
 
-pub const READ_ONLY: &str = "This ZIP opens read-only. Extract it to change what's inside.";
-pub const NEEDS_PASSWORD: &str = "This file is locked. Enter the ZIP's password first.";
-const GONE: &str = "That isn't in the ZIP anymore";
-const NO_FOLDER: &str = "This ZIP has no folder by that name";
+pub const READ_ONLY: &str = "This archive opens read-only. Extract it to change what's inside.";
+pub const NEEDS_PASSWORD: &str = packs::NEEDS_PASSWORD;
+const GONE: &str = "That isn't in the archive anymore";
+const NO_FOLDER: &str = "This archive has no folder by that name";
+const UNSAFE: &str = "This name in the archive isn't safe to use";
+/// A solid archive is taken out whole once if it unpacks to this at most.
+const MOST_WHOLE: u64 = 4 << 30;
 
 const CACHE_FOLDER: &str = "perli-zip";
 /// What was taken out stays this long, as the app it opened in may still be using it.
@@ -28,14 +33,25 @@ fn is_zip(name: &OsStr) -> bool {
     Path::new(name).extension().is_some_and(|extension| extension.eq_ignore_ascii_case("zip"))
 }
 
+/// Whether a file of this name opens as a folder. A comic opens to be read instead.
+fn is_archive(name: &OsStr) -> bool {
+    let comic = Path::new(name).extension().is_some_and(|extension| extension.eq_ignore_ascii_case("cbr") || extension.eq_ignore_ascii_case("cb7"));
+    is_zip(name) || packs::kind_of(name).is_some() && !comic
+}
+
+/// Whether `packs` reads this archive, rather than the ZIP code here.
+fn is_pack(archive: &Path) -> bool {
+    packs::kind_of(archive.as_os_str()).is_some()
+}
+
 /// The archive and the path inside it, with `/` between parts and `""` for its top. `None`
-/// outside a ZIP. Only a name that ends in `.zip` costs a look at the disk.
+/// outside an archive. Only a name an archive has costs a look at the disk.
 pub fn split(path: &Path) -> Option<(PathBuf, String)> {
     let mut archive = PathBuf::new();
     let mut parts = path.components();
     while let Some(part) = parts.next() {
         archive.push(part);
-        if matches!(part, Component::Normal(name) if is_zip(name)) && archive.is_file() {
+        if matches!(part, Component::Normal(name) if is_archive(name)) && archive.is_file() {
             let inner: Vec<_> = parts.map(|part| part.as_os_str().to_string_lossy().into_owned()).collect();
             return Some((archive, inner.join("/")));
         }
@@ -43,7 +59,7 @@ pub fn split(path: &Path) -> Option<(PathBuf, String)> {
     None
 }
 
-/// Below a ZIP's top, as its rows are. The ZIP file itself is not.
+/// Below an archive's top, as its rows are. The archive file itself is not.
 pub fn is_inside(path: &Path) -> bool {
     split(path).is_some_and(|(_, inner)| !inner.is_empty())
 }
@@ -58,16 +74,20 @@ pub fn password(archive: &Path) -> Option<String> {
 
 /// Checks `password` on the archive's smallest locked file, then keeps it for the session.
 pub fn unlock(archive: &Path, password: &str) -> Result<(), String> {
-    let zip = inside::open(archive)?;
-    let smallest = (0..zip.len())
-        .filter_map(|index| {
-            let entry = zip.by_index_data(index).ok()?;
-            let name = entry.name().ok()?.into_owned();
-            (entry.encrypted() && !entry.is_dir()).then_some((entry.size(), name))
-        })
-        .min();
-    if let Some((_, name)) = smallest {
-        inside::check_password(archive, &name, password)?;
+    if is_pack(archive) {
+        packs::check_password(archive, password)?;
+    } else {
+        let zip = inside::open(archive)?;
+        let smallest = (0..zip.len())
+            .filter_map(|index| {
+                let entry = zip.by_index_data(index).ok()?;
+                let name = entry.name().ok()?.into_owned();
+                (entry.encrypted() && !entry.is_dir()).then_some((entry.size(), name))
+            })
+            .min();
+        if let Some((_, name)) = smallest {
+            inside::check_password(archive, &name, password)?;
+        }
     }
     PASSWORDS.lock().unwrap_or_else(PoisonError::into_inner).insert(key(archive), password.to_string());
     Ok(())
@@ -90,7 +110,7 @@ fn below<'a>(name: &'a str, inner: &[String]) -> Option<Vec<&'a str>> {
     Some(parts.collect())
 }
 
-/// One row of a ZIP's folder. A folder adds up what is inside it.
+/// One row of an archive's folder. A folder adds up what is inside it.
 #[derive(Debug, PartialEq)]
 pub struct Node {
     /// Its folder under the one asked for, with `/` between parts. Empty right inside it.
@@ -103,48 +123,70 @@ pub struct Node {
     pub folder: bool,
 }
 
-/// What is inside `inner`, all the way down with `deep` or else only right in it, and whether
-/// anything in the archive is locked. Folders the archive names only in the paths of what is
-/// deeper are rows too, and Mac archives' hidden `__MACOSX` copies are left out.
-pub fn list(archive: &Path, inner: &str, deep: bool) -> Result<(Vec<Node>, bool), String> {
+/// What an archive holds, read with the password given this session.
+fn listed(archive: &Path) -> Result<Arc<Listed>, String> {
+    if is_pack(archive) {
+        return packs::list(archive, password(archive).as_deref());
+    }
     let zip = inside::open(archive)?;
-    let inner = parts_of(inner);
-    let (mut nodes, mut at) = (Vec::<Node>::new(), HashMap::<String, usize>::new());
-    let (mut locked, mut found) = (false, inner.is_empty());
+    let mut items = Vec::with_capacity(zip.len());
     for index in 0..zip.len() {
         let entry = zip.by_index_data(index).map_err(|error| error.to_string())?;
-        locked |= entry.encrypted();
         let name = entry.name().map_err(|error| error.to_string())?;
-        if name.starts_with("__MACOSX/") {
+        items.push(Item {
+            name: name.trim_end_matches('/').to_string(),
+            size: entry.size(),
+            packed: entry.compressed_size(),
+            ticks: entry.last_modified().map_or(0, ops::zip_ticks),
+            folder: entry.is_dir(),
+            locked: entry.encrypted(),
+        });
+    }
+    Ok(Arc::new(Listed { items, solid: false, hidden: false }))
+}
+
+/// What is inside `inner`, all the way down with `deep` or else only right in it, and whether
+/// anything in the archive is locked. Folders the archive names only in the paths of what is
+/// deeper are rows too, and Mac archives' hidden `__MACOSX` copies are left out. An archive
+/// whose very names are locked shows nothing until its password is given.
+pub fn list(archive: &Path, inner: &str, deep: bool) -> Result<(Vec<Node>, bool), String> {
+    let listed = listed(archive)?;
+    if listed.hidden {
+        return Ok((Vec::new(), true));
+    }
+    let inner = parts_of(inner);
+    let (mut nodes, mut at) = (Vec::<Node>::new(), HashMap::<String, usize>::new());
+    let mut found = inner.is_empty();
+    for item in &listed.items {
+        if item.name.starts_with("__MACOSX/") {
             continue;
         }
-        let Some(rest) = below(&name, &inner) else { continue };
+        let Some(rest) = below(&item.name, &inner) else { continue };
         found = true;
-        let ticks = entry.last_modified().map_or(0, ops::zip_ticks);
         let levels = if deep { rest.len() } else { rest.len().min(1) };
         for level in 1..=levels {
-            let folder = level < rest.len() || entry.is_dir();
+            let folder = level < rest.len() || item.folder;
             let place = *at.entry(rest[..level].join("/")).or_insert_with(|| {
                 let (parent, name) = (rest[..level - 1].join("/"), rest[level - 1].to_string());
                 nodes.push(Node { parent, name, size: 0, packed: 0, modified: 0, folder });
                 nodes.len() - 1
             });
             let node = &mut nodes[place];
-            if !entry.is_dir() {
-                node.size += entry.size();
-                node.packed += entry.compressed_size();
+            if !item.folder {
+                node.size += item.size;
+                node.packed += item.packed;
             }
-            node.modified = node.modified.max(ticks);
+            node.modified = node.modified.max(item.ticks);
         }
     }
     if !found {
         return Err(NO_FOLDER.into());
     }
-    Ok((nodes, locked))
+    Ok((nodes, listed.locked()))
 }
 
-/// A picture inside a ZIP, `edge` pixels on its longest side at most. Empty for anything else,
-/// so the list shows its icon.
+/// A picture inside an archive, `edge` pixels on its longest side at most. Empty for anything
+/// else, so the list shows its icon.
 pub fn picture(archive: &Path, inner: &str, edge: u32) -> Vec<u8> {
     let Some(name) = inside::is_picture(inner).then(|| entry_name(archive, inner)).flatten() else {
         return Vec::new();
@@ -154,15 +196,65 @@ pub fn picture(archive: &Path, inner: &str, edge: u32) -> Vec<u8> {
 
 /// The archive's own name for the file at `inner`.
 fn entry_name(archive: &Path, inner: &str) -> Option<String> {
-    let zip = inside::open(archive).ok()?;
     let inner = parts_of(inner);
-    let fits = |name: &std::borrow::Cow<'_, str>| !name.ends_with('/') && below(name, &inner).is_some_and(|rest| rest.is_empty());
-    let found = zip.file_names().flatten().find(fits).map(|name| name.into_owned());
-    found
+    let fits = |item: &&Item| !item.folder && below(&item.name, &inner).is_some_and(|rest| rest.is_empty());
+    listed(archive).ok()?.items.iter().find(fits).map(|item| item.name.clone())
 }
 
-/// A file or folder of a ZIP as a real one on disk, taken out to a cache once for each version
-/// of the archive. Paths outside a ZIP come back as they are, and so does a ZIP's top.
+/// The cache folder for `inner` of this version of the archive, and a fresh folder to write it
+/// in before it moves there.
+fn slot(archive: &Path, inner: &str) -> (PathBuf, PathBuf) {
+    let root = cache_root();
+    let version = fs::metadata(archive).ok().map(|metadata| (metadata.len(), metadata.modified().ok()));
+    let mut hasher = DefaultHasher::new();
+    // The mark of the web is part of the version, so a copy taken out unmarked is never reused.
+    (key(archive), version, inner.to_lowercase(), ops::sys::read_zone(archive)).hash(&mut hasher);
+    let hash = hasher.finish();
+    (root.join(format!("{hash:016x}")), root.join(format!("{hash:016x}-{}.part", crate::since_1970().as_nanos())))
+}
+
+/// Has `write` fill `part`, then moves it to `slot`. Fine too if another look made `done` first.
+fn settle(part: &Path, slot: &Path, done: &Path, write: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
+    fs::create_dir_all(part).map_err(|error| error.to_string())?;
+    let written = write().and_then(|()| fs::rename(part, slot).map_err(|error| error.to_string()));
+    if written.is_err() {
+        let _ = fs::remove_dir_all(part);
+    }
+    match written {
+        Err(_) if done.exists() => Ok(()),
+        other => other,
+    }
+}
+
+/// One whole take-out at a time, so the thumbnails of a folder wait for one rather than each
+/// start their own.
+// ponytail: one lock for all archives; a lock for each if two big ones open at once.
+static WHOLE: Mutex<()> = Mutex::new(());
+
+/// Where all of a solid archive is taken out, once for each version of it. Reading a file of one
+/// unpacks all before it, so the pictures of a folder read one by one would unpack it again for
+/// each. `None` for an archive that reads each file as fast on its own, and one too big.
+// ponytail: a solid archive with locked files reads each file on its own; take its unlocked ones
+// out whole too if such archives turn out slow.
+pub fn whole(archive: &Path) -> Option<PathBuf> {
+    if !is_pack(archive) {
+        return None;
+    }
+    let listed = packs::list(archive, None).ok()?;
+    let size: u64 = listed.items.iter().map(|item| item.size).sum();
+    if !listed.solid || listed.locked() || size > MOST_WHOLE {
+        return None;
+    }
+    let (slot, part) = slot(archive, "");
+    let _one = WHOLE.lock().unwrap_or_else(PoisonError::into_inner);
+    if !slot.exists() {
+        settle(&part, &slot, &slot, || take_out_pack(archive, "", &part, None)).ok()?;
+    }
+    Some(slot)
+}
+
+/// A file or folder of an archive as a real one on disk, taken out to a cache once for each
+/// version of the archive. Paths outside an archive come back as they are, and so does its top.
 pub fn real(path: &Path) -> Result<PathBuf, String> {
     let Some((archive, inner)) = split(path) else {
         return Ok(path.to_path_buf());
@@ -170,33 +262,20 @@ pub fn real(path: &Path) -> Result<PathBuf, String> {
     let Some(name) = inner.rsplit('/').next().filter(|name| !name.is_empty()) else {
         return Ok(archive);
     };
-    let root = cache_root();
-    let version = fs::metadata(&archive).ok().map(|metadata| (metadata.len(), metadata.modified().ok()));
-    let mut hasher = DefaultHasher::new();
-    // The mark of the web is part of the version, so a copy taken out unmarked is never reused.
-    (key(&archive), version, inner.to_lowercase(), ops::sys::read_zone(&archive)).hash(&mut hasher);
-    let slot = root.join(format!("{:016x}", hasher.finish()));
+    let relative = ops::safe_relative(inner.split('/').collect());
+    // A move may have taken it away from there.
+    if let Some(found) = whole(&archive).zip(relative).map(|(whole, relative)| whole.join(relative)).filter(|found| found.exists()) {
+        return Ok(found);
+    }
+    let (slot, part) = slot(&archive, &inner);
     let target = slot.join(name);
     if target.exists() {
         return Ok(target);
     }
     // A move took what was here away.
     let _ = fs::remove_dir_all(&slot);
-    let part = root.join(format!("{:016x}-{}.part", hasher.finish(), crate::since_1970().as_nanos()));
-    fs::create_dir_all(&part).map_err(|error| error.to_string())?;
-    let written = take_out(&archive, &inner, &part.join(name)).and_then(|()| fs::rename(&part, &slot).map_err(|error| error.to_string()));
-    match written {
-        Ok(()) => Ok(target),
-        // Another look took it out first.
-        Err(_) if target.exists() => {
-            let _ = fs::remove_dir_all(&part);
-            Ok(target)
-        }
-        Err(error) => {
-            let _ = fs::remove_dir_all(&part);
-            Err(error)
-        }
-    }
+    settle(&part, &slot, &target, || take_out(&archive, &inner, &part.join(name)))?;
+    Ok(target)
 }
 
 pub fn real_all(paths: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
@@ -205,6 +284,9 @@ pub fn real_all(paths: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
 
 /// Writes `inner`, a file or a folder with all it holds, to `target`.
 fn take_out(archive: &Path, inner: &str, target: &Path) -> Result<(), String> {
+    if is_pack(archive) {
+        return take_out_pack(archive, inner, target, password(archive).as_deref());
+    }
     let mut zip = inside::open(archive)?;
     let password = password(archive);
     let zone = ops::sys::read_zone(archive);
@@ -218,10 +300,7 @@ fn take_out(archive: &Path, inner: &str, target: &Path) -> Result<(), String> {
         };
         let Some(rest) = below(&name, &wanted) else { continue };
         found = true;
-        // A name that could reach outside the target stays in the archive.
-        let Some(relative) = ops::safe_relative(rest.iter().collect()) else { continue };
-        // An empty join would end the path in a backslash, which names no file.
-        let path = if rest.is_empty() { target.to_path_buf() } else { target.join(relative) };
+        let Some(path) = landing(target, &rest) else { continue };
         if is_dir {
             fs::create_dir_all(&path).map_err(|error| error.to_string())?;
             continue;
@@ -240,21 +319,66 @@ fn take_out(archive: &Path, inner: &str, target: &Path) -> Result<(), String> {
         .map_err(inside::reason)?;
         let mut file = fs::File::create(&path).map_err(|error| error.to_string())?;
         std::io::copy(&mut entry, &mut file).map_err(|error| inside::read_failed(error, archive, &name, key))?;
-        if let Some(time) = time_of(ticks) {
-            let _ = file.set_modified(time);
+        finish(file, &path, ticks, zone.as_deref());
+    }
+    if !found {
+        return Err(GONE.into());
+    }
+    if target.exists() { Ok(()) } else { Err(UNSAFE.into()) }
+}
+
+/// `take_out` for the kinds `packs` reads, in one walk.
+fn take_out_pack(archive: &Path, inner: &str, target: &Path, password: Option<&str>) -> Result<(), String> {
+    let listed = packs::list(archive, password)?;
+    if listed.hidden {
+        return Err(NEEDS_PASSWORD.into());
+    }
+    let zone = ops::sys::read_zone(archive);
+    let wanted = parts_of(inner);
+    let mut found = false;
+    for item in &listed.items {
+        let Some(rest) = below(&item.name, &wanted) else { continue };
+        found = true;
+        if item.locked && !item.folder && password.is_none() {
+            return Err(NEEDS_PASSWORD.into());
         }
-        drop(file);
-        if let Some(zone) = &zone {
-            mark(&path, zone);
+        if let Some(path) = landing(target, &rest).filter(|_| item.folder) {
+            fs::create_dir_all(path).map_err(|error| error.to_string())?;
         }
     }
     if !found {
         return Err(GONE.into());
     }
-    if target.exists() {
-        Ok(())
-    } else {
-        Err("This name in the archive isn't safe to use".into())
+    let wants = |item: &Item| !item.folder && below(&item.name, &wanted).is_some();
+    packs::walk(archive, password, wants, |item, body| {
+        let Some(path) = below(&item.name, &wanted).and_then(|rest| landing(target, &rest)) else { return Ok(true) };
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        }
+        let mut file = fs::File::create(&path).map_err(|error| error.to_string())?;
+        body.pour(&mut file).map_err(|error| packs::read_error(error, item, password))?;
+        finish(file, &path, item.ticks, zone.as_deref());
+        Ok::<_, String>(true)
+    })?;
+    if target.exists() { Ok(()) } else { Err(UNSAFE.into()) }
+}
+
+/// Where an entry whose parts below the one taken out are `rest` lands in `target`. `None` for a
+/// name that could reach outside it, which stays in the archive.
+fn landing(target: &Path, rest: &[&str]) -> Option<PathBuf> {
+    let relative = ops::safe_relative(rest.iter().collect())?;
+    // An empty join would end the path in a backslash, which names no file.
+    Some(if rest.is_empty() { target.to_path_buf() } else { target.join(relative) })
+}
+
+/// Gives a file just taken out its time in the archive and the archive's mark of the web.
+fn finish(file: fs::File, path: &Path, ticks: u64, zone: Option<&[u8]>) {
+    // Writing the mark changes the file's time, so the mark goes first.
+    if let Some(zone) = zone {
+        mark(path, zone);
+    }
+    if let Some(time) = time_of(ticks) {
+        let _ = file.set_modified(time);
     }
 }
 
@@ -427,6 +551,60 @@ mod tests {
 
         assert_eq!(ops::sys::read_zone(&file).as_deref(), Some(zone.as_slice()));
         assert_eq!(ops::sys::read_zone(&folder.join("deeper").join("b.txt")).as_deref(), Some(zone.as_slice()));
+        let _ = fs::remove_dir_all(file.parent().unwrap());
+        let _ = fs::remove_dir_all(folder.parent().unwrap());
+    }
+
+    #[test]
+    fn a_tar_opens_as_a_folder_and_comes_out_whole_once() {
+        let fixture = Fixture::new("tar", &[]);
+        let archive = fixture.0.join("pack.tar.gz");
+        let mut squeezed = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        squeezed.write_all(&packs::tests::tar_bytes()).unwrap();
+        fs::write(&archive, squeezed.finish().unwrap()).unwrap();
+        let zone = b"[ZoneTransfer]\r\nZoneId=3\r\n";
+        mark(&archive, zone);
+
+        assert_eq!(split(&archive.join("docs")), Some((archive.clone(), "docs".into())));
+        let (top, locked) = list(&archive, "", false).unwrap();
+        let mut names: Vec<_> = top.iter().map(|node| (node.name.as_str(), node.folder)).collect();
+        names.sort();
+        assert_eq!(names, [("docs", true), ("top.txt", false)]);
+        assert!(!locked);
+        assert_eq!(top.iter().find(|node| node.name == "docs").unwrap().size, 10);
+
+        // A TAR reads from its start, so it all comes out once and every file is served from there.
+        let file = real(&archive.join("docs").join("deeper").join("b.txt")).unwrap();
+        assert_eq!(fs::read_to_string(&file).unwrap(), "beta!");
+        let whole = whole(&archive).unwrap();
+        assert!(file.starts_with(&whole));
+        assert_eq!(real(&archive.join("top.txt")).unwrap(), whole.join("top.txt"));
+        assert_eq!(ops::sys::read_zone(&file).as_deref(), Some(zone.as_slice()));
+        let modified = fs::metadata(&file).unwrap().modified().unwrap();
+        assert_eq!(modified.duration_since(UNIX_EPOCH).unwrap().as_secs(), 1_700_000_000);
+        assert_eq!(real(&archive.join("gone.txt")), Err(GONE.into()));
+        let _ = fs::remove_dir_all(whole);
+    }
+
+    #[test]
+    fn a_7z_with_locked_names_shows_nothing_until_unlocked() {
+        let fixture = Fixture::new("seven", &[]);
+        let archive = fixture.0.join("pack.7z");
+        packs::tests::seven(&archive, Some("open sesame"), false, true);
+
+        assert_eq!(list(&archive, "", false), Ok((Vec::new(), true)));
+        assert_eq!(real(&archive.join("top.txt")), Err(NEEDS_PASSWORD.into()));
+        assert!(unlock(&archive, "wrong").is_err());
+        unlock(&archive, "open sesame").unwrap();
+
+        let (top, locked) = list(&archive, "", false).unwrap();
+        assert_eq!(top.len(), 2);
+        assert!(locked);
+        let file = real(&archive.join("docs").join("a.txt")).unwrap();
+        assert_eq!(fs::read_to_string(&file).unwrap(), "alpha");
+        let folder = real(&archive.join("docs")).unwrap();
+        assert_eq!(fs::read_to_string(folder.join("deeper").join("b.txt")).unwrap(), "beta!");
+        PASSWORDS.lock().unwrap().remove(&key(&archive));
         let _ = fs::remove_dir_all(file.parent().unwrap());
         let _ = fs::remove_dir_all(folder.parent().unwrap());
     }

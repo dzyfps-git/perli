@@ -42,6 +42,8 @@ export const [falling, setFalling] = stored("midi-falling", saved("midi-falling"
 /** A `.sf2` file of the user's own that MIDI files play through, or null for the bundled one. */
 export const [soundSet, setSoundSet] = stored<string | null>("midi-font", typeof saved("midi-font") === "string" ? (saved("midi-font") as string) : null);
 export const [videoMuted, setVideoMuted] = stored("video-muted", saved("video-muted") === true);
+/** A film that plays when its preview closes goes on in a small window over the others. */
+export const [videoPopOut, setVideoPopOut] = stored("video-pop-out", saved("video-pop-out") !== false);
 /** A film's subtitles from the `.srt` or `.vtt` file beside it. */
 export const [subtitles, setSubtitles] = stored("video-subtitles", saved("video-subtitles") !== false);
 export type BookTheme = "auto" | "paper" | "sepia" | "night";
@@ -114,5 +116,9 @@ export const VIEWER_SETTINGS = {
     item("Lyrics beside the song", lyricsShown, setLyricsShown),
     item("MIDI notes fall onto the keyboard", falling, setFalling),
   ],
-  Video: [item("Start muted", videoMuted, setVideoMuted), item("Subtitles", subtitles, setSubtitles)],
+  Video: [
+    item("Start muted", videoMuted, setVideoMuted),
+    item("Subtitles", subtitles, setSubtitles),
+    item("Keep playing in a small window when the preview closes", videoPopOut, setVideoPopOut),
+  ],
 } satisfies Record<string, CogItem[]>;

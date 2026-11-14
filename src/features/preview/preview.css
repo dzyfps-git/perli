@@ -2641,6 +2641,77 @@ th[aria-sort="descending"] .table-sort::after {
   background: color-mix(in srgb, var(--accent) 85%, var(--text));
 }
 
+/* How the locked files are locked, with what that means on hover. */
+.archive-lock {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 5px;
+  padding: 2px var(--space-2);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  animation: player-rise var(--motion-spring);
+}
+
+.archive-lock span {
+  font: 10px var(--font-icons);
+}
+
+/* An archive whose names are locked: a quiet card in the middle, the lock gently rocking in. */
+.archive-hidden {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-3);
+  height: 100%;
+  padding: var(--space-4);
+  text-align: center;
+}
+
+.archive-hidden-icon {
+  display: grid;
+  place-items: center;
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent);
+  font: 24px var(--font-icons);
+  animation: lock-rock 760ms var(--spring);
+}
+
+@keyframes lock-rock {
+  0% {
+    opacity: 0;
+    scale: 0.5;
+    rotate: -18deg;
+  }
+  60% {
+    rotate: 8deg;
+  }
+}
+
+.archive-hidden-title {
+  margin: 0;
+  font-weight: 600;
+}
+
+.archive-hidden-note {
+  margin: 0;
+  color: var(--text-muted);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .archive-lock,
+  .archive-hidden-icon {
+    animation: none;
+  }
+}
+
 .archive-tested {
   margin: 0 var(--space-4) var(--space-2);
   padding: 4px 10px;

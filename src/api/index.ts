@@ -140,6 +140,8 @@ export interface Start {
   home: string | null;
   /** Started by "Move to new window", so it keeps no window place of its own. */
   newWindow: boolean;
+  /** A tab moved here from another window, as `parseMoved` reads it. */
+  moved: string | null;
 }
 
 export interface DriveSpace {
@@ -192,6 +194,7 @@ export interface Selection {
 /** What the UI can ask of the file engine. Folders are paths, and files are always rows. */
 /** How hard a new ZIP squeezes its files. */
 export type ZipLevel = "store" | "fast" | "normal" | "best";
+export type ArchiveFormat = "zip" | "7z" | "tar" | "tar.gz";
 
 export type Task =
   | { kind: "copy" | "move"; selection: Selection; folder: string }
@@ -205,7 +208,7 @@ export type Task =
   | { kind: "ownTemplate"; folder: string; name: string; date?: string }
   | { kind: "fromClipboard"; folder: string }
   | { kind: "saveTemplate"; selection: Selection }
-  | { kind: "zip"; selection: Selection; level?: ZipLevel; password?: string }
+  | { kind: "zip"; selection: Selection; level?: ZipLevel; password?: string; format?: ArchiveFormat; aes?: boolean }
   /** `smart` gives an archive its own folder only when more than one item sits at its top. */
   | { kind: "unzip"; selection: Selection; ownFolder: boolean; smart?: boolean; only?: string[]; password?: string }
   | { kind: "paste"; folder: string }
@@ -844,8 +847,34 @@ export const asksWaiting = () => invoke<OpenAsk[]>("asks_waiting");
 /** Brings the window to the front. */
 export const comeForward = () => invoke<void>("come_forward");
 
+/** Another Perli window under the pointer, and whether the pointer is on its tabs. */
+export interface TabTarget {
+  window: number;
+  tabBar: boolean;
+}
+export const perliWindowAt = () => invoke<TabTarget | null>("perli_window_at");
+/** Sends a moved tab's text to another Perli window. False when it didn't take it. */
+export const sendTab = (window: number, tab: string) => invoke<boolean>("send_tab", { window, tab });
+export const otherWindows = () => invoke<number[]>("other_windows");
+/** Asks another Perli window to send all its tabs here and close. False when it won't. */
+export const askForTabs = (window: number) => invoke<boolean>("ask_for_tabs", { window });
+export const jobsRunning = () => invoke<boolean>("jobs_running");
+/** Shows a picture, `width` by `height` RGBA pixels, at the pointer, over every window. */
+export function ghostShow(width: number, height: number, rgba: Uint8ClampedArray) {
+  const body = new Uint8Array(8 + rgba.length);
+  const head = new DataView(body.buffer);
+  head.setUint32(0, width, true);
+  head.setUint32(4, height, true);
+  body.set(rgba, 8);
+  return invoke<void>("ghost_show", body);
+}
+export const ghostMove = () => invoke<void>("ghost_move");
+export const ghostHide = () => invoke<void>("ghost_hide");
+
 /** Starts one more Perli with a window of its own. */
-export const openWindow = (folder: string, select: string[]) => invoke<void>("open_window", { folder, select });
+/** `moved` is a whole tab for the new window to take, as `parseMoved` reads it. */
+export const openWindow = (folder: string, select: string[], moved?: string) =>
+  invoke<void>("open_window", { folder, select, moved: moved ?? null });
 
 export const onDrivesChanged = (handler: () => void) => listen("drives-changed", handler);
 
@@ -874,7 +903,9 @@ export async function fetchRows(
 export type Preview =
   | { kind: "text"; text: string; next: number | null; end: number; encoding: string }
   | { kind: "markdown"; html: string; source: string }
-  | { kind: "archive"; entries: ArchiveEntry[]; more: boolean }
+  /** `hidden` when even the names are locked. `lock` says how locked files are locked, such as
+   *  "AES-256" or "ZipCrypto", and is null when none are. */
+  | { kind: "archive"; entries: ArchiveEntry[]; more: boolean; hidden: boolean; lock: string | null }
   | { kind: "comic"; pages: string[] }
   | { kind: "book"; title: string; chapters: string[]; contents: BookHeading[] }
   | { kind: "model" }
@@ -892,7 +923,7 @@ export interface BookHeading {
   depth: number;
 }
 
-/** One file or folder inside a ZIP. `modified` is as the archive wrote it. */
+/** One file or folder inside an archive. `modified` is as the archive wrote it. */
 export interface ArchiveEntry {
   name: string;
   size: number;
@@ -961,8 +992,15 @@ export const dragEntry = (view: number, request: number, row: number, entry: str
 export const audioPeaks = (view: number, request: number, row: number, bars: number) =>
   invoke<number[]>("audio_peaks", { view, request, row, bars });
 
-export const besideText = (view: number, request: number, row: number, extension: "lrc" | "srt" | "vtt") =>
-  invoke<string | null>("beside_text", { view, request, row, extension });
+export const besideText = (view: number, request: number, row: number, extension: "lrc" | "srt" | "vtt", path?: string) =>
+  invoke<string | null>("beside_text", { view, request, row, extension, path: path ?? null });
+
+/** Hands a film to the small window that plays it on top of every window. */
+export const miniOpen = (state: unknown) => invoke<void>("mini_open", { state });
+/** What the main window handed the small window last, once. */
+export const miniTake = <T>() => invoke<T | null>("mini_take");
+/** Sizes the small window to the film's shape and puts it in a corner of the screen. */
+export const miniFit = (width: number, aspect: number, corner: string) => invoke<void>("mini_fit", { width, aspect, corner });
 
 /** Saves a frame of a film as a PNG beside it, and gives the new file's name. */
 export function saveFrame(view: number, request: number, row: number, seconds: number, png: ArrayBuffer) {

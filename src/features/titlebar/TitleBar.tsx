@@ -4,6 +4,7 @@ import { placeSnapArea } from "../../api";
 import { Menu } from "../../ui/Menu";
 import { toCrumbs } from "../navigation/path";
 import { lookOf } from "../sidebar/saved";
+import { dragTab } from "../tabs/tabDrag";
 import type { Tab, Tabs } from "../tabs/tabs";
 import { TabPeek } from "./TabPeek";
 import "./titlebar.css";
@@ -197,7 +198,10 @@ export function TitleBar(props: { tabs: Tabs; onNewTab: () => void; onTabSearch:
                 onAuxClick={(event) => event.button === 1 && props.tabs.close(tab)}
                 onPointerEnter={(event) => restOn(tab, event.currentTarget)}
                 onPointerLeave={leave}
-              onPointerDown={leave}
+                onPointerDown={(event) => {
+                  leave();
+                  dragTab(event, tab, props.tabs, strip, tabTitle(tab), () => activate(tab));
+                }}
                 onContextMenu={(event) => {
                   event.preventDefault();
                   // A native window sits over the maximize button and would take the menu's clicks.

@@ -78,8 +78,41 @@ export interface ArchiveViewProps {
   /** Drags one file out, the way a row is dragged out of the list. */
   drag: (entry: string, password?: string) => Promise<void>;
   keys: (handler: ((event: KeyboardEvent) => boolean) | undefined) => void;
-  /** Opens the ZIP in the list as a folder, where a ZIP can be one. */
+  /** Opens the archive in the list as a folder, where it can be one. */
   onOpenFolder?: () => void;
+  /** Even the names are locked, so nothing shows without the password. */
+  hidden?: boolean;
+  /** How its locked files are locked, such as "AES-256" or "ZipCrypto". */
+  lock?: string | null;
+  /** "ZIP", "7z", "RAR", "TAR" or "CAB". */
+  kind?: string;
+}
+
+/** What each lock means for whoever opens the archive next. */
+function lockNote(lock: string, kind: string | undefined) {
+  if (lock === "ZipCrypto") return "The classic ZIP lock. Windows and every unzip app open it. Fine against a glance, not for secrets";
+  if (kind === "ZIP") return "A strong lock. Windows can't open an AES ZIP on its own; Perli and 7-Zip can";
+  return "A strong lock. Every locked file needs the password";
+}
+
+/** An archive whose very names are locked, which shows nothing until the password comes. */
+function LockedNames(props: { onOpenFolder?: () => void }) {
+  return (
+    <div class="archive-hidden">
+      <span class="archive-hidden-icon" aria-hidden="true">
+        {ICON_LOCK}
+      </span>
+      <p class="archive-hidden-title">Even the names in this archive are locked.</p>
+      <Show when={props.onOpenFolder} fallback={<p class="archive-hidden-note">Extract it to give the password.</p>}>
+        {(open) => (
+          <button class="details-button archive-as-folder" onClick={() => open()()}>
+            <span aria-hidden="true">{ICON_FOLDER}</span>
+            Open as folder to enter it
+          </button>
+        )}
+      </Show>
+    </div>
+  );
 }
 
 const count = (amount: number, one: string) => `${amount.toLocaleString()} ${one}${amount === 1 ? "" : "s"}`;
@@ -104,6 +137,7 @@ export function testSentence(found: ArchiveTested) {
  */
 export function ArchiveView(live: ArchiveViewProps) {
   const props = { ...live };
+  if (props.hidden) return <LockedNames onOpenFolder={props.onOpenFolder} />;
   const tree = treeOf(props.entries);
   const [open, setOpen] = createSignal(new Set<string>(tree.length === 1 && tree[0].folder ? [tree[0].path] : []));
   const [query, setQuery] = createSignal("");
@@ -279,6 +313,14 @@ export function ArchiveView(live: ArchiveViewProps) {
           {summary}
           {props.more && ". Only the first ones are listed."}
         </p>
+        <Show when={props.lock}>
+          {(lock) => (
+            <span class="archive-lock" aria-label={lockNote(lock(), props.kind)}>
+              <span aria-hidden="true">{ICON_LOCK}</span>
+              {lock()}
+            </span>
+          )}
+        </Show>
         <Show when={picked().size}>
           <button class="details-button archive-take" onClick={() => extract([...picked()])}>
             Extract {picked().size.toLocaleString()}
@@ -286,7 +328,7 @@ export function ArchiveView(live: ArchiveViewProps) {
         </Show>
         <Show when={props.onOpenFolder}>
           {(open) => (
-            <button class="details-button archive-as-folder" aria-label="Open the ZIP in the list, as a folder" onClick={() => open()()}>
+            <button class="details-button archive-as-folder" aria-label="Open the archive in the list, as a folder" onClick={() => open()()}>
               <span aria-hidden="true">{ICON_FOLDER}</span>
               Open as folder
             </button>
