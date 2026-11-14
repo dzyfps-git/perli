@@ -15,6 +15,8 @@ const LOOK_EDGE = 1600;
 /** A press that moves this far is a drag out of the archive. */
 const DRAG_PX = 6;
 const WRONG_PASSWORD = "Wrong password";
+/** Rust adds this when the file tried is damaged but the password opened another one. */
+const PASSWORD_RIGHT = "The password is right.";
 
 type Column = "name" | "size" | "modified";
 
@@ -191,7 +193,10 @@ export function ArchiveView(live: ArchiveViewProps) {
     const waiting = asking();
     if (!waiting || !firstLocked) return;
     try {
-      await props.check(firstLocked.name, tried);
+      await props.check(firstLocked.name, tried).catch((reason) => {
+        // The file tried is damaged, but the password is proven on another, so it goes on.
+        if (!String(reason).includes(PASSWORD_RIGHT)) throw reason;
+      });
       setPassword(tried);
       setAsking(undefined);
       waiting.then();

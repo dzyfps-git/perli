@@ -149,8 +149,10 @@ export function createFolderView(id: number, saved?: SavedPane) {
   const [chipsOpen, setChipsOpen] = createSignal(false);
   /** A search reads small text files too. */
   const [inside, setInsideValue] = createSignal(false);
-  /** Folders opened in place, whose rows show under them. They last until the view goes elsewhere. */
-  const [expanded, setExpanded] = createSignal<string[]>([]);
+  /** Folders opened in place, whose rows show under them. Each folder keeps its own, over a restart too. */
+  const [expanded, setExpanded] = createSignal<string[]>(saved?.expanded ?? []);
+  /** The folders opened in place in each folder this pane left, by lowercase path. */
+  const openedIn = new Map<string, string[]>();
   /** What the folder's rows gather under headers by, and a search's, which the folder keeps apart. */
   const [groupBy, setGroupByValue] = createSignal<GroupBy>(saved ? rememberedGroup(saved.path) : "none");
   const [searchGroupBy, setSearchGroupBy] = createSignal<GroupBy>("none");
@@ -215,7 +217,7 @@ export function createFolderView(id: number, saved?: SavedPane) {
     showHidden: showHidden(),
     showSystem: showSystem(),
     filter: toFilter(form),
-    expanded: samePath(path(), target) && !isBin(target) && by === "none" && nests() ? expanded() : [],
+    expanded: isBin(target) || by !== "none" || !nests() ? [] : samePath(path(), target) ? expanded() : (openedIn.get(target.toLowerCase()) ?? []),
     ...grouped(by, samePath(path(), target) ? folded() : []),
   });
   /** Row numbers mean nothing outside the snapshot they came from. */
@@ -298,7 +300,9 @@ export function createFolderView(id: number, saved?: SavedPane) {
         setFilterFormValue(form);
         if (filterActive(form)) setChipsOpen(true);
         if (!samePath(path(), opened.path)) {
-          setExpanded([]);
+          if (before && expanded().length > 0) openedIn.set(before.toLowerCase(), expanded());
+          else if (before) openedIn.delete(before.toLowerCase());
+          setExpanded(wanted.expanded ?? []);
           setFolded([]);
         }
         setGroupByValue(by);

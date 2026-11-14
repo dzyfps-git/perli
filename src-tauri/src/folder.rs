@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use serde::{Deserialize, Serialize};
 use windows::core::{Result, HSTRING, PCWSTR};
@@ -58,7 +58,33 @@ pub enum SortKey {
     Found,
     /// Rows of one tag sit together, and rows with none go last.
     Tags,
+    /// The extra columns, read from each file's own properties.
+    Artist,
+    Album,
+    Length,
+    Taken,
+    Dimensions,
 }
+
+impl SortKey {
+    /// The Windows property an extra column shows, as `preview::props_of` reads it.
+    fn property(self) -> Option<&'static str> {
+        Some(match self {
+            Self::Artist => "System.Music.Artist",
+            Self::Album => "System.Music.AlbumTitle",
+            Self::Length => "System.Media.Duration",
+            Self::Taken => "date:System.Photo.DateTaken",
+            Self::Dimensions => "System.Image.Dimensions",
+            _ => return None,
+        })
+    }
+}
+
+/// Property values read for sorting, by path and property, with the file's modified time they
+/// were read at. Emptied when it gets this big.
+type PropCache = HashMap<(PathBuf, &'static str), (u64, Option<String>)>;
+static SORT_PROPS: Mutex<Option<PropCache>> = Mutex::new(None);
+const MOST_SORT_PROPS: usize = 200_000;
 
 /// Where folders go among files.
 #[derive(Clone, Copy, Default, Deserialize, PartialEq)]
@@ -113,11 +139,16 @@ pub struct Group {
 #[serde(rename_all = "camelCase")]
 pub struct Shape {
     pub count: usize,
+    /// How many files the rows stand for. Fewer than `count` when a file stands under more than
+    /// one tag.
+    pub items: usize,
     /// The system switch changes what the hidden switch would show.
     pub hidden_count: usize,
     pub groups: Vec<Group>,
     /// The biggest size a row shows, which the size bars measure against.
     pub largest: u64,
+    /// Files a search by tag couldn't reach, on a drive or computer that isn't here.
+    pub away: usize,
 }
 
 /// What a filter lets through, of files and folders.
@@ -368,6 +399,8 @@ pub struct Found {
     locations: Vec<Arc<[u16]>>,
     /// Only a search by tag knows the tags of its rows.
     tags: tags::Tagged,
+    /// Files with the tag searched for that are on a drive or computer that isn't here.
+    pub away: usize,
 }
 
 impl Found {
@@ -382,14 +415,24 @@ impl Found {
     }
 
     /// Moves all of `other`'s rows to the end of this one.
+    /// Reads the tags of the rows pushed since `from`, which are all in `folder`. A search shows
+    /// tags on its rows the way the folder does.
+    pub fn tag_from(&mut self, folder: &Path, from: usize) {
+        if from >= self.entries.len() {
+            return;
+        }
+        let tagged = tags::in_folder(folder, &self.entries[from..]);
+        self.tags.extend(tagged.into_iter().map(|(row, tags)| (row + from as u32, tags)));
+    }
+
     pub fn append(&mut self, other: &mut Self) {
         let after = self.entries.len() as u32;
         self.tags.extend(other.tags.drain().map(|(row, tags)| (row + after, tags)));
         self.entries.append(&mut other.entries);
         self.locations.append(&mut other.locations);
+        self.away += std::mem::take(&mut other.away);
     }
 
-    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.entries.len()
     }
@@ -417,6 +460,8 @@ pub struct Listing {
     parents: Arc<Vec<u32>>,
     /// Only entries that have tags are here, so normal rows stay small.
     tags: Arc<tags::Tagged>,
+    /// Files a search by tag couldn't reach, on a drive or computer that isn't here.
+    away: usize,
     visible: Vec<u32>,
     groups: Vec<Group>,
     order: Order,
@@ -500,9 +545,15 @@ impl Listing {
             entries: Arc::new(found.entries),
             found_in: Arc::new(found.locations),
             tags: Arc::new(found.tags),
+            away: found.away,
             ..Self::default()
         }
         .arrange(order)
+    }
+
+    /// The folders opened in place that the read listed.
+    pub fn expanded(&self) -> &[String] {
+        &self.order.expanded
     }
 
     pub fn arranged(self, order: Order) -> Self {
@@ -513,7 +564,14 @@ impl Listing {
         }
     }
 
-    fn arrange(mut self, order: Order) -> Self {
+    fn arrange(self, order: Order) -> Self {
+        let by_tag = order.key == SortKey::Tags || order.group_by == GroupBy::Tag;
+        let places = if by_tag { tags::places() } else { HashMap::new() };
+        self.arrange_with(order, &places)
+    }
+
+    /// `places` is each tag's place in name order, needed only to sort or group by tag.
+    fn arrange_with(mut self, order: Order, places: &HashMap<u32, u64>) -> Self {
         let entries = &self.entries;
         let name = order.filter.name.to_lowercase();
         let sight = order.sight();
@@ -528,29 +586,50 @@ impl Listing {
         let ranks = match order.key {
             SortKey::Type => type_ranks(entries),
             SortKey::Size if sizes::any() => self.sizes(),
-            SortKey::Tags => self.tag_ranks(&tags::places()),
-            _ => Vec::new(),
+            SortKey::Tags => self.tag_ranks(places),
+            key => key.property().map(|name| self.prop_ranks(name)).unwrap_or_default(),
         };
-        let grouped = order.group_by != GroupBy::None;
-        let (group_of, group_keys) = self.group_places(&order);
-        let group = |row: u32| group_of[row as usize];
+        let mut groups = Vec::new();
         // Grouped rows leave folders opened in place, which the UI doesn't offer then.
-        if parents.is_empty() || grouped {
-            visible.sort_unstable_by(|&a, &b| {
-                let by_group = if grouped { group(a).cmp(&group(b)) } else { Ordering::Equal };
-                by_group.then_with(|| compare(entries, locations, &ranks, a, b, &order))
-            });
-        } else {
-            // Each folder's rows are sorted among themselves and follow it.
-            // ponytail: a row whose folder the filter leaves out goes with it. Search finds those.
-            let mut kept = vec![false; entries.len()];
-            let mut inside: HashMap<u32, Vec<u32>> = HashMap::new();
-            for row in visible.drain(..) {
-                let parent = parents[row as usize];
-                if parent == TOP || kept[parent as usize] {
-                    kept[row as usize] = true;
-                    inside.entry(parent).or_default().push(row);
+        if order.group_by != GroupBy::None {
+            let (group_of, also_in, group_keys) = self.group_places(&order, places);
+            let mut placed: Vec<(u32, u32)> = visible.iter().map(|&row| (group_of[row as usize], row)).collect();
+            if !also_in.is_empty() {
+                let mut fits = vec![false; entries.len()];
+                for &row in &visible {
+                    fits[row as usize] = true;
                 }
+                placed.extend(also_in.iter().filter(|&&(_, row)| fits[row as usize]));
+            }
+            placed.sort_unstable_by(|a, b| a.0.cmp(&b.0).then_with(|| compare(entries, locations, &ranks, a.1, b.1, &order)));
+            visible.clear();
+            for run in placed.chunk_by(|a, b| a.0 == b.0) {
+                let key = group_keys[run[0].0 as usize].clone();
+                let folded = order.folded.contains(&key);
+                let total = run.len() as u32;
+                groups.push(Group { key, start: visible.len() as u32, count: if folded { 0 } else { total }, total });
+                if !folded {
+                    visible.extend(run.iter().map(|&(_, row)| row));
+                }
+            }
+        } else if parents.is_empty() {
+            visible.sort_unstable_by(|&a, &b| compare(entries, locations, &ranks, a, b, &order));
+        } else {
+            // Each folder's rows are sorted among themselves and follow it. A row the filter keeps
+            // brings back the folders it sits in, so it is never hidden by its folder's name.
+            // Hidden folders stay hidden, and what is inside them with them.
+            let mut kept = vec![false; entries.len()];
+            for row in visible.drain(..) {
+                kept[row as usize] = true;
+                let mut parent = parents[row as usize];
+                while parent != TOP && !kept[parent as usize] && shown(&entries[parent as usize]) {
+                    kept[parent as usize] = true;
+                    parent = parents[parent as usize];
+                }
+            }
+            let mut inside: HashMap<u32, Vec<u32>> = HashMap::new();
+            for row in (0..entries.len() as u32).filter(|&row| kept[row as usize]) {
+                inside.entry(parents[row as usize]).or_default().push(row);
             }
             for rows in inside.values_mut() {
                 rows.sort_unstable_by(|&a, &b| compare(entries, locations, &ranks, b, a, &order));
@@ -561,31 +640,18 @@ impl Listing {
                 next.extend(inside.remove(&row).unwrap_or_default());
             }
         }
-        let mut groups = Vec::new();
-        if grouped {
-            let mut kept = Vec::with_capacity(visible.len());
-            for run in visible.chunk_by(|&a, &b| group(a) == group(b)) {
-                let key = group_keys[group(run[0]) as usize].clone();
-                let folded = order.folded.contains(&key);
-                let total = run.len() as u32;
-                groups.push(Group { key, start: kept.len() as u32, count: if folded { 0 } else { total }, total });
-                if !folded {
-                    kept.extend_from_slice(run);
-                }
-            }
-            visible = kept;
-        }
         self.visible = visible;
         self.groups = groups;
         self.order = order;
         self
     }
 
-    /// Each entry's group, as a place in the keys that is also where the group goes.
-    fn group_places(&self, order: &Order) -> (Vec<u32>, Vec<String>) {
+    /// Each entry's group, as a place in the keys that is also where the group goes. The middle
+    /// list holds the other groups, as (group, entry), of an entry that stands in more than one.
+    fn group_places(&self, order: &Order, places: &HashMap<u32, u64>) -> (Vec<u32>, Vec<(u32, u32)>, Vec<String>) {
         let numbered = |count: usize| (0..count).map(|at| at.to_string()).collect::<Vec<_>>();
         let each = |place: &dyn Fn(usize) -> usize| (0..self.entries.len()).map(|entry| place(entry) as u32).collect::<Vec<u32>>();
-        match order.group_by {
+        let (places, keys) = match order.group_by {
             GroupBy::None => (Vec::new(), Vec::new()),
             GroupBy::Date => {
                 let edges: Vec<u64> = order.group_edges.iter().map(|&edge| ticks(edge)).collect();
@@ -626,18 +692,22 @@ impl Listing {
                 (each(&place), keys)
             }
             GroupBy::Tag => {
-                // ponytail: a row with many tags goes under the first one only. Explorer repeats it
-                // under each, which would need rows that stand in more than one place.
-                let places = tags::places();
+                // A row with many tags stands under each of them, as in Explorer.
                 let mut ids: Vec<u32> = places.keys().copied().collect();
                 ids.sort_unstable_by_key(|id| places[id]);
-                let place = |entry: usize| {
-                    let ranks = self.tags_of(entry as u32).iter().filter_map(|tag| places.get(tag));
-                    ranks.min().map_or(ids.len(), |&rank| rank as usize)
-                };
+                let ranks = |entry: usize| self.tags_of(entry as u32).iter().filter_map(|tag| places.get(tag).map(|&rank| rank as u32));
+                let place = |entry: usize| ranks(entry).min().map_or(ids.len(), |rank| rank as usize);
+                let mut also_in = Vec::new();
+                for entry in 0..self.entries.len() {
+                    let first = place(entry) as u32;
+                    let mut more: Vec<u32> = ranks(entry).filter(|&rank| rank != first).collect();
+                    more.sort_unstable();
+                    more.dedup();
+                    also_in.extend(more.into_iter().map(|rank| (rank, entry as u32)));
+                }
                 let mut keys: Vec<String> = ids.iter().map(u32::to_string).collect();
                 keys.push("none".into());
-                (each(&place), keys)
+                return (each(&place), also_in, keys);
             }
             GroupBy::Folder => {
                 let locations = self.locations();
@@ -649,15 +719,18 @@ impl Listing {
                 let keys = folders.iter().map(|folder| String::from_utf16_lossy(&folder[..folder.len() - 1])).collect();
                 (each(&place), keys)
             }
-        }
+        };
+        (places, Vec::new(), keys)
     }
 
     pub fn shape(&self) -> Shape {
         Shape {
             count: self.len(),
+            items: self.items(),
             hidden_count: self.hidden_count(),
             groups: self.groups.clone(),
             largest: self.visible.iter().map(|&row| self.size_of(row as usize)).max().unwrap_or(0),
+            away: self.away,
         }
     }
 
@@ -676,6 +749,60 @@ impl Listing {
 
     fn tags_of(&self, entry: u32) -> &[u32] {
         self.tags.get(&entry).map_or(&[], |tags| tags)
+    }
+
+    /// Where each entry goes in a sort by the property `name`. Rows without one go last. Values
+    /// are read once per file and kept until the file changes, so a reload reads only what is new.
+    fn prop_ranks(&self, name: &'static str) -> Vec<u64> {
+        let paths: Vec<PathBuf> = (0..self.entries.len())
+            .map(|entry| match &self.bin {
+                Some(bin) => bin.items[entry].item.clone(),
+                None => self.full_path(entry),
+            })
+            .collect();
+        let mut values: Vec<Option<Option<String>>> = vec![None; paths.len()];
+        {
+            let mut kept = SORT_PROPS.lock().unwrap_or_else(PoisonError::into_inner);
+            let kept = kept.get_or_insert_default();
+            for (entry, path) in paths.iter().enumerate() {
+                let modified = self.entries[entry].modified;
+                if let Some((at, value)) = kept.get(&(path.clone(), name)) {
+                    values[entry] = (*at == modified).then(|| value.clone());
+                }
+            }
+        }
+        // Folders have none of these, and Windows takes a while to say so.
+        let missing: Vec<usize> = (0..paths.len()).filter(|&entry| values[entry].is_none() && !self.entries[entry].is_dir).collect();
+        let read = crate::preview::props_of(&missing.iter().map(|&entry| paths[entry].clone()).collect::<Vec<_>>(), &[name.to_string()]);
+        {
+            let mut kept = SORT_PROPS.lock().unwrap_or_else(PoisonError::into_inner);
+            let kept = kept.get_or_insert_default();
+            if kept.len() > MOST_SORT_PROPS {
+                kept.clear();
+            }
+            for (&entry, mut value) in missing.iter().zip(read) {
+                let value = value.pop().flatten();
+                kept.insert((paths[entry].clone(), name), (self.entries[entry].modified, value.clone()));
+                values[entry] = Some(value);
+            }
+        }
+
+        let texts: Vec<Option<Vec<u16>>> = values
+            .into_iter()
+            .map(|value| value.flatten().map(|text| text.encode_utf16().chain([0]).collect()))
+            .collect();
+        let mut by_value: Vec<usize> = (0..texts.len()).filter(|&entry| texts[entry].is_some()).collect();
+        by_value.sort_by(|&a, &b| natural(texts[a].as_ref().unwrap(), texts[b].as_ref().unwrap()));
+        let mut ranks = vec![u64::MAX; texts.len()];
+        let mut rank = 0;
+        for (at, &entry) in by_value.iter().enumerate() {
+            // Equal values share a rank, so the name decides between them.
+            if at > 0 && natural(texts[by_value[at - 1]].as_ref().unwrap(), texts[entry].as_ref().unwrap()) != Ordering::Equal {
+                rank += 1;
+            }
+            ranks[entry] = rank;
+        }
+        ranks
     }
 
     /// Where each entry goes in a sort by tag: by whichever of its tags comes first in `places`.
@@ -706,11 +833,14 @@ impl Listing {
         self.visible.iter().map(|&row| &self.entries[row as usize])
     }
 
-    /// The positions in `entries` of the rows the UI named. Rows no longer shown are left out.
+    /// The positions in `entries` of the rows the UI named, each once, since a row with many tags
+    /// can stand in many groups. Rows no longer shown are left out.
     fn chosen<'a>(&'a self, rows: &'a [u32]) -> impl Iterator<Item = usize> + 'a {
+        let mut seen = HashSet::new();
         rows.iter()
             .filter_map(|&row| self.visible.get(row as usize))
             .map(|&entry| entry as usize)
+            .filter(move |&entry| seen.insert(entry))
     }
 
     fn full_path(&self, entry: usize) -> PathBuf {
@@ -724,17 +854,36 @@ impl Listing {
     /// What is on disk for each of `rows`: its full path, built from the raw name so that odd
     /// names survive, or its `$R` item in the Recycle Bin.
     pub fn paths(&self, rows: &[u32]) -> Vec<PathBuf> {
-        self.chosen(rows)
-            .map(|entry| match &self.bin {
-                Some(bin) => bin.items[entry].item.clone(),
-                None => self.full_path(entry),
-            })
-            .collect()
+        self.chosen(rows).map(|entry| self.path_of(entry)).collect()
     }
 
-    /// What `rows` add up to, as the list shows their sizes. Nothing on disk is read.
-    pub fn rows_size(&self, rows: &[u32]) -> u64 {
-        self.chosen(rows).map(|entry| self.size_of(entry)).sum()
+    /// One path for each of `rows`, in their order, repeats kept, for answers the UI lines up
+    /// with its rows. A row no longer shown gets an empty path.
+    pub fn row_paths(&self, rows: &[u32]) -> Vec<PathBuf> {
+        let path = |row: &u32| self.visible.get(*row as usize).map_or_else(PathBuf::new, |&entry| self.path_of(entry as usize));
+        rows.iter().map(path).collect()
+    }
+
+    fn path_of(&self, entry: usize) -> PathBuf {
+        match &self.bin {
+            Some(bin) => bin.items[entry].item.clone(),
+            None => self.full_path(entry),
+        }
+    }
+
+    /// How many files `rows` are, and what they add up to as the list shows their sizes.
+    /// Nothing on disk is read.
+    pub fn rows_size(&self, rows: &[u32]) -> (usize, u64) {
+        self.chosen(rows).fold((0, 0), |(count, bytes), entry| (count + 1, bytes + self.size_of(entry)))
+    }
+
+    /// Only grouping by tag shows a file more than once.
+    fn items(&self) -> usize {
+        if self.order.group_by != GroupBy::Tag {
+            return self.len();
+        }
+        let mut seen = vec![false; self.entries.len()];
+        self.visible.iter().filter(|&&row| !std::mem::replace(&mut seen[row as usize], true)).count()
     }
 
     /// The Recycle Bin items at `rows`. Other folders have none.
@@ -937,12 +1086,24 @@ fn compare(
         Grouping::Mixed => Ordering::Equal,
     };
     groups.then_with(|| {
+        // Rows an extra column has nothing for go last, whichever way the column sorts.
+        let blank = |row: u32| ranks[row as usize] == u64::MAX;
+        if order.key.property().is_some() && blank(first) != blank(second) {
+            return blank(first).cmp(&blank(second));
+        }
         let by_key = match order.key {
             SortKey::Name => natural(&a.name, &b.name),
             SortKey::Modified => a.modified.cmp(&b.modified),
             SortKey::Created => a.created.cmp(&b.created),
             SortKey::Size if ranks.is_empty() => a.size.cmp(&b.size),
-            SortKey::Type | SortKey::Size | SortKey::Tags => ranks[first as usize].cmp(&ranks[second as usize]),
+            SortKey::Type
+            | SortKey::Size
+            | SortKey::Tags
+            | SortKey::Artist
+            | SortKey::Album
+            | SortKey::Length
+            | SortKey::Taken
+            | SortKey::Dimensions => ranks[first as usize].cmp(&ranks[second as usize]),
             SortKey::Location => natural(location_of(locations, first), location_of(locations, second)),
             SortKey::Found => first.cmp(&second),
         };
@@ -1245,7 +1406,13 @@ mod tests {
 
         let named = |name: &str| Order { filter: Filter { name: name.into(), ..Filter::default() }, ..open(&["apple"], false) };
         assert_eq!(sorted(&folder, named("a")), ["apple", "a.txt", "banana"]);
-        assert_eq!(sorted(&folder, named("txt")), ["cherry.txt"], "rows go with the folder they are in");
+        assert_eq!(
+            sorted(&folder, named("txt")),
+            ["apple", "a.txt", "b.txt", "cherry.txt"],
+            "a row that fits brings back the folder it is in"
+        );
+        let seed = Order { filter: Filter { name: "seed".into(), ..Filter::default() }, ..open(&["apple", "apple/core"], false) };
+        assert_eq!(sorted(&folder, seed), ["apple", "core", "seed.txt"], "and every folder above that");
 
         let rows = deep.encode_rows(0, 3);
         let location_bytes = |at: usize| u32::from_le_bytes(rows[at..at + 4].try_into().unwrap());
@@ -1436,6 +1603,55 @@ mod tests {
             ..Listing::default()
         }
         .arrange(order)
+    }
+
+    /// A 24-bit BMP of `width` by `height` black pixels.
+    fn bmp(width: u32, height: u32) -> Vec<u8> {
+        let row = (width * 3).div_ceil(4) * 4;
+        let pixels = row * height;
+        let mut bytes = b"BM".to_vec();
+        for value in [54 + pixels, 0, 54, 40, width, height] {
+            bytes.extend(value.to_le_bytes());
+        }
+        bytes.extend(1u16.to_le_bytes());
+        bytes.extend(24u16.to_le_bytes());
+        for value in [0, pixels, 2835, 2835, 0, 0] {
+            bytes.extend(value.to_le_bytes());
+        }
+        bytes.resize(bytes.len() + pixels as usize, 0);
+        bytes
+    }
+
+    #[test]
+    fn an_extra_column_sorts_by_its_value_and_rows_without_one_go_last() {
+        let folder = TempFolder::new("prop-sort");
+        for (name, width) in [("a.bmp", 30), ("b.bmp", 4), ("c.bmp", 120)] {
+            fs::write(folder.0.join(name), bmp(width, 2)).unwrap();
+        }
+        fs::write(folder.0.join("d.txt"), "").unwrap();
+        fs::create_dir(folder.0.join("e")).unwrap();
+        let by = |descending| Order { key: SortKey::Dimensions, descending, group: Grouping::Mixed, ..Order::default() };
+
+        assert_eq!(sorted(&folder, by(false)), ["b.bmp", "a.bmp", "c.bmp", "d.txt", "e"]);
+        // Read again from what was kept, the other way round.
+        assert_eq!(sorted(&folder, by(true))[..3], ["c.bmp", "a.bmp", "b.bmp"]);
+    }
+
+    #[test]
+    fn a_row_with_two_tags_stands_under_both_and_is_chosen_once() {
+        let folder = TempFolder::new("group-tags");
+        let order = Order { group_by: GroupBy::Tag, ..Order::default() };
+        let places = HashMap::from([(9, 0), (7, 1)]);
+        let listing = tagged_listing(&folder, Order::default()).arrange_with(order, &places);
+
+        assert_eq!(names(&listing), ["c", "a", "c", "b"]);
+        let groups: Vec<_> = listing.groups.iter().map(|group| (group.key.as_str(), group.start, group.total)).collect();
+        assert_eq!(groups, [("9", 0, 1), ("7", 1, 2), ("none", 3, 1)]);
+        assert_eq!(listing.paths(&[0, 2, 1]), [folder.0.join("c"), folder.0.join("a")], "c is chosen once");
+        assert_eq!((listing.shape().count, listing.shape().items), (4, 3), "c is one item");
+        assert_eq!(listing.rows_size(&[0, 2]).0, 1, "both of c's rows are one selected");
+        let lined_up = [folder.0.join("c"), folder.0.join("a"), folder.0.join("c"), folder.0.join("b"), PathBuf::new()];
+        assert_eq!(listing.row_paths(&[0, 1, 2, 3, 99]), lined_up, "one answer for each row the list shows");
     }
 
     #[test]

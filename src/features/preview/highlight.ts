@@ -92,12 +92,24 @@ async function withLanguage(language: string) {
   return hljs;
 }
 
+/** A piece left open is colored again with the next one, up to this much text. */
+const MOST_CARRIED = 1024 * 1024;
+
 /**
- * Colored HTML for one piece of a file. highlight.js escapes the text itself, so the HTML is safe.
- * ponytail: each piece is colored on its own, so a comment or string that crosses into the next
- * piece colors wrong there. Carrying the parser state over would fix it.
+ * Colors a file piece by piece. highlight.js can't carry its state from one piece to the next,
+ * so a piece that ends inside a comment or a string is colored again together with the next
+ * one, and `replaces` says to take the last piece's HTML away first. highlight.js escapes the
+ * text itself, so the HTML is safe.
  */
-export async function highlight(text: string, language: string): Promise<string> {
-  const hljs = await withLanguage(language);
-  return hljs.highlight(text, { language, ignoreIllegals: true }).value;
+export function pieceColorer(language: string) {
+  let open: string | undefined;
+  return async (piece: string): Promise<{ html: string; replaces: boolean }> => {
+    const replaces = open !== undefined;
+    const text = (open ?? "") + piece;
+    const hljs = await withLanguage(language);
+    const result = hljs.highlight(text, { language, ignoreIllegals: true }) as { value: string; _top?: { parent?: unknown } };
+    // The root mode has no parent, so a parent means the text ended inside something.
+    open = result._top?.parent && text.length < MOST_CARRIED ? text : undefined;
+    return { html: result.value, replaces };
+  };
 }

@@ -10,12 +10,16 @@ export interface Opened {
   /** The resolved full path. */
   path: string;
   count: number;
+  /** How many files the rows stand for, fewer than `count` when a file stands under two tags. */
+  items: number;
   /** Hidden entries in the folder, shown or not. */
   hiddenCount: number;
   /** The rows under each header, in order. Empty when the rows are not grouped. */
   groups: Group[];
   /** The biggest size a row shows, which the size bars measure against. */
   largest: number;
+  /** Files a search by tag couldn't reach, on a drive or computer that isn't here. */
+  away: number;
   loadMs: number;
   /** Rows to select straight away, when this is a new order of the same folder. */
   selected?: number[];
@@ -52,10 +56,12 @@ export interface Tag {
 }
 
 export type SortKey = "name" | "modified" | "created" | "type" | "size" | "location";
+/** The extra columns, read from each file's own properties. */
+export type PropKey = "artist" | "album" | "length" | "taken" | "dimensions";
 
 export interface Sort {
   /** `found` is the order a search found its rows in, which no column stands for. */
-  key: SortKey | "found" | "tags";
+  key: SortKey | PropKey | "found" | "tags";
   descending: boolean;
 }
 
@@ -78,9 +84,11 @@ export interface Group {
 /** What a new order of the same rows tells the list. */
 export interface Arranged {
   count: number;
+  items: number;
   hiddenCount: number;
   groups: Group[];
   largest: number;
+  away: number;
   selected: number[];
 }
 
@@ -260,8 +268,10 @@ export type JobEvent = { id: number } & (
       created: string[];
       /** Sources a move left alone because they changed while it ran. */
       kept: string[];
-      /** What a copy or a move skipped after a problem, to try again. */
+      /** What the job skipped after a problem. */
       failed: Retry[];
+      /** False for a restore or an undo, whose skips are only listed. */
+      retries: boolean;
       cancelled: boolean;
       /** The undo step this job added. */
       step: number | null;
@@ -628,6 +638,12 @@ export const setTag = (target: ShellTarget, tag: number, on: boolean) =>
 export const setTagPaths = (paths: string[], tag: number, on: boolean) =>
   invoke<void>("set_tag_paths", { paths, tag, on });
 
+/** Every tagged file here, by path, with its tags, for a backup. */
+export const taggedFiles = () => invoke<[string, number[]][]>("tagged_files");
+
+/** Puts a backup's tags back on the files here. Says how many files got them. */
+export const restoreTagged = (files: [string, number[]][]) => invoke<number>("restore_tagged", { files });
+
 /** Asks the sync app to keep the selected rows on this device for good, or to free their space. */
 export const keepOnDevice = (selection: Selection, keep: boolean) =>
   invoke<void>("keep_on_device", { selection, keep });
@@ -655,7 +671,8 @@ export const rowProps = (view: number, request: number, rows: number[], names: s
 export const folderPictures = (path: string) => invoke<string[]>("folder_pictures", { path });
 
 /** The bytes of the selected files, from the listing alone. Folders count as nothing. */
-export const selectionSize = (selection: Selection) => invoke<number>("selection_size", { selection });
+/** How many files the rows are, each once, and their size. */
+export const selectionSize = (selection: Selection) => invoke<[number, number]>("selection_size", { selection });
 
 /** The accent color picked in Windows, as `#rrggbb`. */
 export const windowsAccent = () => invoke<string | null>("windows_accent");
@@ -836,7 +853,7 @@ export async function fetchRows(
 
 /** What the quick preview shows. `next` is where the following piece of a text starts. */
 export type Preview =
-  | { kind: "text"; text: string; next: number | null; end: number; bom: boolean }
+  | { kind: "text"; text: string; next: number | null; end: number; encoding: string }
   | { kind: "markdown"; html: string; source: string }
   | { kind: "archive"; entries: ArchiveEntry[]; more: boolean }
   | { kind: "comic"; pages: string[] }
@@ -921,6 +938,10 @@ export const dragEntry = (view: number, request: number, row: number, entry: str
   invoke<void>("drag_entry", { view, request, row, entry, password: password ?? null });
 
 /** The words beside a file under its own name: lyrics (`lrc`) or subtitles (`srt`, `vtt`). */
+/** The loudest point of each of `bars` slices of a sound, from 0 to 1, read a little at a time. */
+export const audioPeaks = (view: number, request: number, row: number, bars: number) =>
+  invoke<number[]>("audio_peaks", { view, request, row, bars });
+
 export const besideText = (view: number, request: number, row: number, extension: "lrc" | "srt" | "vtt") =>
   invoke<string | null>("beside_text", { view, request, row, extension });
 
@@ -945,17 +966,26 @@ export const bookChapter = (view: number, request: number, row: number, entry: s
 export const modelFile = (view: number, request: number, row: number, part?: string) =>
   invoke<ArrayBuffer>("model_file", { view, request, row, part: part ?? null });
 
-/** A MIDI file's name, instruments and notes. Notes are start and length in seconds, key, channel. */
+/** A MIDI song's notes in order of start, as columns: start and length in seconds, key, channel. */
+export interface Notes {
+  start: Float32Array;
+  long: Float32Array;
+  key: Uint8Array;
+  channel: Uint8Array;
+}
+
+/** A MIDI file's name, instruments and notes. */
 export interface SongInfo {
   title: string | null;
   /** General MIDI programs in the order they first play. 128 is the drums. */
   instruments: number[];
   /** Each channel that plays and the instrument it starts with. */
   channels: [channel: number, instrument: number][];
-  notes: [number, number, number, number][];
+  notes: Notes;
   /** When each beat falls, in seconds. */
   beats: number[];
-  perBar: number;
+  /** When each bar starts, in seconds, following the time signatures. */
+  bars: number[];
 }
 
 /** How a MIDI file is played: silent channels as bits, keys up or down, and how fast. */
@@ -965,8 +995,24 @@ export interface Playing {
   speed: number;
 }
 
-export const songInfo = (view: number, request: number, row: number) =>
-  invoke<SongInfo>("song_info", { view, request, row });
+export async function songInfo(view: number, request: number, row: number): Promise<SongInfo> {
+  const [info, packed] = await Promise.all([
+    invoke<Omit<SongInfo, "notes">>("song_info", { view, request, row }),
+    invoke<ArrayBuffer>("song_notes", { view, request, row }),
+  ]);
+  return { ...info, notes: unpackNotes(packed) };
+}
+
+/** Notes packed by Rust as columns: every start, every length, every key, every channel. */
+export function unpackNotes(packed: ArrayBuffer): Notes {
+  const count = Math.floor(packed.byteLength / 10);
+  return {
+    start: new Float32Array(packed, 0, count),
+    long: new Float32Array(packed, 4 * count, count),
+    key: new Uint8Array(packed, 8 * count, count),
+    channel: new Uint8Array(packed, 9 * count, count),
+  };
+}
 
 export interface Tags {
   title: string | null;
@@ -986,9 +1032,12 @@ export const fetchCover = (view: number, request: number, row: number, edge: num
 export const aiffAudio = (view: number, request: number, row: number, path?: string) =>
   invoke<ArrayBuffer>("aiff_audio", { view, request, row, path: path ?? null });
 
-/** A MIDI file as one WAV, through the bundled SoundFont or a `.sf2` file named by `font`. */
+/**
+ * A MIDI file as one WAV, through the bundled SoundFont or a `.sf2` file named by `font`. The
+ * number streams it from `song://` while it is made, until `forgetSong` lets go of it.
+ */
 export const songAudio = (view: number, request: number, row: number, how?: { playing?: Playing; font?: string; path?: string }) =>
-  invoke<ArrayBuffer>("song_audio", {
+  invoke<number>("song_audio", {
     view,
     request,
     row,
@@ -996,6 +1045,8 @@ export const songAudio = (view: number, request: number, row: number, how?: { pl
     playing: how?.playing ?? null,
     font: how?.font ?? null,
   });
+
+export const forgetSong = (number: number) => invoke<void>("forget_song", { number });
 
 /** A picture on this PC that a Markdown file points to. */
 export const fetchPictureFile = (path: string, edge: number) =>

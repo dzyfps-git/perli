@@ -5,6 +5,15 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
+use windows::core::HSTRING;
+use windows::Win32::Media::MediaFoundation::{
+    MFAudioFormat_Float, MFCreateMediaType, MFCreateSourceReaderFromURL, MFMediaType_Audio, MFShutdown, MFStartup,
+    MFSTARTUP_LITE, MF_MT_AUDIO_NUM_CHANNELS, MF_MT_AUDIO_SAMPLES_PER_SECOND, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE,
+    MF_PD_DURATION, MF_SOURCE_READERF_ENDOFSTREAM, MF_SOURCE_READER_ALL_STREAMS, MF_SOURCE_READER_FIRST_AUDIO_STREAM,
+    MF_SOURCE_READER_MEDIASOURCE, MF_VERSION,
+};
+use windows::Win32::System::Com::StructuredStorage::PropVariantToUInt64;
+
 /// The player holds the whole sound in memory, so a file past this is left to its own app.
 const MOST_AIFF_BYTES: u64 = 512 << 20;
 const MOST_COVER_BYTES: u32 = 32 << 20;
@@ -133,9 +142,78 @@ pub fn flac_cover(path: &Path) -> Option<Vec<u8>> {
     }
 }
 
+/// The loudest point of each of `bars` even slices of a sound, from 0 to 1. Windows' own
+/// decoders read it a little at a time, so a song of any length takes little memory.
+pub fn peaks(path: &Path, bars: usize) -> Result<Vec<f32>, String> {
+    let bars = bars.clamp(1, 4096);
+    let _com = crate::ops::Com::enter();
+    unsafe { MFStartup(MF_VERSION, MFSTARTUP_LITE) }.map_err(|error| error.message())?;
+    let peaks = unsafe { read_peaks(path, bars) }.map_err(|error| error.message());
+    unsafe {
+        let _ = MFShutdown();
+    }
+    peaks
+}
+
+unsafe fn read_peaks(path: &Path, bars: usize) -> windows::core::Result<Vec<f32>> {
+    const AUDIO: u32 = MF_SOURCE_READER_FIRST_AUDIO_STREAM.0 as u32;
+    unsafe {
+        let reader = MFCreateSourceReaderFromURL(&HSTRING::from(path.as_os_str()), None)?;
+        reader.SetStreamSelection(MF_SOURCE_READER_ALL_STREAMS.0 as u32, false)?;
+        reader.SetStreamSelection(AUDIO, true)?;
+        let wanted = MFCreateMediaType()?;
+        wanted.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio)?;
+        wanted.SetGUID(&MF_MT_SUBTYPE, &MFAudioFormat_Float)?;
+        reader.SetCurrentMediaType(AUDIO, None, &wanted)?;
+        let format = reader.GetCurrentMediaType(AUDIO)?;
+        let channels = format.GetUINT32(&MF_MT_AUDIO_NUM_CHANNELS)?.max(1) as usize;
+        let rate = u64::from(format.GetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND)?);
+        // In steps of 100 nanoseconds.
+        let length = PropVariantToUInt64(&reader.GetPresentationAttribute(MF_SOURCE_READER_MEDIASOURCE.0 as u32, &MF_PD_DURATION)?)?;
+        let frames = (u128::from(length) * u128::from(rate) / 10_000_000).max(1);
+        let mut peaks = vec![0f32; bars];
+        let mut frame = 0u128;
+        loop {
+            let (mut flags, mut sample) = (0u32, None);
+            reader.ReadSample(AUDIO, 0, None, Some(&mut flags), None, Some(&mut sample))?;
+            if flags & MF_SOURCE_READERF_ENDOFSTREAM.0 as u32 != 0 {
+                break;
+            }
+            let Some(sample) = sample else { continue };
+            let buffer = sample.ConvertToContiguousBuffer()?;
+            let (mut data, mut size) = (std::ptr::null_mut(), 0u32);
+            buffer.Lock(&mut data, None, Some(&mut size))?;
+            let values = std::slice::from_raw_parts(data.cast::<f32>(), size as usize / 4);
+            for one in values.chunks(channels) {
+                let bar = ((frame * bars as u128 / frames) as usize).min(bars - 1);
+                peaks[bar] = one.iter().fold(peaks[bar], |loudest, value| loudest.max(value.abs()));
+                frame += 1;
+            }
+            buffer.Unlock()?;
+        }
+        let top = peaks.iter().copied().fold(0.01, f32::max);
+        Ok(peaks.into_iter().map(|peak| peak / top).collect())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_long_sound_gives_its_peaks_without_being_read_whole() {
+        // One second of quiet, then one of a loud square wave, as 16-bit samples.
+        let quiet = vec![0u8; 44100 * 2];
+        let loud: Vec<u8> = (0..44100).flat_map(|at: i32| if at % 100 < 50 { 0x6000i16 } else { -0x6000 }.to_be_bytes()).collect();
+        let wav = aiff_to_wav(&aiff(b"AIFF", &[], 16, &[quiet, loud].concat())).unwrap();
+        let file = std::env::temp_dir().join(format!("perli-peaks-{}.wav", std::process::id()));
+        std::fs::write(&file, wav).unwrap();
+        let peaks = peaks(&file, 4).unwrap();
+        std::fs::remove_file(file).unwrap();
+        assert_eq!(peaks.len(), 4);
+        assert!(peaks[0] < 0.01 && peaks[1] < 0.01, "{peaks:?}");
+        assert!(peaks[2] > 0.99 && peaks[3] > 0.99, "{peaks:?}");
+    }
 
     fn chunk(id: &[u8], body: &[u8]) -> Vec<u8> {
         let mut chunk = [id, &(body.len() as u32).to_be_bytes(), body].concat();

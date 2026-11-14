@@ -12,10 +12,15 @@ use quick_xml::{Reader, XmlVersion};
 use serde::Serialize;
 use windows::core::HSTRING;
 use windows::Win32::Foundation::GENERIC_READ;
+use windows::core::{w, Interface};
 use windows::Win32::Graphics::Imaging::{
-    CLSID_WICImagingFactory, GUID_WICPixelFormat32bppRGBA, IWICImagingFactory, WICBitmapInterpolationModeFant,
+    CLSID_WICImagingFactory, GUID_WICPixelFormat32bppRGBA, IWICBitmapFrameDecode, IWICBitmapSource, IWICImagingFactory,
+    WICBitmapInterpolationModeFant, WICBitmapTransformFlipHorizontal, WICBitmapTransformFlipVertical,
+    WICBitmapTransformOptions, WICBitmapTransformRotate180, WICBitmapTransformRotate270, WICBitmapTransformRotate90,
     WICConvertBitmapSource, WICDecodeMetadataCacheOnDemand,
 };
+use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
+use windows::Win32::System::Variant::VT_UI2;
 use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
 use windows::Win32::UI::Shell::StrCmpLogicalW;
 use zip::result::ZipError;
@@ -63,17 +68,36 @@ fn reason(error: ZipError) -> String {
     }
 }
 
+/// Said of a locked file whose password reads others of the archive whole.
+const DAMAGED_LOCKED: &str = "This file is damaged in the archive. The password is right.";
+
 /// A wrong ZipCrypto password passes its one-byte check about once in 256 tries, and then the
-/// file reads as garbage: a broken compressed stream, or a checksum that does not match.
-/// ponytail: a locked file that is damaged reads as a wrong password too; only the password
-/// check in the UI comes through here.
-fn read_failed(error: std::io::Error, password: Option<&str>) -> String {
+/// file reads as garbage: a broken compressed stream, or a checksum that does not match. A right
+/// password on a damaged file reads the same way, so another locked file of the archive tells
+/// them apart: if the password reads that one whole, it is right.
+fn read_failed(error: std::io::Error, path: &Path, name: &str, password: Option<&str>) -> String {
     use std::io::ErrorKind::{InvalidData, InvalidInput};
-    if password.is_some() && matches!(error.kind(), InvalidData | InvalidInput) {
-        WRONG_PASSWORD.into()
-    } else {
-        error.to_string()
+    match password.filter(|_| matches!(error.kind(), InvalidData | InvalidInput)) {
+        Some(password) if opens_another(path, name, password) => DAMAGED_LOCKED.into(),
+        Some(_) => WRONG_PASSWORD.into(),
+        None => error.to_string(),
     }
+}
+
+/// Whether `password` reads the smallest other locked file of the archive whole.
+// ponytail: tries one other file. If that one is damaged too, the password reads as wrong.
+fn opens_another(path: &Path, name: &str, password: &str) -> bool {
+    let Ok(mut zip) = open(path) else { return false };
+    let smallest = (0..zip.len())
+        .filter_map(|index| {
+            let entry = zip.by_index_data(index).ok()?;
+            let other = entry.encrypted() && !entry.is_dir() && entry.name().ok()?.as_ref() != name;
+            other.then(|| (entry.size(), index))
+        })
+        .min();
+    let Some((_, index)) = smallest else { return false };
+    zip.by_index_decrypt(index, password.as_bytes())
+        .is_ok_and(|mut entry| std::io::copy(&mut entry, &mut std::io::sink()).is_ok())
 }
 
 /// One entry, opened with the password if it has one.
@@ -154,9 +178,8 @@ pub fn text(path: &Path, name: &str, password: Option<&str>) -> Result<Option<St
     let mut zip = open(path)?;
     let entry = entry(&mut zip, name, password)?;
     let mut bytes = Vec::new();
-    entry.take(MOST_TEXT_BYTES).read_to_end(&mut bytes).map_err(|error| read_failed(error, password))?;
-    let body = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&bytes);
-    Ok(crate::preview::as_text(body, true).map(str::to_string))
+    entry.take(MOST_TEXT_BYTES).read_to_end(&mut bytes).map_err(|error| read_failed(error, path, name, password))?;
+    Ok(crate::preview::as_text(&bytes, true))
 }
 
 /// Reads all of a locked file, so its checksum proves `password`. A wrong one can pass the quick
@@ -164,7 +187,7 @@ pub fn text(path: &Path, name: &str, password: Option<&str>) -> Result<Option<St
 pub fn check_password(path: &Path, name: &str, password: &str) -> Result<(), String> {
     let mut zip = open(path)?;
     let mut entry = entry(&mut zip, name, Some(password))?;
-    std::io::copy(&mut entry, &mut std::io::sink()).map_err(|error| read_failed(error, Some(password)))?;
+    std::io::copy(&mut entry, &mut std::io::sink()).map_err(|error| read_failed(error, path, name, Some(password)))?;
     Ok(())
 }
 
@@ -291,8 +314,33 @@ fn book_cover(zip: &mut Zip) -> Option<String> {
     marked.or(by_note).or_else(by_name).map(|href| resolve(&package, &href))
 }
 
-/// Windows' own imaging reads the picture, so every format Windows can show works.
-/// ponytail: a JPEG's EXIF turn is not applied. Comic pages almost never have one.
+/// The turn a photo's EXIF orientation asks for, 1 to 8, as Windows' flip-rotator says it. A
+/// flip is applied before the turn.
+fn transform(orientation: u16) -> Option<WICBitmapTransformOptions> {
+    let both = |a: WICBitmapTransformOptions, b: WICBitmapTransformOptions| WICBitmapTransformOptions(a.0 | b.0);
+    Some(match orientation {
+        2 => WICBitmapTransformFlipHorizontal,
+        3 => WICBitmapTransformRotate180,
+        4 => WICBitmapTransformFlipVertical,
+        5 => both(WICBitmapTransformRotate270, WICBitmapTransformFlipHorizontal),
+        6 => WICBitmapTransformRotate90,
+        7 => both(WICBitmapTransformRotate90, WICBitmapTransformFlipHorizontal),
+        8 => WICBitmapTransformRotate270,
+        _ => return None,
+    })
+}
+
+/// A JPEG's EXIF orientation, or nothing for any other picture or one without it.
+unsafe fn orientation(frame: &IWICBitmapFrameDecode) -> Option<u16> {
+    let reader = frame.GetMetadataQueryReader().ok()?;
+    let mut value = PROPVARIANT::default();
+    reader.GetMetadataByName(w!("/app1/ifd/{ushort=274}"), &raw mut value).ok()?;
+    let inner = &value.Anonymous.Anonymous;
+    (inner.vt == VT_UI2).then(|| inner.Anonymous.uiVal)
+}
+
+/// Windows' own imaging reads the picture, so every format Windows can show works. A photo is
+/// turned the way its EXIF says, as a camera or phone leaves it.
 pub(crate) fn decode(bytes: &[u8], edge: u32) -> windows::core::Result<Vec<u8>> {
     let _com = Com::enter();
     unsafe {
@@ -308,7 +356,15 @@ pub(crate) fn decode(bytes: &[u8], edge: u32) -> windows::core::Result<Vec<u8>> 
         let height = ((height as f64 * scale).round() as u32).max(1);
         let scaler = factory.CreateBitmapScaler()?;
         scaler.Initialize(&frame, width, height, WICBitmapInterpolationModeFant)?;
-        let pixels = WICConvertBitmapSource(&GUID_WICPixelFormat32bppRGBA, &scaler)?;
+        let mut turned: IWICBitmapSource = scaler.cast()?;
+        if let Some(transform) = orientation(&frame).and_then(transform) {
+            let rotator = factory.CreateBitmapFlipRotator()?;
+            rotator.Initialize(&turned, transform)?;
+            turned = rotator.cast()?;
+        }
+        let (mut width, mut height) = (0, 0);
+        turned.GetSize(&raw mut width, &raw mut height)?;
+        let pixels = WICConvertBitmapSource(&GUID_WICPixelFormat32bppRGBA, &turned)?;
         let mut out = vec![0; 8 + width as usize * height as usize * 4];
         out[..4].copy_from_slice(&width.to_le_bytes());
         out[4..8].copy_from_slice(&height.to_le_bytes());
@@ -752,6 +808,113 @@ mod tests {
         assert_eq!(reason(ZipError::UnsupportedArchive("AES encrypted files cannot be decrypted without the aes-crypto feature.")), AES_LOCKED);
         assert_eq!(test(&path, None).unwrap(), Tested { sound: 1, damaged: vec![], locked: 1 });
         assert_eq!(test(&path, Some("open sesame")).unwrap(), Tested { sound: 2, damaged: vec![], locked: 0 });
+        std::fs::remove_file(path).unwrap();
+    }
+
+    /// A 64x32 JPEG in four colours, red, blue / green, black, with `orientation` in its EXIF.
+    fn turned_jpeg(orientation: u16) -> Vec<u8> {
+        use windows::Win32::Foundation::E_FAIL;
+        use windows::Win32::Graphics::Imaging::{GUID_ContainerFormatJpeg, GUID_WICPixelFormat24bppBGR, WICBitmapEncoderNoCache};
+        use windows::Win32::System::Com::{IStream, STATFLAG_NONAME, STATSTG, STREAM_SEEK_SET};
+        use windows::Win32::UI::Shell::SHCreateMemStream;
+        let (width, height) = (64u32, 32u32);
+        let mut pixels = Vec::new();
+        for y in 0..height {
+            for x in 0..width {
+                let bgr: [u8; 3] = match (x < 32, y < 16) {
+                    (true, true) => [0, 0, 255],
+                    (false, true) => [255, 0, 0],
+                    (true, false) => [0, 255, 0],
+                    (false, false) => [0, 0, 0],
+                };
+                pixels.extend(bgr);
+            }
+        }
+        let _com = Com::enter();
+        let jpeg = unsafe {
+            let factory: IWICImagingFactory = CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER).unwrap();
+            let source = factory.CreateBitmapFromMemory(width, height, &GUID_WICPixelFormat24bppBGR, width * 3, &pixels).unwrap();
+            let stream: IStream = SHCreateMemStream(None).ok_or(windows::core::Error::from(E_FAIL)).unwrap();
+            let encoder = factory.CreateEncoder(&GUID_ContainerFormatJpeg, std::ptr::null()).unwrap();
+            encoder.Initialize(&stream, WICBitmapEncoderNoCache).unwrap();
+            let mut frame = None;
+            encoder.CreateNewFrame(&raw mut frame, std::ptr::null_mut()).unwrap();
+            let frame = frame.unwrap();
+            frame.Initialize(None).unwrap();
+            frame.WriteSource(&source, std::ptr::null()).unwrap();
+            frame.Commit().unwrap();
+            encoder.Commit().unwrap();
+            let mut facts = STATSTG::default();
+            stream.Stat(&raw mut facts, STATFLAG_NONAME).unwrap();
+            stream.Seek(0, STREAM_SEEK_SET, None).unwrap();
+            let mut bytes = vec![0u8; facts.cbSize as usize];
+            let mut read = 0;
+            stream.Read(bytes.as_mut_ptr().cast(), bytes.len() as u32, Some(&raw mut read)).ok().unwrap();
+            bytes
+        };
+        // APP1 with a little-endian TIFF header and one IFD entry: orientation, a SHORT.
+        let mut app1 = b"Exif\0\0II*\0\x08\0\0\0\x01\0\x12\x01\x03\0\x01\0\0\0".to_vec();
+        app1.extend(orientation.to_le_bytes());
+        app1.extend([0, 0, 0, 0, 0, 0]);
+        let mut out = jpeg[..2].to_vec();
+        out.extend([0xFF, 0xE1]);
+        out.extend(((app1.len() + 2) as u16).to_be_bytes());
+        out.extend(app1);
+        out.extend(&jpeg[2..]);
+        out
+    }
+
+    #[test]
+    fn a_photo_is_turned_the_way_its_exif_says() {
+        let size = |out: &[u8]| (u32::from_le_bytes(out[..4].try_into().unwrap()) as usize, u32::from_le_bytes(out[4..8].try_into().unwrap()) as usize);
+        let colour = |out: &[u8], x: usize, y: usize| {
+            let at = 8 + (y * size(out).0 + x) * 4;
+            match (out[at] > 128, out[at + 1] > 128, out[at + 2] > 128) {
+                (true, false, false) => "red",
+                (false, true, false) => "green",
+                (false, false, true) => "blue",
+                (false, false, false) => "black",
+                _ => "mixed",
+            }
+        };
+        // The size it comes out, then the colour of its top left and top right quarters.
+        let seen = |orientation: u16| {
+            let out = decode(&turned_jpeg(orientation), 256).unwrap();
+            let (width, height) = size(&out);
+            ((width, height), colour(&out, width / 4, height / 4), colour(&out, width * 3 / 4, height / 4))
+        };
+        assert_eq!(seen(1), ((64, 32), "red", "blue"));
+        assert_eq!(seen(2), ((64, 32), "blue", "red"));
+        assert_eq!(seen(3), ((64, 32), "black", "green"));
+        assert_eq!(seen(4), ((64, 32), "green", "black"));
+        assert_eq!(seen(5), ((32, 64), "red", "green"));
+        assert_eq!(seen(6), ((32, 64), "green", "red"));
+        assert_eq!(seen(7), ((32, 64), "black", "blue"));
+        assert_eq!(seen(8), ((32, 64), "blue", "black"));
+    }
+
+    #[test]
+    fn a_damaged_locked_file_says_so_when_the_password_opens_another() {
+        use zip::unstable::write::FileOptionsExt;
+        let path = std::env::temp_dir().join(format!("perli-inside-{}-damaged.zip", std::process::id()));
+        let mut zip = ZipWriter::new(File::create(&path).unwrap());
+        let locked = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored).with_deprecated_encryption(b"key").unwrap();
+        for name in ["a.txt", "b.txt"] {
+            zip.start_file(name, locked).unwrap();
+            zip.write_all(b"some words to keep").unwrap();
+        }
+        zip.finish().unwrap();
+        // The first byte of a.txt's own data, after its header and the 12 bytes of the lock.
+        let mut bytes = std::fs::read(&path).unwrap();
+        let field = |at: usize| u16::from_le_bytes([bytes[at], bytes[at + 1]]) as usize;
+        let data = 30 + field(26) + field(28) + 12;
+        bytes[data] ^= 0xFF;
+        std::fs::write(&path, bytes).unwrap();
+
+        assert_eq!(text(&path, "a.txt", Some("key")), Err(DAMAGED_LOCKED.to_string()));
+        assert_eq!(check_password(&path, "a.txt", "key"), Err(DAMAGED_LOCKED.to_string()));
+        assert_eq!(text(&path, "a.txt", Some("nope")), Err(WRONG_PASSWORD.to_string()));
+        assert_eq!(text(&path, "b.txt", Some("key")).unwrap().as_deref(), Some("some words to keep"));
         std::fs::remove_file(path).unwrap();
     }
 

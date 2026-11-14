@@ -100,7 +100,6 @@ impl Query {
 
     /// Whether a small text file's content holds the text, in any case. A file in the cloud
     /// stays there.
-    // ponytail: reads UTF-8 only, so UTF-16 text never fits. A BOM check would add it.
     fn holds(&self, entry: &Entry, folder: &Path) -> bool {
         self.inside
             && !entry.is_dir()
@@ -108,7 +107,7 @@ impl Query {
             && entry.size() <= INSIDE_MAX
             && TEXT_TYPES.contains(&entry.extension_text().as_str())
             && std::fs::read(folder.join(entry.file_name()))
-                .is_ok_and(|bytes| String::from_utf8_lossy(&bytes).to_lowercase().contains(&self.text))
+                .is_ok_and(|bytes| crate::preview::searchable(&bytes).to_lowercase().contains(&self.text))
     }
 
     /// How well a name fits if its letters match from `start`, which holds the query's first.
@@ -203,6 +202,7 @@ fn read_top(folder: &Path, query: &Query, sight: Sight) -> Result<(Found, VecDeq
     for (_, entry) in fits {
         found.push(entry, location.clone());
     }
+    found.tag_from(folder, 0);
     Ok((found, below))
 }
 
@@ -307,6 +307,7 @@ impl Search {
                 continue;
             }
             let location: Arc<[u16]> = folder::null_terminated(&folder).into();
+            let from = rows.len();
             // A folder that can't be read has nothing to show, which is no reason to stop.
             let _ = read_folder(&folder, sight, &mut below, |entry| {
                 if query.is_in(&entry, &folder) {
@@ -314,6 +315,7 @@ impl Search {
                     rows.push(entry, location.clone());
                 }
             });
+            rows.tag_from(&folder, from);
             if !quiet && !rows.is_empty() && reported.elapsed() >= report_gap(in_sight) {
                 self.show(&mut rows, &mut quiet);
                 report(Walk::Going);
@@ -395,15 +397,22 @@ fn tagged(name: &str, scope: Scope, folder: &Path) -> Found {
         return found;
     };
     let mut locations = HashMap::<PathBuf, Arc<[u16]>>::new();
-    for (path, tags) in tags::files_with(tag) {
+    let with_tag = tags::files_with(tag);
+    let reached = |parent: &Path| match scope {
+        Scope::Drives => true,
+        Scope::Drive => is_under(parent, &root_of(folder)),
+        Scope::Below => is_under(parent, folder),
+        Scope::Folder => is_under(parent, folder) && is_under(folder, parent),
+    };
+    // A file never seen by a path counts only in a look over every drive.
+    let away = |last: &Option<PathBuf>| match last.as_deref().and_then(Path::parent) {
+        Some(parent) => reached(parent),
+        None => scope == Scope::Drives,
+    };
+    found.away = with_tag.away.iter().filter(|last| away(last)).count();
+    for (path, tags) in with_tag.files {
         let Some(parent) = path.parent() else { continue };
-        let reached = match scope {
-            Scope::Drives => true,
-            Scope::Drive => is_under(parent, &root_of(folder)),
-            Scope::Below => is_under(parent, folder),
-            Scope::Folder => is_under(parent, folder) && is_under(folder, parent),
-        };
-        if !reached {
+        if !reached(parent) {
             continue;
         }
         let mut entry = None;

@@ -1,7 +1,5 @@
-import { createEffect, onCleanup } from "solid-js";
-
-/** A note as start and length in seconds, key, and channel. */
-export type Note = [start: number, long: number, key: number, channel: number];
+import { createEffect, createMemo, onCleanup } from "solid-js";
+import type { Notes } from "../../api";
 
 /** How many seconds of the song the stage shows at once. */
 const SPAN = 6;
@@ -15,12 +13,12 @@ const DRUMS = 9;
 export const channelColor = (channel: number, alpha = 1) => `hsl(${(channel * 47 + 265) % 360} 72% 64% / ${alpha})`;
 
 /** The first note that starts at or after `seconds`. */
-function firstFrom(notes: Note[], seconds: number) {
+function firstFrom(notes: Notes, seconds: number) {
   let low = 0;
-  let high = notes.length;
+  let high = notes.start.length;
   while (low < high) {
     const middle = (low + high) >> 1;
-    if (notes[middle][0] < seconds) low = middle + 1;
+    if (notes.start[middle] < seconds) low = middle + 1;
     else high = middle;
   }
   return low;
@@ -32,9 +30,10 @@ function firstFrom(notes: Note[], seconds: number) {
  * in their channel's color while they sound.
  */
 export function MidiStage(props: {
-  notes: Note[];
+  notes: Notes;
   beats: number[];
-  perBar: number;
+  /** When each bar starts, in seconds. */
+  bars: number[];
   /** Silent channels, one bit each. */
   muted: number;
   falling: boolean;
@@ -44,6 +43,20 @@ export function MidiStage(props: {
 }) {
   let canvas!: HTMLCanvasElement;
   let frame = 0;
+
+  // The keys from the C under the lowest note to the B over the highest, worked out once a song,
+  // as a big one has millions of notes.
+  const reach = createMemo(() => {
+    const { long: longs, key: keys } = props.notes;
+    let [low, high, longest] = [127, 0, 0];
+    for (let at = 0; at < keys.length; at++) {
+      low = Math.min(low, keys[at]);
+      high = Math.max(high, keys[at]);
+      longest = Math.max(longest, longs[at]);
+    }
+    if (low > high) [low, high] = [60, 71];
+    return { low: low - (low % 12), high: high + 11 - (high % 12), longest };
+  });
 
   function draw() {
     const box = canvas.getBoundingClientRect();
@@ -60,18 +73,9 @@ export function MidiStage(props: {
     pen.font = `${10 * scale}px ${style.fontFamily}`;
     pen.textBaseline = "middle";
 
-    const { notes, beats, perBar, muted, falling } = props;
+    const { notes, beats, bars, muted, falling } = props;
     const now = props.time();
-    // The keys from the C under the lowest note to the B over the highest.
-    let [low, high, longest] = [127, 0, 0];
-    for (const [, long, key] of notes) {
-      low = Math.min(low, key);
-      high = Math.max(high, key);
-      longest = Math.max(longest, long);
-    }
-    if (low > high) [low, high] = [60, 71];
-    low -= low % 12;
-    high += 11 - (high % 12);
+    const { low, high, longest } = reach();
     const keys = high - low + 1;
     const lit = new Map<number, number>();
     const start = firstFrom(notes, now - longest);
@@ -82,14 +86,15 @@ export function MidiStage(props: {
       const slot = wide / keys;
       const perSecond = floor / SPAN;
       pen.fillStyle = line;
-      for (let beat = firstFromBeats(beats, now); beat < beats.length && beats[beat] < now + SPAN; beat++) {
-        const y = floor - (beats[beat] - now) * perSecond;
-        pen.globalAlpha = beat % perBar === 0 ? 1 : 0.4;
-        pen.fillRect(0, y, wide, scale);
+      for (const [times, alpha] of [[beats, 0.4], [bars, 1]] as const) {
+        pen.globalAlpha = alpha;
+        for (let at = firstFromBeats(times, now); at < times.length && times[at] < now + SPAN; at++) {
+          pen.fillRect(0, floor - (times[at] - now) * perSecond, wide, scale);
+        }
       }
       pen.globalAlpha = 1;
-      for (let at = start; at < notes.length && notes[at][0] < now + SPAN; at++) {
-        const [begin, long, key, channel] = notes[at];
+      for (let at = start; at < notes.start.length && notes.start[at] < now + SPAN; at++) {
+        const [begin, long, key, channel] = [notes.start[at], notes.long[at], notes.key[at], notes.channel[at]];
         if (begin + long < now) continue;
         const sounding = begin <= now && !silent(channel);
         if (sounding) lit.set(key, channel);
@@ -116,20 +121,22 @@ export function MidiStage(props: {
     const top = RULER * scale;
     const row = (tall - top) / keys;
     const perSecond = (wide - left) / SPAN;
+    pen.fillStyle = line;
+    pen.globalAlpha = 0.4;
     for (let beat = firstFromBeats(beats, now); beat < beats.length && beats[beat] < now + SPAN; beat++) {
-      const x = left + (beats[beat] - now) * perSecond;
-      const bar = beat % perBar === 0;
-      pen.fillStyle = line;
-      pen.globalAlpha = bar ? 1 : 0.4;
-      pen.fillRect(x, bar ? 0 : top, scale, tall);
-      if (bar) {
-        pen.fillStyle = quiet;
-        pen.fillText(String(beat / perBar + 1), x + 4 * scale, top / 2);
-      }
+      pen.fillRect(left + (beats[beat] - now) * perSecond, top, scale, tall);
     }
     pen.globalAlpha = 1;
-    for (let at = start; at < notes.length && notes[at][0] < now + SPAN; at++) {
-      const [begin, long, key, channel] = notes[at];
+    for (let bar = firstFromBeats(bars, now); bar < bars.length && bars[bar] < now + SPAN; bar++) {
+      const x = left + (bars[bar] - now) * perSecond;
+      pen.fillStyle = line;
+      pen.fillRect(x, 0, scale, tall);
+      pen.fillStyle = quiet;
+      pen.fillText(String(bar + 1), x + 4 * scale, top / 2);
+    }
+    pen.globalAlpha = 1;
+    for (let at = start; at < notes.start.length && notes.start[at] < now + SPAN; at++) {
+      const [begin, long, key, channel] = [notes.start[at], notes.long[at], notes.key[at], notes.channel[at]];
       if (begin + long < now) continue;
       const sounding = begin <= now && !silent(channel);
       if (sounding) lit.set(key, channel);
@@ -162,7 +169,7 @@ export function MidiStage(props: {
 
   // Any change draws at once, and playing keeps it moving.
   createEffect(() => {
-    void [props.notes, props.beats, props.muted, props.falling];
+    void [props.notes, props.beats, props.bars, props.muted, props.falling];
     cancelAnimationFrame(frame);
     if (props.playing) run();
     else draw();

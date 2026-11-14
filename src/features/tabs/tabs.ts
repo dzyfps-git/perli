@@ -192,7 +192,8 @@ export function createTabs() {
     const saved = tabs().map((tab) => ({
       panes: tab.panes().flatMap((pane) => {
         const panePath = pane.path();
-        return panePath ? [{ path: panePath, sort: pane.folderSort(), layout: pane.layout() }] : [];
+        const expanded = pane.expanded();
+        return panePath ? [{ path: panePath, sort: pane.folderSort(), layout: pane.layout(), ...(expanded.length > 0 ? { expanded } : {}) }] : [];
       }),
       active: tab.panes().indexOf(tab.active()),
       swapped: tab.swapped(),

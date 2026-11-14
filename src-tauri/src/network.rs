@@ -13,13 +13,14 @@ use windows::Win32::Foundation::{
     ERROR_HOST_UNREACHABLE, ERROR_INVALID_PASSWORD, ERROR_LOGON_FAILURE, ERROR_NETNAME_DELETED,
     ERROR_NETWORK_UNREACHABLE, ERROR_NOT_AUTHENTICATED, ERROR_NOT_CONNECTED, ERROR_NO_NETWORK,
     ERROR_NO_NET_OR_BAD_PATH, ERROR_REM_NOT_LIST, ERROR_SEM_TIMEOUT, ERROR_UNEXP_NET_ERR, E_FAIL,
-    HWND, NO_ERROR, WIN32_ERROR,
+    HANDLE, HWND, NO_ERROR, WIN32_ERROR,
 };
 use windows::Win32::NetworkManagement::NetManagement::{NetApiBufferFree, MAX_PREFERRED_LENGTH};
 use windows::Win32::NetworkManagement::WNet::{
-    WNetAddConnection3W, WNetCancelConnection2W, WNetConnectionDialog, WNetDisconnectDialog,
-    WNetGetConnectionW, CONNECT_INTERACTIVE, CONNECT_PROMPT, CONNECT_UPDATE_PROFILE, NETRESOURCEW,
-    NET_CONNECT_FLAGS, RESOURCETYPE_ANY, RESOURCETYPE_DISK,
+    WNetAddConnection3W, WNetCancelConnection2W, WNetCloseEnum, WNetConnectionDialog, WNetDisconnectDialog,
+    WNetEnumResourceW, WNetGetConnectionW, WNetOpenEnumW, CONNECT_INTERACTIVE, CONNECT_PROMPT,
+    CONNECT_UPDATE_PROFILE, NETRESOURCEW, NET_CONNECT_FLAGS, RESOURCETYPE_ANY, RESOURCETYPE_DISK,
+    RESOURCE_REMEMBERED, WNET_OPEN_ENUM_USAGE,
 };
 use windows::Win32::Storage::FileSystem::{
     GetDriveTypeW, GetLogicalDrives, NetShareEnum, SHARE_INFO_1, STYPE_DISKTREE, STYPE_MASK,
@@ -289,17 +290,55 @@ fn remote_name(device: &str) -> Option<String> {
     (found == NO_ERROR).then(|| String::from_utf16_lossy(&name[..end]))
 }
 
+/// Drives Windows maps again at each sign-in, also those whose server is away now and that so
+/// have no letter in Windows' mask.
+fn remembered() -> Vec<Mapped> {
+    let mut handle = HANDLE::default();
+    let opened = unsafe { WNetOpenEnumW(RESOURCE_REMEMBERED, RESOURCETYPE_DISK, WNET_OPEN_ENUM_USAGE(0), None, &raw mut handle) };
+    if opened != NO_ERROR {
+        return Vec::new();
+    }
+    let text = |name: PWSTR| if name.is_null() { String::new() } else { unsafe { name.to_string() }.unwrap_or_default() };
+    let mut drives = Vec::new();
+    // The size Windows suggests for one call, aligned for the records at its start.
+    let mut buffer = vec![0u64; 16 * 1024 / size_of::<u64>()];
+    loop {
+        let mut count = u32::MAX;
+        let mut size = size_of_val(buffer.as_slice()) as u32;
+        // No more items, or a failure: either way the list ends here.
+        if unsafe { WNetEnumResourceW(handle, &raw mut count, buffer.as_mut_ptr().cast(), &raw mut size) } != NO_ERROR {
+            break;
+        }
+        // Windows wrote `count` records at the start, with their text after them.
+        let resources = unsafe { std::slice::from_raw_parts(buffer.as_ptr().cast::<NETRESOURCEW>(), count as usize) };
+        for resource in resources {
+            let letter = text(resource.lpLocalName).to_uppercase();
+            if is_letter(&letter) {
+                drives.push(Mapped { letter, remote: text(resource.lpRemoteName) });
+            }
+        }
+    }
+    let _ = unsafe { WNetCloseEnum(handle) };
+    drives
+}
+
 /// Free letters and mapped drives, for Perli's own dialogs.
-// ponytail: a remembered drive whose server is away has no letter in Windows' mask, so it is
-// missing here. Windows' own dialog, one click away, lists those.
 pub fn drive_letters() -> Letters {
     let mask = unsafe { GetLogicalDrives() };
-    let mapped = letters(mask, true)
+    let mut mapped: Vec<Mapped> = letters(mask, true)
         .into_iter()
         .filter(|letter| mapped_drive(letter).is_some())
         .map(|letter| Mapped { remote: remote_name(&letter).unwrap_or_default(), letter })
         .collect();
-    Letters { free: letters(mask, false), mapped }
+    for drive in remembered() {
+        if !mapped.iter().any(|known| known.letter.eq_ignore_ascii_case(&drive.letter)) {
+            mapped.push(drive);
+        }
+    }
+    mapped.sort_by(|a, b| b.letter.cmp(&a.letter));
+    // A remembered letter comes back at sign-in, so it isn't free to take.
+    let free = letters(mask, false).into_iter().filter(|letter| !mapped.iter().any(|known| known.letter == *letter)).collect();
+    Letters { free, mapped }
 }
 
 /// Maps `letter` (`Z:`) to `remote` (`\\server\share`). With `remember` it comes back at sign-in.
@@ -340,7 +379,8 @@ pub fn map(letter: &str, remote: &str, remember: bool, owner: isize) -> Result<(
 /// Disconnects the mapped drive `letter`, and forgets it for the next sign-in. Open files on it
 /// make this fail, so nothing is lost.
 pub fn unmap(letter: &str) -> Result<()> {
-    if !is_letter(letter) || mapped_drive(letter).is_none() {
+    let known = || mapped_drive(letter).is_some() || remembered().iter().any(|drive| drive.letter.eq_ignore_ascii_case(letter));
+    if !is_letter(letter) || !known() {
         return Err(Error::new(E_FAIL, "That is not a network drive"));
     }
     unsafe { WNetCancelConnection2W(&HSTRING::from(letter), CONNECT_UPDATE_PROFILE, false) }.ok()
@@ -397,6 +437,16 @@ mod tests {
         let found = drive_letters();
         assert!(!found.free.contains(&system));
         assert!(!found.mapped.iter().any(|drive| drive.letter == system));
+    }
+
+    #[test]
+    fn remembered_drives_are_letters_and_never_free() {
+        let found = drive_letters();
+        for drive in remembered() {
+            assert!(is_letter(&drive.letter), "{drive:?}");
+            assert!(found.mapped.iter().any(|known| known.letter.eq_ignore_ascii_case(&drive.letter)), "{drive:?}");
+        }
+        assert!(!found.free.iter().any(|letter| found.mapped.iter().any(|drive| drive.letter == *letter)), "{found:?}");
     }
 
     #[test]
