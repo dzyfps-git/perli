@@ -2,12 +2,15 @@ import { createEffect, createMemo, createSignal, For, on, onCleanup, onMount, Sh
 import type { Thumb } from "../../api";
 import { saved, stored } from "../filelist/prefs";
 import { ToolCog } from "../../ui/Controls";
+import { Minimap } from "./Minimap";
 import { edgeColor } from "./pictureFacts";
 import { draw } from "./QuickPreview";
+import { originShift, seenPart, type Box, type ViewRect } from "./zoomView";
 import {
   comicLong,
   keepProgress,
   manga,
+  minimapShown,
   setComicLong,
   setManga,
   setSpread,
@@ -74,6 +77,8 @@ export function ComicView(live: ComicViewProps) {
   const [wide, setWide] = createSignal(new Set<number>());
   const [backdrop, setBackdrop] = createSignal<string>();
   const [zoom, setZoom] = createSignal<{ x: number; y: number }>();
+  /** The part of the zoomed pages on show, for the map. */
+  const [seen, setSeen] = createSignal<ViewRect>({ x: 0, y: 0, width: 1, height: 1 });
   /** The last page was turned past, so the next comic is offered. */
   const [atEnd, setAtEnd] = createSignal(false);
   const [noNext, setNoNext] = createSignal(false);
@@ -192,6 +197,7 @@ export function ComicView(live: ComicViewProps) {
   /** In the long strip, the page that crosses the middle of the stage is the one being read. */
   const longPage = (at: number) => stage?.querySelector<HTMLElement>(`[data-page="${at}"]`);
   function onScroll() {
+    measureSeen();
     if (!comicLong()) return;
     const middle = stage.scrollTop + stage.clientHeight / 2;
     for (const element of stage.querySelectorAll<HTMLElement>("[data-page]")) {
@@ -218,6 +224,52 @@ export function ComicView(live: ComicViewProps) {
     if (zoom()) return setZoom(undefined);
     const box = sheet.getBoundingClientRect();
     setZoom({ x: ((event.clientX - box.left) / box.width) * 100, y: ((event.clientY - box.top) / box.height) * 100 });
+    requestAnimationFrame(measureSeen);
+  }
+
+  /** The pages on show, together, as one box on screen. */
+  function pagesBox(): Box {
+    const boxes = [...sheet!.querySelectorAll("canvas")].map((one) => one.getBoundingClientRect());
+    const left = Math.min(...boxes.map((one) => one.left));
+    const top = Math.min(...boxes.map((one) => one.top));
+    return { left, top, width: Math.max(...boxes.map((one) => one.right)) - left, height: Math.max(...boxes.map((one) => one.bottom)) - top };
+  }
+
+  function viewport(): Box {
+    const box = stage.getBoundingClientRect();
+    return { left: box.left + stage.clientLeft, top: box.top + stage.clientTop, width: stage.clientWidth, height: stage.clientHeight };
+  }
+
+  function measureSeen() {
+    if (zoom() && sheet?.isConnected) setSeen(seenPart(viewport(), pagesBox()));
+  }
+
+  /** The pages on show drawn small as one picture, for the map. */
+  function sheetPicture() {
+    const all = pagesBox();
+    const picture = document.createElement("canvas");
+    picture.width = 400;
+    picture.height = Math.round((picture.width * all.height) / all.width);
+    const context = picture.getContext("2d")!;
+    const scale = picture.width / all.width;
+    for (const one of sheet!.querySelectorAll("canvas")) {
+      const box = one.getBoundingClientRect();
+      context.drawImage(one, (box.left - all.left) * scale, (box.top - all.top) * scale, box.width * scale, box.height * scale);
+    }
+    return picture;
+  }
+
+  /** Moves the zoom so the spot `center` of the pages (0 to 1) comes to the middle of the stage. */
+  function centerOn(center: { x: number; y: number }) {
+    const now = zoom();
+    if (!now || !sheet) return;
+    const all = pagesBox();
+    const view = viewport();
+    const x = now.x + (originShift(all.left + center.x * all.width, view.left + view.width / 2, ZOOM) / sheet.offsetWidth) * 100;
+    const y = now.y + (originShift(all.top + center.y * all.height, view.top + view.height / 2, ZOOM) / sheet.offsetHeight) * 100;
+    const percent = (value: number) => Math.min(Math.max(value, 0), 100);
+    setZoom({ x: percent(x), y: percent(y) });
+    measureSeen();
   }
 
   props.keys((event) => {
@@ -301,11 +353,23 @@ export function ComicView(live: ComicViewProps) {
             data-manga={manga() || undefined}
             data-zoom={zoom() ? "" : undefined}
             style={zoom() ? { "transform-origin": `${zoom()!.x}% ${zoom()!.y}%`, scale: String(ZOOM) } : undefined}
+            onTransitionEnd={measureSeen}
           >
             <For each={shown()}>{() => <canvas class="preview-picture comic-page" />}</For>
           </div>
         </Show>
       </div>
+      <Show when={zoom() && minimapShown()}>
+        <Minimap
+          source={sheetPicture}
+          aspect={() => {
+            const all = pagesBox();
+            return all.width / all.height;
+          }}
+          view={seen}
+          onMove={centerOn}
+        />
+      </Show>
       <div class="preview-tools comic-tools" role="toolbar" aria-label="Comic">
         <button class="strip-icon" aria-label="Two pages" aria-keyshortcuts="S" aria-pressed={spread()} disabled={comicLong()} onClick={() => setSpread(!spread())}>
           {ICON_SPREAD}

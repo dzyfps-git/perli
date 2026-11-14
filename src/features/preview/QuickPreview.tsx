@@ -15,8 +15,13 @@ import {
   fetchPictureFile,
   fetchRows,
   fetchThumb,
+  fontFace,
   keepOnDevice,
+  dbCount,
+  dbQuery,
+  dbRows,
   modelFile,
+  openStreamed,
   openAudio,
   openLink,
   pictureSize,
@@ -28,6 +33,8 @@ import {
   startJob,
   type ArchiveEntry,
   type Preview,
+  type DbTable,
+  type FontFacts,
   type Row,
   type Thumb,
 } from "../../api";
@@ -47,6 +54,8 @@ import type { ComicViewProps } from "./ComicView";
 import type { ArchiveViewProps } from "./ArchiveView";
 import type { PlayerProps } from "./Player";
 import type { VideoViewProps } from "./VideoView";
+import type { DatabaseViewProps } from "./DatabaseView";
+import type { FontViewProps } from "./FontView";
 import { song, wav, type Track } from "./nowPlaying";
 import type { Film } from "../mini/handover";
 import "./preview.css";
@@ -61,6 +70,8 @@ export interface PreviewAt {
   selected: () => number | undefined;
   /** The folder shown, where rows with no location of their own are. */
   folder: string;
+  /** The rows chosen in the list as the preview opened, which fonts set their sample in together. */
+  chosen?: number[];
 }
 
 /** Pictures in Markdown don't need the full size. */
@@ -79,6 +90,10 @@ const BookView = lazy(() => import("./DocView").then((module) => ({ default: mod
 const ArchiveView = lazy(() => import("./ArchiveView").then((module) => ({ default: module.ArchiveView })));
 const ComicView = lazy(() => import("./ComicView").then((module) => ({ default: module.ComicView })));
 const PictureView = lazy(() => import("./PictureView").then((module) => ({ default: module.PictureView })));
+const DatabaseView = lazy(() => import("./DatabaseView").then((module) => ({ default: module.DatabaseView })));
+const ParquetView = lazy(() => import("./ParquetView").then((module) => ({ default: module.ParquetView })));
+const FontView = lazy(() => import("./FontView").then((module) => ({ default: module.FontView })));
+const PdfView = lazy(() => import("./PdfView").then((module) => ({ default: module.PdfView })));
 const VideoView = lazy(() => import("./VideoView").then((module) => ({ default: module.VideoView })));
 
 /** Files the player plays, for Play next to skip to. */
@@ -96,6 +111,9 @@ const SLIDE_SHOW_MS = 4000;
 const AIFF = /\.(aiff?|aifc)$/i;
 const SOUND_SETS = /\.sf2$/i;
 const COMICS = /\.(cbz|cbr|cb7)$/i;
+const FONTS = /\.(ttf|otf|woff2?|ttc|otc)$/i;
+/** Fonts chosen together beyond this many don't join the side-by-side. */
+const MOST_COMPARED = 8;
 /** The queue is the songs among this many rows of the folder. */
 const MOST_QUEUE = 5000;
 const QUEUE_BATCH = 500;
@@ -235,6 +253,46 @@ export function QuickPreview(props: {
       table: tableDelimiter(item.name),
       keys: (handler) => (viewKeys = handler),
       onFailure: setFailure,
+    };
+  }
+
+  function database(preview: { tables: DbTable[]; failure: string | null }): DatabaseViewProps {
+    const { view } = props.at;
+    const at = index();
+    const shot = snapshot;
+    return {
+      ...preview,
+      count: (table) => dbCount(view, shot, at, table),
+      rows: (table, order, filters) => dbRows(view, shot, at, table, order, filters),
+      query: (sql) => dbQuery(view, shot, at, sql),
+      keys: (handler) => (viewKeys = handler),
+    };
+  }
+
+  /** A file the view reads the parts of that it shows, straight from disk. */
+  function streamed(item: Row) {
+    const { view } = props.at;
+    const at = index();
+    const shot = snapshot;
+    return { open: () => openStreamed(view, shot, at), size: item.size, keys: (handler: typeof viewKeys) => (viewKeys = handler) };
+  }
+
+  function font(faces: FontFacts[]): FontViewProps {
+    const { view } = props.at;
+    const at = index();
+    const shot = snapshot;
+    const chosen = props.at.chosen ?? [];
+    return {
+      faces,
+      load: (face) => fontFace(view, shot, at, face),
+      // Several fonts chosen together set the sample in each, one under another.
+      others: async () => {
+        if (!chosen.includes(at)) return [];
+        const rows = chosen.filter((one) => one !== at).slice(0, MOST_COMPARED);
+        const found = await Promise.all(rows.map((one) => fetchRows(view, shot, one, 1).then(([item]) => ({ one, item }))));
+        return found.flatMap(({ one, item }) => (item && !item.isDir && FONTS.test(item.name) ? [{ name: item.name, load: () => fontFace(view, shot, one, 0) }] : []));
+      },
+      note: setNote,
     };
   }
 
@@ -620,6 +678,10 @@ export function QuickPreview(props: {
                 <Player {...player(row()!, preview.kind === "song")} />
               )}
               {preview.kind === "video" && <VideoView {...video(row()!)} />}
+              {preview.kind === "database" && <DatabaseView {...database(preview)} />}
+              {preview.kind === "parquet" && <ParquetView {...streamed(row()!)} />}
+              {preview.kind === "font" && <FontView {...font(preview.faces)} />}
+              {preview.kind === "pdf" && <PdfView path={pathOf(row()!)} {...streamed(row()!)} note={setNote} />}
             </>
           )}
         </Show>
@@ -751,6 +813,7 @@ export function PreviewDock(props: { view: FolderView; onOpen: (row: Row) => voi
                   count: () => folder.count,
                   selected: () => cursor.index,
                   folder: folder.path,
+                  chosen: [...(props.view.list()?.selection().rows ?? [])],
                 }
               : undefined,
           );

@@ -3,7 +3,9 @@ import type { Thumb } from "../../api";
 import { ToolCog } from "../../ui/Controls";
 import { draw } from "./QuickPreview";
 import { cameraFacts, hexAt, tintOf } from "./pictureFacts";
-import { sharpPixels, VIEWER_SETTINGS } from "./viewerPrefs";
+import { Minimap } from "./Minimap";
+import { minimapShown, setMinimapShown, sharpPixels, VIEWER_SETTINGS } from "./viewerPrefs";
+import { panFor, viewWindow } from "./zoomView";
 
 const ICON_ZOOM_IN = "";
 const ICON_ZOOM_OUT = "";
@@ -93,6 +95,13 @@ export function PictureView(live: PictureViewProps) {
     return Math.min((width * devicePixelRatio) / w, (height * devicePixelRatio) / h, 1);
   });
   const scale = () => zoom() ?? fit();
+  /** The picture's size on screen as it now shows, turned. */
+  const shownSize = createMemo(() => {
+    const own = natural() ?? [1, 1];
+    const [w, h] = turn() % 2 ? [own[1], own[0]] : own;
+    return { width: (w / devicePixelRatio) * scale(), height: (h / devicePixelRatio) * scale() };
+  });
+  const mapped = () => minimapShown() && zoom() !== null && (shownSize().width > box().width + 1 || shownSize().height > box().height + 1);
 
   async function load(edge: number) {
     const picture = await props.load(edge);
@@ -233,6 +242,7 @@ export function PictureView(live: PictureViewProps) {
     else if (key === "0") tools.fit();
     else if (key === "r") tools.turn(event.shiftKey ? -1 : 1);
     else if (key === "i") setPicking(!picking());
+    else if (key === "m") setMinimapShown(!minimapShown());
     else if (key === "s" && props.onSlideshow) props.onSlideshow(!props.slideshow?.());
     else if (key === "p" && frames()) play(!playing());
     else if (key === "," && frames()) stepFrame(-1);
@@ -296,6 +306,16 @@ export function PictureView(live: PictureViewProps) {
       onDblClick={(event) => !picking() && zoomTo(zoom() === null ? 1 : null, zoom() === null ? fromMiddle(event) : undefined)}
     >
       <canvas ref={canvas} class="preview-picture" style={style()} />
+      <Show when={mapped()}>
+        <Minimap
+          source={() => canvas}
+          aspect={() => shownSize().width / shownSize().height}
+          turn={turn}
+          view={() => viewWindow(box(), shownSize(), pan())}
+          onMove={(center) => setPan(panFor(center, shownSize()))}
+          live={frames() > 0}
+        />
+      </Show>
       <Show when={chips().length > 0}>
         <ul class="picture-chips" aria-label="Camera">
           <For each={chips()}>{(chip) => <li>{chip}</li>}</For>

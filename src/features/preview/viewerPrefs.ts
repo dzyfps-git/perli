@@ -35,6 +35,8 @@ export const [previewSize, setPreviewSize] = stored<{ width: number; height: num
 );
 /** Each pixel of a picture stays a hard square when zoomed in, instead of being smoothed. */
 export const [sharpPixels, setSharpPixels] = stored("picture-sharp", saved("picture-sharp") === true);
+/** A small map of the whole picture, page or film shows while zoomed in. */
+export const [minimapShown, setMinimapShown] = stored("minimap", saved("minimap") !== false);
 /** A song's lyrics from the `.lrc` file beside it. */
 export const [lyricsShown, setLyricsShown] = stored("song-lyrics", saved("song-lyrics") !== false);
 /** A MIDI file's notes fall onto the keyboard, instead of running past it. */
@@ -85,7 +87,7 @@ const item = (label: string, checked: () => boolean, set: (on: boolean) => void)
 /** The settings of each viewer, as its cog and the settings page both show them. */
 export const VIEWER_SETTINGS = {
   Preview: [item("Neighbouring files along the bottom", neighbours, setNeighbours)],
-  Pictures: [item("Sharp pixels when zoomed in", sharpPixels, setSharpPixels)],
+  Pictures: [item("Sharp pixels when zoomed in", sharpPixels, setSharpPixels), item("Map of the whole picture when zoomed in", minimapShown, setMinimapShown)],
   Text: [
     item("Wrap long lines", wrap, setWrap),
     item("Line numbers", numbers, setNumbers),
@@ -103,6 +105,7 @@ export const VIEWER_SETTINGS = {
     item("Right to left, for manga", manga, setManga),
     item("Page strip", strip, setStrip),
     item("Long strip, one page under another", comicLong, setComicLong),
+    item("Map of the whole page when zoomed in", minimapShown, setMinimapShown),
   ],
   "3D models": [
     item("Floor grid", grid, setGrid),
@@ -120,5 +123,6 @@ export const VIEWER_SETTINGS = {
     item("Start muted", videoMuted, setVideoMuted),
     item("Subtitles", subtitles, setSubtitles),
     item("Keep playing in a small window when the preview closes", videoPopOut, setVideoPopOut),
+    item("Map of the whole film when zoomed in", minimapShown, setMinimapShown),
   ],
 } satisfies Record<string, CogItem[]>;
