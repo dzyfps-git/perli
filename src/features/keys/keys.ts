@@ -21,6 +21,7 @@ export const KEYS: KeyCommand[] = [
   { id: "paste", label: "Paste", group: "Files", keys: ["Ctrl+V"], where: "list" },
   { id: "duplicate", label: "Duplicate", group: "Files", keys: ["Ctrl+D"], where: "list" },
   { id: "copyPath", label: "Copy path", group: "Files", keys: ["Ctrl+Shift+C"], where: "list" },
+  { id: "compare", label: "Compare two files", group: "Files", keys: ["Ctrl+Shift+D"], where: "list" },
   { id: "rename", label: "Rename", group: "Files", keys: ["F2"], where: "list" },
   { id: "delete", label: "Delete", group: "Files", keys: ["Delete"], where: "list" },
   { id: "deleteForGood", label: "Delete permanently", group: "Files", keys: ["Shift+Delete"], where: "list" },

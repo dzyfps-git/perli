@@ -365,7 +365,8 @@ export function FileList(props: {
   /** A middle click on a row. */
   onOpenBehind: (row: Row) => void;
   /** What the bar over a selection offers. */
-  barItems: () => BarItem[];
+  /** `two` holds both rows when exactly two are selected. */
+  barItems: (two?: Row[]) => BarItem[];
   connect: (list: ListHandle) => void;
   /** Where to start scrolled to, on coming back to a folder. */
   scrollTo?: number;
@@ -1679,7 +1680,7 @@ export function FileList(props: {
           count={picked().count}
           of={props.items}
           bytes={picked().bytes}
-          items={props.barItems()}
+          items={props.barItems(picked().count === 2 ? selection.rows().map(rowAt).filter((row) => row !== undefined) : undefined)}
           onClear={() => {
             selection.clear();
             selectionChanged();

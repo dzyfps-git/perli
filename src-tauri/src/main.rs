@@ -1628,6 +1628,14 @@ async fn peek_text(view: u32, request: u64, row: u32, views: State<'_, Views>) -
         .map_err(|error| error.to_string())
 }
 
+/// A whole text file, for a compare. Nothing when it is not text.
+#[tauri::command]
+async fn whole_text(view: u32, request: u64, row: u32, views: State<'_, Views>) -> Result<Option<String>, String> {
+    let selection = Selection { view, request, rows: vec![row], ranges: Vec::new() };
+    let path = views.read(&selection, folder::Listing::paths)?.pop().ok_or("That row is gone")?;
+    blocking(move || preview::whole_text(&path)).await
+}
+
 /// What is in a folder, for its hover card.
 #[tauri::command]
 async fn peek_folder(view: u32, request: u64, row: u32, views: State<'_, Views>) -> Result<Option<thumbs::FolderStart>, String> {
@@ -2213,6 +2221,7 @@ fn main() {
             row_properties,
             checksum,
             peek_text,
+            whole_text,
             peek_folder,
             recent_files,
             forget_recent,

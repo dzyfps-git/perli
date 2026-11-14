@@ -444,6 +444,10 @@ export interface FolderStart {
   more: boolean;
 }
 
+/** A whole text file, for a compare. Null when it is not text. */
+export const wholeText = (view: number, request: number, row: number) =>
+  invoke<string | null>("whole_text", { view, request, row });
+
 export const peekFolder = (view: number, request: number, row: number) =>
   invoke<FolderStart | null>("peek_folder", { view, request, row });
 

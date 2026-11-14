@@ -5,6 +5,7 @@ import type { MenuItem } from "./Menu";
  * table keeps an action looking the same in all of them. Icons are Segoe Fluent Icons glyphs.
  */
 const LOOK: Record<string, [icon: string, keys?: string]> = {
+  Compare: ["\uE89A", "Ctrl+Shift+D"],
   Open: ["", "Enter"],
   "Open to side": [""],
   "Open with": [""],

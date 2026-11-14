@@ -36,6 +36,8 @@ const PIECE_BYTES: usize = 256 * 1024;
 /// Bigger Markdown shows as plain text, since rendering needs all of it at once.
 const MARKDOWN_BYTES: u64 = 4 * 1024 * 1024;
 const HASH_BYTES: usize = 1024 * 1024;
+/// The most of each text that a compare reads.
+const COMPARE_BYTES: u64 = 4 * 1024 * 1024;
 /// The most a 3D model, or one file it points to, may take.
 const MODEL_BYTES: u64 = 256 * 1024 * 1024;
 
@@ -194,6 +196,20 @@ pub fn as_text(bytes: &[u8], more: bool) -> Option<String> {
 pub fn searchable(bytes: &[u8]) -> String {
     let (encoding, mark) = Encoding::of(bytes);
     encoding.decode(&bytes[mark..], false).map_or_else(|| String::from_utf8_lossy(bytes).into_owned(), |(text, _)| text)
+}
+
+/// A whole text file, for a compare. `None` when it is not text. A file only online is never
+/// fetched for it, and a huge one is refused.
+pub fn whole_text(path: &Path) -> Result<Option<String>, String> {
+    if thumbs::is_online_only(path) {
+        return Err("It is only online. Download it first to compare it.".into());
+    }
+    let size = path.metadata().map_err(|error| error.to_string())?.len();
+    if size > COMPARE_BYTES {
+        return Err(format!("It is over {} MB, too big to compare here.", COMPARE_BYTES / 1024 / 1024));
+    }
+    let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
+    Ok(as_text(&bytes, false))
 }
 
 fn is_markdown(path: &Path) -> bool {
@@ -687,6 +703,25 @@ mod tests {
         let path = std::env::temp_dir().join(format!("perli-preview-{name}-{}", std::process::id()));
         fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    #[test]
+    fn a_compare_reads_whole_texts_in_their_encoding_and_refuses_the_rest() {
+        let folder = folder("compare");
+        let utf16 = folder.join("wide.txt");
+        let mut bytes = vec![0xFF, 0xFE];
+        bytes.extend("héllo\r\nworld".encode_utf16().flat_map(u16::to_le_bytes));
+        fs::write(&utf16, bytes).unwrap();
+        assert_eq!(whole_text(&utf16).unwrap().as_deref(), Some("héllo\r\nworld"));
+
+        let binary = folder.join("tool.bin");
+        fs::write(&binary, [0u8, 1, 2, 0, 0, 255, 254, 0]).unwrap();
+        assert_eq!(whole_text(&binary).unwrap(), None);
+
+        let huge = folder.join("huge.txt");
+        fs::write(&huge, vec![b'a'; COMPARE_BYTES as usize + 1]).unwrap();
+        assert!(whole_text(&huge).unwrap_err().contains("too big"));
+        fs::remove_dir_all(folder).unwrap();
     }
 
     #[test]
