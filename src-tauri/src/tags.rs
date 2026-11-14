@@ -95,6 +95,12 @@ fn file_key(path: &Path) -> Result<Key, String> {
     key_of(*file).map_err(|error| error.message())
 }
 
+/// Whether the drive `last` was on is here, by the nearest folder above it that is. Another drive
+/// plugged in under the same letter is not.
+fn volume_here(last: &Path, volume: u64) -> bool {
+    last.ancestors().skip(1).find_map(|folder| file_key(folder).ok()).is_some_and(|key| key.volume == volume)
+}
+
 fn file_keys(paths: &[PathBuf]) -> Result<Vec<Key>, String> {
     paths.iter().map(|path| file_key(path)).collect()
 }
@@ -439,7 +445,15 @@ pub fn files_with(tag: u32) -> WithTag {
                     found.away.push(Some(last.clone()));
                     continue;
                 }
-                file_key(last).ok().filter(|key| key.volume == volume && key.file == file).map(|_| last.clone())
+                match file_key(last) {
+                    Ok(key) if key.volume == volume && key.file == file => Some(last.clone()),
+                    _ if volume_here(last, volume) => None,
+                    // An unplugged drive answers "no such path", as a deleted file does.
+                    _ => {
+                        found.away.push(Some(last.clone()));
+                        continue;
+                    }
+                }
             }
         };
         if let Some(path) = path {
@@ -541,6 +555,19 @@ mod tests {
         let tags = store.all().unwrap();
         assert_eq!(tags[0].name, "Art");
         assert_eq!(tags[1], Tag { id: work.id, name: "Zebra".to_string(), color: 3 });
+    }
+
+    #[test]
+    fn a_file_gone_from_a_drive_that_is_here_is_not_away_but_one_on_a_missing_drive_is() {
+        let folder = Folder::new("volume-here");
+        let file = folder.file("gone.txt");
+        let volume = key(&file).volume;
+        fs::remove_file(&file).unwrap();
+
+        assert!(volume_here(&file, volume), "deleted, so left out");
+        assert!(!volume_here(&file, volume ^ 1), "another drive under the same letter");
+        let free = (b'D'..=b'Z').map(|letter| format!(r"{}:\", char::from(letter))).find(|root| !Path::new(root).exists()).unwrap();
+        assert!(!volume_here(&Path::new(&free).join(r"usb\photo.jpg"), volume), "unplugged");
     }
 
     #[test]
