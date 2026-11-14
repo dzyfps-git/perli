@@ -71,6 +71,8 @@ export function Tooltip() {
 
   function onPointerOver(event: PointerEvent) {
     pointerY = event.clientY;
+    // A press or drag under way, such as of a pane's edge, wants nothing over it.
+    if (event.buttons !== 0) return;
     const next = (event.target as Element).closest(LABELLED) ?? undefined;
     if (next === current) return;
     if (!next) return hide();
@@ -91,6 +93,7 @@ export function Tooltip() {
     const listeners = new AbortController();
     const { signal } = listeners;
     window.addEventListener("pointerover", onPointerOver, { signal });
+    window.addEventListener("pointerdown", hide, { signal });
     window.addEventListener("click", onClick, { signal });
     window.addEventListener("blur", hide, { signal });
     document.documentElement.addEventListener("pointerleave", hide, { signal });

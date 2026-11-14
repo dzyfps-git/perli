@@ -82,7 +82,12 @@ export function diffLines(a: string[], b: string[], key: (line: string) => strin
 export const spacesAside = (line: string) => line.replace(/\s+/g, " ").trim();
 
 /** A text's lines, whatever ends them. */
-export const linesOf = (text: string) => text.split(/\r\n|\n|\r/);
+export function linesOf(text: string) {
+  const lines = text.split(/\r\n|\n|\r/);
+  // The ending of the last line starts no line of its own.
+  if (lines.at(-1) === "") lines.pop();
+  return lines;
+}
 
 /** The parts of two changed lines that differ, as [start, end) character spans in each. */
 export function changedSpans(a: string, b: string) {

@@ -42,6 +42,12 @@ test("any line ending splits lines", () => {
   assert.deepEqual(linesOf("a\r\nb\nc\rd"), ["a", "b", "c", "d"]);
 });
 
+test("the ending of the last line starts no line of its own", () => {
+  assert.deepEqual(linesOf("one\r\ntwo\r\n"), ["one", "two"]);
+  assert.deepEqual(linesOf("one\n\n"), ["one", ""]);
+  assert.deepEqual(linesOf(""), []);
+});
+
 test("only the words that changed are marked", () => {
   const spans = changedSpans("the quick brown fox", "the slow brown fox jumps");
   assert.deepEqual(spans.a, [[4, 9]]);
