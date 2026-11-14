@@ -253,6 +253,8 @@ export type JobEvent = { id: number } & (
       newItem: boolean;
       recycle: boolean;
       back: boolean;
+      /** The archives it takes files out of. */
+      unpack: string[];
       /** The folder the job fills, for what to do when it is done. */
       target: string | null;
     }
