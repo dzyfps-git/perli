@@ -153,8 +153,8 @@ async fn answer(
 const PEEK_NAMES: usize = 6;
 const PEEK_COUNT: usize = 1000;
 
-/// The first lines of a file that reads as UTF-8 text, for a preview. Bytes that are not UTF-8,
-/// or control characters, mean it is not text. A file in the cloud stays there. Blocks, so call
+/// The first lines of a file that reads as text, in any encoding Notepad saves. Bytes that are
+/// control characters mean it is not text. A file in the cloud stays there. Blocks, so call
 /// it off the main thread.
 pub fn text_start(path: &Path) -> Option<String> {
     use std::io::Read;
@@ -163,9 +163,8 @@ pub fn text_start(path: &Path) -> Option<String> {
     }
     let mut bytes = Vec::with_capacity(PEEK_BYTES);
     fs::File::open(path).ok()?.take(PEEK_BYTES as u64).read_to_end(&mut bytes).ok()?;
-    let body = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&bytes);
     // The cut can land inside a character, which is fine.
-    let text = crate::preview::as_text(body, true)?;
+    let text = crate::preview::as_text(&bytes, true)?;
     (!text.is_empty()).then(|| text.lines().take(PEEK_LINES).collect::<Vec<_>>().join("\n"))
 }
 

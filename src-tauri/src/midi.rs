@@ -1,13 +1,18 @@
-//! MIDI files played through the bundled SoundFont. The whole song becomes one WAV, which the
-//! page's own audio player plays, so pausing, seeking and volume need nothing here.
+//! MIDI files played through the bundled SoundFont. The song becomes one WAV, made a block at a
+//! time while the page's own audio player streams it, so it plays at once, and pausing, seeking
+//! and volume need nothing here.
 
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::BufReader;
+use std::panic::AssertUnwindSafe;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 
 use serde::{Deserialize, Serialize};
 use rustysynth::{MidiFile, MidiFileSequencer, SoundFont, Synthesizer, SynthesizerSettings};
+use tauri::http::Response;
 
 /// The SoundFont beside perli.exe. Its license is in TimGM6mb-LICENSE.txt beside it.
 pub const SOUND_FONT: &str = "TimGM6mb.sf2";
@@ -16,8 +21,8 @@ const CHANNELS: u16 = 2;
 const SAMPLE_BYTES: u16 = 2;
 /// Long enough for the last notes to fade out.
 const TAIL_SECONDS: f64 = 2.0;
-// ponytail: the whole song is rendered before it plays, about 10.6 MB a minute. Stream it to
-// the speakers instead if songs longer than this matter.
+// ponytail: the made song stays in memory, about 10.6 MB a minute, so seeking back needs no
+// second render. Past this it is cut. Keep only a window round the playhead if longer songs matter.
 const MOST_SECONDS: f64 = 20.0 * 60.0;
 const BLOCK_FRAMES: usize = 4096;
 const WAV_HEADER_BYTES: usize = 44;
@@ -41,8 +46,8 @@ impl Default for Playing {
 const SLOWEST: f64 = 0.25;
 const FASTEST: f64 = 4.0;
 
-/// The song as a 16-bit stereo WAV.
-pub fn render(sound_font: &Path, song: &Path, playing: Playing) -> Result<Vec<u8>, String> {
+/// The song as a 16-bit stereo WAV, made on another thread while the window plays its start.
+pub fn stream(sound_font: &Path, song: &Path, playing: Playing) -> Result<Arc<Stream>, String> {
     let font = SoundFont::new(&mut BufReader::new(File::open(sound_font).map_err(|error| error.to_string())?))
         .map_err(|error| format!("The SoundFont can't be read: {error}"))?;
     let mut bytes = std::fs::read(song).map_err(|error| error.to_string())?;
@@ -57,19 +62,126 @@ pub fn render(sound_font: &Path, song: &Path, playing: Playing) -> Result<Vec<u8
     sequencer.play(&Arc::new(song), false);
     sequencer.set_speed(speed);
 
-    let mut wav = wav_header(frames);
+    let header = wav_header(frames);
+    let total = header.len() + frames * usize::from(CHANNELS * SAMPLE_BYTES);
+    let stream = Arc::new(Stream { made: Mutex::new((header, false)), grown: Condvar::new(), total });
+    let filling = Arc::clone(&stream);
+    std::thread::spawn(move || {
+        // A broken file can trip the synthesizer's own checks. The song then ends where it got to.
+        let _ = std::panic::catch_unwind(AssertUnwindSafe(|| fill(&mut sequencer, frames, &filling)));
+        filling.lock().1 = true;
+        filling.grown.notify_all();
+    });
+    Ok(stream)
+}
+
+fn fill(sequencer: &mut MidiFileSequencer, frames: usize, stream: &Arc<Stream>) {
     let (mut left, mut right) = (vec![0.0; BLOCK_FRAMES], vec![0.0; BLOCK_FRAMES]);
+    let mut block = Vec::with_capacity(BLOCK_FRAMES * 4);
     let mut done = 0;
-    while done < frames {
+    // Once the window lets go of the song, nothing else holds it, and making it stops.
+    while done < frames && Arc::strong_count(stream) > 1 {
         let count = BLOCK_FRAMES.min(frames - done);
         sequencer.render(&mut left[..count], &mut right[..count]);
+        block.clear();
         for (l, r) in left[..count].iter().zip(&right[..count]) {
-            wav.extend_from_slice(&sample(*l));
-            wav.extend_from_slice(&sample(*r));
+            block.extend_from_slice(&sample(*l));
+            block.extend_from_slice(&sample(*r));
         }
+        let mut made = stream.lock();
+        // Let go of, so nothing more is made.
+        if made.1 {
+            return;
+        }
+        made.0.extend_from_slice(&block);
+        drop(made);
+        stream.grown.notify_all();
         done += count;
     }
-    Ok(wav)
+}
+
+/// A song being made into a WAV a block at a time. The window plays it as it grows.
+pub struct Stream {
+    /// The WAV so far, and whether making it has ended, all of it or not.
+    made: Mutex<(Vec<u8>, bool)>,
+    grown: Condvar,
+    /// How long the whole WAV is.
+    total: usize,
+}
+
+/// The most of a song one ask gets. The window asks again for the rest.
+const CHUNK_BYTES: usize = 1 << 20;
+
+impl Stream {
+    fn lock(&self) -> std::sync::MutexGuard<'_, (Vec<u8>, bool)> {
+        self.made.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Ends the making, and wakes every ask still waiting with what there is.
+    fn stop(&self) {
+        self.lock().1 = true;
+        self.grown.notify_all();
+    }
+
+    /// The bytes from `start` up to `end`, waiting until they are made.
+    fn read(&self, start: usize, end: usize) -> Vec<u8> {
+        let made = self.grown.wait_while(self.lock(), |(wav, ended)| wav.len() < end && !*ended);
+        let made = made.unwrap_or_else(PoisonError::into_inner);
+        made.0.get(start..end.min(made.0.len())).unwrap_or_default().to_vec()
+    }
+
+    /// The answer to the window's ask for a part of the song, by an HTTP `Range` such as `bytes=0-`.
+    pub fn answer(&self, range: Option<&str>) -> Response<Vec<u8>> {
+        let total = self.total;
+        let asked = range.and_then(|range| range.strip_prefix("bytes=")).and_then(|range| range.split_once('-'));
+        let (start, end) = match asked {
+            Some(("", last)) => (total.saturating_sub(last.parse().unwrap_or(0)), total),
+            Some((first, last)) => (first.parse().unwrap_or(usize::MAX), last.parse::<usize>().map_or(total, |last| last.saturating_add(1))),
+            None => (0, total),
+        };
+        let body = if start < total { self.read(start, end.min(total).min(start + CHUNK_BYTES)) } else { Vec::new() };
+        if body.is_empty() {
+            return Response::builder().status(416).header("Content-Range", format!("bytes */{total}")).body(Vec::new()).unwrap();
+        }
+        Response::builder()
+            .status(206)
+            .header("Content-Type", "audio/wav")
+            .header("Accept-Ranges", "bytes")
+            .header("Content-Range", format!("bytes {start}-{}/{total}", start + body.len() - 1))
+            .body(body)
+            .unwrap()
+    }
+}
+
+/// The songs being made, by number, until the window lets go of each.
+#[derive(Default)]
+pub struct Streams {
+    next: AtomicU64,
+    songs: Mutex<HashMap<u64, Arc<Stream>>>,
+}
+
+impl Streams {
+    fn songs(&self) -> std::sync::MutexGuard<'_, HashMap<u64, Arc<Stream>>> {
+        self.songs.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    pub fn add(&self, stream: Arc<Stream>) -> u64 {
+        let number = self.next.fetch_add(1, Ordering::Relaxed);
+        self.songs().insert(number, stream);
+        number
+    }
+
+    pub fn get(&self, number: u64) -> Option<Arc<Stream>> {
+        self.songs().get(&number).cloned()
+    }
+
+    /// A seek far ahead can still hold the song, so it stops here rather than when the last
+    /// hold goes.
+    pub fn forget(&self, number: u64) {
+        if let Some(stream) = self.songs().remove(&number) {
+            stream.stop();
+        }
+    }
 }
 
 /// Silences the muted channels and moves every note but the drums by `transpose` keys. Each
@@ -178,18 +290,33 @@ pub struct SongInfo {
     instruments: Vec<u8>,
     /// Each channel that plays and the instrument it starts with, in the order they first play.
     channels: Vec<(u8, u8)>,
-    /// Each note as start and length in seconds, key, and channel.
+    /// Each note as start and length in seconds, key, and channel. They go to the window
+    /// packed, by `packed_notes`, as a big song has millions.
+    #[serde(skip)]
     notes: Vec<(f32, f32, u8, u8)>,
     /// When each beat falls, in seconds.
     beats: Vec<f32>,
-    /// How many beats make a bar.
-    per_bar: u8,
+    /// When each bar starts, in seconds, following the song's time signatures.
+    bars: Vec<f32>,
+}
+
+impl SongInfo {
+    /// The notes as columns of little-endian numbers: every start, every length, every key,
+    /// every channel. The window reads each column in place.
+    pub fn packed_notes(&self) -> Vec<u8> {
+        let mut packed = Vec::with_capacity(self.notes.len() * 10);
+        packed.extend(self.notes.iter().flat_map(|note| note.0.to_le_bytes()));
+        packed.extend(self.notes.iter().flat_map(|note| note.1.to_le_bytes()));
+        packed.extend(self.notes.iter().map(|note| note.2));
+        packed.extend(self.notes.iter().map(|note| note.3));
+        packed
+    }
 }
 
 pub const DRUMS: u8 = 128;
 const DRUM_CHANNEL: u8 = 9;
-// ponytail: a piano roll past this many notes shows only the first ones.
-const MOST_NOTES: usize = 200_000;
+// ponytail: a piano roll past this many notes shows only the first ones, 40 MB of them packed.
+const MOST_NOTES: usize = 4_000_000;
 const MOST_BEATS: usize = 20_000;
 const DEFAULT_TEMPO: f64 = 500_000.0;
 
@@ -198,6 +325,8 @@ enum Event {
     On { channel: u8, key: u8 },
     Off { channel: u8, key: u8 },
     Program { channel: u8, program: u8 },
+    /// A time signature: so many notes a bar, each a 2 to the `power` part of a whole note.
+    Meter { count: u8, power: u8 },
 }
 
 struct Reader<'a> {
@@ -252,23 +381,19 @@ fn read_info(bytes: &[u8]) -> Option<SongInfo> {
     file.take(header.checked_sub(6)?)?;
 
     let mut title = None;
-    let mut meter = None;
     let mut events = Vec::new();
     for track in 0..tracks {
         let (Some(kind), Some(length)) = (file.take(4), file.u32()) else { break };
         let Some(body) = file.take(length as usize).or_else(|| file.bytes.get(file.at..)) else { break };
         if kind == b"MTrk" {
-            read_track(body, &mut events, if track == 0 { Some(&mut title) } else { None }, &mut meter);
+            read_track(body, &mut events, if track == 0 { Some(&mut title) } else { None });
         }
     }
     events.sort_by_key(|(tick, _)| *tick);
 
     let seconds_at = timing(division, &events);
-    // ponytail: the first time signature counts for the whole song. Songs that change it draw
-    // their bar lines off after the change.
-    let per_bar = meter.map_or(4, |(count, power): (u8, u8)| ((u32::from(count) * 4) >> power.min(7)).clamp(1, 255) as u8);
-    let beats = beats(division, &events);
-    let mut info = SongInfo { title, beats, per_bar, ..SongInfo::default() };
+    let (beats, bars) = beats_and_bars(division, &events);
+    let mut info = SongInfo { title, beats, bars, ..SongInfo::default() };
     let mut programs = [0u8; 16];
     let mut held: Vec<Vec<(u8, f32)>> = vec![Vec::new(); 16];
     for ((_, event), seconds) in events.iter().zip(seconds_at) {
@@ -294,14 +419,14 @@ fn read_info(bytes: &[u8]) -> Option<SongInfo> {
                     }
                 }
             }
-            Event::Tempo(_) => {}
+            Event::Tempo(_) | Event::Meter { .. } => {}
         }
     }
     info.notes.sort_by(|a, b| a.0.total_cmp(&b.0));
     Some(info)
 }
 
-fn read_track(body: &[u8], events: &mut Vec<(u64, Event)>, mut title: Option<&mut Option<String>>, meter: &mut Option<(u8, u8)>) {
+fn read_track(body: &[u8], events: &mut Vec<(u64, Event)>, mut title: Option<&mut Option<String>>) {
     let mut track = Reader { bytes: body, at: 0 };
     let mut tick = 0u64;
     let mut running = 0u8;
@@ -326,10 +451,7 @@ fn read_track(body: &[u8], events: &mut Vec<(u64, Event)>, mut title: Option<&mu
                         }
                         None
                     }
-                    (0x58, [count, power, ..]) => {
-                        meter.get_or_insert((*count, *power));
-                        None
-                    }
+                    (0x58, [count, power, ..]) if *count > 0 => Some(Event::Meter { count: *count, power: *power }),
                     (0x2F, _) => return,
                     _ => None,
                 }
@@ -385,33 +507,57 @@ fn timing(division: u16, events: &[(u64, Event)]) -> Vec<f64> {
         .collect()
 }
 
-/// When each beat falls, in seconds, up to the song's last event.
-fn beats(division: u16, events: &[(u64, Event)]) -> Vec<f32> {
+/// When each beat and each bar starts, in seconds, up to the song's last event. A new time
+/// signature starts a new bar where it falls.
+fn beats_and_bars(division: u16, events: &[(u64, Event)]) -> (Vec<f32>, Vec<f32>) {
     if division & 0x8000 != 0 {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
     let per_beat = u64::from(division.max(1));
     let last = events.last().map_or(0, |(tick, _)| *tick);
-    let mut changes = events.iter().filter_map(|(tick, event)| match event {
-        Event::Tempo(tempo) => Some((*tick, f64::from(*tempo))),
-        _ => None,
-    });
-    let mut next = changes.next();
+    let beats: Vec<u64> = (0..).map(|beat| beat * per_beat).take_while(|tick| *tick <= last).take(MOST_BEATS).collect();
+    let mut meters = events
+        .iter()
+        .filter_map(|(tick, event)| match event {
+            // A bar of 7/8 is 3.5 beats, so it is counted in ticks.
+            Event::Meter { count, power } => Some((*tick, ((per_beat * 4 * u64::from(*count)) >> (*power).min(7)).max(1))),
+            _ => None,
+        })
+        .peekable();
+    let (mut bars, mut tick, mut length) = (Vec::new(), 0u64, per_beat * 4);
+    while tick <= last && bars.len() < MOST_BEATS {
+        while let Some((_, changed)) = meters.next_if(|(at, _)| *at <= tick) {
+            length = changed;
+        }
+        bars.push(tick);
+        let end = tick + length;
+        tick = meters.peek().map_or(end, |(at, _)| (*at).min(end));
+    }
+    (seconds_of(per_beat, events, &beats), seconds_of(per_beat, events, &bars))
+}
+
+/// When each of `ticks`, in order, falls in seconds, following the tempo changes before it.
+fn seconds_of(per_beat: u64, events: &[(u64, Event)], ticks: &[u64]) -> Vec<f32> {
+    let mut changes = events
+        .iter()
+        .filter_map(|(tick, event)| match event {
+            Event::Tempo(tempo) => Some((*tick, f64::from(*tempo))),
+            _ => None,
+        })
+        .peekable();
     let (mut tempo, mut from, mut seconds) = (DEFAULT_TEMPO, 0u64, 0.0f64);
     let span = |ticks: u64, tempo: f64| ticks as f64 * tempo / 1_000_000.0 / per_beat as f64;
-    let mut found = Vec::new();
-    let mut tick = 0u64;
-    while tick <= last && found.len() < MOST_BEATS {
-        while let Some((at, changed)) = next.filter(|(at, _)| *at <= tick) {
-            seconds += span(at - from, tempo);
-            from = at;
-            tempo = changed;
-            next = changes.next();
-        }
-        found.push((seconds + span(tick - from, tempo)) as f32);
-        tick += per_beat;
-    }
-    found
+    ticks
+        .iter()
+        .map(|&tick| {
+            while let Some((at, changed)) = changes.next_if(|(at, _)| *at <= tick) {
+                seconds += span(at - from, tempo);
+                from = at;
+                tempo = changed;
+            }
+            (seconds + span(tick - from, tempo)) as f32
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -429,6 +575,73 @@ mod tests {
         song.extend_from_slice(&(track.len() as u32).to_be_bytes());
         song.extend_from_slice(&track);
         song
+    }
+
+    /// The whole WAV, once it is made.
+    fn render(font: &Path, song: &Path, playing: Playing) -> Result<Vec<u8>, String> {
+        let stream = stream(font, song, playing)?;
+        Ok(stream.read(0, stream.total))
+    }
+
+    #[test]
+    fn the_window_streams_a_song_in_parts_while_it_is_made() {
+        let folder = std::env::temp_dir().join(format!("perli-midi-stream-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let song = folder.join("one.mid");
+        std::fs::write(&song, one_note()).unwrap();
+        let font = Path::new(env!("CARGO_MANIFEST_DIR")).join("resources").join(SOUND_FONT);
+        let streams = Streams::default();
+        let number = streams.add(stream(&font, &song, Playing::default()).unwrap());
+        let stream = streams.get(number).unwrap();
+        let total = stream.total;
+        let whole = stream.read(0, total);
+        assert_eq!(whole.len(), total);
+
+        let first = stream.answer(Some("bytes=0-"));
+        assert_eq!(first.status(), 206);
+        assert_eq!(first.headers()["Content-Range"], format!("bytes 0-{}/{total}", total.min(CHUNK_BYTES) - 1));
+        assert_eq!(first.body()[..], whole[..total.min(CHUNK_BYTES)]);
+        let part = stream.answer(Some("bytes=40-43"));
+        assert_eq!((part.headers()["Content-Range"].to_str().unwrap(), &part.body()[..]), (format!("bytes 40-43/{total}").as_str(), &whole[40..44]));
+        assert_eq!(stream.answer(Some("bytes=-4")).body()[..], whole[total - 4..]);
+        assert_eq!(stream.answer(Some(&format!("bytes={total}-"))).status(), 416);
+        assert_eq!(stream.answer(None).body().len(), total.min(CHUNK_BYTES));
+
+        streams.forget(number);
+        assert!(streams.get(number).is_none());
+        std::fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
+    fn letting_go_of_a_song_stops_making_it_even_while_a_seek_waits() {
+        let folder = std::env::temp_dir().join(format!("perli-midi-stop-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let song = folder.join("long.mid");
+        // A note held for longer than the longest song, so the WAV runs to `MOST_SECONDS`.
+        let mut long = one_note();
+        long.splice(26..27, [0xFF, 0xFF, 0xFF, 0x7F]);
+        let length = (long.len() - 22) as u32;
+        long[18..22].copy_from_slice(&length.to_be_bytes());
+        std::fs::write(&song, long).unwrap();
+        let font = Path::new(env!("CARGO_MANIFEST_DIR")).join("resources").join(SOUND_FONT);
+        let streams = Streams::default();
+        let number = streams.add(stream(&font, &song, Playing::default()).unwrap());
+
+        // A seek near the end holds the song while it waits.
+        let seek = streams.get(number).unwrap();
+        let (sent, waited) = std::sync::mpsc::channel();
+        std::thread::spawn(move || sent.send(seek.answer(Some(&format!("bytes={}-", seek.total - 4))).status()));
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let watched = streams.get(number).unwrap();
+        streams.forget(number);
+
+        let status = waited.recv_timeout(std::time::Duration::from_secs(1)).expect("the seek still waits");
+        assert_eq!(status, 416);
+        let made = watched.lock().0.len();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert_eq!(watched.lock().0.len(), made, "still making it");
+        assert!(made < watched.total);
+        std::fs::remove_dir_all(folder).unwrap();
     }
 
     #[test]
@@ -492,10 +705,26 @@ mod tests {
         assert_eq!(info.title.as_deref(), Some("Tune"));
         assert_eq!(info.instruments, [0, 40, DRUMS]);
         assert_eq!(info.notes, [(0.0, 1.0, 60, 0), (1.0, 0.5, 64, 0), (1.5, 0.5, 36, 9)]);
+        let packed = info.packed_notes();
+        assert_eq!(packed.len(), 30);
+        assert_eq!((&packed[4..8], &packed[12..16]), (&1f32.to_le_bytes()[..], &1f32.to_le_bytes()[..]), "starts, then lengths");
+        assert_eq!(&packed[24..], [60, 64, 36, 0, 0, 9], "keys, then channels");
         assert_eq!(info.channels, [(0, 0), (9, DRUMS)]);
-        assert_eq!((info.beats.as_slice(), info.per_bar), ([0.0, 1.0, 2.0].as_slice(), 4));
+        assert_eq!((info.beats.as_slice(), info.bars.as_slice()), ([0.0, 1.0, 2.0].as_slice(), [0.0].as_slice()));
         assert!(read_info(b"RIFF").is_none());
         // Cut off in the middle of a track: the notes before the cut stay.
         assert_eq!(read_info(&song[..song.len() - 12]).unwrap().notes.len(), 2);
+    }
+
+    #[test]
+    fn bar_lines_follow_a_change_of_time_signature() {
+        // 3/4 for one bar, then 7/8, at the default half a second a beat, with a note at tick 960.
+        let track = b"\0\xFF\x58\x04\x03\x02\x18\x08\x82\x20\xFF\x58\x04\x07\x03\x18\x08\x85\x20\x90\x3C\x64\0\x80\x3C\0\0\xFF\x2F\0";
+        let mut song = b"MThd\0\0\0\x06\0\0\0\x01\0\x60MTrk".to_vec();
+        song.extend_from_slice(&(track.len() as u32).to_be_bytes());
+        song.extend_from_slice(track);
+        let info = read_info(&song).unwrap();
+        assert_eq!(info.bars, [0.0, 1.5, 3.25, 5.0]);
+        assert_eq!(info.beats.len(), 11);
     }
 }
