@@ -312,16 +312,14 @@ pub fn save_frame(film: &Path, seconds: u64, png: &[u8]) -> Result<String, Strin
     Err("Too many frames of this moment are saved already".into())
 }
 
-/// How much of a file's start says what encoding a later piece of it is in.
-const HEAD_BYTES: u64 = 64 * 1024;
-
 fn piece(path: &Path, offset: u64) -> Option<Preview> {
     let mut file = File::open(path).ok()?;
     let (encoding, mark) = if offset == 0 {
         (Encoding::Utf8, 0)
     } else {
+        // The same bytes the first piece judged by, so every piece decodes as it did.
         let mut head = Vec::new();
-        (&file).take(HEAD_BYTES).read_to_end(&mut head).ok()?;
+        (&file).take(PIECE_BYTES as u64).read_to_end(&mut head).ok()?;
         Encoding::of(&head)
     };
     file.seek(SeekFrom::Start(offset)).ok()?;
@@ -745,6 +743,25 @@ mod tests {
             assert!(labels.len() >= 2);
             assert!(labels.iter().all(|label| label == if big { "UTF-16 BE" } else { "UTF-16 LE" }), "{labels:?}");
         }
+        fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
+    fn later_pieces_keep_the_encoding_the_first_one_found() {
+        let folder = folder("ansi-late");
+        let file = folder.join("old.log");
+        // The one ANSI letter sits past the first 64 KiB. Later, `C3 A9` would also read as UTF-8.
+        let mut bytes = b"plain ascii line\n".repeat(80 * 1024 / 17);
+        bytes.extend(b"caf\xE9\n");
+        while bytes.len() < PIECE_BYTES * 2 {
+            bytes.extend(b"\xC3\xA9 two letters in ANSI\n");
+        }
+        fs::write(&file, &bytes).unwrap();
+
+        let Preview::Text { encoding: first, next, .. } = read(&file, 0) else { panic!("not text") };
+        let Preview::Text { encoding: later, text, .. } = read(&file, next.unwrap()) else { panic!("not text") };
+        assert_eq!(later, first);
+        assert!(!text.contains('\u{e9}'), "read as UTF-8: {}", &text[..40]);
         fs::remove_dir_all(folder).unwrap();
     }
 
