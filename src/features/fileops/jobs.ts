@@ -20,7 +20,7 @@ import {
 } from "../../api";
 import type { FolderView } from "../navigation/folderView";
 import { baseName, join, samePath } from "../navigation/path";
-import { markBack, markDeleted } from "../filelist/rowMotion";
+import { markBack, markDeleted, markUnpacking } from "../filelist/rowMotion";
 import { checkCut } from "./clipboard";
 import { setLanded } from "./landed";
 import { nextRate, nextThen, startRate, withSpeed, type Rate, type Then } from "./progress";
@@ -91,6 +91,8 @@ export function createJobs(views: () => FolderView[], host: JobsHost) {
   const [redoText, setRedoText] = createSignal<string | null>(null);
   /** Cards with no job behind them count down, so their ids never meet a job's. */
   let failures = 0;
+  /** What each job taking files out of archives says once it ends. */
+  const unpacked = new Map<number, () => void>();
 
   const find = (id: number) => cards.find((card) => card.id === id);
   const patch = (id: number, change: Partial<JobCard>) => setCards((card) => card.id === id, change);
@@ -111,11 +113,12 @@ export function createJobs(views: () => FolderView[], host: JobsHost) {
   }
 
   function started(event: Extract<JobEvent, { kind: "started" }>) {
-    const { id, title, origin, newItem, recycle, back, target } = event;
+    const { id, title, origin, newItem, recycle, back, unpack, target } = event;
     const rate = startRate(performance.now());
     setCards(cards.length, { id, title, origin, newItem, recycle, shown: false, paused: false, rate, speeds: [], target, then: "none" });
     if (recycle) markDeleted();
     if (back) markBack();
+    if (unpack.length > 0) unpacked.set(id, markUnpacking(unpack));
     setTimeout(() => patch(id, { shown: true }), SHOW_AFTER_MS);
   }
 
@@ -145,6 +148,8 @@ export function createJobs(views: () => FolderView[], host: JobsHost) {
     const card = find(event.id);
     if (!card) return;
     undoable(event);
+    unpacked.get(event.id)?.();
+    unpacked.delete(event.id);
     reloadViews(event, card);
     if (!event.cancelled && event.touched.length > 0) setLanded({ folders: event.touched });
     // A finished cut paste empties the clipboard. A cancelled one leaves the cut standing.

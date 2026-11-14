@@ -1595,6 +1595,7 @@
 
 /* The preview beside the list. It is the same preview, without the dialog's dress. */
 .preview-dock {
+  position: relative;
   display: flex;
   flex: none;
   width: clamp(280px, 36%, 560px);
@@ -1604,6 +1605,86 @@
   border-radius: var(--radius);
   overflow: hidden;
   animation: details-in var(--motion-slide);
+}
+
+/* Once its edge was dragged, the pane keeps its share of the room as the window changes. */
+.preview-dock-sized {
+  width: clamp(240px, calc(var(--preview-share) * 100%), 70%);
+}
+
+/* Let go now, and the pane closes. */
+.preview-dock-folding {
+  opacity: 0.45;
+  transition: opacity var(--motion);
+}
+
+/* The pane's left edge. A short grip shows near the pointer, in the accent, and grows into a
+   line while it moves. */
+.dock-edge {
+  position: absolute;
+  inset-block: 0;
+  left: 0;
+  z-index: 3;
+  width: var(--space-2);
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.dock-edge::before {
+  content: "";
+  position: absolute;
+  inset: calc(50% - 16px) calc(50% - 1.5px);
+  border-radius: 2px;
+  background: var(--text-muted);
+  opacity: 0;
+  transition:
+    opacity var(--motion),
+    inset var(--motion-glide),
+    background var(--motion);
+}
+
+.dock-edge:hover::before,
+.dock-edge:focus-visible::before {
+  background: var(--accent);
+  opacity: 0.8;
+}
+
+.dock-edge-dragging::before {
+  inset: var(--space-2) calc(50% - 1px);
+  background: var(--accent-line);
+  opacity: 1;
+}
+
+.dock-edge:focus-visible {
+  outline: none;
+}
+
+.dock-tick {
+  position: fixed;
+  z-index: 40;
+}
+
+/* The width while the edge moves, beside the pointer. */
+.dock-pill {
+  position: fixed;
+  z-index: 40;
+  padding: 2px var(--space-2);
+  color: var(--text);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  background: var(--overlay-tint);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  box-shadow: var(--shadow);
+  backdrop-filter: var(--blur);
+  translate: calc(-100% - 12px) -50%;
+  pointer-events: none;
+  transition: color var(--motion);
+}
+
+.dock-pill-folds {
+  color: var(--text-muted);
 }
 
 .preview-dock > .details-empty {

@@ -77,6 +77,8 @@ enum Change {
         recycle: bool,
         /// An undo, whose rows go back to where they were.
         back: bool,
+        /// The archives a job takes files out of, whose rows the new ones fan out from.
+        unpack: Vec<String>,
         /// The folder the job fills, for what to do when it is done.
         target: Option<String>,
     },
@@ -726,6 +728,10 @@ impl Bridge {
             new_item: matches!(plan.job, Job::New { .. } | Job::Gather { .. } | Job::Template { .. } | Job::Zip { .. }),
             recycle: matches!(plan.job, Job::Recycle { .. }),
             back: matches!(plan.history, History::Undo),
+            unpack: match &plan.job {
+                Job::Unzip { archives, .. } => archives.iter().map(|path| text(path)).collect(),
+                _ => Vec::new(),
+            },
             target: target_of(&plan.job),
         });
 

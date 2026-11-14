@@ -44,6 +44,15 @@ test("a look changes in parts and goes once it is empty", () => {
   assert.deepEqual(withLook(covered, "C:\\Trip", { cover: undefined }), {});
 });
 
+test("where a cover is cropped goes with that cover", () => {
+  const top = withLook(withLook({}, "C:\\Trip", { cover: "C:\\Trip\\a.jpg" }), "C:\\Trip", { coverAt: "start" });
+  assert.deepEqual(top, { "c:\\trip": { cover: "C:\\Trip\\a.jpg", coverAt: "start" } });
+  assert.deepEqual(withLook(top, "C:\\Trip", { color: 1 })["c:\\trip"].coverAt, "start", "other changes keep it");
+  assert.deepEqual(withLook(top, "C:\\Trip", { cover: "C:\\Trip\\b.jpg" }), { "c:\\trip": { cover: "C:\\Trip\\b.jpg" } });
+  assert.deepEqual(withLook(top, "C:\\Trip", { cover: undefined }), {});
+  assert.deepEqual(withLook({}, "C:\\Trip", { coverAt: "end" }), {}, "no cover, nothing to crop");
+});
+
 test("a look handed to the folders inside reaches every depth, but not past their own", () => {
   let looks = withLook({}, "C:\\Work", { color: 2, inside: true });
   looks = withLook(looks, "C:\\Work\\Old\\Mine", { icon: "\uE734" });

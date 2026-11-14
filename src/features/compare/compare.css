@@ -1,0 +1,509 @@
+/* Compare: two files in one window, as big as the preview can be. */
+.quick-preview.compare {
+  width: min(1400px, 94vw);
+  height: min(900px, 90vh);
+}
+
+.compare-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-2) var(--space-2) var(--space-4);
+  border-bottom: 1px solid var(--border);
+}
+
+.compare-title {
+  display: flex;
+  flex: 1 1 0;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  font-weight: 600;
+}
+
+.compare-title > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.compare-slot,
+.compare-tools {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.compare-icon-button {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text-muted);
+  font: 13px / 1 var(--font-icons);
+  transition:
+    background var(--motion),
+    color var(--motion),
+    rotate var(--motion-glide);
+}
+
+.compare-icon-button:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.compare-title .compare-icon-button:active {
+  rotate: 180deg;
+}
+
+/* A row of choices. The pill under the one picked slides over to the next, with a spring. */
+.compare-choices {
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(var(--of), 1fr);
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.compare-choices button {
+  position: relative;
+  height: 24px;
+  padding: 0 var(--space-2);
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 12px;
+  white-space: nowrap;
+  transition: color var(--motion);
+}
+
+.compare-choices button[aria-checked="true"],
+.compare-choices button:hover {
+  color: var(--text);
+}
+
+.compare-choices button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  border-radius: 6px;
+}
+
+.compare-choice-pill {
+  position: absolute;
+  inset: 2px auto 2px 2px;
+  width: calc((100% - 4px) / var(--of));
+  border-radius: 6px;
+  background: var(--surface-selected);
+  translate: calc(var(--at) * 100%) 0;
+  transition: translate 420ms var(--spring);
+}
+
+/* The pictures. Each sits in a layer of its own, and the layers lie over each other. */
+.compare-stage {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  isolation: isolate;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+
+.compare-stage[data-mode="side"] {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-1);
+}
+
+.compare-layer {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  transition: opacity 120ms ease-out;
+}
+
+.compare-stage[data-mode="side"] .compare-layer {
+  position: relative;
+}
+
+.compare-stage[data-mode="difference"] .compare-layer + .compare-layer {
+  mix-blend-mode: difference;
+}
+
+.compare-hidden {
+  opacity: 0;
+}
+
+.compare-pan {
+  position: absolute;
+  inset: var(--space-3);
+  transform-origin: center;
+}
+
+.compare-pan canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+/* Each picture's name in its corner, clear of the line. */
+.compare-label {
+  position: absolute;
+  top: var(--space-3);
+  max-width: 40%;
+  padding: 2px var(--space-2);
+  overflow: hidden;
+  color: var(--text);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: var(--overlay-tint);
+  border-radius: 999px;
+  backdrop-filter: var(--blur);
+  pointer-events: none;
+}
+
+.compare-label[data-slot="0"] {
+  left: var(--space-3);
+}
+
+.compare-label[data-slot="1"] {
+  right: var(--space-3);
+}
+
+.compare-stage:is([data-mode="blink"], [data-mode="difference"]) .compare-label {
+  display: none;
+}
+
+/* The swipe line, with a round knob to hold it by. */
+.compare-line {
+  position: absolute;
+  inset-block: 0;
+  left: calc(var(--cut) * 100%);
+  z-index: 2;
+  width: 24px;
+  margin-left: -12px;
+  cursor: ew-resize;
+}
+
+.compare-line::before {
+  content: "";
+  position: absolute;
+  inset-block: 0;
+  left: 11px;
+  width: 2px;
+  background: var(--accent-line);
+  box-shadow: 0 0 0 1px rgb(0 0 0 / 25%);
+}
+
+.compare-stage[data-vertical] .compare-line {
+  inset: calc(var(--cut) * 100%) 0 auto;
+  width: auto;
+  height: 24px;
+  margin: -12px 0 0;
+  cursor: ns-resize;
+}
+
+.compare-stage[data-vertical] .compare-line::before {
+  inset: 11px 0 auto;
+  width: auto;
+  height: 2px;
+}
+
+.compare-knob {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 28px;
+  height: 28px;
+  border: 2px solid var(--accent);
+  border-radius: 50%;
+  background: var(--overlay-tint);
+  backdrop-filter: var(--blur);
+  box-shadow: var(--shadow);
+  translate: -50% -50%;
+  transition: scale var(--motion-glide);
+}
+
+.compare-line:hover .compare-knob,
+.compare-line:active .compare-knob {
+  scale: 1.15;
+}
+
+.compare-blink-note {
+  position: absolute;
+  bottom: var(--space-3);
+  left: 50%;
+  padding: 2px var(--space-3);
+  font-size: 12px;
+  background: var(--overlay-tint);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  backdrop-filter: var(--blur);
+  translate: -50% 0;
+}
+
+/* What each file is, under its own half. */
+.compare-sides {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-4);
+  padding: var(--space-2) var(--space-4);
+  border-top: 1px solid var(--border);
+}
+
+.compare-side {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-2);
+  min-width: 0;
+}
+
+.compare-chip {
+  padding: 0 var(--space-2);
+  color: var(--text);
+  font-size: 11.5px;
+  line-height: 20px;
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  border-radius: 10px;
+  animation: compare-chip-in 420ms var(--spring) backwards;
+}
+
+@keyframes compare-chip-in {
+  from {
+    scale: 0.6;
+    opacity: 0;
+  }
+}
+
+.compare-recycle {
+  margin-left: auto;
+}
+
+/* The texts. */
+.compare-text {
+  position: relative;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.diff-summary {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-4);
+}
+
+.diff-chip-new {
+  background: color-mix(in srgb, #3fb950 22%, transparent);
+}
+
+.diff-chip-gone {
+  background: color-mix(in srgb, #f85149 22%, transparent);
+}
+
+/* Nothing differs: a check that draws itself. */
+.diff-same {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.diff-check {
+  width: 22px;
+  height: 22px;
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 2.2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-dasharray: 24;
+  stroke-dashoffset: 24;
+  animation: diff-check-draw 600ms 120ms var(--spring) forwards;
+}
+
+@keyframes diff-check-draw {
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+.diff-scroll {
+  flex: 1;
+  min-height: 0;
+  margin-right: 14px;
+  overflow: auto;
+  font: 12.5px / 1.55 "Cascadia Mono", Consolas, monospace;
+  outline: none;
+}
+
+.diff-row {
+  display: grid;
+  grid-template-columns: var(--number) 1fr var(--number) 1fr;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 20px;
+}
+
+.diff-scroll[data-one] .diff-row {
+  grid-template-columns: 1fr;
+}
+
+.diff-scroll[data-one] .diff-row[data-kind="same"],
+.diff-one {
+  display: grid;
+  grid-template-columns: var(--number) 1fr;
+}
+
+.diff-number {
+  padding: 0 var(--space-2) 0 0;
+  color: var(--text-muted);
+  text-align: right;
+  opacity: 0.7;
+  user-select: none;
+}
+
+.diff-line {
+  min-width: 0;
+  padding: 0 var(--space-2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.diff-line[data-kind="gone"] {
+  background: color-mix(in srgb, #f85149 13%, transparent);
+}
+
+.diff-line[data-kind="new"] {
+  background: color-mix(in srgb, #3fb950 13%, transparent);
+}
+
+/* The text ends here with no line ending, which is all that may differ. */
+.diff-line[data-open]::after {
+  content: "No line ending";
+  margin-left: var(--space-2);
+  padding: 0 6px;
+  border-radius: 999px;
+  font-family: var(--font);
+  font-size: 0.85em;
+  color: var(--text-muted);
+  background: color-mix(in srgb, var(--text-muted) 14%, transparent);
+  white-space: nowrap;
+}
+
+.diff-line[data-kind="none"] {
+  background: repeating-linear-gradient(135deg, transparent 0 6px, color-mix(in srgb, var(--text-muted) 8%, transparent) 6px 7px);
+}
+
+.diff-scroll[data-one] .diff-line[data-kind="gone"]::before {
+  content: "− ";
+  color: #f85149;
+}
+
+.diff-scroll[data-one] .diff-line[data-kind="new"]::before {
+  content: "+ ";
+  color: #3fb950;
+}
+
+::highlight(diff-gone-word) {
+  background-color: color-mix(in srgb, #f85149 38%, transparent);
+}
+
+::highlight(diff-new-word) {
+  background-color: color-mix(in srgb, #3fb950 38%, transparent);
+}
+
+/* Same lines folded away. Opened, they slide down into place. */
+.diff-fold {
+  display: block;
+  width: 100%;
+  padding: 2px var(--space-4);
+  border: 0;
+  border-block: 1px dashed var(--border);
+  background: var(--surface);
+  color: var(--text-muted);
+  font: 12px var(--font);
+  text-align: left;
+  transition:
+    background var(--motion),
+    color var(--motion);
+}
+
+.diff-fold:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.diff-unfolded {
+  animation: diff-unfold 320ms var(--spring) backwards;
+}
+
+@keyframes diff-unfold {
+  from {
+    opacity: 0;
+    translate: 0 -6px;
+  }
+}
+
+/* Where the changes are, down the side. A click goes there. */
+.diff-strip {
+  position: absolute;
+  top: 44px;
+  right: 2px;
+  bottom: var(--space-2);
+  width: 10px;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--text-muted) 8%, transparent);
+}
+
+.diff-mark {
+  position: absolute;
+  left: 1px;
+  width: 8px;
+  height: 4px;
+  padding: 0;
+  border: 0;
+  border-radius: 2px;
+  background: var(--accent);
+  opacity: 0.6;
+  cursor: pointer;
+  transition:
+    opacity var(--motion),
+    scale var(--motion-glide);
+}
+
+.diff-mark:hover,
+.diff-mark-on {
+  opacity: 1;
+  scale: 1.4;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .compare-choice-pill,
+  .compare-knob,
+  .compare-icon-button {
+    transition: none;
+  }
+
+  .compare-chip,
+  .diff-unfolded {
+    animation: none;
+  }
+
+  .diff-check {
+    stroke-dashoffset: 0;
+    animation: none;
+  }
+}

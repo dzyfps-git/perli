@@ -253,6 +253,8 @@ export type JobEvent = { id: number } & (
       newItem: boolean;
       recycle: boolean;
       back: boolean;
+      /** The archives it takes files out of. */
+      unpack: string[];
       /** The folder the job fills, for what to do when it is done. */
       target: string | null;
     }
@@ -443,6 +445,10 @@ export interface FolderStart {
   count: number;
   more: boolean;
 }
+
+/** A whole text file, for a compare. Null when it is not text. */
+export const wholeText = (view: number, request: number, row: number) =>
+  invoke<string | null>("whole_text", { view, request, row });
 
 export const peekFolder = (view: number, request: number, row: number) =>
   invoke<FolderStart | null>("peek_folder", { view, request, row });
@@ -667,8 +673,9 @@ export const countWhere = (view: number, request: number, filter: Filter) =>
 export const rowProps = (view: number, request: number, rows: number[], names: string[]) =>
   invoke<(string | null)[][]>("row_props", { view, request, rows, names });
 
-/** A few pictures right inside `path`, for its tile to show a stack of. */
-export const folderPictures = (path: string) => invoke<string[]>("folder_pictures", { path });
+/** A few pictures right inside `path`, for its tile to show a stack of, or up to `most` (200 at
+ *  the very most) for the cover picker. */
+export const folderPictures = (path: string, most?: number) => invoke<string[]>("folder_pictures", { path, most: most ?? null });
 
 /** The bytes of the selected files, from the listing alone. Folders count as nothing. */
 /** How many files the rows are, each once, and their size. */
@@ -730,6 +737,8 @@ export const openPathsWithExe = (paths: string[], exe: string) =>
 /** Windows' file picker for an app. `null` when the user backs out. */
 export const browseApp = () => invoke<string | null>("browse_app");
 export const pickFolder = () => invoke<string | null>("pick_folder");
+/** Windows' file picker for a cover of `folder`, opened there. `null` when the user backs out. */
+export const pickPicture = (folder: string) => invoke<string | null>("pick_picture", { folder });
 
 /** Saves `text` to a file the user picks. False when they back out. */
 export const exportSettings = (text: string, name?: string) => invoke<boolean>("export_settings", { text, name: name ?? null });

@@ -147,6 +147,10 @@ import type { BarItem } from "./features/reach/SelectionBar";
 import { Shelf } from "./features/reach/Shelf";
 import { DetailsPanel } from "./features/preview/DetailsPanel";
 import { PreviewDock, QuickPreview, type PreviewAt } from "./features/preview/QuickPreview";
+import { stepWidth } from "./features/preview/DockEdge";
+import { Compare, type CompareSide } from "./features/compare/Compare";
+import { compareKind } from "./features/compare/comparable";
+import { DOCK_STEP } from "./features/preview/dockWidth";
 import { MiniPlayer } from "./features/preview/MiniPlayer";
 import { CutChip } from "./features/fileops/CutChip";
 import { sweptText } from "./features/fileops/progress";
@@ -387,6 +391,7 @@ export function App() {
   const [pickingApp, setPickingApp] = createSignal<string[]>();
   const [drives, setDrives] = createSignal<"map" | "disconnect">();
   const [previewing, setPreviewing] = createSignal<{ view: FolderView; at: PreviewAt }>();
+  const [comparing, setComparing] = createSignal<{ view: FolderView; snapshot: number; kind: "picture" | "text"; sides: [CompareSide, CompareSide] }>();
   const [keysOpen, setKeysOpen] = createSignal(false);
   const [activityOpen, setActivityOpen] = createSignal(false);
   /** The folder the disk map starts in, while the map is open. */
@@ -403,6 +408,7 @@ export function App() {
     !!pickingApp() ||
     !!drives() ||
     !!previewing() ||
+    !!comparing() ||
     keysOpen() ||
     !!mapping() ||
     updateSheet() ||
@@ -559,6 +565,11 @@ export function App() {
   }
 
   const toggleDetails = () => setDetailsPanel(!detailsPanel());
+  /** Opens the preview pane if it is shut, then makes it wider or narrower. */
+  function resizePreview(step: number) {
+    if (!previewPane()) setPreviewPane(true);
+    stepWidth(step, document.querySelector(".panes:not([hidden]) .preview-dock"));
+  }
   /** Where files from the shelf can land: a real folder, not the Recycle Bin or a search. */
   const dropFolder = () => {
     const view = tabs.activeView();
@@ -861,6 +872,7 @@ export function App() {
       ...(kindOf(row.name, row.isDir) === "picture"
         ? [{ label: "Use as folder cover", action: () => setLook(row.location || view.folder()!.path, { cover: path }) }]
         : []),
+      ...(view.list()?.selection().rows.length === 2 && !row.isDir ? [{ label: "Compare", keys: keyText("compare"), action: () => quietly(compare(view)) }] : []),
       ...toolItems,
       shell.tagsItem(view, showTagChange, () => setNamingTag(view)),
       ...(inCloud(path)
@@ -1474,6 +1486,9 @@ export function App() {
     invertSelection: () => invertSelection(here()),
     details: toggleDetails,
     previewPane: () => setPreviewPane(!previewPane()),
+    compare: () => quietly(compare(here())),
+    widerPreview: () => resizePreview(DOCK_STEP),
+    narrowerPreview: () => resizePreview(-DOCK_STEP),
     sidebar: toggleSidebar,
     fullScreen: () => quietly(toggleFullScreen()),
     shelf: () => setShelfOpen(!shelfOpen()),
@@ -1523,7 +1538,18 @@ export function App() {
     ];
   }
 
-  function barItems(view: FolderView): BarItem[] {
+  /** Opens the two selected files side by side, the upper one on the left. */
+  async function compare(view: FolderView) {
+    const selection = view.list()?.selection();
+    if (selection?.rows.length !== 2) return jobs.notify("Select two files to compare", "Compare works on two at a time", true);
+    const indexes = [...selection.rows].sort((a, b) => a - b);
+    const rows = await Promise.all(indexes.map((index) => fetchRows(view.id, selection.request, index, 1).then((found) => found[0])));
+    if (rows.some((row) => !row || row.isDir)) return jobs.notify("Select two files to compare", "Folders can't be compared", true);
+    const kind = compareKind(rows.map((row) => row.name), rows.map((row) => kindOf(row.name, false))) === "picture" ? "picture" : "text";
+    setComparing({ view, snapshot: selection.request, kind, sides: [{ row: rows[0], index: indexes[0] }, { row: rows[1], index: indexes[1] }] });
+  }
+
+  function barItems(view: FolderView, two?: Row[]): BarItem[] {
     const item = (label: string, run: BarItem["run"], id?: string): BarItem => ({
       label,
       icon: iconFor(label) ?? "",
@@ -1572,6 +1598,7 @@ export function App() {
       item("Rename", () => actions.startRename(view), "rename"),
       item("Put on the shelf", () => quietly(putOnShelf(view)), "shelve"),
       ...(view.query() ? [] : [item("New folder with selection", () => gather(view), "newFolderWith")]),
+      ...(two && compareKind(two.map((row) => row.name), two.map((row) => kindOf(row.name, row.isDir))) ? [item("Compare", () => quietly(compare(view)), "compare")] : []),
     ];
   }
 
@@ -1932,7 +1959,7 @@ export function App() {
                 onPreview={(at) => preview(view, at)}
                 onCursor={view.setCursor}
                 onOpenBehind={(row) => openBehind(view, row)}
-                barItems={() => barItems(view)}
+                barItems={(two) => barItems(view, two)}
                 connect={view.connectList}
               />
             )}
@@ -2141,6 +2168,24 @@ export function App() {
           onWindows={() => disconnectDrive().then(refreshPlaces).catch(jobs.report)}
           onClose={() => setDrives(undefined)}
         />
+      </Show>
+      <Show when={comparing()} keyed>
+        {(ask) => (
+          <Compare
+            view={ask.view.id}
+            snapshot={ask.snapshot}
+            kind={ask.kind}
+            sides={ask.sides}
+            onRecycle={(side) => {
+              startJob({ kind: "recycle", selection: { view: ask.view.id, request: ask.snapshot, rows: [side.index] } }, ask.view.id).catch(jobs.report);
+              setComparing(undefined);
+            }}
+            onClose={() => {
+              setComparing(undefined);
+              ask.view.list()?.focus();
+            }}
+          />
+        )}
       </Show>
       <Show when={previewing()} keyed>
         {({ view, at }) => (

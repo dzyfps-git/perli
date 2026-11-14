@@ -39,6 +39,8 @@ import { join, parentOf, resolveRelative } from "../navigation/path";
 import { languageOf } from "./highlight";
 import { tableDelimiter } from "./table";
 import { neighbours, previewSize, setNeighbours, setPreviewSize } from "./viewerPrefs";
+import { previewWidth } from "../filelist/prefs";
+import { DockEdge } from "./DockEdge";
 import type { TextPiece, TextViewProps } from "./TextView";
 import type { BookViewProps } from "./DocView";
 import type { ComicViewProps } from "./ComicView";
@@ -725,7 +727,13 @@ export function PreviewDock(props: { view: FolderView; onOpen: (row: Row) => voi
   onCleanup(() => window.clearTimeout(timer));
 
   return (
-    <aside class="preview-dock" aria-label="Preview">
+    <aside
+      class="preview-dock"
+      classList={{ "preview-dock-sized": previewWidth() !== null }}
+      style={{ "--preview-share": previewWidth() ?? undefined }}
+      aria-label="Preview"
+    >
+      <DockEdge onFold={props.onClose} />
       <Show
         when={at()}
         keyed

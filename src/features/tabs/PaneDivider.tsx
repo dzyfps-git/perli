@@ -47,6 +47,7 @@ export function PaneDivider(props: { tab: Tab }) {
         role="separator"
         tabindex="0"
         aria-label="Pane size"
+        data-tip="Drag to resize · double-click for half and half"
         aria-orientation={props.tab.stacked() ? "horizontal" : "vertical"}
         aria-valuemin={SPLIT_MIN * 100}
         aria-valuemax={SPLIT_MAX * 100}

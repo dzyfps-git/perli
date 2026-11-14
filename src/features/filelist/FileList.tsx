@@ -21,6 +21,7 @@ import type { ListHandle, RowAt } from "../navigation/folderView";
 import { isBin, join, parentOf, relativeTo, samePath } from "../navigation/path";
 import { dayOf } from "../reach/lists";
 import { allLooks, lookOf } from "../sidebar/saved";
+import { coverPosition } from "../sidebar/placeLists";
 import { EmptyState, type Empty } from "./EmptyState";
 import { HoverCard, type CardAsk } from "./HoverCard";
 import {
@@ -365,7 +366,8 @@ export function FileList(props: {
   /** A middle click on a row. */
   onOpenBehind: (row: Row) => void;
   /** What the bar over a selection offers. */
-  barItems: () => BarItem[];
+  /** `two` holds both rows when exactly two are selected. */
+  barItems: (two?: Row[]) => BarItem[];
   connect: (list: ListHandle) => void;
   /** Where to start scrolled to, on coming back to a folder. */
   scrollTo?: number;
@@ -703,6 +705,7 @@ export function FileList(props: {
     pooled.element.toggleAttribute("data-stack", stacked);
     const path = row && join(row.location || props.folder, row.name);
     const key = look?.cover ? `cover|${look.cover}` : stacked ? `stack|${path}|${row!.modified}` : pictured ? thumbKey(row) : undefined;
+    if (pooled.thumb) pooled.thumb.style.objectPosition = look?.cover ? coverPosition(look.coverAt) : "";
     showThumb(pooled, key);
     // A book or comic part read shows how far, as a thin bar under its icon.
     const read = row && !row.isDir ? readProgress()[join(row.location || props.folder, row.name)] : undefined;
@@ -1679,7 +1682,7 @@ export function FileList(props: {
           count={picked().count}
           of={props.items}
           bytes={picked().bytes}
-          items={props.barItems()}
+          items={props.barItems(picked().count === 2 ? selection.rows().map(rowAt).filter((row) => row !== undefined) : undefined)}
           onClear={() => {
             selection.clear();
             selectionChanged();

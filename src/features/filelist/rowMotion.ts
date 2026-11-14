@@ -1,7 +1,7 @@
 /** Rows that stay glide to their new places, new ones spring in and gone ones leave in their own
  *  way, when a folder's rows change under the user's eyes. */
 
-import { BIN_PATH } from "../navigation/path";
+import { baseName, BIN_PATH, parentOf } from "../navigation/path";
 
 const MOVE_MS = 300;
 const ARRIVE_MS = 600;
@@ -41,6 +41,54 @@ export function markDeleted() {
 /** An undo has started, so the rows that come next glide back into place rather than spring in. */
 export function markBack() {
   backAt = performance.now();
+}
+
+/** Archives whose files are being taken out, by row key, with when their show ends. */
+const unpacking = new Map<string, number>();
+const FAN_MS = 620;
+const FAN_TURN_DEG = 4;
+/** After this many, the rest of the files fan out together. */
+const MOST_FANNED = 12;
+
+/**
+ * Files are being taken out of `archives`, so rows that come next fan out from the archive's row
+ * while the job runs. The answer ends the show a little after the job.
+ */
+export function markUnpacking(archives: string[]) {
+  // The key a row goes by: the folder it is listed in and its name. Case tells none apart on Windows.
+  const keys = archives.map((path) => `${parentOf(path) ?? ""}|${baseName(path)}`.toLowerCase());
+  for (const key of keys) unpacking.set(key, Infinity);
+  return () => {
+    for (const key of keys) unpacking.set(key, performance.now() + DELETE_WINDOW_MS);
+  };
+}
+
+/** The row on screen of an archive being taken apart, if any. */
+function unpackingRow(rows: [string, HTMLElement][]) {
+  const now = performance.now();
+  for (const [key, until] of unpacking) if (until < now) unpacking.delete(key);
+  if (unpacking.size === 0) return undefined;
+  return rows.find(([key]) => unpacking.has(key.toLowerCase()))?.[1];
+}
+
+/** A file just taken out flies from its archive's row to its own place, turning a little as it goes, like a dealt card. */
+function fanOut(element: HTMLElement, from: DOMRect, order: number, spring: string) {
+  const { top, left } = element.getBoundingClientRect();
+  const turn = `${order % 2 === 0 ? -FAN_TURN_DEG : FAN_TURN_DEG}deg`;
+  const delay = Math.min(order, MOST_FANNED) * 45;
+  element.animate(
+    [
+      { translate: `${from.left - left}px ${from.top - top}px`, scale: 0.7, rotate: turn, opacity: 0 },
+      { opacity: 1, offset: 0.2 },
+      { translate: "0 0", scale: 1, rotate: "0deg", opacity: 1 },
+    ],
+    { duration: FAN_MS, delay, easing: spring, fill: "backwards" },
+  );
+  // Landed, it glows softly for a moment, so the eye finds what came out.
+  element.animate(
+    { backgroundColor: ["color-mix(in srgb, var(--accent) 22%, transparent)", "transparent"] },
+    { duration: 900, delay: delay + FAN_MS * 0.6, easing: "ease-out" },
+  );
 }
 
 /** A row coming back from an undo slides in from the side it left by, fading up. */
@@ -138,10 +186,17 @@ export function playMoves(
   const { frames, duration } = LEAVES[deleted ? "fold" : back ? "drift" : leave];
   let arrived = 0;
   const here = new Set<string>();
+  const archive = unpackingRow(after);
+  const from = archive?.getBoundingClientRect();
+  let fanned = 0;
   for (const [key, element] of after) {
     here.add(key);
     const seenBefore = before.get(key);
     const was = seenBefore && { top: seenBefore.top - scrolled, left: seenBefore.left };
+    if (!was && from) {
+      fanOut(element, from, fanned++, spring);
+      continue;
+    }
     if (!was && edge !== undefined && !back) {
       // Closing ranks after rows went, so it was there all along, just out of sight below.
       const { top } = element.getBoundingClientRect();
@@ -172,6 +227,8 @@ export function playMoves(
       .catch(() => ghost.remove());
     if (deleted && wisps < MOST_WISPS) sendWisp(gone, wisps++);
   }
+  // The archive gives a small puff as its files leave it.
+  if (archive && fanned > 0) archive.animate({ scale: [1, 1.05, 0.98, 1] }, { duration: 420, easing: "ease-out" });
   // One delete, one show: a reload that follows for another reason shrinks as usual.
   if (deleted && wisps > 0) deletedAt = -Infinity;
   if (back && arrived > 0) backAt = -Infinity;

@@ -113,3 +113,29 @@ export function pieceColorer(language: string) {
     return { html: result.value, replaces };
   };
 }
+
+/** A whole text colored at once, cut into its lines. A span that runs over a line's end is shut
+ *  there and opened again on the next line, so each line stands on its own. */
+export async function coloredLines(language: string, text: string) {
+  const hljs = await withLanguage(language);
+  return htmlLines(hljs.highlight(text, { language, ignoreIllegals: true }).value);
+}
+
+/** highlight.js HTML cut at its line ends. It only ever writes span tags. */
+export function htmlLines(html: string) {
+  const lines: string[] = [];
+  const open: string[] = [];
+  let line = "";
+  for (const part of html.split(/(<span[^>]*>|<\/span>|\r\n|\n|\r)/)) {
+    if (part.startsWith("<span")) open.push(part);
+    else if (part === "</span>") open.pop();
+    else if (part === "\r\n" || part === "\n" || part === "\r") {
+      lines.push(line + "</span>".repeat(open.length));
+      line = open.join("");
+      continue;
+    }
+    line += part;
+  }
+  lines.push(line + "</span>".repeat(open.length));
+  return lines;
+}

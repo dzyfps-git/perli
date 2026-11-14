@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { pieceColorer } from "./highlight.ts";
+import { coloredLines, htmlLines, pieceColorer } from "./highlight.ts";
+
+test("colored text cuts into lines that each close what they open", async () => {
+  assert.deepEqual(htmlLines('a<span class="c">b\r\nc</span>d\ne'), ['a<span class="c">b</span>', '<span class="c">c</span>d', "e"]);
+  const lines = await coloredLines("rust", "/* one\ntwo */\nlet x = 1;");
+  assert.deepEqual(lines.slice(0, 2), ['<span class="hljs-comment">/* one</span>', '<span class="hljs-comment">two */</span>']);
+  assert.match(lines[2], /<span class="hljs-keyword">let<\/span>/);
+});
 
 test("a comment that crosses into the next piece is colored again with it", async () => {
   const color = pieceColorer("rust");
