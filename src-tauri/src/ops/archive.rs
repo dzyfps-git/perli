@@ -298,8 +298,9 @@ impl Run<'_> {
         }
 
         // One entry lands as if its own folder were the top of the archive.
-        let only = only.map(|name| name.trim_end_matches('/'));
-        let above = only.and_then(|name| name.rfind('/').map(|at| PathBuf::from(&name[..at])));
+        let only = only.map(|name| name.trim_end_matches(['/', '\\']));
+        // How many folders sit above the entry, whatever their case.
+        let above = only.map_or(0, |name| parts(name).count().saturating_sub(1));
         let wanted: Vec<usize> = (0..zip.len()).filter(|&index| only.is_none_or(|name| is_under(&zip, index, name))).collect();
         let sizes = wanted.iter().filter_map(|&index| zip.by_index_data(index).ok().map(|entry| entry.size()));
         let bytes = sizes.sum();
@@ -307,10 +308,7 @@ impl Run<'_> {
         for index in wanted {
             self.check()?;
             let facts = zip.by_index_data(index).map(|entry| {
-                let relative = entry.enclosed_name().and_then(safe).and_then(|path| match &above {
-                    Some(above) => path.strip_prefix(above).ok().map(Path::to_path_buf),
-                    None => Some(path),
-                });
+                let relative = entry.enclosed_name().and_then(safe).map(|path| path.components().skip(above).collect::<PathBuf>());
                 let time = entry.last_modified().map_or(0, ticks_of);
                 (relative, entry.is_dir(), entry.encrypted(), Stat::of_file(entry.size(), time))
             });
@@ -440,11 +438,18 @@ fn tops(zip: &ZipArchive<BufReader<File>>) -> usize {
     zip.file_names().flatten().filter_map(|name| first(&name)).collect::<HashSet<_>>().len()
 }
 
+/// Whether entry `index` is `name` or inside it. Names match in any case and with either
+/// separator, the way a ZIP opened as a folder shows them.
 fn is_under(zip: &ZipArchive<BufReader<File>>, index: usize, name: &str) -> bool {
     let Ok(entry) = zip.by_index_data(index) else { return false };
     let Ok(own) = entry.name() else { return false };
-    let own = own.trim_end_matches('/');
-    own == name || own.strip_prefix(name).is_some_and(|rest| rest.starts_with('/'))
+    let mut own = parts(&own);
+    parts(name).all(|wanted| own.next().is_some_and(|part| part.to_lowercase() == wanted.to_lowercase()))
+}
+
+/// The parts of a name in an archive, between either separator.
+fn parts(name: &str) -> impl Iterator<Item = &str> {
+    name.split(['/', '\\']).filter(|part| !part.is_empty())
 }
 
 fn entry_name(zip: &ZipArchive<BufReader<File>>, index: usize) -> String {

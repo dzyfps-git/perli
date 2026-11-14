@@ -173,7 +173,8 @@ pub fn real(path: &Path) -> Result<PathBuf, String> {
     let root = cache_root();
     let version = fs::metadata(&archive).ok().map(|metadata| (metadata.len(), metadata.modified().ok()));
     let mut hasher = DefaultHasher::new();
-    (key(&archive), version, inner.to_lowercase()).hash(&mut hasher);
+    // The mark of the web is part of the version, so a copy taken out unmarked is never reused.
+    (key(&archive), version, inner.to_lowercase(), ops::sys::read_zone(&archive)).hash(&mut hasher);
     let slot = root.join(format!("{:016x}", hasher.finish()));
     let target = slot.join(name);
     if target.exists() {
@@ -206,6 +207,7 @@ pub fn real_all(paths: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
 fn take_out(archive: &Path, inner: &str, target: &Path) -> Result<(), String> {
     let mut zip = inside::open(archive)?;
     let password = password(archive);
+    let zone = ops::sys::read_zone(archive);
     let wanted = parts_of(inner);
     let mut found = false;
     for index in 0..zip.len() {
@@ -241,6 +243,10 @@ fn take_out(archive: &Path, inner: &str, target: &Path) -> Result<(), String> {
         if let Some(time) = time_of(ticks) {
             let _ = file.set_modified(time);
         }
+        drop(file);
+        if let Some(zone) = &zone {
+            mark(&path, zone);
+        }
     }
     if !found {
         return Err(GONE.into());
@@ -250,6 +256,15 @@ fn take_out(archive: &Path, inner: &str, target: &Path) -> Result<(), String> {
     } else {
         Err("This name in the archive isn't safe to use".into())
     }
+}
+
+/// Gives `path` the archive's mark of where it came from, so Windows warns about a downloaded
+/// file taken out of a downloaded ZIP as it would about the ZIP. The cache sits outside any
+/// test's folder, so this writes the stream itself rather than through `ops::sys`.
+fn mark(path: &Path, zone: &[u8]) {
+    let mut stream = path.as_os_str().to_owned();
+    stream.push(":Zone.Identifier");
+    let _ = fs::write(PathBuf::from(stream), zone);
 }
 
 /// FILETIME ticks as a time. None before 1970, which no ZIP can hold.
@@ -397,6 +412,21 @@ mod tests {
         assert_eq!(real(&fixture.archive()).unwrap(), fixture.archive());
         assert_eq!(real(&fixture.0).unwrap(), fixture.0);
         assert_eq!(real(&fixture.archive().join("gone.txt")), Err(GONE.into()));
+        let _ = fs::remove_dir_all(file.parent().unwrap());
+        let _ = fs::remove_dir_all(folder.parent().unwrap());
+    }
+
+    #[test]
+    fn what_is_taken_out_keeps_the_mark_of_the_web() {
+        let fixture = Fixture::new("zone", &ENTRIES);
+        let zone = b"[ZoneTransfer]\r\nZoneId=3\r\n";
+        mark(&fixture.archive(), zone);
+
+        let file = real(&fixture.archive().join("top.txt")).unwrap();
+        let folder = real(&fixture.archive().join("docs")).unwrap();
+
+        assert_eq!(ops::sys::read_zone(&file).as_deref(), Some(zone.as_slice()));
+        assert_eq!(ops::sys::read_zone(&folder.join("deeper").join("b.txt")).as_deref(), Some(zone.as_slice()));
         let _ = fs::remove_dir_all(file.parent().unwrap());
         let _ = fs::remove_dir_all(folder.parent().unwrap());
     }

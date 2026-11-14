@@ -1186,6 +1186,23 @@ fn one_entry_extracts_beside_the_archive_on_its_own() {
 }
 
 #[test]
+fn one_entry_is_found_in_any_case_as_a_zip_opened_as_a_folder_shows_it() {
+    let sandbox = Sandbox::new();
+    let archive = sandbox.path(r"out\pack.zip");
+    fs::create_dir(sandbox.path("out")).unwrap();
+    // One folder spelled two ways, as some tools write it.
+    zip_of(&archive, &[("Docs/a.txt", b"a"), ("docs/Deep/b.txt", b"b"), ("docs/Deeper.txt", b"not inside Deep")]);
+    let only = |name: &str| Job::Unzip { archives: vec![archive.clone()], own_folder: false, smart: false, only: vec![name.into()], password: None, into: None };
+
+    go(only("docs/a.txt"));
+    assert_eq!(read(&sandbox.path(r"out\a.txt")), "a");
+
+    go(only("DOCS/deep"));
+    assert_eq!(read(&sandbox.path(r"out\Deep\b.txt")), "b");
+    assert_eq!(sandbox.names("out"), ["Deep", "a.txt", "pack.zip"], "a folder brings only what is inside it");
+}
+
+#[test]
 fn a_zip_can_store_or_squeeze_and_lock_its_files() {
     let sandbox = Sandbox::new();
     let text = "the same words again and again ".repeat(400);

@@ -1564,15 +1564,17 @@ fn save_frame(request: tauri::ipc::Request<'_>, views: State<'_, Views>) -> Resu
     let word = |at: usize| u32::from_le_bytes(body[at..at + 4].try_into().unwrap());
     let float = |at: usize| f64::from_le_bytes(body[at..at + 8].try_into().unwrap());
     let path = row_path(&views, word(0), float(8) as u64, word(4))?;
+    // Nothing lands beside a film in a ZIP.
+    refuse_zipped(std::slice::from_ref(&path))?;
     preview::save_frame(&path, float(16).max(0.0) as u64, &body[HEAD..])
 }
 
 /// The file a player asks for: a row of the list, or a path, for a song that plays on after its
-/// list has gone.
-fn media_path(views: &Views, view: u32, request: u64, row: u32, path: Option<PathBuf>) -> Result<PathBuf, String> {
+/// list has gone. One inside a ZIP is taken out first, as a player needs a real file.
+async fn media_path(views: &Views, view: u32, request: u64, row: u32, path: Option<PathBuf>) -> Result<PathBuf, String> {
     match path {
-        Some(path) => Ok(path),
-        None => row_path(views, view, request, row),
+        Some(path) => blocking(move || zipped::real(&path)).await,
+        None => row_file(views, view, request, row).await,
     }
 }
 
@@ -1620,7 +1622,7 @@ async fn song_audio(
     views: State<'_, Views>,
     streams: State<'_, midi::Streams>,
 ) -> Result<u64, String> {
-    let path = media_path(&views, view, request, row, path)?;
+    let path = media_path(&views, view, request, row, path).await?;
     let own = font.filter(|font| font.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("sf2")));
     let font = match own {
         Some(font) => font,
@@ -1667,7 +1669,7 @@ async fn open_audio(
     app: AppHandle,
     views: State<'_, Views>,
 ) -> Result<(String, preview::Tags), String> {
-    let path = media_path(&views, view, request, row, path)?;
+    let path = media_path(&views, view, request, row, path).await?;
     // ponytail: files stay open to the window for the session, as a scope can't take one back
     // and allow it again later. Fine while only the window's own code asks for them.
     app.asset_protocol_scope().allow_file(&path).map_err(|error| error.to_string())?;
@@ -1679,7 +1681,7 @@ async fn open_audio(
 /// An AIFF file as a WAV, which the window can play.
 #[tauri::command]
 async fn aiff_audio(view: u32, request: u64, row: u32, path: Option<PathBuf>, views: State<'_, Views>) -> Result<Response, String> {
-    let path = media_path(&views, view, request, row, path)?;
+    let path = media_path(&views, view, request, row, path).await?;
     let wav = blocking(move || sound::aiff_to_wav(&sound::read_aiff(&path)?)).await?;
     Ok(Response::new(wav))
 }
@@ -1725,9 +1727,7 @@ async fn checksum(
 /// The first lines of a text file, for its hover card.
 #[tauri::command]
 async fn peek_text(view: u32, request: u64, row: u32, views: State<'_, Views>) -> Result<Option<String>, String> {
-    let selection = Selection { view, request, rows: vec![row], ranges: Vec::new() };
-    let path = views.read(&selection, folder::Listing::paths)?.pop();
-    let path = path.ok_or("That row is gone")?;
+    let path = row_file(&views, view, request, row).await?;
     async_runtime::spawn_blocking(move || thumbs::text_start(&path))
         .await
         .map_err(|error| error.to_string())
@@ -1736,8 +1736,8 @@ async fn peek_text(view: u32, request: u64, row: u32, views: State<'_, Views>) -
 /// A whole text file, for a compare. Nothing when it is not text.
 #[tauri::command]
 async fn whole_text(view: u32, request: u64, row: u32, views: State<'_, Views>) -> Result<Option<String>, String> {
-    let selection = Selection { view, request, rows: vec![row], ranges: Vec::new() };
-    let path = views.read(&selection, folder::Listing::paths)?.pop().ok_or("That row is gone")?;
+    // One in a ZIP is read from what was taken out.
+    let path = row_file(&views, view, request, row).await?;
     blocking(move || preview::whole_text(&path)).await
 }
 
@@ -2423,6 +2423,29 @@ mod tests {
         assert!(matches!(copy_job(vec![archive.clone()], folder.clone()).unwrap(), Job::Copy { .. }));
         assert_eq!(refuse_zipped(&[row]), Err(zipped::READ_ONLY.to_string()));
         assert_eq!(refuse_zipped(&[archive]), Ok(()));
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    #[test]
+    fn a_player_gets_a_real_file_for_a_song_in_a_zip() {
+        use std::io::Write;
+        let folder = std::env::temp_dir().join(format!("perli-media-path-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let archive = folder.join("pack.zip");
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(&archive).unwrap());
+        zip.start_file("music/song.mp3", zip::write::SimpleFileOptions::default()).unwrap();
+        zip.write_all(b"not really a song").unwrap();
+        zip.finish().unwrap();
+
+        // A queued song comes as its path, with no row behind it.
+        let queued = archive.join("music").join("song.mp3");
+        let path = async_runtime::block_on(media_path(&Views::default(), 0, 0, 0, Some(queued.clone()))).unwrap();
+        assert_ne!(path, queued);
+        assert_eq!(std::fs::read(&path).unwrap(), b"not really a song");
+        // One outside a ZIP stays as it is.
+        let plain = folder.join("plain.mp3");
+        assert_eq!(async_runtime::block_on(media_path(&Views::default(), 0, 0, 0, Some(plain.clone()))).unwrap(), plain);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
         let _ = std::fs::remove_dir_all(&folder);
     }
 
