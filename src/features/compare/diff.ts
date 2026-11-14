@@ -36,14 +36,13 @@ function edits<T>(a: T[], b: T[], from: number, to: number, lines: Line[], offA:
     }
     trace.push(v.slice(zero - d, zero + d + 1));
   }
-  const out: Line[] = [];
   if (found < 0) {
     // ponytail: past MOST_EDITS changes the middle shows as one block; a linear-space Myers would split it finely.
-    for (let x = 0; x < n; x++) out.push({ kind: "gone", a: offA + x });
-    for (let y = 0; y < m; y++) out.push({ kind: "new", b: offB + y });
-    lines.push(...out);
+    for (let x = 0; x < n; x++) lines.push({ kind: "gone", a: offA + x });
+    for (let y = 0; y < m; y++) lines.push({ kind: "new", b: offB + y });
     return;
   }
+  const out: Line[] = [];
   let x = n;
   let y = m;
   for (let d = found; d > 0; d--) {
@@ -60,13 +59,23 @@ function edits<T>(a: T[], b: T[], from: number, to: number, lines: Line[], offA:
     else out.push({ kind: "gone", a: offA + --x });
   }
   while (x > 0) out.push({ kind: "same", a: offA + --x, b: offB + --y });
-  lines.push(...out.reverse());
+  // One by one: spreading a long run into push's arguments overflows the stack.
+  for (let at = out.length - 1; at >= 0; at--) lines.push(out[at]);
 }
 
-/** Lines of `a` and `b` in order, each marked same, gone or new. `key` says when two lines count as one. */
-export function diffLines(a: string[], b: string[], key: (line: string) => string = (line) => line) {
+/** Which of two texts end with no line ending after their last line. */
+export type Open = readonly [boolean, boolean];
+
+/**
+ * Lines of `a` and `b` in order, each marked same, gone or new. `key` says when two lines count as
+ * one. A last line with no ending (`open`) never counts as one with a last line that has one.
+ */
+export function diffLines(a: string[], b: string[], key: (line: string) => string = (line) => line, open: Open = [false, false]) {
   const keysA = a.map(key);
   const keysB = b.map(key);
+  // No line holds a line ending, so one on the key marks the open end and matches nothing else.
+  if (open[0] && keysA.length) keysA[keysA.length - 1] += "\n";
+  if (open[1] && keysB.length) keysB[keysB.length - 1] += "\n";
   let start = 0;
   while (start < a.length && start < b.length && keysA[start] === keysB[start]) start++;
   let end = 0;
@@ -88,6 +97,9 @@ export function linesOf(text: string) {
   if (lines.at(-1) === "") lines.pop();
   return lines;
 }
+
+/** True when a text's last line has no line ending after it. */
+export const endsOpen = (text: string) => text !== "" && !/[\r\n]$/.test(text);
 
 /** The parts of two changed lines that differ, as [start, end) character spans in each. */
 export function changedSpans(a: string, b: string) {
@@ -161,8 +173,9 @@ export function rowsOf(lines: Line[], context = CONTEXT) {
   return rows;
 }
 
-/** The changes as a unified patch, the way `diff -u` writes one. */
-export function patchOf(nameA: string, nameB: string, a: string[], b: string[], lines: Line[], context = CONTEXT) {
+/** The changes as a unified patch, the way `diff -u` writes one, open ends marked as it marks them. */
+export function patchOf(nameA: string, nameB: string, a: string[], b: string[], lines: Line[], context = CONTEXT, open: Open = [false, false]) {
+  const noEnd = (line: Line) => (line.kind === "new" ? open[1] && line.b === b.length - 1 : open[0] && line.a === a.length - 1);
   const out = [`--- ${nameA}`, `+++ ${nameB}`];
   let at = 0;
   while (at < lines.length) {
@@ -187,6 +200,7 @@ export function patchOf(nameA: string, nameB: string, a: string[], b: string[], 
     out.push(`@@ -${countA ? firstA + 1 : firstA},${countA} +${countB ? firstB + 1 : firstB},${countB} @@`);
     for (const line of hunk) {
       out.push(line.kind === "same" ? ` ${a[line.a!]}` : line.kind === "gone" ? `-${a[line.a!]}` : `+${b[line.b!]}`);
+      if (noEnd(line)) out.push("\\ No newline at end of file");
     }
     at = end;
   }

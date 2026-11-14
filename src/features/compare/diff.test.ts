@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { changedSpans, diffLines, linesOf, patchOf, rowsOf, spacesAside, type Line } from "./diff.ts";
+import { changedSpans, diffLines, endsOpen, linesOf, patchOf, rowsOf, spacesAside, type Line } from "./diff.ts";
 
 const marks = (lines: Line[], a: string[], b: string[]) =>
   lines.map((line) => (line.kind === "same" ? ` ${a[line.a!]}` : line.kind === "gone" ? `-${a[line.a!]}` : `+${b[line.b!]}`));
@@ -85,4 +85,42 @@ test("a patch reads like diff -u", () => {
   );
   // Nothing of the first text in the hunk: it sits after the line before.
   assert.equal(patchOf("a", "b", [], ["x"], diffLines([], ["x"]), 3), "--- a\n+++ b\n@@ -0,0 +1,1 @@\n+x\n");
+});
+
+test("a huge compare never spreads its lines into one call", () => {
+  // Too many changes: the middle comes as one block.
+  const many = Array.from({ length: 200_000 }, (_, at) => String(at));
+  assert.equal(diffLines([], many).length, 200_000);
+  // Few changes around a long same run.
+  const a = ["first", ...many, "last"];
+  const b = ["FIRST", ...many, "LAST"];
+  const lines = diffLines(a, b);
+  assert.equal(lines.length, 200_004);
+  assert.equal(lines.filter((line) => line.kind === "same").length, 200_000);
+});
+
+test("a last line with no ending is not the same line with one", () => {
+  assert.equal(endsOpen("a"), true);
+  assert.equal(endsOpen("a\n"), false);
+  assert.equal(endsOpen("a\r"), false);
+  assert.equal(endsOpen(""), false);
+  const a = linesOf("a");
+  const b = linesOf("a\n");
+  const lines = diffLines(a, b, undefined, [true, false]);
+  assert.deepEqual(marks(lines, a, b), ["-a", "+a"]);
+  assert.equal(patchOf("x", "y", a, b, lines, 3, [true, false]), "--- x\n+++ y\n@@ -1,1 +1,1 @@\n-a\n\\ No newline at end of file\n+a\n");
+  // Setting spaces aside still keeps them apart.
+  assert.equal(diffLines(a, b, spacesAside, [true, false]).filter((line) => line.kind === "same").length, 0);
+});
+
+test("both ends open still match, and the patch marks each", () => {
+  const a = ["one", "two"];
+  const b = ["ONE", "two"];
+  const lines = diffLines(a, b, undefined, [true, true]);
+  assert.deepEqual(marks(lines, a, b), ["-one", "+ONE", " two"]);
+  assert.equal(patchOf("x", "y", a, b, lines, 3, [true, true]), "--- x\n+++ y\n@@ -1,2 +1,2 @@\n-one\n+ONE\n two\n\\ No newline at end of file\n");
+  // Only the second open: its last line is new, the first's is gone.
+  const opened = diffLines(a, a, undefined, [false, true]);
+  assert.deepEqual(marks(opened, a, a), [" one", "-two", "+two"]);
+  assert.equal(patchOf("x", "y", a, a, opened, 3, [false, true]), "--- x\n+++ y\n@@ -1,2 +1,2 @@\n one\n-two\n+two\n\\ No newline at end of file\n");
 });
