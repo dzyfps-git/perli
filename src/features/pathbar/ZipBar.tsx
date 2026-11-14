@@ -1,7 +1,7 @@
-import { createSignal, Show } from "solid-js";
+import { createEffect, createSignal, on, Show } from "solid-js";
 import { unlockZip } from "../../api";
 import type { FolderView } from "../navigation/folderView";
-import { baseName } from "../navigation/path";
+import { archiveKind, baseName, partNumber } from "../navigation/path";
 import { PasswordCard, WRONG_PASSWORD } from "../preview/PasswordCard";
 
 const ICON_ZIP = "";
@@ -9,12 +9,22 @@ const ICON_LOCK = "";
 const ICON_EXTRACT = "";
 
 /**
- * Says a ZIP opened as a folder can only be read, and offers what works on all of it: taking it
- * all out, and the password its locked files need.
+ * Says an archive opened as a folder can only be read, and offers what works on all of it:
+ * taking it all out, and the password its locked files need.
  */
 export function ZipBar(props: { view: FolderView; onExtract: () => void }) {
   const [asking, setAsking] = createSignal<{ wrong?: string }>();
   const name = () => baseName(props.view.archive() ?? "");
+  const part = () => partNumber(name());
+  // An archive whose very names are locked shows nothing until its password is in, so it asks.
+  createEffect(
+    on(
+      () => props.view.folder(),
+      (shown) => {
+        if (props.view.locked() && shown?.count === 0 && shown.path === props.view.archive()) setAsking({});
+      },
+    ),
+  );
 
   async function unlock(password: string) {
     const archive = props.view.archive();
@@ -31,11 +41,18 @@ export function ZipBar(props: { view: FolderView; onExtract: () => void }) {
   }
 
   return (
-    <div class="zip-bar" role="toolbar" aria-label={`Inside ${name()}`}>
+    <div class="zip-bar" role="toolbar" aria-label={`Inside ${name()}, a ${archiveKind(name())} archive`}>
       <span class="zip-bar-icon" aria-hidden="true">
         {ICON_ZIP}
       </span>
       <span class="zip-bar-name">{name()}</span>
+      <Show when={part()}>
+        {(number) => (
+          <span class="zip-bar-pill zip-bar-part" aria-label="One part of a set. Everything in the set shows, read from its first part">
+            Part {number()}
+          </span>
+        )}
+      </Show>
       <span class="zip-bar-pill" aria-label="Files here can be opened and copied out, not changed">
         Read-only
       </span>
@@ -56,7 +73,7 @@ export function ZipBar(props: { view: FolderView; onExtract: () => void }) {
       </button>
       <Show when={asking()}>
         {(waiting) => (
-          <div class="zip-password">
+          <div class="zip-bar-password">
             <PasswordCard
               wrong={waiting().wrong}
               note="Perli keeps it until it closes."

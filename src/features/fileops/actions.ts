@@ -39,10 +39,10 @@ export function createFileActions(
   /** Items in the Recycle Bin can only be restored or deleted. */
   const movable = (view: FolderView) => (view.isBin() ? undefined : selected(view));
 
-  /** A ZIP opened as a folder only gives its files out. Says so rather than doing nothing. */
+  /** An archive opened as a folder only gives its files out. Says so rather than doing nothing. */
   function writable(view: FolderView) {
     if (!view.isZip()) return !view.isBin();
-    jobs.notify("This ZIP is read-only", "Copy files out of it, or extract it all, to change them", true);
+    jobs.notify("This archive is read-only", "Copy files out of it, or extract it all, to change them", true);
     return false;
   }
   const changeable = (view: FolderView) => (writable(view) ? selected(view) : undefined);
@@ -112,12 +112,12 @@ export function createFileActions(
       }
     },
 
-    /** With `at`, a small popover there asks for the level and a password first. */
+    /** With `at`, a small popover there asks for the kind, the level and a password first. */
     compress(view: FolderView, at?: { x: number; y: number }) {
       const selection = changeable(view);
       if (!selection) return;
       if (!at) return start(view, { kind: "zip", selection });
-      askZip({ selection, ...at, confirm: (level, password) => start(view, { kind: "zip", selection, level, password }) });
+      askZip({ selection, ...at, confirm: (choice) => void start(view, { kind: "zip", selection, ...choice }) });
     },
 
     extract(view: FolderView, ownFolder: boolean, smart = false) {

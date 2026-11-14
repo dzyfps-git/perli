@@ -38,6 +38,9 @@ pub struct Ask {
     /// Set by `--new-window`: this start gets a window of its own.
     #[serde(skip)]
     pub new_window: bool,
+    /// Set by `--tab`: the file a tab moved from another window waits in.
+    #[serde(skip)]
+    pub moved: Option<String>,
 }
 
 impl Ask {
@@ -51,6 +54,8 @@ impl Ask {
                 ask.new_window = true;
             } else if arg == "--select" {
                 args.next().into_iter().for_each(|path| ask.point_at(path));
+            } else if arg == "--tab" {
+                ask.moved = args.next().cloned();
             } else if arg == "--directory" {
                 ask.folder = args.next().cloned().map(crate::folder_argument);
             } else if let Some(path) = arg.strip_prefix("/select,") {
@@ -215,6 +220,9 @@ mod tests {
         assert_eq!(ask.folder.as_deref(), Some(r"D:\Work"));
         assert!(ask.new_window);
         assert!(parsed(&["--new-window", r"D:\Work"]).new_window);
+        let moved = parsed(&["--new-window", "--tab", r"C:\x\moved-1.json"]);
+        assert_eq!(moved.moved.as_deref(), Some(r"C:\x\moved-1.json"));
+        assert!(moved.folder.is_none() && moved.new_window);
     }
 
     #[test]
@@ -267,10 +275,10 @@ mod tests {
         door.listen(move |ask| sender.send(ask).unwrap());
 
         for name in ["one", "two"] {
-            let ask = Ask { folder: Some(r"C:\Users".into()), select: vec![name.into()], new_window: true };
+            let ask = Ask { folder: Some(r"C:\Users".into()), select: vec![name.into()], new_window: true, moved: Some("x".into()) };
             assert!(hand_off(&ask));
             let got = asked.recv_timeout(Duration::from_secs(5)).unwrap();
-            assert_eq!(got, Ask { new_window: false, ..ask });
+            assert_eq!(got, Ask { new_window: false, moved: None, ..ask });
         }
     }
 }

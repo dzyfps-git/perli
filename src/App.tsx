@@ -1,3 +1,4 @@
+import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { createEffect, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
 import {
@@ -18,7 +19,10 @@ import {
   onFolderChanged,
   onOpenAsked,
   asksWaiting,
+  askForTabs,
   comeForward,
+  otherWindows,
+  sendTab,
   ejectDrive,
   keepOnDevice,
   fetchRows,
@@ -118,7 +122,7 @@ import {
 } from "./features/filelist/prefs";
 import { SelectPattern } from "./features/filelist/SelectPattern";
 import { FLAT_QUERY, type FolderView, type RowAt } from "./features/navigation/folderView";
-import { BIN_PATH, isBin, isDriveRoot, isZipName, join, parentOf, baseName, relativeTo, samePath, type Crumb } from "./features/navigation/path";
+import { BIN_PATH, isBin, isDriveRoot, isArchiveName, join, parentOf, baseName, relativeTo, samePath, type Crumb } from "./features/navigation/path";
 import { Palette, type Command } from "./features/palette/Palette";
 import { wordsFor, type Verb } from "./features/palette/words";
 import { PaneDivider } from "./features/tabs/PaneDivider";
@@ -155,7 +159,9 @@ import { DOCK_STEP } from "./features/preview/dockWidth";
 import { MiniPlayer } from "./features/preview/MiniPlayer";
 import { CutChip } from "./features/fileops/CutChip";
 import { sweptText } from "./features/fileops/progress";
-import { now } from "./features/preview/nowPlaying";
+import { audio, now } from "./features/preview/nowPlaying";
+import { holdBack } from "./features/preview/popOut";
+import type { HandBack } from "./features/mini/handover";
 import { BACKDROPS, SCALES, setBackdrop, setUiScale } from "./features/settings/appearance";
 import { Settings } from "./features/settings/Settings";
 import { putOffUpdate, setUpdateSheet, startUpdates, updateSheet, updateState } from "./features/settings/updates";
@@ -187,7 +193,7 @@ import {
   toggleSection,
 } from "./features/sidebar/saved";
 import { folderGlyph, FOLDERS, Sidebar } from "./features/sidebar/Sidebar";
-import { parseSession } from "./features/tabs/session";
+import { parseMoved, parseSession } from "./features/tabs/session";
 import { createTabs, type Tab } from "./features/tabs/tabs";
 import { NewTag } from "./features/tags/NewTag";
 import { refreshTags, TAG_DROP, tagQuery, tags as allTags } from "./features/tags/tags";
@@ -564,7 +570,7 @@ export function App() {
   function openRow(view: FolderView, row: Row, toSide: boolean) {
     if (view.isBin()) return;
     const path = rowPath(view, row);
-    const asFolder = row.isDir || (isZipName(row.name) && !view.isZip());
+    const asFolder = row.isDir || (isArchiveName(row.name) && !view.isZip());
     if (!asFolder) openFile(path).catch(jobs.report);
     else if (toSide) tabs.openToSide(path);
     else view.open(path);
@@ -792,14 +798,52 @@ export function App() {
   }
 
   /** From the disc on the sidebar back to the song's full player, among its own folder. */
-  async function backToPlayer() {
-    const song = now();
-    if (!song) return;
+  /** A file's preview, over its folder in the tab on show: for a song or a film playing on. */
+  async function previewOf(path: string) {
     const view = tabs.activeView();
-    await showInFolder(view, song.path);
+    await showInFolder(view, path);
     const folder = view.folder();
     const index = folder?.selected?.[0];
     if (folder && index !== undefined) preview(view, { snapshot: folder.request, index });
+  }
+
+  async function backToPlayer() {
+    const song = now();
+    if (song) await previewOf(song.path);
+  }
+
+  // The film's small window hands its film back to the full player, at the same moment.
+  void listen<HandBack>("mini-back", ({ payload }) => {
+    holdBack(payload);
+    comeForward()
+      .then(() => previewOf(payload.path))
+      .catch(jobs.report);
+  });
+  // A song here would play under the film there.
+  void listen("mini-playing", () => audio.pause());
+
+  // A tab dragged here from another Perli window.
+  void listen<string>("tab-arrived", ({ payload }) => {
+    const moved = parseMoved(payload);
+    if (moved) tabs.adopt(moved.tab);
+  });
+  // Another window brings every window into one: this one's tabs go there, then it closes.
+  void listen<number>("tabs-asked", async ({ payload: asker }) => {
+    for (const tab of tabs.tabs()) {
+      if (!(await sendTab(asker, JSON.stringify({ tab: tabs.handover(tab) })))) return;
+    }
+    await getCurrentWindow().close();
+  });
+
+  async function gatherWindows() {
+    const others = await otherWindows();
+    if (others.length === 0) return jobs.notify("No other windows", "Every Perli tab is already in this window.", true);
+    let stayed = 0;
+    for (const other of others) if (!(await askForTabs(other))) stayed += 1;
+    if (stayed > 0) {
+      const title = stayed === 1 ? "A window stayed open" : `${stayed} windows stayed open`;
+      jobs.notify(title, "Its jobs are still running. Bring it in once they finish.", true);
+    }
   }
 
   function showRecentMenu(event: MouseEvent, view: FolderView, recent: Recent, forget: () => void) {
@@ -1247,7 +1291,11 @@ export function App() {
       };
     }
     if (view.isBin()) return { art: "bin", text: "The Recycle Bin is empty.", actions: [] };
-    if (view.isZip() && !view.query()) return { art: "folder", text: "This folder in the ZIP is empty.", actions: [] };
+    if (view.isZip() && !view.query()) {
+      // A 7z can lock its very names, so nothing shows until its password is in.
+      const hidden = view.locked() && samePath(view.folder()?.path, view.archive() ?? "");
+      return { art: "folder", text: hidden ? "Its names are under the password too. Enter it to see inside." : "This folder in the archive is empty.", actions: [] };
+    }
     if (view.query()) {
       const flat = view.query() === FLAT_QUERY;
       return {
@@ -1557,6 +1605,7 @@ export function App() {
     duplicateTab: () => tabs.duplicate(tabs.active()),
     pinTab: () => tabs.togglePinned(tabs.active()),
     tabToWindow: () => quietly(tabs.toWindow(tabs.active())),
+    gatherWindows: () => quietly(gatherWindows()),
     split: splitView,
     otherPane: () => tabs.active().activate(tabs.active().other() ?? here()),
     nextTab: () => tabs.cycle(1),
@@ -1886,7 +1935,8 @@ export function App() {
       .catch(console.error);
     const start = await startState();
     homePath = start.home ?? undefined;
-    const session = start.folder ? undefined : parseSession(start.session);
+    const moved = parseMoved(start.moved);
+    const session = start.folder ? undefined : moved ? { tabs: [moved.tab], active: 0 } : parseSession(start.session);
     if (session) {
       tabs.restore(session);
     } else {
@@ -1894,7 +1944,8 @@ export function App() {
       if (opened) performance.mark("perli-folder-open", { detail: opened });
       if (opened && start.select.length > 0) await tabs.activeView().reload(start.select);
     }
-    setKeepSession(!start.folder);
+    // Only the first window keeps its tabs for the next start.
+    setKeepSession(!start.folder && !start.moved);
     // Starts handed over while this window loaded wait in the back end until now.
     await openListener;
     for (const ask of await asksWaiting()) await openAsked(ask).catch(console.error);

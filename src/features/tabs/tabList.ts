@@ -46,3 +46,38 @@ export function snapped(share: number) {
   const kept = Math.min(SPLIT_MAX, Math.max(SPLIT_MIN, share));
   return SPLIT_SNAPS.find((snap) => Math.abs(snap - kept) < SNAP_REACH) ?? kept;
 }
+
+/** A point, a size and a box on the screens, in physical pixels. */
+export interface Point {
+  x: number;
+  y: number;
+}
+export interface Size {
+  width: number;
+  height: number;
+}
+export type Box = Point & Size;
+
+/** A tab let go this near a screen's side takes that half of it, and near its top, all of it. */
+const SNAP_EDGE = 8;
+/** How much of a new window stays on its screen, so its tabs can still be reached. */
+const KEEP_SEEN = 120;
+
+/**
+ * Where a window for a tab let go at `at` goes, on a screen whose work area is `work`, at
+ * `scale`. It keeps `size`, and puts the tab under the pointer where `grab` held it.
+ */
+export function placeFor(at: Point, work: Box, size: Size, grab: Point, scale: number): Box & { maximized?: boolean } {
+  const edge = SNAP_EDGE * scale;
+  const half = Math.round(work.width / 2);
+  if (at.x <= work.x + edge) return { x: work.x, y: work.y, width: half, height: work.height };
+  if (at.x >= work.x + work.width - edge) return { x: work.x + work.width - half, y: work.y, width: half, height: work.height };
+  const keep = KEEP_SEEN * scale;
+  const within = (value: number, low: number, high: number) => Math.round(Math.min(Math.max(value, low), high));
+  return {
+    x: within(at.x - grab.x, work.x + keep - size.width, work.x + work.width - keep),
+    y: within(at.y - grab.y, work.y, work.y + work.height - keep),
+    ...size,
+    ...(at.y <= work.y + edge ? { maximized: true } : {}),
+  };
+}

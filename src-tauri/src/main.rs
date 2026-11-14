@@ -11,10 +11,12 @@ mod launch;
 mod menus;
 mod network;
 mod ops;
+mod packs;
 mod parts;
 mod places;
 mod inside;
 mod midi;
+mod mini;
 mod preview;
 mod props;
 mod recent;
@@ -26,6 +28,7 @@ mod sizes;
 mod snap;
 mod sound;
 mod tags;
+mod tearoff;
 mod templates;
 mod thumbs;
 mod watch;
@@ -232,6 +235,10 @@ enum Task {
         level: ops::ZipLevel,
         #[serde(default)]
         password: Option<String>,
+        #[serde(default)]
+        format: ops::ArchiveFormat,
+        #[serde(default)]
+        aes: bool,
     },
     /// `only` names the entries to take out, rather than all of them.
     Unzip {
@@ -331,10 +338,12 @@ impl Task {
                 Job::Template { folder: target(folder)?, template }
             }
             Self::SaveTemplate { selection } => copy_job(sources(&selection)?, templates::own_folder()?)?,
-            Self::Zip { selection, level, password } => Job::Zip {
+            Self::Zip { selection, level, password, format, aes } => Job::Zip {
                 sources: paths(&selection)?,
                 level,
                 password,
+                format,
+                aes,
             },
             Self::Unzip { selection, own_folder, smart, only, password } => {
                 let archives = paths(&selection)?;
@@ -343,7 +352,7 @@ impl Task {
                 Job::Unzip { archives, own_folder, smart, only, password, into: None }
             }
             Self::ExtractZip { path } => {
-                let (archive, _) = zipped::split(Path::new(&path)).ok_or("This isn't a ZIP")?;
+                let (archive, _) = zipped::split(Path::new(&path)).ok_or("This isn't an archive")?;
                 let password = zipped::password(&archive);
                 Job::Unzip { archives: vec![archive], own_folder: false, smart: true, only: Vec::new(), password, into: None }
             }
@@ -502,6 +511,8 @@ struct Start {
     home: Option<String>,
     /// One more window, which opens where Windows puts it and doesn't keep its place.
     new_window: bool,
+    /// A tab moved here from another window, with where the window goes, as the UI wrote it.
+    moved: Option<String>,
 }
 
 /// Windows quotes a drive as `"C:\"`, and the backslash then escapes the closing quote.
@@ -516,7 +527,13 @@ fn folder_argument(text: String) -> String {
 
 impl Start {
     fn read(ask: launch::Ask) -> Self {
-        let session = ask.folder.is_none().then(session::read).flatten();
+        // The file is the old window's word to this one only, so it goes once read.
+        let moved = ask.moved.as_deref().and_then(|file| {
+            let text = std::fs::read_to_string(file).ok();
+            let _ = std::fs::remove_file(file);
+            text
+        });
+        let session = (ask.folder.is_none() && moved.is_none()).then(session::read).flatten();
         let home = std::env::var("USERPROFILE").ok();
         Self {
             folder: ask.folder,
@@ -524,6 +541,7 @@ impl Start {
             session,
             home,
             new_window: ask.new_window,
+            moved,
         }
     }
 
@@ -533,9 +551,18 @@ impl Start {
         self.folder
             .as_ref()
             .map(plain)
+            .or_else(|| self.moved.as_deref().and_then(moved_folder).map(|path| plain(&path)))
             .or_else(|| self.session.as_deref().and_then(session::start))
             .or_else(|| self.home.as_ref().map(plain))
     }
+}
+
+/// The folder on show in a moved tab: its pane in use.
+fn moved_folder(text: &str) -> Option<String> {
+    let moved: serde_json::Value = serde_json::from_str(text).ok()?;
+    let tab = &moved["tab"];
+    let active = tab["active"].as_u64().unwrap_or(0) as usize;
+    tab["panes"].get(active)?["path"].as_str().map(str::to_string)
 }
 
 #[tauri::command]
@@ -806,6 +833,12 @@ fn hold_close(request: u64, closing: State<'_, Closing>, jobs: State<'_, Jobs>) 
         closing.hold(request);
     }
     running
+}
+
+/// Whether a job still runs, so this window must stay.
+#[tauri::command]
+fn jobs_running(jobs: State<'_, Jobs>) -> bool {
+    jobs.running()
 }
 
 #[tauri::command]
@@ -1447,7 +1480,7 @@ async fn big_picture(view: u32, request: u64, row: u32, edge: u32, views: State<
 #[tauri::command]
 async fn unlock_zip(path: PathBuf, password: String) -> Result<(), String> {
     blocking(move || {
-        let (archive, _) = zipped::split(&path).ok_or("This isn't a ZIP")?;
+        let (archive, _) = zipped::split(&path).ok_or("This isn't an archive")?;
         zipped::unlock(&archive, &password)
     })
     .await
@@ -1544,9 +1577,17 @@ async fn audio_peaks(view: u32, request: u64, row: u32, bars: usize, views: Stat
 }
 
 /// The words beside a file under its own name: a song's lyrics (`lrc`) or a film's subtitles.
+/// With `path`, the file there rather than a row's, for the film's small window.
 #[tauri::command]
-async fn beside_text(view: u32, request: u64, row: u32, extension: String, views: State<'_, Views>) -> Result<Option<String>, String> {
-    let path = row_file(&views, view, request, row).await?;
+async fn beside_text(
+    view: u32,
+    request: u64,
+    row: u32,
+    extension: String,
+    path: Option<PathBuf>,
+    views: State<'_, Views>,
+) -> Result<Option<String>, String> {
+    let path = media_path(&views, view, request, row, path).await?;
     blocking(move || Ok(preview::beside_text(&path, &extension))).await
 }
 
@@ -2102,12 +2143,18 @@ fn come_forward(window: tauri::WebviewWindow) {
     let _ = window.set_focus();
 }
 
-/// Starts one more Perli with a window of its own, for those who want each folder in one.
+/// Starts one more Perli with a window of its own, for those who want each folder in one. With
+/// `moved`, the window takes a whole tab from this one instead, written to a file it reads once.
 #[tauri::command]
-fn open_window(folder: String, select: Vec<String>) -> Result<(), String> {
+fn open_window(folder: String, select: Vec<String>, moved: Option<String>) -> Result<(), String> {
     let mut start = Command::new(std::env::current_exe().map_err(|error| error.to_string())?);
     start.arg("--new-window");
-    if select.is_empty() {
+    if let Some(moved) = moved {
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|since| since.as_nanos()).unwrap_or_default();
+        let file = session::data_file(&format!("moved-{stamp}.json")).ok_or("No folder for app data")?;
+        session::write(&file, &moved).map_err(|error| error.to_string())?;
+        start.arg("--tab").arg(&file);
+    } else if select.is_empty() {
         start.arg("--directory").arg(&folder);
     }
     for name in &select {
@@ -2128,7 +2175,7 @@ fn pose_for(folder: String) {
     explorer::pose(&folder, POSING_TIME, |paths| {
         let names = paths.iter().filter_map(|path| Path::new(path).file_name());
         let select = names.map(|name| name.to_string_lossy().into_owned()).collect();
-        let ask = launch::Ask { folder: Some(folder.clone()), select, new_window: false };
+        let ask = launch::Ask { folder: Some(folder.clone()), select, ..Default::default() };
         for _ in 0..50 {
             if launch::hand_off(&ask) {
                 return;
@@ -2182,6 +2229,15 @@ fn main() {
         // The UI saves the session and then closes the window, unless it holds the close back
         // because jobs are running. A frozen UI does neither, so the window goes anyway.
         .on_window_event(|window, event| {
+            // The film's small window closes at once, and goes with the main one.
+            if window.label() != "main" {
+                return;
+            }
+            if let WindowEvent::Destroyed = event {
+                if let Some(mini) = window.app_handle().get_webview_window(mini::LABEL) {
+                    let _ = mini.destroy();
+                }
+            }
             if let WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
                 let request = window.state::<Closing>().ask();
@@ -2207,6 +2263,7 @@ fn main() {
         .manage(Searches::default())
         .manage(Scans::default())
         .manage(midi::Streams::default())
+        .manage(mini::Handed::default())
         // A MIDI song as it is made, which the window streams by number from `song://`.
         .register_asynchronous_uri_scheme_protocol("song", |context, request, responder| {
             let number = request.uri().path().trim_start_matches('/').parse().ok();
@@ -2239,6 +2296,11 @@ fn main() {
                 });
             }
             watch::start(app.handle().clone());
+            if let Some(main) = app.get_webview_window("main") {
+                if let Err(error) = tearoff::mark(&main) {
+                    eprintln!("Tabs can't come to this window from others: {error}");
+                }
+            }
             let (events, drags) = (app.handle().clone(), app.state::<Arc<Drags>>().inner().clone());
             drag::attach(jobs::owner(app.handle()), drags, move |event| {
                 let _ = events.emit("file-drag", event);
@@ -2331,6 +2393,17 @@ fn main() {
             drag_entry,
             audio_peaks,
             beside_text,
+            mini::mini_open,
+            tearoff::perli_window_at,
+            tearoff::send_tab,
+            tearoff::other_windows,
+            tearoff::ask_for_tabs,
+            tearoff::ghost_show,
+            tearoff::ghost_move,
+            tearoff::ghost_hide,
+            jobs_running,
+            mini::mini_take,
+            mini::mini_fit,
             save_frame,
             picture_file,
             preview_row,

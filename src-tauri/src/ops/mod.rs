@@ -45,8 +45,9 @@ pub enum Job {
     Gather { sources: Vec<PathBuf>, folder: PathBuf, name: Option<String> },
     Template { folder: PathBuf, template: Template },
     Shortcut { sources: Vec<PathBuf>, folder: PathBuf },
-    /// A new archive beside the first source, its files locked with `password` if there is one.
-    Zip { sources: Vec<PathBuf>, level: ZipLevel, password: Option<String> },
+    /// A new archive beside the first source, its files locked with `password` if there is one
+    /// and the format can lock. With `aes`, a ZIP's lock is AES-256 rather than ZipCrypto.
+    Zip { sources: Vec<PathBuf>, level: ZipLevel, password: Option<String>, format: ArchiveFormat, aes: bool },
     /// Each archive beside itself, loose or in a new folder of its own. `smart` gives an archive
     /// its own folder only when more than one item sits at its top. With `only`, just that entry
     /// of each, a file or a folder with all it holds, lands beside the archive. With `into`, they land
@@ -72,6 +73,20 @@ pub enum ZipLevel {
     #[default]
     Normal,
     Best,
+}
+
+/// What kind of archive a new one is.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq)]
+pub enum ArchiveFormat {
+    #[default]
+    #[serde(rename = "zip")]
+    Zip,
+    #[serde(rename = "7z")]
+    SevenZ,
+    #[serde(rename = "tar")]
+    Tar,
+    #[serde(rename = "tar.gz")]
+    TarGz,
 }
 
 /// A new file of a type Windows knows, such as a blank spreadsheet.
@@ -339,7 +354,7 @@ impl<'a> Run<'a> {
             Job::Gather { sources, folder, name } => self.gather(sources, &folder, name.as_deref()),
             Job::Template { folder, template } => self.new_from(&folder, &template),
             Job::Shortcut { sources, folder } => self.shortcuts(&sources, &folder),
-            Job::Zip { sources, level, password } => self.zip(sources, level, password.as_deref()),
+            Job::Zip { sources, level, password, format, aes } => self.zip(sources, level, password.as_deref(), format, aes),
             Job::Unzip { archives, own_folder, smart, only, password, into } => {
                 self.unzip(archives, own_folder, smart, &only, password.as_deref(), into.as_deref())
             }

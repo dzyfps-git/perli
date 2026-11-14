@@ -23,6 +23,7 @@ import {
 import type { MenuItem } from "../../ui/Menu";
 import { setTerminalChoice, terminalChoice, TERMINAL_NAMES } from "../filelist/prefs";
 import type { FolderView } from "../navigation/folderView";
+import { archiveStem, isArchiveName } from "../navigation/path";
 import { refreshTags, tags } from "../tags/tags";
 import type { FileActions } from "./actions";
 import type { Jobs } from "./jobs";
@@ -35,9 +36,7 @@ interface Point {
 
 /** Keys have no pointer, so what they open goes by the window instead. */
 const WINDOW_CORNER: Point = { x: 0, y: 0 };
-const ZIP = ".zip";
-
-const isZip = (name: string, isDir: boolean) => !isDir && name.toLowerCase().endsWith(ZIP);
+const isArchive = (name: string, isDir: boolean) => !isDir && isArchiveName(name);
 
 /**
  * The parts of a right click that come from Windows. Rows are read when an item runs, so a
@@ -178,12 +177,12 @@ export function createShellItems(
       },
     }),
 
-    /** `row` is the row the menu opened on. Extracting only fits when all the rows are ZIPs. */
+    /** `row` is the row the menu opened on. Extracting only fits when all the rows are archives. */
     async fileToolItems(view: FolderView, row: Row, at: Point): Promise<MenuItem[]> {
       const selection = actions.selected(view);
-      const facts = selection && isZip(row.name, row.isDir) ? await rowFacts(selection).catch(report) : undefined;
-      const zips = !!facts?.every(([name, isDir]) => isZip(name, isDir));
-      const stem = row.name.slice(0, -ZIP.length);
+      const facts = selection && isArchive(row.name, row.isDir) ? await rowFacts(selection).catch(report) : undefined;
+      const zips = !!facts?.every(([name, isDir]) => isArchive(name, isDir));
+      const stem = archiveStem(row.name);
       return [
         { label: "Compress to ZIP", divider: true, action: () => actions.compress(view) },
         { label: "Compress with options…", action: () => actions.compress(view, at) },

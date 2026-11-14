@@ -43,6 +43,25 @@
   color: var(--text);
 }
 
+/* A dragged tab rises over the others, which slide out of its way. */
+.tab[data-lifted] {
+  z-index: 2;
+  cursor: grabbing;
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow);
+  scale: 1.03;
+  transition:
+    scale var(--motion),
+    box-shadow var(--motion),
+    opacity var(--motion);
+}
+
+/* Out of the strip, the tab is the card that follows the pointer, and its place stays open. */
+.tab[data-torn] {
+  opacity: 0;
+}
+
 /* Registered as an angle, so the comet's place on the edge can be animated. */
 @property --spin {
   syntax: "<angle>";

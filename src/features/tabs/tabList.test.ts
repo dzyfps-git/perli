@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { cycled, EVEN_SPLIT, moved, nextActive, otherPane, pinnedFirst, snapped, SPLIT_MAX, SPLIT_MIN } from "./tabList.ts";
+import { cycled, EVEN_SPLIT, moved, nextActive, otherPane, pinnedFirst, placeFor, snapped, SPLIT_MAX, SPLIT_MIN } from "./tabList.ts";
 
 test("closing the active tab activates the next, then the previous", () => {
   assert.equal(nextActive(["a", "b", "c"], "b", "b"), "c");
@@ -42,4 +42,16 @@ test("a divider is drawn to a third, a half or two thirds, and stays in bounds",
   assert.equal(snapped(0.42), 0.42);
   assert.equal(snapped(0.05), SPLIT_MIN);
   assert.equal(snapped(1), SPLIT_MAX);
+});
+
+test("a torn-off tab's window opens under the pointer, snaps to a side's half, and maximizes at the top", () => {
+  const work = { x: -1920, y: 0, width: 1920, height: 1040 };
+  const size = { width: 1000, height: 700 };
+  const grab = { x: 60, y: 20 };
+  assert.deepEqual(placeFor({ x: -1000, y: 400 }, work, size, grab, 1), { x: -1060, y: 380, width: 1000, height: 700 });
+  assert.deepEqual(placeFor({ x: -1917, y: 400 }, work, size, grab, 1), { x: -1920, y: 0, width: 960, height: 1040 });
+  assert.deepEqual(placeFor({ x: -3, y: 400 }, work, size, grab, 1), { x: -960, y: 0, width: 960, height: 1040 });
+  assert.equal(placeFor({ x: -1000, y: 2 }, work, size, grab, 1).maximized, true);
+  // It never goes so far off its screen that its tabs are out of reach.
+  assert.deepEqual(placeFor({ x: -1000, y: 1035 }, work, size, grab, 2), { x: -1060, y: 800, width: 1000, height: 700 });
 });

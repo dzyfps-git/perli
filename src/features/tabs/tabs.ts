@@ -3,7 +3,7 @@ import { closeView, openWindow } from "../../api";
 import { morph } from "../../ui/morph";
 import { createFolderView, type FolderView } from "../navigation/folderView";
 import { followTarget } from "../navigation/path";
-import type { SavedPane, SavedTab, Session } from "./session";
+import type { Place, SavedPane, SavedTab, Session } from "./session";
 import { cycled, EVEN_SPLIT, moved, nextActive, otherPane, pinnedFirst, snapped } from "./tabList";
 
 export type Tabs = ReturnType<typeof createTabs>;
@@ -134,13 +134,13 @@ export function createTabs() {
 
   const inOrder = (list: Tab[]) => pinnedFirst(list, (tab) => tab.pinned());
 
-  /** A pinned tab stays, unless `evenPinned`. */
-  function close(tab: Tab, evenPinned = false) {
+  /** A pinned tab stays, unless `evenPinned`. A tab that `moved` to another window can't be reopened here. */
+  function close(tab: Tab, evenPinned = false, moved = false) {
     if (tabs().length === 1 || (tab.pinned() && !evenPinned)) return;
     morph(() => {
       const list = tabs();
       if (list.length === 1 || !list.includes(tab)) return;
-      remember(tab.paths());
+      if (!moved) remember(tab.paths());
       setActive(nextActive(list, tab, active()));
       setTabs(list.filter((other) => other !== tab));
       for (const view of tab.panes()) closeView(view.id).catch(console.error);
@@ -168,40 +168,50 @@ export function createTabs() {
     return tab.lead(view, path);
   }
 
+  const fromSaved = (saved: SavedTab) => {
+    const tab = createTab(
+      saved.panes.map((pane) => newView(pane)),
+      saved.swapped,
+      saved,
+    );
+    tab.activate(tab.panes()[saved.active]);
+    tab.setPinned(saved.pinned === true);
+    return tab;
+  };
+
   function restore(session: Omit<Session, "start">) {
-    const restored = session.tabs.map((saved) => {
-      const tab = createTab(
-        saved.panes.map((pane) => newView(pane)),
-        saved.swapped,
-        saved,
-      );
-      tab.activate(tab.panes()[saved.active]);
-      tab.setPinned(saved.pinned === true);
-      return tab;
-    });
+    const restored = session.tabs.map(fromSaved);
     for (const view of first.panes()) closeView(view.id).catch(console.error);
     setTabs(inOrder(restored));
     setActive(restored[session.active]);
   }
+
+  /** A tab as saved, its panes written by `pane`. */
+  const savedTab = (tab: Tab, pane: (view: FolderView) => SavedPane | undefined): SavedTab => ({
+    panes: tab.panes().flatMap((view) => pane(view) ?? []),
+    active: tab.panes().indexOf(tab.active()),
+    swapped: tab.swapped(),
+    ...(tab.pinned() ? { pinned: true } : {}),
+    ...tab.layout(),
+  });
 
   /** What to save, or undefined until a folder is open. Reading it tracks every part. */
   function session(): Session | undefined {
     const view = active().active();
     const path = view.path();
     if (!path) return undefined;
-    const saved = tabs().map((tab) => ({
-      panes: tab.panes().flatMap((pane) => {
+    const saved = tabs().map((tab) =>
+      savedTab(tab, (pane) => {
         const panePath = pane.path();
         const expanded = pane.expanded();
-        return panePath ? [{ path: panePath, sort: pane.folderSort(), layout: pane.layout(), ...(expanded.length > 0 ? { expanded } : {}) }] : [];
+        return panePath ? { path: panePath, sort: pane.folderSort(), layout: pane.layout(), ...(expanded.length > 0 ? { expanded } : {}) } : undefined;
       }),
-      active: tab.panes().indexOf(tab.active()),
-      swapped: tab.swapped(),
-      ...(tab.pinned() ? { pinned: true } : {}),
-      ...tab.layout(),
-    }));
+    );
     return { start: { path, order: view.order() }, tabs: saved, active: tabs().indexOf(active()) };
   }
+
+  /** All of a tab, for another window to take: its panes' history, selection and scroll too. */
+  const handover = (tab: Tab) => savedTab(tab, (view) => view.handover());
 
   return {
     tabs,
@@ -227,12 +237,23 @@ export function createTabs() {
         setTabs(inOrder(tabs()));
       }, "tabs");
     },
-    /** The tab's folder opens in a window of its own, and the tab closes here. */
-    async toWindow(tab: Tab) {
+    handover,
+    /** A tab from another window comes in after the one on show, and is shown. */
+    adopt(saved: SavedTab) {
+      const tab = fromSaved(saved);
+      morph(() => {
+        const result = [...tabs()];
+        result.splice(result.indexOf(active()) + 1, 0, tab);
+        setTabs(inOrder(result));
+        setActive(tab);
+      }, "tabs");
+    },
+    /** The whole tab goes to a window of its own, at `place` if given, and closes here. */
+    async toWindow(tab: Tab, place?: Place) {
       const path = tab.active().path();
       if (!path) return;
-      await openWindow(path, []);
-      close(tab, true);
+      await openWindow(path, [], JSON.stringify({ tab: handover(tab), ...(place ? { place } : {}) }));
+      close(tab, true, true);
     },
     duplicate: (tab: Tab) => add(tab.paths(), tab),
     /** The other pane shows the folder of the one in use, which a tab of one pane gets. */

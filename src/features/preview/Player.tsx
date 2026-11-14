@@ -1,6 +1,7 @@
 import { createEffect, createMemo, createSignal, For, onCleanup, Show } from "solid-js";
 import type { Playing, SongInfo, Thumb } from "../../api";
 import { saved, stored } from "../filelist/prefs";
+import { clock, remember, RESUME_FROM_SECONDS, RESUME_MARGIN_SECONDS, resumePlace, resumes } from "./playback";
 import { ToolCog } from "../../ui/Controls";
 import { instrumentName } from "./instruments";
 import { channelColor, MidiStage } from "./MidiStage";
@@ -56,9 +57,6 @@ const SPEEDS = [1, 1.25, 1.5, 2, 0.5, 0.75];
 const STEP_SECONDS = 5;
 const BIG_STEP_SECONDS = 30;
 /** Longer files remember where they were left, like podcasts and audiobooks. */
-const RESUME_FROM_SECONDS = 10 * 60;
-const RESUME_MARGIN_SECONDS = 30;
-const MOST_RESUMES = 100;
 const RESUME_SAVE_MS = 5000;
 const RESUME_SHOWN_MS = 15000;
 /** Bigger files have their waveform read by the app, as decoding here needs the whole file at once. */
@@ -109,24 +107,7 @@ export interface PlayerProps {
   onNext: () => void;
 }
 
-export const clock = (seconds: number) => {
-  const whole = Math.max(0, Math.floor(seconds));
-  const hours = Math.floor(whole / 3600);
-  const rest = `${Math.floor((whole % 3600) / 60)}:${String(whole % 60).padStart(2, "0")}`;
-  return hours ? `${hours}:${rest.padStart(5, "0")}` : rest;
-};
-
-export function resumes(): Record<string, number> {
-  return (saved("song-resume") as Record<string, number> | null) ?? {};
-}
-
-export function remember(path: string, seconds: number | undefined) {
-  const all = resumes();
-  delete all[path];
-  if (seconds !== undefined) all[path] = seconds;
-  const kept = Object.entries(all).slice(-MOST_RESUMES);
-  localStorage.setItem("perli-song-resume", JSON.stringify(Object.fromEntries(kept)));
-}
+export { clock, remember, resumes };
 
 /** The loudest point of each slice of the sound, from 0 to 1. */
 async function waveform(url: string): Promise<Float32Array> {
@@ -388,8 +369,8 @@ export function Player(live: PlayerProps) {
       audio.currentTime = Math.min(pendingSeek, audio.duration);
       pendingSeek = undefined;
     } else if (!kept) {
-      const at = resumes()[props.path];
-      if (audio.duration > RESUME_FROM_SECONDS && at > RESUME_MARGIN_SECONDS && at < audio.duration - RESUME_MARGIN_SECONDS) {
+      const at = resumePlace(resumes()[props.path], audio.duration);
+      if (at) {
         setResumeAt(at);
         resumeTimer = setTimeout(() => setResumeAt(undefined), RESUME_SHOWN_MS);
       }

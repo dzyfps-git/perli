@@ -6,5 +6,10 @@ export default defineConfig({
   clearScreen: false,
   server: { port: 1420, strictPort: true },
   // three.js comes alone, with the first 3D model shown.
-  build: { target: "chrome120", chunkSizeWarningLimit: 700 },
+  // The film's small window is a page of its own, so it loads none of the file list.
+  build: {
+    target: "chrome120",
+    chunkSizeWarningLimit: 700,
+    rollupOptions: { input: { main: "index.html", mini: "mini.html" } },
+  },
 });

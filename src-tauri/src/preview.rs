@@ -48,8 +48,8 @@ pub enum Preview {
     #[serde(rename_all = "camelCase")]
     Text { text: String, next: Option<u64>, end: u64, encoding: String },
     Markdown { html: String, source: String },
-    /// What a ZIP holds, and whether there was more than the list.
-    Archive { entries: Vec<inside::Entry>, more: bool },
+    /// What an archive holds.
+    Archive(inside::Contents),
     /// A comic's pages, by their names inside it.
     Comic { pages: Vec<String> },
     /// A book's title, its chapters by their names inside it, and its table of contents.
@@ -243,10 +243,10 @@ pub fn read(path: &Path, offset: u64) -> Preview {
 /// A comic or a book that can't be read still shows what it holds, as any ZIP does.
 fn inside_of(path: &Path) -> Option<Preview> {
     let extension = path.extension()?.to_string_lossy().to_lowercase();
-    let listed = || inside::entries(path).ok().map(|(entries, more)| Preview::Archive { entries, more });
+    let listed = || inside::entries(path).ok().map(Preview::Archive);
     match extension.as_str() {
         "zip" => listed(),
-        "cbz" => match inside::pages(path) {
+        "cbz" | "cbr" | "cb7" => match inside::pages(path) {
             Ok(pages) if !pages.is_empty() => Some(Preview::Comic { pages }),
             _ => listed(),
         },
@@ -258,6 +258,7 @@ fn inside_of(path: &Path) -> Option<Preview> {
         "mid" | "midi" => Some(Preview::Song),
         "mp3" | "m4a" | "aac" | "wav" | "flac" | "ogg" | "oga" | "opus" | "weba" | "aif" | "aiff" | "aifc" => Some(Preview::Audio),
         "mp4" | "m4v" | "webm" | "mov" | "mkv" | "ogv" => Some(Preview::Video),
+        _ if crate::packs::kind_of(path.file_name()?).is_some() => listed(),
         _ => None,
     }
 }

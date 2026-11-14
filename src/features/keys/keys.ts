@@ -82,6 +82,7 @@ export const KEYS: KeyCommand[] = [
   { id: "duplicateTab", label: "Duplicate tab", group: "Tabs and panes", keys: ["Ctrl+Shift+K"] },
   { id: "pinTab", label: "Pin tab", group: "Tabs and panes", keys: [] },
   { id: "tabToWindow", label: "Move to new window", group: "Tabs and panes", keys: [] },
+  { id: "gatherWindows", label: "Bring all windows into one", group: "Tabs and panes", keys: [] },
   { id: "split", label: "Split view", group: "Tabs and panes", keys: ["Ctrl+\\"] },
   { id: "otherPane", label: "Go to the other pane", group: "Tabs and panes", keys: ["F6"] },
   { id: "stackPanes", label: "Stack or unstack panes", group: "Tabs and panes", keys: [] },

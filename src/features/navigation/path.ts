@@ -8,8 +8,31 @@ export const BIN_PATH = "shell:RecycleBinFolder";
 
 export const isBin = (path: string | undefined) => path === BIN_PATH;
 
-/** A name Perli opens as a folder of its own, the way Explorer does. */
-export const isZipName = (name: string) => /\.zip$/i.test(name);
+/** The names Perli opens as a folder of their own, the way Explorer does: a ZIP, a 7z (or a part
+ *  of a split one), a RAR, a TAR however squeezed, and a CAB. A comic opens to be read instead. */
+const ARCHIVE = /\.(zip|7z|7z\.\d{3}|rar|tar|tgz|tar\.(gz|bz2|xz|zst)|tbz2?|txz|tzst|cab)$/i;
+export const isArchiveName = (name: string) => ARCHIVE.test(name);
+
+/** What an archive is called by its kind, for the bar of one opened as a folder. */
+export function archiveKind(name: string) {
+  const lower = name.toLowerCase();
+  if (/\.(zip|cbz|epub)$/.test(lower)) return "ZIP";
+  if (/\.(7z(\.\d{3})?|cb7)$/.test(lower)) return "7z";
+  if (/\.(rar|cbr)$/.test(lower)) return "RAR";
+  if (lower.endsWith(".cab")) return "CAB";
+  return "TAR";
+}
+
+/** Which part of a set this one is, from `x.part3.rar` or `x.7z.003`, or undefined for one alone. */
+export function partNumber(name: string) {
+  const part = /\.part(\d+)\.rar$/i.exec(name) ?? /\.7z\.(\d{3})$/i.exec(name);
+  return part ? Number(part[1]) : undefined;
+}
+
+/** A name without what marks it as an archive or a part of one: `x` for `x.tar.gz`, `x.part2.rar`
+ *  and `x.7z.001`, as Extract names a folder for it. */
+export const archiveStem = (name: string) =>
+  name.replace(/(\.part\d+\.rar|\.7z\.\d{3}|\.tar\.(gz|bz2|xz|zst)|\.(zip|7z|rar|tar|tgz|tbz2?|txz|tzst|cab))$/i, "");
 
 export const isDriveRoot = (path: string) => /^[a-z]:\\$/i.test(path);
 

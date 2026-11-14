@@ -18,7 +18,7 @@ import { ColumnHeader, SortStrip } from "./ColumnHeader";
 import { formatSize } from "../../ui/format";
 import { tagColor, tagNames, tags } from "../tags/tags";
 import type { ListHandle, RowAt } from "../navigation/folderView";
-import { isBin, isZipName, join, parentOf, relativeTo, samePath } from "../navigation/path";
+import { isBin, isArchiveName, join, parentOf, relativeTo, samePath } from "../navigation/path";
 import { dayOf } from "../reach/lists";
 import { allLooks, lookOf } from "../sidebar/saved";
 import { coverPosition } from "../sidebar/placeLists";
@@ -459,7 +459,7 @@ export function FileList(props: {
   );
 
   /** Books and comics whose cover Perli reads itself. */
-  const COVERED = /\.(epub|cbz)$/i;
+  const COVERED = /\.(epub|cbz|cbr|cb7)$/i;
 
   const thumbKey = (row: Row) => `${row.location || props.folder}\\${row.name}|${row.modified}|${row.size}`;
 
@@ -1072,7 +1072,7 @@ export function FileList(props: {
     if (!row) return;
     // Where the folder zooms out from, if this opens one here.
     const element = pool[index % pool.length]?.element.getBoundingClientRect();
-    const zip = !row.isDir && isZipName(row.name);
+    const zip = !row.isDir && isArchiveName(row.name);
     if ((row.isDir || zip) && !toSide && element) openedAt.set(props.view, element.top + element.height / 2);
     if (zip && !toSide && element) grewFrom.set(props.view, { folder: join(row.location || props.folder, row.name), top: element.top, bottom: element.bottom });
     else grewFrom.delete(props.view);
@@ -1428,6 +1428,10 @@ export function FileList(props: {
     pinch = 0;
   }
 
+  /** Only rows already read have names to keep, at most the pages kept. */
+  const selectedNames = () =>
+    selection.rows().flatMap((index) => pages.get(Math.floor(index / PAGE_SIZE))?.[index % PAGE_SIZE]?.name ?? []);
+
   onMount(() => {
     itemHeight = rowHeight();
     resize();
@@ -1440,6 +1444,7 @@ export function FileList(props: {
         selection.restore(rows);
         selectionChanged(true);
       },
+      left: () => (grid.isConnected ? { names: selectedNames(), scrollTop: grid.scrollTop } : undefined),
     });
     if (props.selected?.length) {
       selection.restore(props.selected);
@@ -1470,11 +1475,7 @@ export function FileList(props: {
       window.clearTimeout(jumpTimer);
       leftFrom.set(props.view, { folder, y: openedAt.get(props.view) });
       openedAt.delete(props.view);
-      // Only rows already read have names to keep, at most the pages kept.
-      const names = selection
-        .rows()
-        .flatMap((index) => pages.get(Math.floor(index / PAGE_SIZE))?.[index % PAGE_SIZE]?.name ?? []);
-      props.onLeave?.(folder, names, grid.scrollTop);
+      props.onLeave?.(folder, selectedNames(), grid.scrollTop);
     });
   });
 

@@ -2,6 +2,7 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import { createSignal } from "solid-js";
 import { aiffAudio, forgetSong, openAudio, songAudio, type Playing, type Tags } from "../../api";
 import { saved, stored } from "../filelist/prefs";
+import { hushMini } from "./popOut";
 import { playNext } from "./viewerPrefs";
 
 /**
@@ -54,7 +55,10 @@ export const [playing, setPlaying] = createSignal(false);
 export const [queue, setQueue] = createSignal<Track[]>([]);
 
 audio.volume = volume();
-audio.addEventListener("play", () => setPlaying(true));
+audio.addEventListener("play", () => {
+  setPlaying(true);
+  hushMini();
+});
 audio.addEventListener("pause", () => setPlaying(false));
 
 export const wav = (bytes: ArrayBuffer): Source => ({

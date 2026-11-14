@@ -1,4 +1,4 @@
-import { createSignal } from "solid-js";
+import { createSignal, untrack } from "solid-js";
 import { pathsExist } from "../../api";
 import { saved, stored } from "../filelist/prefs";
 import { isBin } from "../navigation/path";
@@ -49,11 +49,14 @@ export const [servers, setServers] = stored<string[]>("servers", strings(saved("
 export const forgetServer = (server: string) =>
   setServers(servers().filter((kept) => kept.toLowerCase() !== server.toLowerCase()));
 
+/** Called as the folder on show changes. It follows only `path`: the lists are another window's too. */
 export function noteFolder(path: string | undefined) {
-  if (!path || isBin(path) || !rememberRecent()) return;
-  if (recentFolders()[0] !== path) setRecentFolders(visited(recentFolders(), path, RECENT_FOLDERS));
-  const server = serverOf(path);
-  if (server && servers()[0]?.toLowerCase() !== server.toLowerCase()) setServers(visited(servers(), server, SERVERS));
+  untrack(() => {
+    if (!path || isBin(path) || !rememberRecent()) return;
+    if (recentFolders()[0] !== path) setRecentFolders(visited(recentFolders(), path, RECENT_FOLDERS));
+    const server = serverOf(path);
+    if (server && servers()[0]?.toLowerCase() !== server.toLowerCase()) setServers(visited(servers(), server, SERVERS));
+  });
 }
 
 function savedNicknames(): Record<string, string> {

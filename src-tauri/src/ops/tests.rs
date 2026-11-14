@@ -1146,7 +1146,7 @@ fn a_zip_holds_a_tree_and_extracts_to_the_same_tree() {
     fs::create_dir_all(folder.join("empty")).unwrap();
     let long_ago = sys::stat(&sandbox.path(r"here\tree\top.txt")).unwrap().unwrap().modified;
 
-    let outcome = go(Job::Zip { sources: vec![folder], level: ZipLevel::Normal, password: None });
+    let outcome = go(Job::Zip { sources: vec![folder], level: ZipLevel::Normal, password: None, format: ArchiveFormat::Zip, aes: false });
 
     let archive = sandbox.path(r"here\tree.zip");
     assert_eq!(outcome.done, [Done::Created { path: archive.clone() }]);
@@ -1203,12 +1203,41 @@ fn one_entry_is_found_in_any_case_as_a_zip_opened_as_a_folder_shows_it() {
 }
 
 #[test]
+fn a_tar_and_a_locked_7z_extract_like_a_zip() {
+    let sandbox = Sandbox::new();
+    fs::create_dir(sandbox.path("out")).unwrap();
+    let tar = sandbox.path(r"out\pics.tar.gz");
+    let mut squeezed = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    std::io::Write::write_all(&mut squeezed, &crate::packs::tests::tar_bytes()).unwrap();
+    fs::write(&tar, squeezed.finish().unwrap()).unwrap();
+    let zone = b"[ZoneTransfer]\r\nZoneId=3\r\n";
+    sys::write_zone(&tar, zone).unwrap();
+
+    let extracted = go(Job::Unzip { archives: vec![tar.clone()], own_folder: false, smart: true, only: Vec::new(), password: None, into: None });
+
+    // Two items on top, so they get a folder named for the archive, without `.tar.gz`.
+    assert_eq!(extracted.done, [Done::Created { path: sandbox.path(r"out\pics") }]);
+    assert_eq!(read(&sandbox.path(r"out\pics\docs\deeper\b.txt")), "beta!");
+    let top = sandbox.path(r"out\pics\top.txt");
+    assert_eq!(sys::read_zone(&top).as_deref(), Some(zone.as_slice()));
+    assert_eq!(sys::stat(&top).unwrap().unwrap().modified, 1_700_000_000 * 10_000_000 + 116_444_736_000_000_000, "the mark keeps the file's time");
+
+    let seven = sandbox.path(r"out\locked.7z");
+    crate::packs::tests::seven(&seven, Some("open sesame"), true, false);
+    let only = Job::Unzip { archives: vec![seven], own_folder: false, smart: false, only: vec!["DOCS/".into()], password: Some("open sesame".into()), into: None };
+    go(only);
+    assert_eq!(read(&sandbox.path(r"out\docs\a.txt")), "alpha");
+    assert_eq!(read(&sandbox.path(r"out\docs\deeper\b.txt")), "beta!");
+    assert!(!exists(&sandbox.path(r"out\top.txt")), "only what was picked comes out");
+}
+
+#[test]
 fn a_zip_can_store_or_squeeze_and_lock_its_files() {
     let sandbox = Sandbox::new();
     let text = "the same words again and again ".repeat(400);
     let source = sandbox.file(r"here\words.txt", &text);
     let zip = |level, password: Option<&str>| {
-        go(Job::Zip { sources: vec![source.clone()], level, password: password.map(String::from) });
+        go(Job::Zip { sources: vec![source.clone()], level, password: password.map(String::from), format: ArchiveFormat::Zip, aes: false });
         let archive = sandbox.path(r"here\words.zip");
         let bytes = fs::read(&archive).unwrap();
         fs::remove_file(&archive).unwrap();
@@ -1248,13 +1277,55 @@ fn smart_extract_makes_a_folder_only_for_many_items_on_top() {
 }
 
 #[test]
+fn a_new_7z_tar_or_aes_zip_reads_back_as_it_went_in() {
+    let sandbox = Sandbox::new();
+    let folder = sandbox.path(r"here\tree");
+    sandbox.file(r"here\tree\top.txt", "top");
+    sandbox.file(r"here\tree\deep\ünï.txt", "deep");
+    fs::create_dir_all(folder.join("empty")).unwrap();
+    let make = |format, password: Option<&str>, aes| {
+        go(Job::Zip { sources: vec![folder.clone()], level: ZipLevel::Fast, password: password.map(String::from), format, aes });
+    };
+    let names = |listed: &crate::packs::Listed| {
+        let mut names: Vec<_> = listed.items.iter().map(|item| (item.name.clone(), item.folder)).collect();
+        names.sort();
+        names
+    };
+    let tree = [("tree", true), ("tree/deep", true), ("tree/deep/ünï.txt", false), ("tree/empty", true), ("tree/top.txt", false)]
+        .map(|(name, folder)| (name.to_string(), folder));
+
+    make(ArchiveFormat::SevenZ, Some("open sesame"), false);
+    let seven = sandbox.path(r"here\tree.7z");
+    assert!(crate::packs::list(&seven, None).unwrap().hidden, "a locked 7z locks its names too");
+    assert_eq!(names(&crate::packs::list(&seven, Some("open sesame")).unwrap()), tree);
+    assert_eq!(crate::packs::read(&seven, "tree/deep/ünï.txt", 100, true, Some("open sesame")).unwrap(), b"deep");
+
+    make(ArchiveFormat::Tar, Some("ignored"), false);
+    make(ArchiveFormat::TarGz, None, false);
+    for tar in [sandbox.path(r"here\tree.tar"), sandbox.path(r"here\tree.tar.gz")] {
+        let listed = crate::packs::list(&tar, None).unwrap();
+        assert_eq!(names(&listed), tree);
+        assert!(!listed.locked());
+        assert_eq!(crate::packs::read(&tar, "tree/top.txt", 100, true, None).unwrap(), b"top");
+    }
+
+    make(ArchiveFormat::Zip, Some("open sesame"), true);
+    let mut zip = zip::ZipArchive::new(fs::File::open(sandbox.path(r"here\tree.zip")).unwrap()).unwrap();
+    let index = zip.index_for_name("tree/top.txt").unwrap();
+    assert!(zip.get_aes_verification_key_and_salt(index).unwrap().is_some(), "locked with AES");
+    let mut top = String::new();
+    std::io::Read::read_to_string(&mut zip.by_index_decrypt(index, b"open sesame").unwrap(), &mut top).unwrap();
+    assert_eq!(top, "top");
+}
+
+#[test]
 fn a_new_zip_gets_its_name_from_what_went_in() {
     let sandbox = Sandbox::new();
     let (a, b) = (sandbox.file(r"here\a.tar.txt", "a"), sandbox.file(r"here\b.txt", "b"));
 
-    go(Job::Zip { sources: vec![a.clone()], level: ZipLevel::Normal, password: None });
-    go(Job::Zip { sources: vec![a.clone(), b.clone()], level: ZipLevel::Normal, password: None });
-    go(Job::Zip { sources: vec![a, b], level: ZipLevel::Normal, password: None });
+    go(Job::Zip { sources: vec![a.clone()], level: ZipLevel::Normal, password: None, format: ArchiveFormat::Zip, aes: false });
+    go(Job::Zip { sources: vec![a.clone(), b.clone()], level: ZipLevel::Normal, password: None, format: ArchiveFormat::Zip, aes: false });
+    go(Job::Zip { sources: vec![a, b], level: ZipLevel::Normal, password: None, format: ArchiveFormat::Zip, aes: false });
 
     assert_eq!(
         sandbox.names("here"),
@@ -1269,7 +1340,7 @@ fn a_file_given_up_on_leaves_a_good_archive() {
     let held = sandbox.file(r"here\held.bin", &"x".repeat(1 << 20));
     let _lock = lock(&held);
 
-    let outcome = go(Job::Zip { sources: vec![good, held.clone()], level: ZipLevel::Normal, password: None });
+    let outcome = go(Job::Zip { sources: vec![good, held.clone()], level: ZipLevel::Normal, password: None, format: ArchiveFormat::Zip, aes: false });
 
     let archive = sandbox.path(r"here\here.zip");
     assert_eq!(outcome.done.len(), 1);
@@ -1290,7 +1361,7 @@ fn a_cancelled_zip_leaves_nothing() {
         ..Script::default()
     };
 
-    let outcome = run(Job::Zip { sources: vec![a, b], level: ZipLevel::Normal, password: None }, &script, &control);
+    let outcome = run(Job::Zip { sources: vec![a, b], level: ZipLevel::Normal, password: None, format: ArchiveFormat::Zip, aes: false }, &script, &control);
 
     assert!(outcome.cancelled);
     assert!(outcome.done.is_empty());
@@ -1305,7 +1376,7 @@ fn a_link_in_a_zip_stays_out_and_is_not_followed() {
     sandbox.file(r"here\tree\a.txt", "a");
     sandbox.junction(r"here\tree\link", &outside);
 
-    go(Job::Zip { sources: vec![sandbox.path(r"here\tree")], level: ZipLevel::Normal, password: None });
+    go(Job::Zip { sources: vec![sandbox.path(r"here\tree")], level: ZipLevel::Normal, password: None, format: ArchiveFormat::Zip, aes: false });
 
     assert_eq!(entries_of(&sandbox.path(r"here\tree.zip")), ["tree/", "tree/a.txt"]);
 }

@@ -5,7 +5,7 @@ import { looksLikeName, readTyped } from "../reach/lists";
 import type { Layout } from "../filelist/layout";
 import { forgetSearch, recentSearches, rememberSearch, showHidden } from "../filelist/prefs";
 import { FLAT_QUERY, type FolderView } from "../navigation/folderView";
-import { baseName, isBin, parentOf, relativeTo, samePath, toCrumbs, typedPath, type Crumb } from "../navigation/path";
+import { archiveKind, baseName, isBin, parentOf, relativeTo, samePath, toCrumbs, typedPath, type Crumb } from "../navigation/path";
 import { lookOf } from "../sidebar/saved";
 import { tagColor } from "../tags/tags";
 import "./pathbar.css";
@@ -486,7 +486,7 @@ export function PathBar(props: {
                 {crumb().label}
                 <Show when={samePath(props.view.archive(), crumb().path)}>
                   <span class="crumb-zip" aria-hidden="true">
-                    ZIP
+                    {archiveKind(crumb().label)}
                   </span>
                 </Show>
               </button>

@@ -1,0 +1,328 @@
+/* The film's small window: the film edge to edge on dark glass, with controls that rest until
+   the pointer comes and slide in from the edges when it does. */
+:root {
+  color-scheme: dark;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: transparent;
+  font-family: var(--font);
+  font-size: var(--font-size);
+  color: var(--text);
+  user-select: none;
+}
+
+.mini {
+  position: relative;
+  height: 100%;
+  overflow: hidden;
+  border-radius: var(--radius);
+  background: #060608;
+  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 9%);
+  outline: none;
+  transition: opacity 400ms ease;
+}
+
+/* Out of the way while the pointer is elsewhere: what is behind shows through a little. */
+.mini[data-away] {
+  opacity: 0.74;
+}
+
+.mini-stage {
+  position: absolute;
+  inset: 0;
+  cursor: default;
+}
+
+.mini-film {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+
+.mini-cue {
+  position: absolute;
+  inset-inline: 8%;
+  bottom: 14%;
+  margin: 0;
+  text-align: center;
+  font-size: clamp(12px, 4.2vh, 22px);
+  text-shadow: 0 1px 3px rgb(0 0 0 / 90%);
+  white-space: pre-line;
+  transition: bottom var(--motion-slide);
+  pointer-events: none;
+}
+
+.mini[data-awake] .mini-cue {
+  bottom: calc(14% + 34px);
+}
+
+.mini-top,
+.mini-bottom {
+  position: absolute;
+  inset-inline: 0;
+  display: flex;
+  opacity: 0;
+  transition:
+    opacity var(--motion),
+    translate var(--motion-slide);
+}
+
+.mini-top {
+  top: 0;
+  align-items: center;
+  gap: 2px;
+  padding: 6px 6px 18px 12px;
+  background: linear-gradient(rgb(0 0 0 / 62%), transparent);
+  translate: 0 -6px;
+}
+
+.mini-bottom {
+  bottom: 0;
+  flex-direction: column;
+  gap: 2px;
+  padding: 18px 10px 6px;
+  background: linear-gradient(transparent, rgb(0 0 0 / 70%));
+  translate: 0 6px;
+}
+
+.mini[data-awake] :is(.mini-top, .mini-bottom) {
+  opacity: 1;
+  translate: 0 0;
+}
+
+.mini:not([data-awake]) :is(.mini-top, .mini-bottom) {
+  pointer-events: none;
+}
+
+.mini-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: rgb(255 255 255 / 86%);
+}
+
+.mini-icon {
+  display: grid;
+  place-items: center;
+  min-width: 28px;
+  height: 28px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: rgb(255 255 255 / 88%);
+  font-family: var(--font-icons);
+  font-size: 13px;
+  transition:
+    background var(--motion),
+    scale var(--motion-slide);
+}
+
+.mini-icon:hover {
+  background: rgb(255 255 255 / 12%);
+}
+
+.mini-icon:active {
+  scale: 0.92;
+}
+
+.mini-icon[aria-pressed="true"] {
+  color: var(--accent);
+}
+
+.mini-speed {
+  font-family: var(--font);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.mini-play {
+  font-size: 15px;
+}
+
+.mini-bar {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+}
+
+.mini-time {
+  margin-left: 4px;
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  color: rgb(255 255 255 / 78%);
+  white-space: nowrap;
+}
+
+.mini-gap {
+  flex: 1;
+}
+
+/* A narrow window keeps play, the time and closing; the rest waits for room. */
+@media (width < 330px) {
+  .mini-speed,
+  .mini-volume {
+    display: none;
+  }
+}
+
+@media (width < 260px) {
+  .mini-time {
+    display: none;
+  }
+}
+
+.mini-lane {
+  --at: 0;
+  position: relative;
+  height: 14px;
+  cursor: pointer;
+}
+
+.mini-track {
+  position: absolute;
+  inset-inline: 0;
+  top: 6px;
+  height: 3px;
+  border-radius: 2px;
+  background: linear-gradient(
+    to right,
+    var(--accent) calc(var(--at) * 100%),
+    rgb(255 255 255 / 22%) calc(var(--at) * 100%)
+  );
+  transition:
+    height var(--motion),
+    top var(--motion);
+}
+
+.mini-lane:hover .mini-track {
+  top: 5px;
+  height: 5px;
+}
+
+.mini-head {
+  position: absolute;
+  top: 3px;
+  left: calc(var(--at) * 100%);
+  width: 9px;
+  height: 9px;
+  margin-left: -4.5px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 0 8px color-mix(in srgb, var(--accent) 70%, transparent);
+  scale: 0;
+  transition: scale var(--motion-slide);
+}
+
+.mini-lane:hover .mini-head {
+  scale: 1;
+}
+
+.mini-volume {
+  --fill: 1;
+  width: 64px;
+  height: 14px;
+  margin: 0 4px;
+  appearance: none;
+  background: transparent;
+}
+
+.mini-volume::-webkit-slider-runnable-track {
+  height: 3px;
+  border-radius: 2px;
+  background: linear-gradient(
+    to right,
+    rgb(255 255 255 / 88%) calc(var(--fill) * 100%),
+    rgb(255 255 255 / 22%) calc(var(--fill) * 100%)
+  );
+}
+
+.mini-volume::-webkit-slider-thumb {
+  width: 10px;
+  height: 10px;
+  margin-top: -3.5px;
+  border-radius: 50%;
+  background: #fff;
+  appearance: none;
+}
+
+/* The next film of the folder, offered near the end. It slides in from the edge. */
+.mini-next-chip {
+  position: absolute;
+  right: 10px;
+  bottom: 64px;
+  display: grid;
+  max-width: 62%;
+  padding: 6px 12px;
+  border: 1px solid rgb(255 255 255 / 14%);
+  border-radius: var(--radius);
+  background: rgb(20 20 26 / 72%);
+  backdrop-filter: var(--blur);
+  color: var(--text);
+  text-align: left;
+  box-shadow: 0 4px 18px rgb(0 0 0 / 45%), 0 0 14px color-mix(in srgb, var(--accent) 22%, transparent);
+  animation: mini-slide-in var(--motion-spring) both;
+}
+
+.mini-next-chip:hover {
+  border-color: color-mix(in srgb, var(--accent) 60%, transparent);
+}
+
+.mini-next-label {
+  font-size: 10.5px;
+  color: var(--accent);
+  letter-spacing: 0.02em;
+}
+
+.mini-next-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+@keyframes mini-slide-in {
+  from {
+    translate: 24px 0;
+    opacity: 0;
+  }
+}
+
+.mini-toast {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  margin: 0;
+  padding: 5px 12px;
+  border-radius: 999px;
+  background: rgb(0 0 0 / 62%);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  translate: -50% -50%;
+  animation: mini-pop 180ms ease-out both;
+  pointer-events: none;
+}
+
+@keyframes mini-pop {
+  from {
+    scale: 0.9;
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mini-next-chip,
+  .mini-toast {
+    animation: none;
+  }
+}
