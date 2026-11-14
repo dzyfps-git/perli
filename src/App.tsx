@@ -147,6 +147,8 @@ import type { BarItem } from "./features/reach/SelectionBar";
 import { Shelf } from "./features/reach/Shelf";
 import { DetailsPanel } from "./features/preview/DetailsPanel";
 import { PreviewDock, QuickPreview, type PreviewAt } from "./features/preview/QuickPreview";
+import { stepWidth } from "./features/preview/DockEdge";
+import { DOCK_STEP } from "./features/preview/dockWidth";
 import { MiniPlayer } from "./features/preview/MiniPlayer";
 import { CutChip } from "./features/fileops/CutChip";
 import { sweptText } from "./features/fileops/progress";
@@ -559,6 +561,11 @@ export function App() {
   }
 
   const toggleDetails = () => setDetailsPanel(!detailsPanel());
+  /** Opens the preview pane if it is shut, then makes it wider or narrower. */
+  function resizePreview(step: number) {
+    if (!previewPane()) setPreviewPane(true);
+    stepWidth(step, document.querySelector(".panes:not([hidden]) .preview-dock"));
+  }
   /** Where files from the shelf can land: a real folder, not the Recycle Bin or a search. */
   const dropFolder = () => {
     const view = tabs.activeView();
@@ -1474,6 +1481,8 @@ export function App() {
     invertSelection: () => invertSelection(here()),
     details: toggleDetails,
     previewPane: () => setPreviewPane(!previewPane()),
+    widerPreview: () => resizePreview(DOCK_STEP),
+    narrowerPreview: () => resizePreview(-DOCK_STEP),
     sidebar: toggleSidebar,
     fullScreen: () => quietly(toggleFullScreen()),
     shelf: () => setShelfOpen(!shelfOpen()),

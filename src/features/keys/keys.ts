@@ -67,6 +67,8 @@ export const KEYS: KeyCommand[] = [
   { id: "invertSelection", label: "Invert selection", group: "View", keys: [] },
   { id: "details", label: "Details panel", group: "View", keys: ["Alt+Shift+P"] },
   { id: "previewPane", label: "Preview pane", group: "View", keys: ["Alt+P"] },
+  { id: "widerPreview", label: "Wider preview pane", group: "View", keys: [] },
+  { id: "narrowerPreview", label: "Narrower preview pane", group: "View", keys: [] },
   { id: "sidebar", label: "Keep sidebar open", group: "View", keys: ["Ctrl+B"], where: "free" },
   { id: "fullScreen", label: "Full screen", group: "View", keys: ["F11"] },
   { id: "shelf", label: "Show the shelf", group: "View", keys: ["Ctrl+Shift+E"] },

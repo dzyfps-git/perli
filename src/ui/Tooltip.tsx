@@ -2,7 +2,7 @@ import { onCleanup, onMount } from "solid-js";
 import { shortcutText } from "./shortcut";
 import "./tooltip.css";
 
-const LABELLED = "button[aria-label], input[type=range][aria-label]";
+const LABELLED = "button[aria-label], input[type=range][aria-label], [data-tip]";
 const OPEN_DELAY_MS = 450;
 /** Right after one closes, the next opens almost at once: the user is reading along a row. */
 const WARM_DELAY_MS = 60;
@@ -11,8 +11,9 @@ const ANCHOR_GAP = 6;
 const EDGE_GAP = 4;
 
 /**
- * Perli's hover text for icon-only controls, read from each control's aria-label, with the
- * control's shortcut from aria-keyshortcuts.
+ * Perli's hover text for icon-only controls, read from each control's aria-label (or its
+ * data-tip, where the label alone would not say how to use it), with the control's shortcut
+ * from aria-keyshortcuts.
  * It is a popover so it can sit above the modal settings dialog.
  */
 export function Tooltip() {
@@ -20,6 +21,7 @@ export function Tooltip() {
   let timer: ReturnType<typeof setTimeout> | undefined;
   let current: Element | undefined;
   let warmUntil = 0;
+  let pointerY = 0;
 
   const isOpen = () => box.matches(":popover-open");
 
@@ -52,11 +54,13 @@ export function Tooltip() {
     if (!current) return;
     // Already open, it glides over to the next control instead of jumping.
     box.classList.toggle("tooltip-glide", isOpen());
-    box.textContent = current.getAttribute("aria-label");
+    box.textContent = current.getAttribute("data-tip") || current.getAttribute("aria-label");
     const keys = current.getAttribute("aria-keyshortcuts");
     if (keys) box.append(keyPills(keys));
     box.togglePopover(true);
-    const anchor = current.getBoundingClientRect();
+    const whole = current.getBoundingClientRect();
+    // A tall edge is met at the pointer, not at its far ends.
+    const anchor = current.matches("[role=separator]") ? new DOMRect(whole.left, pointerY - 10, whole.width, 20) : whole;
     const { width, height } = box.getBoundingClientRect();
     const left = anchor.left + (anchor.width - width) / 2;
     const below = anchor.bottom + ANCHOR_GAP;
@@ -66,6 +70,7 @@ export function Tooltip() {
   }
 
   function onPointerOver(event: PointerEvent) {
+    pointerY = event.clientY;
     const next = (event.target as Element).closest(LABELLED) ?? undefined;
     if (next === current) return;
     if (!next) return hide();

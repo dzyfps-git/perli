@@ -100,6 +100,11 @@ export const [detailsPanel, setDetailsPanel] = stored("details-panel", saved("de
 export const [inlineFolders, setInlineFolders] = stored("inline-folders", saved("inline-folders") !== false);
 /** The preview kept beside the list, following the selection. */
 export const [previewPane, setPreviewPane] = stored("preview-pane", saved("preview-pane") === true);
+/** The preview pane's share of the room beside the list, once its edge was dragged. */
+export const [previewWidth, setPreviewWidth] = stored<number | null>(
+  "preview-width",
+  typeof saved("preview-width") === "number" ? (saved("preview-width") as number) : null,
+);
 
 const [sortMemory, setSortMemory] = stored<SortMemory>(
   "folder-sorts",
