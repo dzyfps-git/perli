@@ -10,8 +10,11 @@ use std::sync::Mutex;
 
 use pulldown_cmark::{html, CowStr, Event, Options, Parser, Tag, TagEnd};
 use serde::Serialize;
-use windows::core::{Interface, HSTRING, PWSTR};
+use windows::core::{Interface, HSTRING, PCWSTR, PWSTR};
 use windows::Win32::Foundation::PROPERTYKEY;
+use windows::Win32::Globalization::{
+    GetACP, GetLocaleInfoEx, MultiByteToWideChar, LOCALE_IDEFAULTANSICODEPAGE, LOCALE_RETURN_NUMBER, MULTI_BYTE_TO_WIDE_CHAR_FLAGS,
+};
 use windows::Win32::Security::Cryptography::{
     BCryptCreateHash, BCryptDestroyHash, BCryptFinishHash, BCryptHashData, BCRYPT_HASH_HANDLE,
     BCRYPT_MD5_ALG_HANDLE, BCRYPT_SHA1_ALG_HANDLE, BCRYPT_SHA256_ALG_HANDLE, BCRYPT_SHA512_ALG_HANDLE,
@@ -41,7 +44,7 @@ const MODEL_BYTES: u64 = 256 * 1024 * 1024;
 pub enum Preview {
     /// `next` is where the following piece starts, if there is one.
     #[serde(rename_all = "camelCase")]
-    Text { text: String, next: Option<u64>, end: u64, bom: bool },
+    Text { text: String, next: Option<u64>, end: u64, encoding: String },
     Markdown { html: String, source: String },
     /// What a ZIP holds, and whether there was more than the list.
     Archive { entries: Vec<inside::Entry>, more: bool },
@@ -63,16 +66,134 @@ pub enum Preview {
     Cloud,
 }
 
-/// The part of `bytes` that is whole UTF-8 text, or `None` if it is not text at all. A cut in the
-/// middle of a character is fine when more follows.
-pub fn as_text(bytes: &[u8], more: bool) -> Option<&str> {
-    let text = match std::str::from_utf8(bytes) {
-        Ok(text) => text,
-        Err(cut) if more && cut.error_len().is_none() => std::str::from_utf8(&bytes[..cut.valid_up_to()]).ok()?,
-        Err(_) => return None,
-    };
-    let plain = |c: char| !c.is_control() || matches!(c, '\n' | '\r' | '\t' | '\x0c');
-    text.chars().all(plain).then_some(text)
+/// How a text file's bytes stand for its letters.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Encoding {
+    Utf8,
+    Utf16 { big: bool },
+    /// Windows' own code page for this PC, as Notepad saves "ANSI".
+    Ansi,
+}
+
+impl Encoding {
+    /// What a file's start says it is, and how long its byte order mark is. Without a mark, text
+    /// that is not UTF-8 is taken as ANSI.
+    pub fn of(start: &[u8]) -> (Self, usize) {
+        if start.starts_with(b"\xEF\xBB\xBF") {
+            (Self::Utf8, 3)
+        } else if start.starts_with(b"\xFF\xFE") {
+            (Self::Utf16 { big: false }, 2)
+        } else if start.starts_with(b"\xFE\xFF") {
+            (Self::Utf16 { big: true }, 2)
+        } else {
+            match std::str::from_utf8(start) {
+                // The start may be cut in the middle of a character.
+                Err(cut) if cut.error_len().is_some() => (Self::Ansi, 0),
+                _ => (Self::Utf8, 0),
+            }
+        }
+    }
+
+    /// The name the text view shows, as Notepad names it.
+    pub fn label(self, mark: usize) -> String {
+        match self {
+            Self::Utf8 if mark > 0 => "UTF-8 with BOM".into(),
+            Self::Utf8 => "UTF-8".into(),
+            Self::Utf16 { big: false } => "UTF-16 LE".into(),
+            Self::Utf16 { big: true } => "UTF-16 BE".into(),
+            Self::Ansi => match ansi_page() {
+                page @ 1250..=1258 => format!("Windows-{page}"),
+                page => format!("Code page {page}"),
+            },
+        }
+    }
+
+    /// `bytes` as text, and how many of them that took. A character cut at the end is left for
+    /// the next piece when `more` follows. UTF-8 that turns out not to be is read as ANSI.
+    pub fn decode(self, bytes: &[u8], more: bool) -> Option<(String, usize)> {
+        match self {
+            Self::Utf8 => match std::str::from_utf8(bytes) {
+                Ok(text) => Some((text.to_string(), bytes.len())),
+                Err(cut) if more && cut.error_len().is_none() => Some((std::str::from_utf8(&bytes[..cut.valid_up_to()]).ok()?.to_string(), cut.valid_up_to())),
+                Err(_) => Self::Ansi.decode(bytes, more),
+            },
+            Self::Utf16 { big } => {
+                if !more && bytes.len() % 2 == 1 {
+                    return None;
+                }
+                let mut units: Vec<u16> = bytes.as_chunks::<2>().0.iter().map(|&pair| if big { u16::from_be_bytes(pair) } else { u16::from_le_bytes(pair) }).collect();
+                if more && units.last().is_some_and(|unit| (0xD800..0xDC00).contains(unit)) {
+                    units.pop();
+                }
+                Some((String::from_utf16(&units).ok()?, units.len() * 2))
+            }
+            // ponytail: a line over a whole piece in a two-byte code page (Shift-JIS) can split a
+            // character at the cut. Pieces otherwise end after a line, which never splits one.
+            Self::Ansi => {
+                if bytes.is_empty() {
+                    return Some((String::new(), 0));
+                }
+                let flags = MULTI_BYTE_TO_WIDE_CHAR_FLAGS(0);
+                let length = unsafe { MultiByteToWideChar(ansi_page(), flags, bytes, None) };
+                let mut wide = vec![0; usize::try_from(length).ok().filter(|&length| length > 0)?];
+                unsafe { MultiByteToWideChar(ansi_page(), flags, bytes, Some(&mut wide)) };
+                Some((String::from_utf16(&wide).ok()?, bytes.len()))
+            }
+        }
+    }
+
+    /// How many of `bytes` run up to and through their last line end, if they have one.
+    fn line_end(self, bytes: &[u8]) -> Option<usize> {
+        match self {
+            Self::Utf16 { big } => bytes.as_chunks::<2>().0.iter().rposition(|pair| *pair == if big { [0, b'\n'] } else { [b'\n', 0] }).map(|at| at * 2 + 2),
+            // In UTF-8 and the ANSI code pages a `\n` byte is always a line end, never part of a letter.
+            _ => bytes.iter().rposition(|&byte| byte == b'\n').map(|at| at + 1),
+        }
+    }
+}
+
+/// The code page Notepad calls ANSI: the user's language's own, even when Windows is set to use
+/// UTF-8 for programs (its "worldwide language support"), where old files are still in it.
+fn ansi_page() -> u32 {
+    const UTF8: u32 = 65001;
+    let mut number = [0u16; 2];
+    let asked = LOCALE_IDEFAULTANSICODEPAGE | LOCALE_RETURN_NUMBER;
+    let found = unsafe { GetLocaleInfoEx(PCWSTR::null(), asked, Some(&mut number)) } > 0;
+    let page = if found { u32::from(number[0]) | (u32::from(number[1]) << 16) } else { 0 };
+    match page {
+        0 | UTF8 => match unsafe { GetACP() } {
+            UTF8 => 1252,
+            page => page,
+        },
+        page => page,
+    }
+}
+
+/// Whether text has only letters and the control characters text files use.
+fn plain(text: &str) -> bool {
+    text.chars().all(|c| !c.is_control() || matches!(c, '\n' | '\r' | '\t' | '\x0c'))
+}
+
+/// A PDF's first lines read as ANSI text, high bytes and all, before its binary parts start.
+fn is_pdf(start: &[u8]) -> bool {
+    start.starts_with(b"%PDF-")
+}
+
+/// A file's bytes as text, in the encoding their start says, or `None` if it is not text at all.
+/// A cut in the middle of a character is fine when more follows.
+pub fn as_text(bytes: &[u8], more: bool) -> Option<String> {
+    if is_pdf(bytes) {
+        return None;
+    }
+    let (encoding, mark) = Encoding::of(bytes);
+    let (text, _) = encoding.decode(&bytes[mark..], more)?;
+    plain(&text).then_some(text)
+}
+
+/// A file's bytes as text for a search to look through, even with odd bytes in it.
+pub fn searchable(bytes: &[u8]) -> String {
+    let (encoding, mark) = Encoding::of(bytes);
+    encoding.decode(&bytes[mark..], false).map_or_else(|| String::from_utf8_lossy(bytes).into_owned(), |(text, _)| text)
 }
 
 fn is_markdown(path: &Path) -> bool {
@@ -96,8 +217,8 @@ pub fn read(path: &Path, offset: u64) -> Preview {
     let size = path.metadata().map_or(0, |data| data.len());
     if offset == 0 && is_markdown(path) && size <= MARKDOWN_BYTES {
         let read = std::fs::read(path).ok();
-        if let Some(source) = read.as_deref().and_then(|bytes| as_text(strip_bom(bytes), false)) {
-            return Preview::Markdown { html: markdown(source), source: source.to_string() };
+        if let Some(source) = read.as_deref().and_then(|bytes| as_text(bytes, false)) {
+            return Preview::Markdown { html: markdown(&source), source };
         }
     }
     piece(path, offset).unwrap_or(Preview::Picture)
@@ -163,7 +284,7 @@ pub fn beside_text(path: &Path, extension: &str) -> Option<String> {
         return None;
     }
     let bytes = std::fs::read(beside).ok()?;
-    Some(String::from_utf8_lossy(strip_bom(&bytes)).into_owned())
+    Some(searchable(&bytes))
 }
 
 const FRAME_BYTES: usize = 64 * 1024 * 1024;
@@ -191,28 +312,37 @@ pub fn save_frame(film: &Path, seconds: u64, png: &[u8]) -> Result<String, Strin
     Err("Too many frames of this moment are saved already".into())
 }
 
-fn strip_bom(bytes: &[u8]) -> &[u8] {
-    bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes)
-}
-
 fn piece(path: &Path, offset: u64) -> Option<Preview> {
     let mut file = File::open(path).ok()?;
+    let (encoding, mark) = if offset == 0 {
+        (Encoding::Utf8, 0)
+    } else {
+        // The same bytes the first piece judged by, so every piece decodes as it did.
+        let mut head = Vec::new();
+        (&file).take(PIECE_BYTES as u64).read_to_end(&mut head).ok()?;
+        Encoding::of(&head)
+    };
     file.seek(SeekFrom::Start(offset)).ok()?;
     let mut bytes = Vec::with_capacity(PIECE_BYTES);
     file.take(PIECE_BYTES as u64 + 1).read_to_end(&mut bytes).ok()?;
     let more = bytes.len() > PIECE_BYTES;
     bytes.truncate(PIECE_BYTES);
-    let body = if offset == 0 { strip_bom(&bytes) } else { &bytes };
-    let skipped = bytes.len() - body.len();
-    let text = as_text(body, more)?;
-    if offset == 0 && text.is_empty() {
+    // The first piece says the encoding from all of itself, so its label holds for what shows.
+    if offset == 0 && is_pdf(&bytes) {
         return None;
     }
+    let (encoding, mark) = if offset == 0 { Encoding::of(&bytes) } else { (encoding, mark) };
+    let skipped = if offset == 0 { mark } else { 0 };
+    let body = &bytes[skipped..];
     // A piece ends after a whole line, so no line is split between two of them.
-    let shown = if more { text.rfind('\n').map_or(text, |end| &text[..=end]) } else { text };
+    let body = if more { encoding.line_end(body).map_or(body, |end| &body[..end]) } else { body };
+    let (text, used) = encoding.decode(body, more)?;
+    if !plain(&text) || (offset == 0 && text.is_empty()) {
+        return None;
+    }
     // Where this piece stops, which is where a file that is still growing is read on from.
-    let end = offset + (skipped + shown.len()) as u64;
-    Some(Preview::Text { text: shown.to_string(), next: more.then_some(end), end, bom: skipped > 0 })
+    let end = offset + (skipped + used) as u64;
+    Some(Preview::Text { text, next: more.then_some(end), end, encoding: encoding.label(mark) })
 }
 
 /// HTML for Markdown, with no HTML of its own: tags in the text show as text, links that are not
@@ -586,6 +716,72 @@ mod tests {
     }
 
     #[test]
+    fn utf16_text_comes_in_whole_lines_that_join_up() {
+        let folder = folder("utf16");
+        let line = "\u{1F600} wide line\r\n";
+        let whole = line.repeat(PIECE_BYTES / line.len());
+        for big in [false, true] {
+            let file = folder.join(format!("wide-{big}.txt"));
+            let mut bytes: Vec<u8> = if big { vec![0xFE, 0xFF] } else { vec![0xFF, 0xFE] };
+            for unit in whole.encode_utf16() {
+                bytes.extend(if big { unit.to_be_bytes() } else { unit.to_le_bytes() });
+            }
+            fs::write(&file, &bytes).unwrap();
+
+            let (mut joined, mut offset, mut labels) = (String::new(), 0, Vec::new());
+            loop {
+                let Preview::Text { text, next, encoding, .. } = read(&file, offset) else { panic!("not text") };
+                assert!(text.ends_with('\n'));
+                joined.push_str(&text);
+                labels.push(encoding);
+                match next {
+                    Some(at) => offset = at,
+                    None => break,
+                }
+            }
+            assert_eq!(joined, whole);
+            assert!(labels.len() >= 2);
+            assert!(labels.iter().all(|label| label == if big { "UTF-16 BE" } else { "UTF-16 LE" }), "{labels:?}");
+        }
+        fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
+    fn later_pieces_keep_the_encoding_the_first_one_found() {
+        let folder = folder("ansi-late");
+        let file = folder.join("old.log");
+        // The one ANSI letter sits past the first 64 KiB. Later, `C3 A9` would also read as UTF-8.
+        let mut bytes = b"plain ascii line\n".repeat(80 * 1024 / 17);
+        bytes.extend(b"caf\xE9\n");
+        while bytes.len() < PIECE_BYTES * 2 {
+            bytes.extend(b"\xC3\xA9 two letters in ANSI\n");
+        }
+        fs::write(&file, &bytes).unwrap();
+
+        let Preview::Text { encoding: first, next, .. } = read(&file, 0) else { panic!("not text") };
+        let Preview::Text { encoding: later, text, .. } = read(&file, next.unwrap()) else { panic!("not text") };
+        assert_eq!(later, first);
+        assert!(!text.contains('\u{e9}'), "read as UTF-8: {}", &text[..40]);
+        fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
+    fn ansi_text_shows_in_the_pcs_code_page_and_binary_still_does_not() {
+        let folder = folder("ansi");
+        fs::write(folder.join("old.txt"), b"caf\xE9 au lait\r\n").unwrap();
+        fs::write(folder.join("tool.exe"), b"MZ\x90\x00\x03\x00\x00\x00\xFF\xFF").unwrap();
+        let Preview::Text { text, encoding, .. } = read(&folder.join("old.txt"), 0) else { panic!("not text") };
+        assert!(text.starts_with("caf") && text.ends_with(" au lait\r\n"), "{text}");
+        assert!(encoding.starts_with("Windows-") || encoding.starts_with("Code page"), "{encoding}");
+        if ansi_page() == 1252 {
+            assert_eq!((text.as_str(), encoding.as_str()), ("caf\u{e9} au lait\r\n", "Windows-1252"));
+        }
+        assert_eq!(read(&folder.join("tool.exe"), 0), Preview::Picture);
+        assert_eq!(searchable(b"\xFF\xFEh\0i\0"), "hi");
+        fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
     fn markdown_renders_but_its_html_links_and_web_pictures_do_not() {
         let html = markdown(
             "# Hi\n\n<script>alert(1)</script>\n\n[web](https://a.b) [bad](javascript:alert(1)) [file](notes.md)\n\n\
@@ -612,11 +808,11 @@ mod tests {
         assert_eq!(read(&folder.join("read.md"), 0), Preview::Markdown { html: "<p><em>hi</em></p>\n".into(), source: "*hi*".into() });
         // A text that is still being written is read on from where the last piece stopped.
         std::fs::write(folder.join("grow.log"), "one\n").unwrap();
-        let Preview::Text { end, next, bom, .. } = read(&folder.join("grow.log"), 0) else { panic!("not text") };
-        assert_eq!((end, next, bom), (4, None, false));
+        let Preview::Text { end, next, encoding, .. } = read(&folder.join("grow.log"), 0) else { panic!("not text") };
+        assert_eq!((end, next, encoding.as_str()), (4, None, "UTF-8"));
         std::fs::write(folder.join("grow.log"), "one\ntwo\n").unwrap();
-        assert_eq!(read(&folder.join("grow.log"), end), Preview::Text { text: "two\n".into(), next: None, end: 8, bom: false });
-        assert_eq!(read(&folder.join("grow.log"), 8), Preview::Text { text: String::new(), next: None, end: 8, bom: false });
+        assert_eq!(read(&folder.join("grow.log"), end), Preview::Text { text: "two\n".into(), next: None, end: 8, encoding: "UTF-8".into() });
+        assert_eq!(read(&folder.join("grow.log"), 8), Preview::Text { text: String::new(), next: None, end: 8, encoding: "UTF-8".into() });
         assert_eq!(read(&folder.join("a.bin"), 0), Preview::Picture);
         assert_eq!(read(&folder.join("empty.txt"), 0), Preview::Picture);
         assert_eq!(read(&folder, 0), Preview::Picture);

@@ -100,7 +100,6 @@ impl Query {
 
     /// Whether a small text file's content holds the text, in any case. A file in the cloud
     /// stays there.
-    // ponytail: reads UTF-8 only, so UTF-16 text never fits. A BOM check would add it.
     fn holds(&self, entry: &Entry, folder: &Path) -> bool {
         self.inside
             && !entry.is_dir()
@@ -108,7 +107,7 @@ impl Query {
             && entry.size() <= INSIDE_MAX
             && TEXT_TYPES.contains(&entry.extension_text().as_str())
             && std::fs::read(folder.join(entry.file_name()))
-                .is_ok_and(|bytes| String::from_utf8_lossy(&bytes).to_lowercase().contains(&self.text))
+                .is_ok_and(|bytes| crate::preview::searchable(&bytes).to_lowercase().contains(&self.text))
     }
 
     /// How well a name fits if its letters match from `start`, which holds the query's first.

@@ -730,6 +730,23 @@ fn a_conflict_says_how_many_names_are_taken_and_how_many_are_free() {
 }
 
 #[test]
+fn the_conflict_count_looks_inside_folders_that_merge() {
+    let sandbox = Sandbox::new();
+    for name in ["a", "b", "c"] {
+        sandbox.file(&format!(r"from\pics\{name}"), "new");
+    }
+    sandbox.file(r"to\pics\a", "old");
+    let host = Script::always(Answer::Skip);
+    run_with(Job::Copy { sources: vec![sandbox.path(r"from\pics")], folder: sandbox.path("to") }, &host);
+
+    let first = host.questions.borrow_mut().drain(..).next();
+    match first {
+        Some(Question::Conflict { clashes, fresh, .. }) => assert_eq!((clashes, fresh), (1, 2)),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
 fn a_copy_lists_what_it_skipped_after_a_problem_for_a_later_try() {
     let sandbox = Sandbox::new();
     let locked = sandbox.file(r"from\locked.txt", "x");
@@ -742,6 +759,26 @@ fn a_copy_lists_what_it_skipped_after_a_problem_for_a_later_try() {
     assert_eq!(outcome.failed, [Failed { source: locked.clone(), folder: to.clone(), moving: false }]);
     assert_eq!(sandbox.names("to"), ["fine.txt"]);
     drop(held);
+}
+
+#[test]
+fn an_undo_lists_what_it_skipped_but_offers_no_try_again() {
+    let sandbox = Sandbox::new();
+    let moved = go(moving(&sandbox.file(r"from\a.txt", "a"), &sandbox.folder("to")));
+    let copied = go(copy(&sandbox.file(r"from\b.txt", "b"), &sandbox.path("to")));
+    let (a, b) = (sandbox.path(r"to\a.txt"), sandbox.path(r"to\b.txt"));
+    let held = (lock(&a), lock(&b));
+
+    let mut records = moved.done;
+    records.extend(copied.done);
+    let outcome = run_with(Job::Undo { records }, &Script::always(Answer::Skip));
+
+    let mut skipped: Vec<PathBuf> = outcome.failed.iter().map(|failed| failed.source.clone()).collect();
+    skipped.sort();
+    assert_eq!(skipped, [a, b]);
+    assert!(!outcome.retries);
+    drop(held);
+    assert!(go(copy(&sandbox.path(r"from\b.txt"), &sandbox.folder("again"))).retries);
 }
 
 #[test]

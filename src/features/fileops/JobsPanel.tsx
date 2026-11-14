@@ -232,11 +232,13 @@ function Card(props: { card: JobCard; jobs: Jobs }) {
               <ul class="job-kept">
                 <For each={ended().failed.slice(0, KEPT_SHOWN)}>{(item) => <li class="job-current">{baseName(item.source)}</li>}</For>
               </ul>
-              <div class="job-choices">
-                <button class="job-choice" onClick={() => jobs.retry(card)}>
-                  Try again
-                </button>
-              </div>
+              <Show when={ended().retries}>
+                <div class="job-choices">
+                  <button class="job-choice" onClick={() => jobs.retry(card)}>
+                    Try again
+                  </button>
+                </div>
+              </Show>
             </Show>
             <Show when={jobs.canUndo(card)}>
               <div class="job-choices">

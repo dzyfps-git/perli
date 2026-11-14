@@ -551,6 +551,11 @@ impl Listing {
         .arrange(order)
     }
 
+    /// The folders opened in place that the read listed.
+    pub fn expanded(&self) -> &[String] {
+        &self.order.expanded
+    }
+
     pub fn arranged(self, order: Order) -> Self {
         if order == self.order {
             self

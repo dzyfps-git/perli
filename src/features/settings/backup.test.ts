@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { missingTags, packed, remapTags, settingsOf, staleSettings, unpacked } from "./backup.ts";
+import { missingTags, packed, remapTags, settingsOf, staleSettings, taggedHere, unpacked } from "./backup.ts";
 
 test("only Perli's settings are packed, and reading places stay behind", () => {
   const prefs = settingsOf([
@@ -14,7 +14,7 @@ test("only Perli's settings are packed, and reading places stay behind", () => {
 });
 
 test("a packed file reads back as it was", () => {
-  const backup = { prefs: { theme: '"dark"' }, tags: [{ name: "Work", color: 3 }] };
+  const backup = { prefs: { theme: '"dark"' }, tags: [{ name: "Work", color: 3 }], tagged: [{ path: "C:\a.txt", tags: [1] }] };
   assert.deepEqual(unpacked(packed(backup)), backup);
 });
 
@@ -27,7 +27,7 @@ test("a file that is not Perli's is refused, and odd parts of one are dropped", 
     prefs: { theme: '"dark"', broken: 5, shelf: "[]" },
     tags: [{ name: "Work", color: 3, extra: true }, { name: 7, color: 1 }, { name: "Bad", color: -1 }],
   });
-  assert.deepEqual(unpacked(text), { prefs: { theme: '"dark"' }, tags: [{ name: "Work", color: 3 }] });
+  assert.deepEqual(unpacked(text), { prefs: { theme: '"dark"' }, tags: [{ name: "Work", color: 3 }], tagged: [] });
 });
 
 test("only tags with a new name are made", () => {
@@ -62,4 +62,19 @@ test("filters pinned to folders get this computer's numbers for their tags", () 
 
 test("a restore takes away settings the file has none of", () => {
   assert.deepEqual(staleSettings({ theme: '"light"', accent: '"sea"' }, { accent: '"sea"' }), ["theme"]);
+});
+
+test("tagged files travel by path and get this computer's tag numbers", () => {
+  const tags = [
+    { name: "Work", color: 1, id: 4 },
+    { name: "Gone", color: 2, id: 9 },
+  ];
+  const tagged = [
+    { path: "C:\a.txt", tags: [4, 9] },
+    { path: "C:\b.txt", tags: [9] },
+  ];
+  const back = unpacked(packed({ prefs: {}, tags, tagged: [...tagged, { path: 3, tags: [] }] as never }));
+  assert.deepEqual(back.tagged, tagged, "a damaged entry is dropped");
+  assert.deepEqual(taggedHere(back.tagged!, tags, [{ id: 12, name: "work" }]), [{ path: "C:\a.txt", tags: [12] }]);
+  assert.deepEqual(unpacked(packed({ prefs: {}, tags })).tagged, [], "an older file has none");
 });

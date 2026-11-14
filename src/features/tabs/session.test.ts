@@ -68,3 +68,11 @@ test("parseSession keeps how a tab's panes sit, and drops what makes no sense", 
     ],
   );
 });
+
+test("parseSession keeps the folders opened in place, and only their names", () => {
+  const session = parseSession(
+    JSON.stringify({ tabs: [{ panes: [{ ...pane, expanded: ["C:\a\b", 4, null] }, { ...pane, expanded: "C:\a\b" }] }] }),
+  );
+  assert.deepEqual(session?.tabs[0].panes[0].expanded, ["C:\a\b"]);
+  assert.equal(session?.tabs[0].panes[1].expanded, undefined);
+});
