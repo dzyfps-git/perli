@@ -390,6 +390,19 @@
   background: color-mix(in srgb, #3fb950 13%, transparent);
 }
 
+/* The text ends here with no line ending, which is all that may differ. */
+.diff-line[data-open]::after {
+  content: "No line ending";
+  margin-left: var(--space-2);
+  padding: 0 6px;
+  border-radius: 999px;
+  font-family: var(--font);
+  font-size: 0.85em;
+  color: var(--text-muted);
+  background: color-mix(in srgb, var(--text-muted) 14%, transparent);
+  white-space: nowrap;
+}
+
 .diff-line[data-kind="none"] {
   background: repeating-linear-gradient(135deg, transparent 0 6px, color-mix(in srgb, var(--text-muted) 8%, transparent) 6px 7px);
 }

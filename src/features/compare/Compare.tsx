@@ -7,7 +7,7 @@ import { draw } from "../preview/QuickPreview";
 import { coloredLines, languageOf } from "../preview/highlight";
 import { lineEnding } from "../preview/table";
 import { sideChips, WHOLE, zoomed, type Lens } from "./comparable";
-import { changedSpans, diffLines, linesOf, patchOf, rowsOf, spacesAside, type Row as DiffRow } from "./diff";
+import { CONTEXT, changedSpans, diffLines, endsOpen, linesOf, patchOf, rowsOf, spacesAside, type Row as DiffRow } from "./diff";
 import "../preview/preview.css";
 import "./compare.css";
 
@@ -362,6 +362,8 @@ function PictureCompare(props: ViewProps) {
 interface Text {
   source: string;
   lines: string[];
+  /** Its last line has no line ending after it. */
+  open: boolean;
   html?: string[];
 }
 
@@ -370,7 +372,7 @@ async function readText(props: { view: number; snapshot: number }, side: Compare
   if (source === null) throw new Error(`${side.row.name} is not text.`);
   const language = languageOf(side.row.name);
   const html = language && source.length <= MOST_COLORED ? await coloredLines(language, source).catch(() => undefined) : undefined;
-  return { source, lines: linesOf(source), html };
+  return { source, lines: linesOf(source), open: endsOpen(source), html };
 }
 
 /** Escapes a line for the page. */
@@ -401,7 +403,7 @@ function TextCompare(props: ViewProps) {
 
   const lines = createMemo(() => {
     const both = texts();
-    return both ? diffLines(both[0].lines, both[1].lines, spaces() ? spacesAside : undefined) : [];
+    return both ? diffLines(both[0].lines, both[1].lines, spaces() ? spacesAside : undefined, [both[0].open, both[1].open]) : [];
   });
   const rows = createMemo(() => rowsOf(lines()));
   // New lines bring new folds, all shut.
@@ -455,7 +457,7 @@ function TextCompare(props: ViewProps) {
   async function copyPatch() {
     const both = texts();
     if (!both) return;
-    await navigator.clipboard.writeText(patchOf(props.sides[0].row.name, props.sides[1].row.name, both[0].lines, both[1].lines, lines()));
+    await navigator.clipboard.writeText(patchOf(props.sides[0].row.name, props.sides[1].row.name, both[0].lines, both[1].lines, lines(), CONTEXT, [both[0].open, both[1].open]));
     setCopied(true);
     window.setTimeout(() => setCopied(false), 1400);
   }
@@ -505,12 +507,17 @@ function TextCompare(props: ViewProps) {
   });
 
   const number = (at: number | undefined) => (at === undefined ? "" : String(at + 1));
+  /** A changed last line with no ending after it, which says so, since its words may all be the same. */
+  const endsHere = (side: 0 | 1, at: number | undefined, kind: string) => {
+    const text = texts()?.[side];
+    return kind !== "same" && !!text?.open && at === text.lines.length - 1;
+  };
   const cell = (side: 0 | 1, at: number | undefined, kind: string, pair?: string) => (
     <>
       <span class="diff-number" aria-hidden="true">
         {number(at)}
       </span>
-      <span class="diff-line" data-kind={at === undefined ? "none" : kind} data-side={side} data-pair={pair} innerHTML={lineHtml(side, at)} />
+      <span class="diff-line" data-kind={at === undefined ? "none" : kind} data-side={side} data-pair={pair} data-open={endsHere(side, at, kind) || undefined} innerHTML={lineHtml(side, at)} />
     </>
   );
 
