@@ -97,7 +97,7 @@ fn zip_time(ticks: u64) -> Option<DateTime> {
     .ok()
 }
 
-fn ticks_of(time: DateTime) -> u64 {
+pub fn ticks_of(time: DateTime) -> u64 {
     sys::local_ticks(&SYSTEMTIME {
         wYear: time.year(),
         wMonth: time.month().into(),
@@ -111,7 +111,7 @@ fn ticks_of(time: DateTime) -> u64 {
 }
 
 /// `relative` if every part of it is a plain name Windows would accept.
-pub(super) fn safe(relative: PathBuf) -> Option<PathBuf> {
+pub fn safe(relative: PathBuf) -> Option<PathBuf> {
     let plain = |part: Component<'_>| match part {
         Component::Normal(name) => name.to_str().is_some_and(|name| names::check(name).is_ok()),
         _ => false,
@@ -264,26 +264,26 @@ impl Run<'_> {
 
     /// With `only`, just those entries come out, each as if its own folder were the top.
     /// One inside a folder also picked comes out with that folder, not again on its own.
-    pub(super) fn unzip(&mut self, archives: Vec<PathBuf>, own_folder: bool, smart: bool, only: &[String], password: Option<&str>) -> Flow {
+    pub(super) fn unzip(&mut self, archives: Vec<PathBuf>, own_folder: bool, smart: bool, only: &[String], password: Option<&str>, into: Option<&Path>) -> Flow {
         self.add_total(archives.len() as u64, 0);
         for archive in archives {
             if only.is_empty() {
-                self.unzip_one(&archive, own_folder, smart, None, password)?;
+                self.unzip_one(&archive, own_folder, smart, None, password, into)?;
             }
             for name in outermost(only) {
-                self.unzip_one(&archive, own_folder, false, Some(name), password)?;
+                self.unzip_one(&archive, own_folder, false, Some(name), password, into)?;
             }
             self.step(1, 0);
         }
         Ok(())
     }
 
-    fn unzip_one(&mut self, archive: &Path, own_folder: bool, smart: bool, only: Option<&str>, password: Option<&str>) -> Flow {
+    fn unzip_one(&mut self, archive: &Path, own_folder: bool, smart: bool, only: Option<&str>, password: Option<&str>, into: Option<&Path>) -> Flow {
         let Some(mut zip) = self.attempt(archive, None, |_| open_archive(archive))? else {
             return Ok(());
         };
         let own_folder = own_folder || (smart && tops(&zip) > 1);
-        let folder = sys::parent(archive);
+        let folder = into.map_or_else(|| sys::parent(archive), Path::to_path_buf);
         let zone = sys::read_zone(archive);
         let mut landing = Landing::new(folder.clone(), Some(archive.to_path_buf()), zone);
         if own_folder {
@@ -298,8 +298,9 @@ impl Run<'_> {
         }
 
         // One entry lands as if its own folder were the top of the archive.
-        let only = only.map(|name| name.trim_end_matches('/'));
-        let above = only.and_then(|name| name.rfind('/').map(|at| PathBuf::from(&name[..at])));
+        let only = only.map(|name| name.trim_end_matches(['/', '\\']));
+        // How many folders sit above the entry, whatever their case.
+        let above = only.map_or(0, |name| parts(name).count().saturating_sub(1));
         let wanted: Vec<usize> = (0..zip.len()).filter(|&index| only.is_none_or(|name| is_under(&zip, index, name))).collect();
         let sizes = wanted.iter().filter_map(|&index| zip.by_index_data(index).ok().map(|entry| entry.size()));
         let bytes = sizes.sum();
@@ -307,10 +308,7 @@ impl Run<'_> {
         for index in wanted {
             self.check()?;
             let facts = zip.by_index_data(index).map(|entry| {
-                let relative = entry.enclosed_name().and_then(safe).and_then(|path| match &above {
-                    Some(above) => path.strip_prefix(above).ok().map(Path::to_path_buf),
-                    None => Some(path),
-                });
+                let relative = entry.enclosed_name().and_then(safe).map(|path| path.components().skip(above).collect::<PathBuf>());
                 let time = entry.last_modified().map_or(0, ticks_of);
                 (relative, entry.is_dir(), entry.encrypted(), Stat::of_file(entry.size(), time))
             });
@@ -440,11 +438,18 @@ fn tops(zip: &ZipArchive<BufReader<File>>) -> usize {
     zip.file_names().flatten().filter_map(|name| first(&name)).collect::<HashSet<_>>().len()
 }
 
+/// Whether entry `index` is `name` or inside it. Names match in any case and with either
+/// separator, the way a ZIP opened as a folder shows them.
 fn is_under(zip: &ZipArchive<BufReader<File>>, index: usize, name: &str) -> bool {
     let Ok(entry) = zip.by_index_data(index) else { return false };
     let Ok(own) = entry.name() else { return false };
-    let own = own.trim_end_matches('/');
-    own == name || own.strip_prefix(name).is_some_and(|rest| rest.starts_with('/'))
+    let mut own = parts(&own);
+    parts(name).all(|wanted| own.next().is_some_and(|part| part.to_lowercase() == wanted.to_lowercase()))
+}
+
+/// The parts of a name in an archive, between either separator.
+fn parts(name: &str) -> impl Iterator<Item = &str> {
+    name.split(['/', '\\']).filter(|part| !part.is_empty())
 }
 
 fn entry_name(zip: &ZipArchive<BufReader<File>>, index: usize) -> String {

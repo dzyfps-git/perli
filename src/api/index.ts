@@ -23,6 +23,10 @@ export interface Opened {
   loadMs: number;
   /** Rows to select straight away, when this is a new order of the same folder. */
   selected?: number[];
+  /** The ZIP file this folder is in, when it is one inside a ZIP. */
+  archive: string | null;
+  /** Something in that ZIP needs a password Perli doesn't have yet. */
+  locked: boolean;
 }
 
 export interface Row {
@@ -57,7 +61,7 @@ export interface Tag {
 
 export type SortKey = "name" | "modified" | "created" | "type" | "size" | "location";
 /** The extra columns, read from each file's own properties. */
-export type PropKey = "artist" | "album" | "length" | "taken" | "dimensions";
+export type PropKey = "artist" | "album" | "length" | "taken" | "dimensions" | "packed";
 
 export interface Sort {
   /** `found` is the order a search found its rows in, which no column stands for. */
@@ -209,7 +213,9 @@ export type Task =
   | { kind: "drop"; folder: string; action?: DropAction }
   | { kind: "recycle" | "delete" | "restore" | "purge"; selection: Selection }
   | { kind: "restoreTo"; selection: Selection; folder: string }
-  | { kind: "empty" };
+  | { kind: "empty" }
+  /** Everything in a ZIP, into a folder of its own beside it. */
+  | { kind: "extractZip"; path: string };
 
 export interface Progress {
   bytes: number;
@@ -484,6 +490,10 @@ export const typeNames = (extensions: string[]) =>
 export const expandPath = (text: string) => invoke<string>("expand_path", { text });
 
 export const isFile = (path: string) => invoke<boolean>("is_file", { path });
+
+/** Keeps the password of a ZIP opened as a folder for this session. Fails with the
+ *  wrong-password message unless it opens the ZIP's locked files. */
+export const unlockZip = (path: string, password: string) => invoke<void>("unlock_zip", { path, password });
 
 /** `shown` is the request of the folder on screen, whose rows must outlive this open. */
 export const openFolder = (view: number, request: number, shown: number, path: string, order: Order) =>

@@ -5,7 +5,7 @@ import { looksLikeName, readTyped } from "../reach/lists";
 import type { Layout } from "../filelist/layout";
 import { forgetSearch, recentSearches, rememberSearch, showHidden } from "../filelist/prefs";
 import { FLAT_QUERY, type FolderView } from "../navigation/folderView";
-import { baseName, isBin, parentOf, toCrumbs, typedPath, type Crumb } from "../navigation/path";
+import { baseName, isBin, parentOf, relativeTo, samePath, toCrumbs, typedPath, type Crumb } from "../navigation/path";
 import { lookOf } from "../sidebar/saved";
 import { tagColor } from "../tags/tags";
 import "./pathbar.css";
@@ -89,6 +89,11 @@ export function PathBar(props: {
   const [chosen, setChosen] = createSignal(-1);
   let asked = 0;
   const crumbs = () => toCrumbs(props.view.trail());
+  /** A ZIP and the folders in it take no drops. */
+  const inZip = (path: string) => {
+    const archive = props.view.archive();
+    return !!archive && relativeTo(archive, path) !== path;
+  };
   const depth = () => toCrumbs(props.view.folder()?.path ?? "").length;
   let list!: HTMLOListElement;
   let searchBox!: HTMLInputElement;
@@ -466,7 +471,7 @@ export function PathBar(props: {
               <button
                 class="crumb"
                 classList={{ "crumb-left": index >= depth() }}
-                data-drop={crumb().path}
+                data-drop={inZip(crumb().path) ? undefined : crumb().path}
                 data-look={lookOf(crumb().path)?.color === undefined ? undefined : ""}
                 style={{ "--look-color": lookColor(crumb().path) }}
                 aria-current={index === depth() - 1 ? "location" : undefined}
@@ -479,6 +484,11 @@ export function PathBar(props: {
                 }}
               >
                 {crumb().label}
+                <Show when={samePath(props.view.archive(), crumb().path)}>
+                  <span class="crumb-zip" aria-hidden="true">
+                    ZIP
+                  </span>
+                </Show>
               </button>
               <Show when={!isBin(crumb().path)}>
                 <button

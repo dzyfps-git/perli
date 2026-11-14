@@ -29,7 +29,7 @@ use zip::ZipArchive;
 use crate::ops::Com;
 use crate::preview::{escape, is_web_link};
 
-type Zip = ZipArchive<BufReader<File>>;
+pub(crate) type Zip = ZipArchive<BufReader<File>>;
 
 /// A list this long is enough to see what an archive holds.
 const MOST_ENTRIES: usize = 10_000;
@@ -60,7 +60,7 @@ pub const WRONG_PASSWORD: &str = "Wrong password";
 /// it on if AES-locked ZIPs turn out to be common.
 const AES_LOCKED: &str = "This ZIP is locked with AES, which Perli can't open yet.";
 
-fn reason(error: ZipError) -> String {
+pub(crate) fn reason(error: ZipError) -> String {
     match error {
         ZipError::InvalidPassword => WRONG_PASSWORD.into(),
         ZipError::UnsupportedArchive(text) if text.starts_with("AES") => AES_LOCKED.into(),
@@ -75,7 +75,7 @@ const DAMAGED_LOCKED: &str = "This file is damaged in the archive. The password 
 /// file reads as garbage: a broken compressed stream, or a checksum that does not match. A right
 /// password on a damaged file reads the same way, so another locked file of the archive tells
 /// them apart: if the password reads that one whole, it is right.
-fn read_failed(error: std::io::Error, path: &Path, name: &str, password: Option<&str>) -> String {
+pub(crate) fn read_failed(error: std::io::Error, path: &Path, name: &str, password: Option<&str>) -> String {
     use std::io::ErrorKind::{InvalidData, InvalidInput};
     match password.filter(|_| matches!(error.kind(), InvalidData | InvalidInput)) {
         Some(password) if opens_another(path, name, password) => DAMAGED_LOCKED.into(),
@@ -128,13 +128,18 @@ pub struct Heading {
     pub depth: usize,
 }
 
-fn open(path: &Path) -> Result<Zip, String> {
+pub(crate) fn open(path: &Path) -> Result<Zip, String> {
     let file = File::open(path).map_err(|error| error.to_string())?;
     ZipArchive::new(BufReader::new(file)).map_err(|error| error.to_string())
 }
 
 fn extension(name: &str) -> String {
     name.rsplit_once('.').map(|(_, extension)| extension.to_ascii_lowercase()).unwrap_or_default()
+}
+
+/// Whether `name` is a picture `picture` can draw.
+pub fn is_picture(name: &str) -> bool {
+    PICTURES.contains(&extension(name).as_str())
 }
 
 /// The entries of a ZIP, and whether there were more than the list holds.

@@ -2,11 +2,13 @@ import { createMemo, createSignal, For, onCleanup, Show } from "solid-js";
 import type { ArchiveEntry, ArchiveTested, Thumb } from "../../api";
 import { formatSize } from "../../ui/format";
 import { draw } from "./QuickPreview";
+import { PasswordCard, WRONG_PASSWORD } from "./PasswordCard";
 
 const ICON_FOLD = "";
 const ICON_LOOK = "";
 const ICON_EXTRACT = "";
 const ICON_BACK = "";
+const ICON_FOLDER = "\uE8B7";
 const ICON_LOCK = "";
 const PICTURES = /\.(jpe?g|png|gif|webp|bmp|tiff?|ico)$/i;
 /** A filter can match a lot. This many rows are plenty to scroll through. */
@@ -14,7 +16,6 @@ const MOST_ROWS = 2000;
 const LOOK_EDGE = 1600;
 /** A press that moves this far is a drag out of the archive. */
 const DRAG_PX = 6;
-const WRONG_PASSWORD = "Wrong password";
 /** Rust adds this when the file tried is damaged but the password opened another one. */
 const PASSWORD_RIGHT = "The password is right.";
 
@@ -77,6 +78,8 @@ export interface ArchiveViewProps {
   /** Drags one file out, the way a row is dragged out of the list. */
   drag: (entry: string, password?: string) => Promise<void>;
   keys: (handler: ((event: KeyboardEvent) => boolean) | undefined) => void;
+  /** Opens the ZIP in the list as a folder, where a ZIP can be one. */
+  onOpenFolder?: () => void;
 }
 
 const count = (amount: number, one: string) => `${amount.toLocaleString()} ${one}${amount === 1 ? "" : "s"}`;
@@ -281,6 +284,14 @@ export function ArchiveView(live: ArchiveViewProps) {
             Extract {picked().size.toLocaleString()}
           </button>
         </Show>
+        <Show when={props.onOpenFolder}>
+          {(open) => (
+            <button class="details-button archive-as-folder" aria-label="Open the ZIP in the list, as a folder" onClick={() => open()()}>
+              <span aria-hidden="true">{ICON_FOLDER}</span>
+              Open as folder
+            </button>
+          )}
+        </Show>
         <button class="details-button" disabled={testing()} onClick={test}>
           {testing() ? "Testing…" : "Test"}
         </button>
@@ -396,43 +407,6 @@ export function ArchiveView(live: ArchiveViewProps) {
         {(waiting) => <PasswordCard wrong={waiting().wrong} onTry={(tried) => void tryPassword(tried)} onCancel={() => setAsking(undefined)} />}
       </Show>
     </div>
-  );
-}
-
-/** Asks for the archive's password, over the list, in Perli's own look. */
-function PasswordCard(props: { wrong?: string; onTry: (password: string) => void; onCancel: () => void }) {
-  let box!: HTMLInputElement;
-  return (
-    <form
-      class="archive-password"
-      aria-label="Password"
-      onSubmit={(event) => {
-        event.preventDefault();
-        if (box.value) props.onTry(box.value);
-      }}
-    >
-      <span class="archive-password-icon" aria-hidden="true">
-        {ICON_LOCK}
-      </span>
-      <label class="archive-password-label">
-        This file is under a password
-        <input ref={(element) => ((box = element), queueMicrotask(() => element.focus()))} type="password" autocomplete="off" class="archive-filter" />
-      </label>
-      <Show when={props.wrong}>
-        <p class="archive-password-wrong" role="alert">
-          {props.wrong}
-        </p>
-      </Show>
-      <span class="archive-password-buttons">
-        <button type="button" class="details-button" onClick={props.onCancel}>
-          Cancel
-        </button>
-        <button type="submit" class="details-button archive-take">
-          Unlock
-        </button>
-      </span>
-      <p class="archive-password-note">Perli keeps it only while this preview is open.</p>
-    </form>
   );
 }
 

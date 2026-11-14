@@ -12,6 +12,7 @@ export const PROP_NAMES: Record<PropColumn, string> = {
   length: "System.Media.Duration",
   taken: "date:System.Photo.DateTaken",
   dimensions: "System.Image.Dimensions",
+  packed: "zip:packed",
 };
 
 export const isProp = (id: ColumnId): id is PropColumn => id in PROP_NAMES;
@@ -77,6 +78,18 @@ export const SEARCH_COLUMNS: Column[] = [
   { id: "modified", label: "Modified", width: 160, visible: true },
   { id: "size", label: "Size", width: 90, visible: true },
 ];
+
+/** A ZIP's own columns. "packed" is what each row takes up in the ZIP. */
+export const ZIP_COLUMNS: Column[] = [
+  { id: "name", label: "Name", width: 0, visible: true },
+  { id: "modified", label: "Modified", width: 160, visible: true },
+  { id: "packed", label: "Packed", width: 130, visible: true },
+  { id: "size", label: "Size", width: 90, visible: true },
+];
+
+/** How much smaller packing made a row, in whole percent rounded down, so only nothing left reads 100. Nothing for an empty one. */
+export const savedShare = (packed: number, size: number) =>
+  size > 0 ? Math.max(0, Math.floor(((size - packed) * 100) / size)) : undefined;
 
 /** A flat view's own columns. Where each row is shows under its name. */
 export const FLAT_COLUMNS: Column[] = [

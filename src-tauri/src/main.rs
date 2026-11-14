@@ -29,6 +29,7 @@ mod tags;
 mod templates;
 mod thumbs;
 mod watch;
+mod zipped;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -243,6 +244,8 @@ enum Task {
         #[serde(default)]
         password: Option<String>,
     },
+    /// Takes all of the ZIP that `path` is in out beside it, as Extract does.
+    ExtractZip { path: String },
     Paste { folder: String },
     /// Shortcuts to the files on the clipboard, which stay where they are, cut or not.
     PasteShortcut { folder: String },
@@ -260,16 +263,24 @@ enum Task {
 impl Task {
     /// The job to run, if there is anything to do.
     fn plan(self, views: &Views, drags: &Drags) -> Result<Option<Plan>, String> {
+        // Nothing lands in a ZIP opened as a folder.
         let target = |folder: String| -> Result<PathBuf, String> {
-            Ok(folder::resolve(&folder).map_err(|error| error.message())?.into())
+            let folder: PathBuf = folder::resolve(&folder).map_err(|error| error.message())?.into();
+            if zipped::split(&folder).is_some() {
+                return Err(zipped::READ_ONLY.into());
+            }
+            Ok(folder)
         };
-        let paths = |selection: &Selection| views.read(selection, folder::Listing::paths);
+        // Rows a job changes, which can't be in a ZIP. A copy reads them with `sources`.
+        let paths = |selection: &Selection| -> Result<Vec<PathBuf>, String> {
+            let paths = views.read(selection, folder::Listing::paths)?;
+            refuse_zipped(&paths)?;
+            Ok(paths)
+        };
+        let sources = |selection: &Selection| views.read(selection, folder::Listing::paths);
         let items = |selection: &Selection| views.read(selection, folder::Listing::bin_items);
         let job = match self {
-            Self::Copy { selection, folder } => Job::Copy {
-                sources: paths(&selection)?,
-                folder: target(folder)?,
-            },
+            Self::Copy { selection, folder } => copy_job(sources(&selection)?, target(folder)?)?,
             Self::Move { selection, folder } => Job::Move {
                 sources: paths(&selection)?,
                 folder: target(folder)?,
@@ -301,8 +312,11 @@ impl Task {
                     folder: target(folder)?,
                 }
             }
-            Self::CopyPaths { paths, folder } => Job::Copy { sources: paths, folder: target(folder)? },
-            Self::MovePaths { paths, folder } => Job::Move { sources: paths, folder: target(folder)? },
+            Self::CopyPaths { paths, folder } => copy_job(paths, target(folder)?)?,
+            Self::MovePaths { paths, folder } => {
+                refuse_zipped(&paths)?;
+                Job::Move { sources: paths, folder: target(folder)? }
+            }
             Self::Template { folder, extension } => Job::Template {
                 folder: target(folder)?,
                 template: templates::template(&extension)?,
@@ -316,22 +330,23 @@ impl Task {
                 let template = content.ok_or("The clipboard holds no text or picture")?;
                 Job::Template { folder: target(folder)?, template }
             }
-            Self::SaveTemplate { selection } => Job::Copy {
-                sources: paths(&selection)?,
-                folder: templates::own_folder()?,
-            },
+            Self::SaveTemplate { selection } => copy_job(sources(&selection)?, templates::own_folder()?)?,
             Self::Zip { selection, level, password } => Job::Zip {
                 sources: paths(&selection)?,
                 level,
                 password,
             },
-            Self::Unzip { selection, own_folder, smart, only, password } => Job::Unzip {
-                archives: paths(&selection)?,
-                own_folder,
-                smart,
-                only,
-                password,
-            },
+            Self::Unzip { selection, own_folder, smart, only, password } => {
+                let archives = paths(&selection)?;
+                // One unlocked while it was open as a folder needs no asking again.
+                let password = password.or_else(|| archives.first().and_then(|archive| zipped::password(archive)));
+                Job::Unzip { archives, own_folder, smart, only, password, into: None }
+            }
+            Self::ExtractZip { path } => {
+                let (archive, _) = zipped::split(Path::new(&path)).ok_or("This isn't a ZIP")?;
+                let password = zipped::password(&archive);
+                Job::Unzip { archives: vec![archive], own_folder: false, smart: true, only: Vec::new(), password, into: None }
+            }
             Self::Paste { folder } => return paste(target(folder)?),
             Self::PasteShortcut { folder } => {
                 let files = clipboard::read().map_err(|error| error.message())?;
@@ -364,6 +379,32 @@ impl Task {
             Self::Empty => Job::Empty,
         };
         Ok(Some(job.into()))
+    }
+}
+
+fn refuse_zipped(paths: &[PathBuf]) -> Result<(), String> {
+    match paths.iter().any(|path| zipped::is_inside(path)) {
+        true => Err(zipped::READ_ONLY.into()),
+        false => Ok(()),
+    }
+}
+
+/// A copy of `sources` into `folder`. Rows of one ZIP opened as a folder come out of it the
+/// way Extract takes them, with its progress, questions and undo.
+fn copy_job(sources: Vec<PathBuf>, folder: PathBuf) -> Result<Job, String> {
+    let inside: Option<Vec<(PathBuf, String)>> =
+        sources.iter().map(|path| zipped::split(path).filter(|(_, inner)| !inner.is_empty())).collect();
+    match inside {
+        Some(inside) if inside.first().is_some_and(|(first, _)| inside.iter().all(|(archive, _)| archive == first)) => {
+            let archive = inside[0].0.clone();
+            let password = zipped::password(&archive);
+            let only = inside.into_iter().map(|(_, inner)| inner).collect();
+            Ok(Job::Unzip { archives: vec![archive], own_folder: false, smart: false, only, password, into: Some(folder) })
+        }
+        // ponytail: rows of two ZIPs, or of a ZIP and a folder, are taken out before the copy
+        // with no progress; an extract per ZIP would show it.
+        _ if sources.iter().any(|path| zipped::is_inside(path)) => Ok(Job::Copy { sources: zipped::real_all(&sources)?, folder }),
+        _ => Ok(Job::Copy { sources, folder }),
     }
 }
 
@@ -404,6 +445,10 @@ struct Opened {
     #[serde(flatten)]
     shape: folder::Shape,
     load_ms: f64,
+    /// The ZIP this folder is in, when it is one opened as a folder.
+    archive: Option<String>,
+    /// Something in that ZIP needs a password Perli doesn't have yet.
+    locked: bool,
 }
 
 #[derive(Serialize)]
@@ -584,6 +629,8 @@ async fn open_folder(
         path: resolved,
         shape: listing.shape(),
         load_ms: started.elapsed().as_secs_f64() * 1000.0,
+        archive: listing.zipped().map(|zip| zip.archive.to_string_lossy().into_owned()),
+        locked: listing.zipped().is_some_and(|zip| zip.locked && zipped::password(&zip.archive).is_none()),
     };
     let mut views = views.0.write().unwrap_or_else(|error| error.into_inner());
     if let Some(current) = views.get_mut(&view) {
@@ -600,8 +647,10 @@ async fn open_folder(
 /// on screen, and that one must go on as it was. Each read's rows keep theirs, so a read the UI
 /// drops can't keep the watch either: the next read starts by going back to the rows shown.
 fn watch_of(path: &str, expanded: &[String]) -> Option<Watch> {
-    let resolved = folder::resolve(path).ok().filter(|_| path != folder::BIN_PATH)?;
-    Some(Watch::new(std::iter::once(PathBuf::from(resolved)).chain(expanded.iter().map(PathBuf::from))))
+    let resolved = PathBuf::from(folder::resolve(path).ok().filter(|_| path != folder::BIN_PATH)?);
+    // A ZIP changes as one file, in the folder it sits in.
+    let watched = zipped::split(&resolved).map_or(resolved, |(archive, _)| ops::sys::parent(&archive));
+    Some(Watch::new(std::iter::once(watched).chain(expanded.iter().map(PathBuf::from))))
 }
 
 /// Puts the shown folder in a new order as a new snapshot, the same way an open would.
@@ -899,6 +948,10 @@ async fn set_clipboard(
     let (paths, names) = views.read(&selection, |listing, rows| {
         (listing.paths(rows), listing.names(rows))
     })?;
+    if cut {
+        refuse_zipped(&paths)?;
+    }
+    let paths = on_disk(paths).await?;
     clipboard::write(&paths, cut, jobs::owner(&app)).map_err(|error| error.message())?;
     Ok(Clipped {
         names,
@@ -1062,10 +1115,8 @@ fn place_snap_area(
 
 #[tauri::command]
 async fn open_file(path: String) -> Result<(), String> {
-    async_runtime::spawn_blocking(move || shell::open(&path))
-        .await
-        .map_err(|error| error.to_string())?
-        .map_err(|error| error.message())
+    let path = blocking(move || zipped::real(Path::new(&path))).await?;
+    off_main(move || shell::open(&path.to_string_lossy())).await
 }
 
 /// Ejects a card, a disc or a USB disk. Only the top of a drive can be asked for.
@@ -1112,11 +1163,13 @@ async fn apps_for_paths(paths: Vec<PathBuf>) -> Result<Vec<menus::App>, String> 
 
 #[tauri::command]
 async fn open_paths_with(paths: Vec<PathBuf>, app: String) -> Result<(), String> {
+    let paths = on_disk(paths).await?;
     off_main(move || menus::open_with(paths, app)).await
 }
 
 #[tauri::command]
 async fn open_paths_with_exe(paths: Vec<PathBuf>, exe: PathBuf) -> Result<(), String> {
+    let paths = on_disk(paths).await?;
     off_main(move || menus::open_with_exe(paths, exe)).await
 }
 
@@ -1171,12 +1224,13 @@ async fn import_settings(app: AppHandle) -> Result<Option<String>, String> {
 /// Windows' own window for picking an app, which is the only thing allowed to set a default.
 #[tauri::command]
 async fn choose_app_for(path: PathBuf) -> Result<(), String> {
+    let path = blocking(move || zipped::real(&path)).await?;
     off_main(move || menus::choose_app(path)).await
 }
 
 #[tauri::command]
 async fn open_with(selection: Selection, app: String, views: State<'_, Views>) -> Result<(), String> {
-    let paths = views.read(&selection, folder::Listing::paths)?;
+    let paths = on_disk(views.read(&selection, folder::Listing::paths)?).await?;
     off_main(move || menus::open_with(paths, app)).await
 }
 
@@ -1186,6 +1240,7 @@ async fn choose_app(selection: Selection, views: State<'_, Views>) -> Result<(),
         .read(&selection, folder::Listing::paths)?
         .pop()
         .ok_or("Nothing is selected")?;
+    let path = blocking(move || zipped::real(&path)).await?;
     off_main(move || menus::choose_app(path)).await
 }
 
@@ -1196,7 +1251,7 @@ async fn send_targets() -> Result<Vec<menus::SendTarget>, String> {
 
 #[tauri::command]
 async fn send_to(selection: Selection, target: PathBuf, views: State<'_, Views>) -> Result<(), String> {
-    let paths = views.read(&selection, folder::Listing::paths)?;
+    let paths = on_disk(views.read(&selection, folder::Listing::paths)?).await?;
     off_main(move || menus::send_to(paths, target)).await
 }
 
@@ -1211,19 +1266,23 @@ enum ShellTarget {
 }
 
 impl ShellTarget {
-    fn read(self, views: &Views) -> Result<menus::Target, String> {
+    /// What is in a ZIP is taken out first. A folder of one stands for the ZIP itself.
+    async fn read(self, views: &Views) -> Result<menus::Target, String> {
         Ok(match self {
             Self::Rows { selection } => {
-                menus::Target::Items(views.read(&selection, folder::Listing::paths)?)
+                menus::Target::Items(on_disk(views.read(&selection, folder::Listing::paths)?).await?)
             }
-            Self::Folder { path } => menus::Target::Folder(path.into()),
-            Self::Paths { paths } => menus::Target::Items(paths),
+            Self::Folder { path } => match zipped::split(Path::new(&path)) {
+                Some((archive, _)) => menus::Target::Items(vec![archive]),
+                None => menus::Target::Folder(path.into()),
+            },
+            Self::Paths { paths } => menus::Target::Items(on_disk(paths).await?),
         })
     }
 
     /// The items themselves, the folder being one.
-    fn paths(self, views: &Views) -> Result<Vec<PathBuf>, String> {
-        Ok(match self.read(views)? {
+    async fn paths(self, views: &Views) -> Result<Vec<PathBuf>, String> {
+        Ok(match self.read(views).await? {
             menus::Target::Items(paths) => paths,
             menus::Target::Folder(folder) => vec![folder],
         })
@@ -1239,7 +1298,7 @@ async fn show_shell_menu(
     views: State<'_, Views>,
     app: AppHandle,
 ) -> Result<Option<String>, String> {
-    let target = target.read(&views)?;
+    let target = target.read(&views).await?;
     let main = jobs::owner(&app);
     off_main(move || menus::show_menu(target, main, x, y)).await
 }
@@ -1247,7 +1306,7 @@ async fn show_shell_menu(
 /// Windows' and other apps' items for `target`, for Perli's own menu to show.
 #[tauri::command]
 async fn shell_menu_items(target: ShellTarget, views: State<'_, Views>) -> Result<Vec<menus::Entry>, String> {
-    let target = target.read(&views)?;
+    let target = target.read(&views).await?;
     off_main(move || menus::list_menu(target)).await
 }
 
@@ -1266,7 +1325,7 @@ async fn show_properties(
     views: State<'_, Views>,
     app: AppHandle,
 ) -> Result<(), String> {
-    let target = target.read(&views)?;
+    let target = target.read(&views).await?;
     let main = jobs::owner(&app);
     off_main(move || menus::show_properties(target, main, x, y)).await
 }
@@ -1275,7 +1334,7 @@ async fn show_properties(
 /// folder reloading behind the sheet can't point them at other rows.
 #[tauri::command]
 async fn item_facts(target: ShellTarget, views: State<'_, Views>) -> Result<props::Facts, String> {
-    let paths = target.paths(&views)?;
+    let paths = target.paths(&views).await?;
     off_main(move || props::facts(paths)).await
 }
 
@@ -1292,6 +1351,7 @@ async fn measure_paths(paths: Vec<PathBuf>) -> Result<Measured, String> {
 
 #[tauri::command]
 async fn path_properties(path: PathBuf) -> Result<Vec<(&'static str, String, String)>, String> {
+    let path = blocking(move || zipped::real(&path)).await?;
     off_main(move || preview::properties(&path)).await
 }
 
@@ -1342,37 +1402,75 @@ fn row_path(views: &Views, view: u32, request: u64, row: u32) -> Result<PathBuf,
     path.ok_or_else(|| "That row is gone".into())
 }
 
+/// A row's file on disk. One inside a ZIP is taken out first, but a folder there is not, since
+/// a look at it needs none of what it holds.
+async fn row_file(views: &Views, view: u32, request: u64, row: u32) -> Result<PathBuf, String> {
+    let selection = Selection { view, request, rows: vec![row], ranges: Vec::new() };
+    let (path, facts) = views.read(&selection, |listing, rows| (listing.paths(rows).pop(), listing.facts(rows).pop()))?;
+    let path = path.ok_or("That row is gone")?;
+    if facts.is_some_and(|(_, folder)| folder) {
+        return Ok(path);
+    }
+    blocking(move || zipped::real(&path)).await
+}
+
+/// `paths` on disk: what is inside a ZIP is taken out first.
+async fn on_disk(paths: Vec<PathBuf>) -> Result<Vec<PathBuf>, String> {
+    blocking(move || zipped::real_all(&paths)).await
+}
+
+/// A row's picture, `edge` pixels on its longest side. One in a ZIP is drawn from the archive,
+/// so pictures never taken out leave nothing behind in Windows' thumbnail cache.
+async fn row_picture(views: &Views, view: u32, request: u64, row: u32, edge: u32) -> Result<Response, String> {
+    let path = row_path(views, view, request, row)?;
+    let bytes = match zipped::split(&path).filter(|(_, inner)| !inner.is_empty()) {
+        Some((archive, inner)) => blocking(move || Ok(zipped::picture(&archive, &inner, edge))).await?,
+        None => thumbs::read(path, edge).await,
+    };
+    Ok(Response::new(bytes))
+}
+
 /// The picture of one row, in the format `thumbs::read` describes.
 #[tauri::command]
 async fn thumbnail(view: u32, request: u64, row: u32, views: State<'_, Views>) -> Result<Response, String> {
-    let path = row_path(&views, view, request, row)?;
-    Ok(Response::new(thumbs::read(path, thumbs::EDGE).await))
+    row_picture(&views, view, request, row, thumbs::EDGE).await
 }
 
 /// A bigger picture of one row, for the quick preview. `edge` is in device pixels.
 #[tauri::command]
 async fn big_picture(view: u32, request: u64, row: u32, edge: u32, views: State<'_, Views>) -> Result<Response, String> {
-    let path = row_path(&views, view, request, row)?;
-    Ok(Response::new(thumbs::read(path, edge).await))
+    row_picture(&views, view, request, row, edge).await
+}
+
+/// Checks the password of the ZIP `path` is in and keeps it for the session, so its locked
+/// files open, preview and come out.
+#[tauri::command]
+async fn unlock_zip(path: PathBuf, password: String) -> Result<(), String> {
+    blocking(move || {
+        let (archive, _) = zipped::split(&path).ok_or("This isn't a ZIP")?;
+        zipped::unlock(&archive, &password)
+    })
+    .await
 }
 
 /// A picture's own width and height in pixels, if Windows' imaging can read them.
 #[tauri::command]
 async fn picture_size(view: u32, request: u64, row: u32, views: State<'_, Views>) -> Result<Option<(u32, u32)>, String> {
-    let path = row_path(&views, view, request, row)?;
+    let path = row_file(&views, view, request, row).await?;
     blocking(move || Ok(inside::pixel_size(&path))).await
 }
 
 /// A picture a Markdown file points to, beside it on this PC.
 #[tauri::command]
 async fn picture_file(path: PathBuf, edge: u32) -> Response {
+    let path = blocking(move || zipped::real(&path)).await.unwrap_or_default();
     Response::new(thumbs::read(path, edge).await)
 }
 
 /// What the quick preview shows for one row, from `offset` for the later pieces of a text.
 #[tauri::command]
 async fn preview_row(view: u32, request: u64, row: u32, offset: u64, views: State<'_, Views>) -> Result<preview::Preview, String> {
-    let path = row_path(&views, view, request, row)?;
+    let path = row_file(&views, view, request, row).await?;
     async_runtime::spawn_blocking(move || preview::read(&path, offset))
         .await
         .map_err(|error| error.to_string())
@@ -1389,7 +1487,7 @@ async fn archive_picture(
     password: Option<String>,
     views: State<'_, Views>,
 ) -> Result<Response, String> {
-    let path = row_path(&views, view, request, row)?;
+    let path = row_file(&views, view, request, row).await?;
     let bytes = blocking(move || inside::picture(&path, &entry, edge, password.as_deref())).await?;
     Ok(Response::new(bytes))
 }
@@ -1397,7 +1495,7 @@ async fn archive_picture(
 /// Reads every file of a ZIP back, to learn whether the archive is whole.
 #[tauri::command]
 async fn archive_test(view: u32, request: u64, row: u32, password: Option<String>, views: State<'_, Views>) -> Result<inside::Tested, String> {
-    let path = row_path(&views, view, request, row)?;
+    let path = row_file(&views, view, request, row).await?;
     blocking(move || inside::test(&path, password.as_deref())).await
 }
 
@@ -1425,7 +1523,7 @@ fn sweep_drags(root: &Path, keep: Duration) {
 /// Drags one file out of a ZIP: it is taken out to a temporary folder first, as Windows drags files.
 #[tauri::command]
 async fn drag_entry(view: u32, request: u64, row: u32, entry: String, password: Option<String>, views: State<'_, Views>, app: AppHandle) -> Result<(), String> {
-    let path = row_path(&views, view, request, row)?;
+    let path = row_file(&views, view, request, row).await?;
     let taken = blocking(move || {
         // A sweep takes it away after DRAG_KEEP, since the app it was dropped on may still be
         // copying it or have it open after the drop.
@@ -1441,14 +1539,14 @@ async fn drag_entry(view: u32, request: u64, row: u32, entry: String, password: 
 /// The loudest point of each slice of a sound, for its waveform, read a little at a time.
 #[tauri::command]
 async fn audio_peaks(view: u32, request: u64, row: u32, bars: usize, views: State<'_, Views>) -> Result<Vec<f32>, String> {
-    let path = row_path(&views, view, request, row)?;
+    let path = row_file(&views, view, request, row).await?;
     blocking(move || sound::peaks(&path, bars)).await
 }
 
 /// The words beside a file under its own name: a song's lyrics (`lrc`) or a film's subtitles.
 #[tauri::command]
 async fn beside_text(view: u32, request: u64, row: u32, extension: String, views: State<'_, Views>) -> Result<Option<String>, String> {
-    let path = row_path(&views, view, request, row)?;
+    let path = row_file(&views, view, request, row).await?;
     blocking(move || Ok(preview::beside_text(&path, &extension))).await
 }
 
@@ -1466,43 +1564,45 @@ fn save_frame(request: tauri::ipc::Request<'_>, views: State<'_, Views>) -> Resu
     let word = |at: usize| u32::from_le_bytes(body[at..at + 4].try_into().unwrap());
     let float = |at: usize| f64::from_le_bytes(body[at..at + 8].try_into().unwrap());
     let path = row_path(&views, word(0), float(8) as u64, word(4))?;
+    // Nothing lands beside a film in a ZIP.
+    refuse_zipped(std::slice::from_ref(&path))?;
     preview::save_frame(&path, float(16).max(0.0) as u64, &body[HEAD..])
 }
 
 /// The file a player asks for: a row of the list, or a path, for a song that plays on after its
-/// list has gone.
-fn media_path(views: &Views, view: u32, request: u64, row: u32, path: Option<PathBuf>) -> Result<PathBuf, String> {
+/// list has gone. One inside a ZIP is taken out first, as a player needs a real file.
+async fn media_path(views: &Views, view: u32, request: u64, row: u32, path: Option<PathBuf>) -> Result<PathBuf, String> {
     match path {
-        Some(path) => Ok(path),
-        None => row_path(views, view, request, row),
+        Some(path) => blocking(move || zipped::real(&path)).await,
+        None => row_file(views, view, request, row).await,
     }
 }
 
 /// The start of a text file inside a ZIP, or nothing if it is not text.
 #[tauri::command]
 async fn archive_text(view: u32, request: u64, row: u32, entry: String, password: Option<String>, views: State<'_, Views>) -> Result<Option<String>, String> {
-    let path = row_path(&views, view, request, row)?;
+    let path = row_file(&views, view, request, row).await?;
     blocking(move || inside::text(&path, &entry, password.as_deref())).await
 }
 
 /// Whether `password` opens the locked `entry`, read all the way through.
 #[tauri::command]
 async fn archive_password(view: u32, request: u64, row: u32, entry: String, password: String, views: State<'_, Views>) -> Result<(), String> {
-    let path = row_path(&views, view, request, row)?;
+    let path = row_file(&views, view, request, row).await?;
     blocking(move || inside::check_password(&path, &entry, &password)).await
 }
 
 /// One chapter of a book, made safe to show.
 #[tauri::command]
 async fn book_chapter(view: u32, request: u64, row: u32, entry: String, views: State<'_, Views>) -> Result<String, String> {
-    let path = row_path(&views, view, request, row)?;
+    let path = row_file(&views, view, request, row).await?;
     blocking(move || inside::chapter(&path, &entry)).await
 }
 
 /// A 3D model's bytes or, with `part`, those of a file beside it that the model points to.
 #[tauri::command]
 async fn model_file(view: u32, request: u64, row: u32, part: Option<String>, views: State<'_, Views>) -> Result<Response, String> {
-    let path = row_path(&views, view, request, row)?;
+    let path = row_file(&views, view, request, row).await?;
     let bytes = blocking(move || preview::model_file(&path, part.as_deref())).await?;
     Ok(Response::new(bytes))
 }
@@ -1522,7 +1622,7 @@ async fn song_audio(
     views: State<'_, Views>,
     streams: State<'_, midi::Streams>,
 ) -> Result<u64, String> {
-    let path = media_path(&views, view, request, row, path)?;
+    let path = media_path(&views, view, request, row, path).await?;
     let own = font.filter(|font| font.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("sf2")));
     let font = match own {
         Some(font) => font,
@@ -1547,14 +1647,14 @@ fn forget_song(number: u64, streams: State<'_, midi::Streams>) {
 /// A MIDI file's name, instruments and notes, for the piano roll.
 #[tauri::command]
 async fn song_info(view: u32, request: u64, row: u32, views: State<'_, Views>) -> Result<midi::SongInfo, String> {
-    let path = row_path(&views, view, request, row)?;
+    let path = row_file(&views, view, request, row).await?;
     blocking(move || midi::info(&path)).await
 }
 
 /// A MIDI file's notes, packed, for the piano roll. See `SongInfo::packed_notes`.
 #[tauri::command]
 async fn song_notes(view: u32, request: u64, row: u32, views: State<'_, Views>) -> Result<Response, String> {
-    let path = row_path(&views, view, request, row)?;
+    let path = row_file(&views, view, request, row).await?;
     blocking(move || midi::info(&path).map(|info| Response::new(info.packed_notes()))).await
 }
 
@@ -1569,7 +1669,7 @@ async fn open_audio(
     app: AppHandle,
     views: State<'_, Views>,
 ) -> Result<(String, preview::Tags), String> {
-    let path = media_path(&views, view, request, row, path)?;
+    let path = media_path(&views, view, request, row, path).await?;
     // ponytail: files stay open to the window for the session, as a scope can't take one back
     // and allow it again later. Fine while only the window's own code asks for them.
     app.asset_protocol_scope().allow_file(&path).map_err(|error| error.to_string())?;
@@ -1581,7 +1681,7 @@ async fn open_audio(
 /// An AIFF file as a WAV, which the window can play.
 #[tauri::command]
 async fn aiff_audio(view: u32, request: u64, row: u32, path: Option<PathBuf>, views: State<'_, Views>) -> Result<Response, String> {
-    let path = media_path(&views, view, request, row, path)?;
+    let path = media_path(&views, view, request, row, path).await?;
     let wav = blocking(move || sound::aiff_to_wav(&sound::read_aiff(&path)?)).await?;
     Ok(Response::new(wav))
 }
@@ -1589,7 +1689,7 @@ async fn aiff_audio(view: u32, request: u64, row: u32, path: Option<PathBuf>, vi
 /// A song's album cover, or nothing if it has none of its own.
 #[tauri::command]
 async fn cover(view: u32, request: u64, row: u32, edge: u32, views: State<'_, Views>) -> Result<Response, String> {
-    let path = row_path(&views, view, request, row)?;
+    let path = row_file(&views, view, request, row).await?;
     // Windows shows no picture for a FLAC, so its own is read from the file.
     if path.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("flac")) && !thumbs::is_online_only(&path) {
         let from = path.clone();
@@ -1604,7 +1704,7 @@ async fn cover(view: u32, request: u64, row: u32, edge: u32, views: State<'_, Vi
 /// Every property Windows shows for one row, as label and value.
 #[tauri::command]
 async fn row_properties(view: u32, request: u64, row: u32, views: State<'_, Views>) -> Result<Vec<(&'static str, String, String)>, String> {
-    let path = row_path(&views, view, request, row)?;
+    let path = row_file(&views, view, request, row).await?;
     off_main(move || preview::properties(&path)).await
 }
 
@@ -1617,7 +1717,7 @@ async fn checksum(
     algorithm: String,
     views: State<'_, Views>,
 ) -> Result<Option<String>, String> {
-    let path = row_path(&views, view, request, row)?;
+    let path = row_file(&views, view, request, row).await?;
     async_runtime::spawn_blocking(move || preview::hash(&path, &algorithm, view))
         .await
         .map_err(|error| error.to_string())?
@@ -1627,9 +1727,7 @@ async fn checksum(
 /// The first lines of a text file, for its hover card.
 #[tauri::command]
 async fn peek_text(view: u32, request: u64, row: u32, views: State<'_, Views>) -> Result<Option<String>, String> {
-    let selection = Selection { view, request, rows: vec![row], ranges: Vec::new() };
-    let path = views.read(&selection, folder::Listing::paths)?.pop();
-    let path = path.ok_or("That row is gone")?;
+    let path = row_file(&views, view, request, row).await?;
     async_runtime::spawn_blocking(move || thumbs::text_start(&path))
         .await
         .map_err(|error| error.to_string())
@@ -1638,15 +1736,15 @@ async fn peek_text(view: u32, request: u64, row: u32, views: State<'_, Views>) -
 /// A whole text file, for a compare. Nothing when it is not text.
 #[tauri::command]
 async fn whole_text(view: u32, request: u64, row: u32, views: State<'_, Views>) -> Result<Option<String>, String> {
-    let selection = Selection { view, request, rows: vec![row], ranges: Vec::new() };
-    let path = views.read(&selection, folder::Listing::paths)?.pop().ok_or("That row is gone")?;
+    // One in a ZIP is read from what was taken out.
+    let path = row_file(&views, view, request, row).await?;
     blocking(move || preview::whole_text(&path)).await
 }
 
 /// What is in a folder, for its hover card.
 #[tauri::command]
 async fn peek_folder(view: u32, request: u64, row: u32, views: State<'_, Views>) -> Result<Option<thumbs::FolderStart>, String> {
-    let path = row_path(&views, view, request, row)?;
+    let path = row_file(&views, view, request, row).await?;
     blocking(move || Ok(thumbs::folder_start(&path))).await
 }
 
@@ -1738,7 +1836,7 @@ async fn delete_tag(id: u32) -> Result<(), String> {
 
 #[tauri::command]
 async fn set_tag(target: ShellTarget, tag: u32, on: bool, views: State<'_, Views>) -> Result<(), String> {
-    let paths = target.paths(&views)?;
+    let paths = target.paths(&views).await?;
     with_tags(move || tags::set(&paths, tag, on)).await
 }
 
@@ -1771,7 +1869,7 @@ async fn keep_on_device(selection: Selection, keep: bool, views: State<'_, Views
 /// The tags all the selected rows have.
 #[tauri::command]
 async fn common_tags(target: ShellTarget, views: State<'_, Views>) -> Result<Vec<u32>, String> {
-    let paths = target.paths(&views)?;
+    let paths = target.paths(&views).await?;
     with_tags(move || tags::common(&paths)).await
 }
 
@@ -1796,11 +1894,26 @@ fn count_where(view: u32, request: u64, filter: folder::Filter, views: State<'_,
     views.read(&selection, |listing, _| listing.fitting(&filter).len())
 }
 
+/// The column of a ZIP's rows that shows how small each is packed.
+const PACKED: &str = "zip:packed";
+
 /// What the extra columns show for `rows`, such as a song's artist or when a picture was taken.
 #[tauri::command]
 async fn row_props(view: u32, request: u64, rows: Vec<u32>, names: Vec<String>, views: State<'_, Views>) -> Result<Vec<Vec<Option<String>>>, String> {
-    let paths = views.read(&Selection { view, request, rows, ranges: Vec::new() }, folder::Listing::row_paths)?;
-    blocking(move || Ok(preview::props_of(&paths, &names))).await
+    let (paths, packed) = views.read(&Selection { view, request, rows, ranges: Vec::new() }, |listing, rows| {
+        (listing.row_paths(rows), listing.packed(rows))
+    })?;
+    blocking(move || {
+        let mut values = preview::props_of(&paths, &names);
+        // A ZIP's rows know their packed size, which no Windows property holds.
+        for at in (0..names.len()).filter(|&at| names[at] == PACKED) {
+            for (row, value) in values.iter_mut().enumerate() {
+                value[at] = packed[row].map(|bytes| bytes.to_string());
+            }
+        }
+        Ok(values)
+    })
+    .await
 }
 
 /// The most pictures the cover picker offers. A folder with more is better served by Browse.
@@ -1906,14 +2019,14 @@ async fn selection_paths(selection: Selection, views: State<'_, Views>) -> Resul
 /// Windows' drag loop must run on the main thread, and not inside this call from the web view.
 #[tauri::command]
 async fn start_drag(selection: Selection, views: State<'_, Views>, app: AppHandle) -> Result<(), String> {
-    let paths = views.read(&selection, folder::Listing::paths)?;
+    let paths = on_disk(views.read(&selection, folder::Listing::paths)?).await?;
     drag_out(paths, app).await
 }
 
 /// A drag of files off the shelf, which Windows runs like any other.
 #[tauri::command]
 async fn start_drag_paths(paths: Vec<PathBuf>, app: AppHandle) -> Result<(), String> {
-    drag_out(paths, app).await
+    drag_out(on_disk(paths).await?, app).await
 }
 
 async fn drag_out(paths: Vec<PathBuf>, app: AppHandle) -> Result<(), String> {
@@ -2210,6 +2323,7 @@ fn main() {
             file_users,
             thumbnail,
             big_picture,
+            unlock_zip,
             picture_size,
             archive_text,
             archive_password,
@@ -2290,6 +2404,50 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_copy_out_of_a_zip_is_an_extract_and_nothing_lands_in_one() {
+        use std::io::Write;
+        let folder = std::env::temp_dir().join(format!("perli-copy-job-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let archive = folder.join("pack.zip");
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(&archive).unwrap());
+        zip.start_file("docs/a.txt", zip::write::SimpleFileOptions::default()).unwrap();
+        zip.write_all(b"alpha").unwrap();
+        zip.finish().unwrap();
+        let row = archive.join("docs").join("a.txt");
+
+        let job = copy_job(vec![row.clone()], folder.clone()).unwrap();
+        assert!(matches!(&job, Job::Unzip { archives, only, into: Some(into), .. }
+            if archives == std::slice::from_ref(&archive) && only == &["docs/a.txt"] && into == &folder));
+        assert!(matches!(copy_job(vec![archive.clone()], folder.clone()).unwrap(), Job::Copy { .. }));
+        assert_eq!(refuse_zipped(&[row]), Err(zipped::READ_ONLY.to_string()));
+        assert_eq!(refuse_zipped(&[archive]), Ok(()));
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    #[test]
+    fn a_player_gets_a_real_file_for_a_song_in_a_zip() {
+        use std::io::Write;
+        let folder = std::env::temp_dir().join(format!("perli-media-path-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let archive = folder.join("pack.zip");
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(&archive).unwrap());
+        zip.start_file("music/song.mp3", zip::write::SimpleFileOptions::default()).unwrap();
+        zip.write_all(b"not really a song").unwrap();
+        zip.finish().unwrap();
+
+        // A queued song comes as its path, with no row behind it.
+        let queued = archive.join("music").join("song.mp3");
+        let path = async_runtime::block_on(media_path(&Views::default(), 0, 0, 0, Some(queued.clone()))).unwrap();
+        assert_ne!(path, queued);
+        assert_eq!(std::fs::read(&path).unwrap(), b"not really a song");
+        // One outside a ZIP stays as it is.
+        let plain = folder.join("plain.mp3");
+        assert_eq!(async_runtime::block_on(media_path(&Views::default(), 0, 0, 0, Some(plain.clone()))).unwrap(), plain);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        let _ = std::fs::remove_dir_all(&folder);
+    }
 
     #[test]
     fn a_folder_argument_survives_the_way_windows_quotes_a_drive() {
