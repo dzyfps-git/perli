@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { byDay, groupsOf, holds, lookKey, moved, movedTo, placeLabel, savedPaths, toggled, withGroup, withLook } from "./placeLists.ts";
+import { byDay, groupsOf, holds, lookIn, lookKey, moved, movedTo, placeLabel, savedPaths, toggled, withGroup, withLook } from "./placeLists.ts";
 
 test("toggling adds at the end and takes out whatever the case", () => {
   const list = toggled(toggled([], "C:\\A"), "D:\\B");
@@ -42,6 +42,18 @@ test("a look changes in parts and goes once it is empty", () => {
   const covered = withLook({}, "C:\\Trip", { cover: "C:\\Trip\\beach.jpg" });
   assert.deepEqual(covered, { "c:\\trip": { cover: "C:\\Trip\\beach.jpg" } });
   assert.deepEqual(withLook(covered, "C:\\Trip", { cover: undefined }), {});
+});
+
+test("a look handed to the folders inside reaches every depth, but not past their own", () => {
+  let looks = withLook({}, "C:\\Work", { color: 2, inside: true });
+  looks = withLook(looks, "C:\\Work\\Old\\Mine", { icon: "\uE734" });
+  looks = withLook(looks, "C:\\Work\\Old", { cover: "C:\\Work\\Old\\a.jpg" });
+  assert.deepEqual(lookIn(looks, "c:\\work\\a\\b\\c"), { color: 2, icon: undefined });
+  assert.deepEqual(lookIn(looks, "C:\\Work\\Old"), { cover: "C:\\Work\\Old\\a.jpg", color: 2, icon: undefined });
+  assert.deepEqual(lookIn(looks, "C:\\Work\\Old\\Mine\\Deeper"), { color: 2, icon: undefined }, "an own look hands nothing down");
+  assert.deepEqual(lookIn(looks, "C:\\Work\\Old\\Mine"), { icon: "\uE734" });
+  assert.equal(lookIn(looks, "C:\\Workshop"), undefined);
+  assert.deepEqual(withLook(looks, "C:\\Work", { color: undefined })["c:\\work"], undefined, "nothing left to hand down");
 });
 
 test("bookmark groups are kept by path, whatever its case", () => {

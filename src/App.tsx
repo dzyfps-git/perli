@@ -71,7 +71,7 @@ import { DisconnectDrive, MapDrive } from "./features/dialogs/NetworkDrives";
 import { Properties } from "./features/dialogs/Properties";
 import { NO_FILTER, toFilter } from "./features/filelist/filter";
 import { FilterChips } from "./features/pathbar/FilterChips";
-import { BIN_COLUMNS, FLAT_COLUMNS, isProp, nextGrouping, nextSort, SEARCH_COLUMNS } from "./features/filelist/columns";
+import { BIN_COLUMNS, FLAT_COLUMNS, nextGrouping, nextSort, SEARCH_COLUMNS } from "./features/filelist/columns";
 import { GROUP_CHOICES, groupLabel } from "./features/filelist/groups";
 import type { Empty } from "./features/filelist/EmptyState";
 import { FileList } from "./features/filelist/FileList";
@@ -1059,7 +1059,7 @@ export function App() {
     const sortItems = own
       ? [
           ...(view.query() ? [sortItem("Best match", "found")] : []),
-          ...own.flatMap((column) => (isProp(column.id) ? [] : [sortItem(column.label, column.id)])),
+          ...own.map((column) => sortItem(column.label, column.id)),
         ]
       : [
           sortItem("Name", "name"),
@@ -1875,6 +1875,7 @@ export function App() {
                 snapshot={view.folder()!.request}
                 rearranged={view.folder()!.rearranged}
                 count={view.folder()!.count}
+                items={view.folder()!.items}
                 selected={view.folder()!.selected}
                 reveal={view.folder()!.reveal}
                 rename={view.folder()!.rename}

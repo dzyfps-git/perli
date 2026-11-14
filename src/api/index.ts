@@ -10,12 +10,16 @@ export interface Opened {
   /** The resolved full path. */
   path: string;
   count: number;
+  /** How many files the rows stand for, fewer than `count` when a file stands under two tags. */
+  items: number;
   /** Hidden entries in the folder, shown or not. */
   hiddenCount: number;
   /** The rows under each header, in order. Empty when the rows are not grouped. */
   groups: Group[];
   /** The biggest size a row shows, which the size bars measure against. */
   largest: number;
+  /** Files a search by tag couldn't reach, on a drive or computer that isn't here. */
+  away: number;
   loadMs: number;
   /** Rows to select straight away, when this is a new order of the same folder. */
   selected?: number[];
@@ -52,10 +56,12 @@ export interface Tag {
 }
 
 export type SortKey = "name" | "modified" | "created" | "type" | "size" | "location";
+/** The extra columns, read from each file's own properties. */
+export type PropKey = "artist" | "album" | "length" | "taken" | "dimensions";
 
 export interface Sort {
   /** `found` is the order a search found its rows in, which no column stands for. */
-  key: SortKey | "found" | "tags";
+  key: SortKey | PropKey | "found" | "tags";
   descending: boolean;
 }
 
@@ -78,9 +84,11 @@ export interface Group {
 /** What a new order of the same rows tells the list. */
 export interface Arranged {
   count: number;
+  items: number;
   hiddenCount: number;
   groups: Group[];
   largest: number;
+  away: number;
   selected: number[];
 }
 
@@ -661,7 +669,8 @@ export const rowProps = (view: number, request: number, rows: number[], names: s
 export const folderPictures = (path: string) => invoke<string[]>("folder_pictures", { path });
 
 /** The bytes of the selected files, from the listing alone. Folders count as nothing. */
-export const selectionSize = (selection: Selection) => invoke<number>("selection_size", { selection });
+/** How many files the rows are, each once, and their size. */
+export const selectionSize = (selection: Selection) => invoke<[number, number]>("selection_size", { selection });
 
 /** The accent color picked in Windows, as `#rrggbb`. */
 export const windowsAccent = () => invoke<string | null>("windows_accent");

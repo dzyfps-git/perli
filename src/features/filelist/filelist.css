@@ -237,6 +237,39 @@
   text-overflow: ellipsis;
 }
 
+/* A tagged name: the name gives way, the pills keep their room. Roomy rows keep the cell a
+   block, since a flex line beside the floated icon narrows to fit it. Elsewhere the line's
+   parts join the cell's own flex row, the arrow still first. */
+.file-grid[data-layout="list"]:not([data-density="roomy"]) .file-name:has(> .file-line) {
+  display: flex;
+  align-items: center;
+}
+
+.file-line {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.file-grid[data-layout="list"]:not([data-density="roomy"]) .file-line {
+  display: contents;
+}
+
+.file-line > .file-twist,
+.file-name > .file-icon {
+  flex: none;
+}
+
+.file-line > .file-twist {
+  order: -1;
+}
+
+.file-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .file-row[data-folder] .file-name {
   font-weight: 600;
 }
@@ -1114,11 +1147,6 @@ html[data-blurred] :is(.empty-float, .empty-shadow) {
   background: linear-gradient(to left, color-mix(in oklch, var(--accent) 34%, transparent), color-mix(in oklch, var(--accent) 12%, transparent));
   translate: 0 -50%;
   pointer-events: none;
-}
-
-/* A column read from the files' own properties has no order to sort by. */
-.column-title[data-plain] .column-button {
-  cursor: default;
 }
 
 /* A folder tile wearing a stack of what is inside keeps a small folder mark in its corner. */

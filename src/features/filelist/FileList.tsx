@@ -322,6 +322,8 @@ export function FileList(props: {
   onFold: (key: string, every: boolean) => void;
   /** The biggest size a row shows, for the size bars. */
   largest: number;
+  /** How many files the rows stand for. A file under two tags has two rows. */
+  items: number;
   /** Rows show where each is, under their names, as a flat view does. */
   paths?: boolean;
   /** The grid is an even wall of pictures, edge to edge, with no names. */
@@ -341,7 +343,7 @@ export function FileList(props: {
   active: boolean;
   layout: Layout;
   sort: Sort;
-  onSort: (key: SortKey) => void;
+  onSort: (key: ColumnId) => void;
   /** The pointer dragged the selected rows far enough to start a real file drag. */
   onDragOut: () => void;
   onOpen: (row: Row, toSide: boolean) => void;
@@ -505,6 +507,10 @@ export function FileList(props: {
         if (snapshot !== props.snapshot) return;
         pages.set(page, rows);
         if (pages.size > MAX_PAGES) pages.delete(pages.keys().next().value!);
+        // The row just after this page could not tell its day from the one above it until now.
+        const after = (page + 1) * PAGE_SIZE;
+        const below = pool[after % pool.length];
+        if (byDay() && below?.index === after) below.filled = false;
         paint();
       })
       .catch(console.error)
@@ -567,7 +573,10 @@ export function FileList(props: {
     const natural = (element: Element) => {
       measure.selectNodeContents(element);
       const style = getComputedStyle(element);
-      return measure.getBoundingClientRect().width + parseFloat(style.paddingLeft) + parseFloat(style.paddingRight);
+      // A shortened name hides the part the pills after it would need room for.
+      const label = element.querySelector(".file-label");
+      const hidden = label ? label.scrollWidth - label.clientWidth : 0;
+      return measure.getBoundingClientRect().width + hidden + parseFloat(style.paddingLeft) + parseFloat(style.paddingRight);
     };
     const widths = pool.flatMap((pooled) =>
       pooled.filled ? pooled.cells.filter((cell) => cell.id === id).map((cell) => natural(cell.element)) : [],
@@ -621,7 +630,7 @@ export function FileList(props: {
     pooled.element.toggleAttribute("data-system", row?.isSystem ?? false);
     pooled.element.toggleAttribute("data-cut", !!row && !row.location && !!props.cut?.has(row.name));
     // The bin by date deleted reads in days: a small label where one day gives way to the next.
-    // ponytail: a row whose neighbour above is not loaded yet goes without, until it refills.
+    // A row whose neighbour above is not loaded yet gets its label once that page arrives.
     const day = row && byDay() ? dayOf(row.modified, Date.now()) : undefined;
     const above = day && index > 0 ? rowAt(index - 1) : undefined;
     if (day && (index === 0 || (above && dayOf(above.modified, Date.now()) !== day))) pooled.element.dataset.day = day;
@@ -654,10 +663,20 @@ export function FileList(props: {
       const { id } = cell;
       cell.element.textContent = !row ? "" : isProp(id) ? propText(row, index, id) : CELL_TEXT[id](row, props.folder);
       if (id === "name") {
-        if (row && inList) cell.element.append(...row.tags.flatMap((id) => tagMark(id, true)));
-        else if (row) cell.element.prepend(...row.tags.flatMap((id) => tagMark(id, false)));
+        const pills = row && inList ? row.tags.flatMap((id) => tagMark(id, true)) : [];
+        // The name shortens on its own, so a long one never hides the pills after it.
+        let line: HTMLElement | undefined;
+        if (pills.length) {
+          const label = document.createElement("span");
+          label.className = "file-label";
+          label.append(...cell.element.childNodes);
+          line = document.createElement("span");
+          line.className = "file-line";
+          line.append(label, ...pills);
+          cell.element.append(line);
+        } else if (row && !inList) cell.element.prepend(...row.tags.flatMap((id) => tagMark(id, false)));
         if (inList) cell.element.prepend(pooled.icon);
-        if (nests()) cell.element.prepend(twistOf(pooled, row));
+        if (nests()) (line ?? cell.element).prepend(twistOf(pooled, row));
         // A flat view says where each row is, which matters more there than its kind and size.
         const where = row && props.paths ? relativeTo(props.folder, row.location) || "In this folder" : undefined;
         if (row && inList && density() === "roomy") cell.element.dataset.sub = where ?? subText(row);
@@ -702,7 +721,8 @@ export function FileList(props: {
     for (const range of pooled.matches ?? []) nameMatches.delete(range);
     pooled.matches = undefined;
     const cell = pooled.cells.find((cell) => cell.id === "name")?.element;
-    const text = cell && [...cell.childNodes].find((node) => node instanceof Text);
+    const holder = cell?.querySelector(".file-label") ?? cell;
+    const text = holder && [...holder.childNodes].find((node) => node instanceof Text);
     if (!row || !props.match || !(text instanceof Text)) return;
     pooled.matches = matchSpans(row.name, props.match).map(([start, end]) => {
       const range = new Range();
@@ -877,11 +897,14 @@ export function FileList(props: {
     window.clearTimeout(sizeTimer);
     const ticket = ++sizeTicket;
     if (count === picked().count && count === 0) return;
-    setPicked({ count, bytes: count === 0 ? 0 : picked().bytes });
-    if (count === 0 || count > MOST_SIZED_ROWS) return setPicked({ count, bytes: 0 });
+    // Rows of the same file count once, which only the listing knows, so until it answers the
+    // count stays as it was.
+    const repeats = props.items < props.count;
+    if (!repeats || count === 0) setPicked({ count, bytes: count === 0 ? 0 : picked().bytes });
+    if (count === 0 || (count > MOST_SIZED_ROWS && !repeats)) return setPicked({ count, bytes: 0 });
     sizeTimer = window.setTimeout(() => {
       selectionSize({ view: props.view, request: shown, rows: selection.rows() })
-        .then((bytes) => ticket === sizeTicket && setPicked({ count, bytes }))
+        .then(([items, bytes]) => ticket === sizeTicket && setPicked({ count: items, bytes: count > MOST_SIZED_ROWS ? 0 : bytes }))
         // A reload in between forgets the snapshot, and the next change asks again.
         .catch(() => undefined);
     }, WHISPER_WAIT_MS);
@@ -897,10 +920,10 @@ export function FileList(props: {
   const whisperText = () => {
     const { count, bytes } = picked();
     if (count > 0) {
-      const of = count > 1 || props.count > 1 ? ` of ${props.count.toLocaleString()}` : "";
+      const of = count > 1 || props.items > 1 ? ` of ${props.items.toLocaleString()}` : "";
       return `${count.toLocaleString()}${of} selected${bytes > 0 ? ` · ${formatSize(bytes)}` : ""}`;
     }
-    return props.match ? counted(props.count, "match", "matches") : counted(props.count, "item", "items");
+    return props.match ? counted(props.items, "match", "matches") : counted(props.items, "item", "items");
   };
   /** An empty list says so itself, in its middle. */
   const barShown = () => selectionBar() && picked().count > 0 && !editor();
@@ -1647,7 +1670,7 @@ export function FileList(props: {
       <Show when={barShown()}>
         <SelectionBar
           count={picked().count}
-          of={props.count}
+          of={props.items}
           bytes={picked().bytes}
           items={props.barItems()}
           onClear={() => {

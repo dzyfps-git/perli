@@ -1,7 +1,8 @@
-import type { Grouping, Sort, SortKey } from "../../api";
+import type { Grouping, PropKey, Sort, SortKey } from "../../api";
 
-/** Columns read from each file's own properties, a screenful at a time, which no sort uses. */
-export type PropColumn = "artist" | "album" | "length" | "taken" | "dimensions";
+/** Columns read from each file's own properties, a screenful at a time. A sort by one reads
+ *  them all in Rust. */
+export type PropColumn = PropKey;
 export type ColumnId = SortKey | PropColumn;
 
 /** Which Windows property each one shows. A `date:` one comes as milliseconds. */
@@ -28,7 +29,7 @@ export interface Column {
 
 export const MIN_COLUMN_WIDTH = 60;
 const NAME_MIN_WIDTH = 120;
-const LARGEST_FIRST: Sort["key"][] = ["modified", "created", "size"];
+const LARGEST_FIRST: Sort["key"][] = ["modified", "created", "size", "taken", "length"];
 
 export const DEFAULT_COLUMNS: Column[] = [
   { id: "name", label: "Name", width: 0, visible: true },
