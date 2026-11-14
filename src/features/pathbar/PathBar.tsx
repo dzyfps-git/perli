@@ -314,17 +314,19 @@ export function PathBar(props: {
   }
 
   const searchStatus = () => {
-    const count = props.view.folder()?.count ?? 0;
+    const count = props.view.folder()?.items ?? 0;
     if (!props.view.query()) return "";
     if (props.view.searching()) return "Searching…";
     if (props.view.moreToFind()) return `${count.toLocaleString()}+ matches`;
     return count === 1 ? "1 match" : `${count.toLocaleString()} matches`;
   };
 
+  // Inside an effect the crumbs hidden by a fold only leave the page once it ends, so the fit
+  // measures after, or it sees no change and folds all or nothing.
   createEffect(() => {
     crumbs();
     depth();
-    revealCurrent();
+    queueMicrotask(revealCurrent);
   });
 
   createEffect(
