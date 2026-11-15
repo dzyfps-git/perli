@@ -11,7 +11,7 @@ test("latest.json points at the installer the release uploads", () => {
     platforms: {
       "windows-x86_64": {
         signature: "sig",
-        url: "https://github.com/dzyfps-git/perli-releases/releases/download/v1.2.3/Perli_1.2.3_x64-setup.exe",
+        url: "https://github.com/dzyfps-git/perli/releases/download/v1.2.3/Perli_1.2.3_x64-setup.exe",
       },
     },
   });
