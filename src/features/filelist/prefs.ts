@@ -3,7 +3,7 @@ import type { GroupBy, Grouping, Sort, Terminal } from "../../api";
 import { movedColumn, restoreColumns, startColumns, type Column, type ColumnId, type ColumnSet } from "./columns";
 import type { Layout } from "./layout";
 import { NO_FILTER, type FilterForm } from "./filter";
-import { folderKey, remembered, type SortMemory } from "./sortMemory";
+import { coveringEntry, folderKey, remembered, type SortMemory } from "./sortMemory";
 import { cleanTheme } from "./iconTheme";
 
 export function saved(key: string): unknown {
@@ -63,6 +63,13 @@ export const [grouping, setGrouping] = stored<Grouping>(
 export const [sizeBars, setSizeBars] = stored("size-bars", saved("size-bars") !== false);
 /** Picture folders in the grid show an even wall of pictures, edge to edge, with no names. */
 export const [pictureWall, setPictureWall] = stored("picture-wall", saved("picture-wall") === true);
+/** How wide the column view's columns of folders are, unless one was dragged. */
+export const [folderColumnWidth, setFolderColumnWidth] = stored(
+  "folder-column-width",
+  typeof saved("folder-column-width") === "number" ? (saved("folder-column-width") as number) : 200,
+);
+/** Picture folders open in the gallery, and the layout before comes back in the next other folder. */
+export const [picturesInGallery, setPicturesInGallery] = stored("pictures-in-gallery", saved("pictures-in-gallery") === true);
 /** The user's own look for file icons, over Perli's. */
 export const [iconTheme, setIconTheme] = stored("icon-theme", cleanTheme(saved("icon-theme")));
 /** Costs a walk of every folder opened, so it waits to be asked for. */
@@ -95,6 +102,18 @@ export const [lastLayout, setLastLayout] = stored<Layout>(
   "layout",
   (saved("layout") as Layout | null) ?? "list",
 );
+/** What a new tab shows: the folder on show, the home page, or one folder always. */
+export type NewTabOpens = "same" | "home" | "folder";
+export const [newTabOpens, setNewTabOpens] = stored<NewTabOpens>(
+  "new-tab-opens",
+  (["same", "home", "folder"] as const).find((choice) => choice === saved("new-tab-opens")) ?? "same",
+);
+export const [newTabFolder, setNewTabFolder] = stored<string | null>(
+  "new-tab-folder",
+  typeof saved("new-tab-folder") === "string" ? (saved("new-tab-folder") as string) : null,
+);
+/** Where a new tab goes: next to the one it came from, or at the end of the strip. */
+export const [newTabPlace, setNewTabPlace] = stored<"next" | "end">("new-tab-place", saved("new-tab-place") === "end" ? "end" : "next");
 /** A card with a file's details and a preview, when the pointer rests on its row. */
 export const [hoverCards, setHoverCards] = stored("hover-cards", saved("hover-cards") !== false);
 /** Where a folder opened from outside Perli goes while Perli runs. */
@@ -184,6 +203,28 @@ export const rememberedGroup = (path: string): GroupBy => groupMemory()[folderKe
 /** No groups is where every folder starts, so it needs no keeping. */
 export const rememberGroup = (path: string, by: GroupBy) =>
   setGroupMemory(remembered(groupMemory(), path, by === "none" ? undefined : by));
+
+/** A folder's locked look, which it opens with every time. Changes made there don't stick. */
+export interface ViewLock {
+  sort: Sort;
+  groupBy: GroupBy;
+  layout: Layout;
+  /** The folders inside wear the same look. */
+  below: boolean;
+  /** The folder as it was shown, since the key is lowercase. */
+  path?: string;
+}
+
+export const [viewLocks, setViewLocks] = stored<Record<string, ViewLock>>(
+  "folder-locks",
+  (saved("folder-locks") as Record<string, ViewLock> | null) ?? {},
+);
+
+/** The lock on a folder, its own or one from a folder above it that covers the folders inside. */
+export const lockOf = (path: string) => coveringEntry(viewLocks(), path);
+
+/** No lock unlocks it. `key` is the folder as the locks keep it. */
+export const lockView = (key: string, lock: ViewLock | undefined) => setViewLocks(remembered(viewLocks(), key, lock));
 
 export const moveColumn = (set: ColumnSet, id: ColumnId, target: ColumnId) =>
   setColumnsOf(set, movedColumn(columnsOf(set), id, target));

@@ -44,6 +44,7 @@ function tint(tab: Tab) {
 }
 
 function tabTitle(tab: Tab) {
+  if (tab.home()) return "Home";
   const titles = tab.panes().map((view) => toCrumbs(view.path() ?? "").at(-1)?.label ?? "New tab");
   return titles.join(" | ");
 }

@@ -5,6 +5,7 @@ import {
   fetchThumb,
   findRow,
   folderPictures,
+  pictureAspects,
   rowProps,
   selectionSize,
   type Group,
@@ -36,7 +37,7 @@ import {
   type ColumnSet,
   type PropColumn,
 } from "./columns";
-import { clampTile, groupedMove, moveTarget, placesOf, TILE_STEP, type Layout } from "./layout";
+import { clampTile, GALLERY_GAP, groupedMove, justifiedPlaces, moveTarget, placesOf, TILE_STEP, type Gallery, type Layout, type Places } from "./layout";
 import { ageShare, hasPicture, iconKindOf, iconSheet, kindOf } from "./fileKinds";
 import {
   dateForm,
@@ -169,6 +170,14 @@ const dateText = (time: number) => {
 const AGO_REFRESH_MS = 30_000;
 /** The corner of a tile that picks it, in pixels. */
 const PICK_CORNER = 26;
+/** A width change past this many pixels at once, as when a pane opens beside the list, moves
+ *  the gallery's pictures to their new places instead of jumping. */
+const GALLERY_STEP = 40;
+/** How far into a gallery picture its name editor sits. */
+const GALLERY_EDITOR_INSET = 6;
+/** Lines the gallery keys move by: one, or a page of them. */
+const GALLERY_LINES: Record<string, number> = { ArrowUp: -1, ArrowDown: 1, PageUp: -2, PageDown: 2 };
+const GALLERY_STEPS: Record<string, number> = { ArrowLeft: -1, ArrowRight: 1 };
 
 const syncText = (row: Row | undefined, synced: boolean) => {
   if (row?.isCloud) return "In the cloud";
@@ -386,6 +395,8 @@ export function FileList(props: {
   onLeave?: (folder: string, names: string[], scrollTop: number) => void;
   /** A double click on no row. */
   onBackgroundDoubleClick?: () => void;
+  /** In the column view, Left goes up a folder and Right opens the folder selected. */
+  onUp?: () => void;
 }) {
   const pages = new Map<number, Row[]>();
   const loading = new Set<number>();
@@ -442,7 +453,16 @@ export function FileList(props: {
   const rowHeight = () => ROW_HEIGHTS[density()];
   let itemHeight = 0;
   let perRow = 1;
-  let places = placesOf([], 0, 1, 1, HEADER_HEIGHT);
+  let places: Places | Gallery = placesOf([], 0, 1, 1, HEADER_HEIGHT);
+  /** The places again, when the layout is the gallery, for what only it has. */
+  let gallery: Gallery | undefined;
+  /** How wide each row's picture shows for its height, read for the snapshot `aspectsOf`. */
+  let aspects: number[] = [];
+  let aspectsOf = -1;
+  let aspectsAsked = false;
+  /** How the gallery's next layout moves its pictures there, if at all. */
+  let galleryMotion: "reflow" | "spring" | undefined;
+  let laidWidth = 0;
   /** The headers in sight, and the one held at the top while its rows scroll under it. */
   const [heads, setHeads] = createSignal<{ group: Group; top: number }[]>([]);
   const [stuck, setStuck] = createSignal<{ group: Group; push: number }>();
@@ -459,7 +479,7 @@ export function FileList(props: {
   /** What the row elements depend on, so a column resize does not rebuild them. */
   const cells = createMemo(
     (): ColumnId[] =>
-      props.layout === "grid"
+      props.layout !== "list"
         ? ["name"]
         : props.columns.filter((column) => column.visible).map((column) => column.id),
     [],
@@ -489,6 +509,10 @@ export function FileList(props: {
     (index, key) => {
       const pooled = rowShowing(index, key);
       if (pooled) showThumb(pooled, key);
+      // A gallery picture comes into focus as it arrives.
+      if (pooled?.thumb && gallery && !reducedMotion.matches) {
+        pooled.thumb.animate({ filter: ["blur(10px)", "blur(0)"], opacity: [0.3, 1] }, { duration: 360, easing: "ease-out" });
+      }
     },
   );
 
@@ -540,8 +564,17 @@ export function FileList(props: {
     return rows?.[index % PAGE_SIZE];
   }
 
-  // Percent moves by whole tiles, so a width change needs no JS at all.
-  const placeOf = (index: number) => `translate(${places.column(index) * 100}%, ${places.top(index)}px)`;
+  // Percent moves by whole tiles, so a width change needs no JS at all. The gallery's pictures
+  // each have a place and a size of their own.
+  const placeOf = (index: number) =>
+    gallery
+      ? `translate(${gallery.x(index)}px, ${gallery.top(index)}px)`
+      : `translate(${places.column(index) * 100}%, ${places.top(index)}px)`;
+
+  function sizeOf(element: HTMLElement, index: number) {
+    element.style.width = gallery ? `${gallery.width(index)}px` : "";
+    element.style.height = gallery ? `${gallery.lineHeight(index)}px` : "";
+  }
 
   /** What the extra columns read for each row, by `thumbKey`, so a reload need not ask again. */
   const propsRead = new Map<string, Partial<Record<PropColumn, string>>>();
@@ -566,7 +599,8 @@ export function FileList(props: {
 
   /** Reads the extra columns of the rows still in sight, all at once. */
   function readProps() {
-    const ids = cells().filter(isProp);
+    // The gallery shows how long each video runs.
+    const ids: PropColumn[] = gallery ? ["length"] : cells().filter(isProp);
     const indexes = [...propsWaiting].filter((index) => pool[index % pool.length]?.index === index);
     propsWaiting.clear();
     const keys = indexes.map((index) => rowAt(index)).map((row) => row && thumbKey(row));
@@ -641,6 +675,7 @@ export function FileList(props: {
       pooled.index = index;
       pooled.element.id = `file-row-${props.view}-${index}`;
       pooled.element.style.transform = placeOf(index);
+      sizeOf(pooled.element, index);
       pooled.element.setAttribute("aria-rowindex", String(index + 1));
       decorate(pooled);
     }
@@ -723,6 +758,9 @@ export function FileList(props: {
     const key = look?.cover ? `cover|${look.cover}` : stacked ? `stack|${path}|${row!.modified}` : pictured ? thumbKey(row) : undefined;
     if (pooled.thumb) pooled.thumb.style.objectPosition = look?.cover ? coverPosition(look.coverAt) : "";
     showThumb(pooled, key);
+    const runs = gallery && row && kindOf(row.name, row.isDir) === "video" ? propText(row, index, "length") : "";
+    if (runs) pooled.icon.dataset.length = runs.replace(/^0:(?=\d\d:)/, "").replace(/^0(?=\d:)/, "");
+    else delete pooled.icon.dataset.length;
     // A book or comic part read shows how far, as a thin bar under its icon.
     const read = row && !row.isDir ? readProgress()[join(row.location || props.folder, row.name)] : undefined;
     if (read !== undefined) {
@@ -895,24 +933,89 @@ export function FileList(props: {
 
     const tile = props.layout === "grid" ? tileSize() : 0;
     perRow = tile ? Math.max(1, Math.floor(grid.clientWidth / tile)) : 1;
-    // A wall's tiles are square and fill the width exactly.
-    itemHeight = tile && props.wall ? grid.clientWidth / perRow : tile || rowHeight();
+    // A wall's tiles are square and fill the width exactly. The gallery's lines are about a tile
+    // tall.
+    itemHeight = props.layout === "gallery" ? tileSize() : tile && props.wall ? grid.clientWidth / perRow : tile || rowHeight();
     grid.style.setProperty("--per-row", String(perRow));
     grid.style.setProperty("--item-height", `${itemHeight}px`);
-    places = placesOf(props.groups, props.count, perRow, itemHeight, HEADER_HEIGHT);
+    const before = gallery;
+    const scrolled = grid.scrollTop;
+    // A pane opening beside it moves the pictures; a window edge dragged lays them out as it goes.
+    const stepped = Math.abs(grid.clientWidth - laidWidth) > GALLERY_STEP;
+    laidWidth = grid.clientWidth;
+    gallery =
+      props.layout === "gallery"
+        ? justifiedPlaces(props.groups, props.count, (index) => aspects[index] ?? 0, grid.clientWidth, itemHeight, GALLERY_GAP, HEADER_HEIGHT)
+        : undefined;
+    places = gallery ?? placesOf(props.groups, props.count, perRow, itemHeight, HEADER_HEIGHT);
     spacer.style.height = `${places.height}px`;
+    // New sizes and a new width keep the picture at the top where it was.
+    const anchor = before && gallery ? before.firstAt(scrolled) : -1;
+    if (anchor >= 0 && anchor < props.count) grid.scrollTop = gallery!.top(anchor) + Math.max(0, scrolled - before!.top(anchor));
 
-    const needed = (Math.ceil(grid.clientHeight / itemHeight) + OVERSCAN * 2) * perRow;
+    const span = grid.clientHeight + OVERSCAN * 2 * itemHeight;
+    const needed = gallery ? gallery.most(span) : (Math.ceil(grid.clientHeight / itemHeight) + OVERSCAN * 2) * perRow;
     const size = Math.min(props.count, needed);
-    const shape = `${cells().join()} ${props.layout} ${perRow} ${itemHeight} ${!!props.wall}`;
-    if (size === pool.length && shape === builtFor) return paint();
-
-    builtFor = shape;
-    forgetMatches();
-    pool = Array.from({ length: size }, () => createRow(cells(), props.thumbs, props.layout === "grid"));
-    spacer.replaceChildren(...pool.map((pooled) => pooled.element));
+    const shape = gallery ? `${cells().join()} gallery` : `${cells().join()} ${props.layout} ${perRow} ${itemHeight} ${!!props.wall}`;
+    const motion = before && gallery && !reducedMotion.matches ? (galleryMotion ?? (stepped ? "reflow" : undefined)) : undefined;
+    galleryMotion = undefined;
+    if (size !== pool.length || shape !== builtFor) {
+      builtFor = shape;
+      forgetMatches();
+      pool = Array.from({ length: size }, () => createRow(cells(), props.thumbs, props.layout !== "list"));
+      spacer.replaceChildren(...pool.map((pooled) => pooled.element));
+    } else if (gallery) {
+      for (const pooled of pool) {
+        if (pooled.index < 0) continue;
+        pooled.element.style.transform = placeOf(pooled.index);
+        sizeOf(pooled.element, pooled.index);
+      }
+    }
     paint();
     moveMarker(true);
+    if (motion && before) glide(before, grid.scrollTop - scrolled, motion);
+    askAspects();
+  }
+
+  /** Moves the gallery's pictures from where `before` had them to their new places. `shift` is
+   *  how far the view scrolled meanwhile, so they start where they were seen. */
+  function glide(before: Gallery, shift: number, motion: "reflow" | "spring") {
+    const easing = motion === "spring" ? "cubic-bezier(0.3, 1.25, 0.5, 1)" : "cubic-bezier(0.2, 0.9, 0.3, 1)";
+    for (const { element, index } of pool) {
+      if (index < 0 || index >= props.count) continue;
+      const from = `translate(${before.x(index)}px, ${before.top(index) + shift}px)`;
+      // Pictures from far off would cross the whole view; they just appear.
+      if (Math.abs(before.top(index) + shift - gallery!.top(index)) > grid.clientHeight) continue;
+      element.animate(
+        {
+          transform: [from, element.style.transform],
+          width: [`${before.width(index)}px`, element.style.width],
+          height: [`${before.lineHeight(index)}px`, element.style.height],
+        },
+        { duration: motion === "spring" ? 420 : 300, easing },
+      );
+    }
+  }
+
+  /** Reads the shape of every picture once per snapshot, and lays the gallery out again with it. */
+  function askAspects() {
+    if (!gallery || aspectsOf === shown || aspectsAsked) return;
+    aspectsAsked = true;
+    const snapshot = shown;
+    pictureAspects(props.view, snapshot)
+      .then((found) => {
+        if (snapshot !== shown) return;
+        aspects = found;
+        aspectsOf = snapshot;
+        galleryMotion = "reflow";
+        resize();
+      })
+      // A reload in between forgets the snapshot, and the next one asks again.
+      .catch(() => undefined)
+      .finally(() => {
+        aspectsAsked = false;
+        if (snapshot !== shown) askAspects();
+      });
   }
 
   function moveMarker(instant: boolean) {
@@ -921,7 +1024,9 @@ export function FileList(props: {
     grid.toggleAttribute("data-slide", lone);
     marker.hidden = !lone;
     marker.style.transition = instant ? "none" : "";
-    if (lone) marker.style.transform = placeOf(focused);
+    if (!lone) return;
+    marker.style.transform = placeOf(focused);
+    sizeOf(marker, focused);
   }
 
   /** Tells the status line what is selected. The bytes come a moment later, from the listing. */
@@ -977,11 +1082,12 @@ export function FileList(props: {
     grid.setAttribute("aria-activedescendant", `file-row-${props.view}-${focused}`);
     if (!reveal) return;
     const top = places.top(focused);
+    const tall = gallery ? gallery.lineHeight(focused) : itemHeight;
     // A header held at the top would cover the row.
     const covered = props.groups.length > 0 ? HEADER_HEIGHT : 0;
     if (top - covered < grid.scrollTop) grid.scrollTop = top - covered;
-    else if (top + itemHeight > grid.scrollTop + grid.clientHeight) {
-      grid.scrollTop = top + itemHeight - grid.clientHeight;
+    else if (top + tall > grid.scrollTop + grid.clientHeight) {
+      grid.scrollTop = top + tall - grid.clientHeight;
     }
   }
 
@@ -1147,7 +1253,7 @@ export function FileList(props: {
   async function swapRows(snapshot: number) {
     const selected = props.selected ?? [];
     const first = props.top ? 0 : places.firstAt(grid.scrollTop - OVERSCAN * itemHeight);
-    const onScreen = (Math.ceil(grid.clientHeight / itemHeight) + OVERSCAN * 2) * perRow;
+    const onScreen = gallery ? pool.length : (Math.ceil(grid.clientHeight / itemHeight) + OVERSCAN * 2) * perRow;
     const wanted = new Set<number>();
     for (let index = first; index < first + onScreen + PAGE_SIZE; index += PAGE_SIZE) {
       wanted.add(Math.floor(index / PAGE_SIZE));
@@ -1240,14 +1346,22 @@ export function FileList(props: {
     const iconRoom = inList ? sample.icon.offsetWidth + ICON_GAP + twistRoom : 0;
     const middle = inList && density() === "roomy" ? ROOMY_LINE / 2 : cell.offsetHeight / 2;
     setEditValue(row.name);
+    // A gallery picture's name is hidden, so the editor sits over the foot of the picture.
+    const box = gallery && {
+      left: gallery.x(index) + GALLERY_EDITOR_INSET,
+      top: gallery.top(index) + gallery.lineHeight(index) - GALLERY_EDITOR_INSET - ROOMY_LINE / 2,
+      width: Math.max(gallery.width(index) - 2 * GALLERY_EDITOR_INSET, MIN_EDITOR_WIDTH),
+    };
     setEditor({
       index,
       name: row.name,
       isDir: row.isDir,
       fresh,
-      left: places.column(index) * element.offsetWidth + element.clientLeft + cell.offsetLeft + iconRoom,
-      top: places.top(index) + element.clientTop + cell.offsetTop + middle,
-      width: Math.max(cell.offsetWidth - iconRoom, MIN_EDITOR_WIDTH),
+      ...(box || {
+        left: places.column(index) * element.offsetWidth + element.clientLeft + cell.offsetLeft + iconRoom,
+        top: places.top(index) + element.clientTop + cell.offsetTop + middle,
+        width: Math.max(cell.offsetWidth - iconRoom, MIN_EDITOR_WIDTH),
+      }),
     });
   }
 
@@ -1398,8 +1512,21 @@ export function FileList(props: {
     const pageRows = Math.max(1, Math.floor(grid.clientHeight / itemHeight) - 1);
     const shape = { count: props.count, perRow, pageRows };
     const plain = !event.shiftKey && !event.ctrlKey;
-    // In a grid of groups, a line can end short and the next group starts a new one.
-    const across = props.layout === "grid" ? groupedMove(event.key, focused, props.groups, perRow) : undefined;
+    // In a grid of groups, a line can end short and the next group starts a new one. The gallery's
+    // lines hold more or fewer pictures, so Up and Down find the nearest one across.
+    const lines = GALLERY_LINES[event.key];
+    const step = GALLERY_STEPS[event.key];
+    const across = gallery
+      ? focused < 0
+        ? undefined
+        : lines !== undefined
+          ? gallery.nearest(focused, Math.abs(lines) > 1 ? Math.sign(lines) * pageRows : lines)
+          : step !== undefined
+            ? Math.min(props.count - 1, Math.max(0, focused + step))
+            : undefined
+      : props.layout === "grid"
+        ? groupedMove(event.key, focused, props.groups, perRow)
+        : undefined;
     const target =
       props.count > 0
         ? ((plain ? treeTarget(event.key, focused) : undefined) ?? across ?? moveTarget(event.key, focused, shape))
@@ -1412,6 +1539,10 @@ export function FileList(props: {
       openIndex(focused, false);
     } else if (event.ctrlKey && !event.shiftKey && event.key.toLowerCase() === "a") {
       selection.selectAll(props.count);
+    } else if (props.onUp && plain && (event.key === "ArrowLeft" || event.key === "ArrowRight")) {
+      if (event.key === "ArrowLeft") props.onUp();
+      else if (focused >= 0 && rowAt(focused)?.isDir) openIndex(focused, false);
+      else return;
     } else if (event.key === "Escape") {
       selection.clear();
       props.onEscape();
@@ -1429,7 +1560,7 @@ export function FileList(props: {
   /** A touchpad pinch sends many small wheel events, so they add up to one wheel notch a step. */
   let pinch = 0;
   function onWheel(event: WheelEvent) {
-    if (!event.ctrlKey || props.layout !== "grid") return;
+    if (!event.ctrlKey || props.layout === "list") return;
     pinch -= event.deltaY;
     if (Math.abs(pinch) < WHEEL_NOTCH / 2) return;
     setTileSize(clampTile(tileSize() + Math.sign(pinch) * TILE_STEP));
@@ -1503,7 +1634,9 @@ export function FileList(props: {
   createEffect(
     on(
       [cells, () => props.layout, tileSize, density, () => props.wall],
-      () => {
+      (now, before) => {
+        // A new tile size springs the gallery's pictures to their new sizes.
+        if (before && now[2] !== before[2] && now[1] === before[1]) galleryMotion = "spring";
         resize();
         selectionChanged(true);
       },
@@ -1603,11 +1736,12 @@ export function FileList(props: {
       <div
         ref={grid}
         class="file-grid"
-        data-layout={props.layout}
+        data-layout={props.layout === "gallery" ? "grid" : props.layout}
+        data-gallery={props.layout === "gallery" ? "" : undefined}
         data-nests={nests() ? "" : undefined}
         data-density={density()}
         data-grouped={props.groups.length > 0 ? "" : undefined}
-        data-wall={props.wall && props.layout === "grid" ? "" : undefined}
+        data-wall={(props.wall && props.layout === "grid") || props.layout === "gallery" ? "" : undefined}
         style={{ "--row-height": `${rowHeight()}px`, "--group-head": `${HEADER_HEIGHT}px` }}
         role="grid"
         aria-multiselectable="true"

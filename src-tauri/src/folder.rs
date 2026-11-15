@@ -1179,7 +1179,7 @@ fn natural(a: &[u16], b: &[u16]) -> Ordering {
 }
 
 /// What a folder tile can show a stack of.
-const PICTURE_TYPES: [&str; 10] = ["jpg", "jpeg", "png", "gif", "webp", "bmp", "heic", "avif", "tif", "tiff"];
+pub(crate) const PICTURE_TYPES: [&str; 10] = ["jpg", "jpeg", "png", "gif", "webp", "bmp", "heic", "avif", "tif", "tiff"];
 
 /// Up to `most` pictures right inside `folder`, in the order Windows lists them. Hidden ones stay
 /// out, and so do ones in the cloud, which reading would fetch.

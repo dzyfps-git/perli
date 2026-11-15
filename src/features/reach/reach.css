@@ -21,6 +21,13 @@
   backdrop-filter: var(--blur);
   transition: bottom 420ms var(--spring);
   animation: selection-bar-in var(--motion-spring);
+  /* Lets the names slide to nothing and back from their own width. */
+  interpolate-size: allow-keywords;
+}
+
+/* SelectionBar tries each look while it measures, which must not start a slide. */
+.selection-bar[data-measuring] * {
+  transition: none !important;
 }
 
 /* The shelf has the foot of the window, so the bar stands on it. */
@@ -48,7 +55,6 @@
   display: flex;
   flex: none;
   align-items: center;
-  gap: 6px;
   height: 26px;
   padding: 0 10px;
   border: 0;
@@ -79,25 +85,38 @@
   color: var(--accent);
 }
 
-.selection-clear {
+.selection-clear,
+.selection-more {
   padding: 0 7px;
 }
 
+.selection-more {
+  animation: selection-more-in var(--motion-spring);
+}
+
+@keyframes selection-more-in {
+  from {
+    opacity: 0;
+    scale: 0.6;
+  }
+}
+
+.selection-label {
+  width: auto;
+  margin-left: 6px;
+  overflow: hidden;
+  white-space: nowrap;
+  transition:
+    width 360ms var(--spring),
+    margin 360ms var(--spring),
+    opacity 200ms ease;
+}
+
 /* With little room the bar keeps the count and the icons, whose names the hover text still gives. */
-.panes:has(.pane + .pane) .selection-label {
-  display: none;
-}
-
-@media (max-width: 1000px) {
-  .selection-label {
-    display: none;
-  }
-}
-
-@media (max-width: 1300px) {
-  .shell[data-sidebar="open"] .selection-label {
-    display: none;
-  }
+.selection-bare .selection-label {
+  width: 0;
+  margin-left: 0;
+  opacity: 0;
 }
 
 /* The corner of a tile that picks it without Ctrl. */
@@ -473,6 +492,7 @@ body:has(.bookmarks) .drop-chips {
 
 @media (prefers-reduced-motion: reduce) {
   .selection-bar,
+  .selection-more,
   .shelf-item,
   .drop-chip {
     animation: none;
@@ -483,6 +503,7 @@ body:has(.bookmarks) .drop-chips {
   .drop-chip,
   .selection-bar,
   .selection-action,
+  .selection-label,
   .file-grid[data-layout="grid"] .file-row::before {
     transition: none;
   }

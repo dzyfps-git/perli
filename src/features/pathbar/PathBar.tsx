@@ -16,6 +16,7 @@ const ICON_UP = "";
 
 const ICON_LIST = "\uE8FD";
 const ICON_GRID = "\uF0E2";
+const ICON_GALLERY = "\uE91B";
 const ICON_SHOWN = "\uE7B3";
 const ICON_HIDDEN = "\uED1A";
 const ICON_FILTER = "\uE71C";
@@ -23,6 +24,7 @@ const ICON_AWAY = "\uE8CD";
 const ICON_CHEVRON = "\uE76C";
 const ICON_LINK = "\uE71B";
 const ICON_MORE = "\uE712";
+const ICON_LOCK = "\uE72E";
 
 const ICON_FORGET = "";
 
@@ -635,12 +637,46 @@ export function PathBar(props: {
           </For>
         </div>
       </Show>
+      <Show when={props.view.lock()} keyed>
+        {(lock) => (
+          <button
+            class="lock-chip"
+            aria-label={
+              samePath(lock.key, props.view.folder()?.path ?? "")
+                ? `This folder's view is locked${lock.value.below ? ", with the folders inside" : ""}. Changes here don't stick. Press to unlock`
+                : // The key is the folder above in lowercase, so its name comes from the shown path.
+                  `View locked by ${nameOf((props.view.folder()?.path ?? "").slice(0, lock.key.length))}, with the folders inside. Changes here don't stick. Press to unlock`
+            }
+            aria-keyshortcuts={ariaKeys("lockView")}
+            onClick={() => props.view.toggleLock()}
+          >
+            {ICON_LOCK}
+          </button>
+        )}
+      </Show>
       <div class="layout-pill" role="group" aria-label="Layout" data-layout={props.view.layout()}>
         <button aria-label="List" aria-keyshortcuts={ariaKeys("list")} aria-pressed={props.view.layout() === "list"} onClick={() => setLayout("list")}>
           {ICON_LIST}
         </button>
         <button aria-label="Grid" aria-keyshortcuts={ariaKeys("grid")} aria-pressed={props.view.layout() === "grid"} onClick={() => setLayout("grid")}>
           {ICON_GRID}
+        </button>
+        <button
+          aria-label="Gallery"
+          aria-keyshortcuts={ariaKeys("gallery")}
+          aria-pressed={props.view.layout() === "gallery"}
+          onClick={() => setLayout("gallery")}
+        >
+          {ICON_GALLERY}
+        </button>
+        <button
+          aria-label="Columns"
+          aria-keyshortcuts={ariaKeys("columns")}
+          aria-pressed={props.view.layout() === "columns"}
+          onClick={() => setLayout("columns")}
+        >
+          {/* The icon font has no three columns side by side, so this one is drawn. */}
+          <span class="layout-columns-icon" aria-hidden="true" />
         </button>
       </div>
     </nav>

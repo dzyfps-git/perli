@@ -48,6 +48,7 @@ export const KEYS: KeyCommand[] = [
   { id: "forward", label: "Forward", group: "Go", keys: ["Alt+Right"] },
   { id: "up", label: "Up", group: "Go", keys: ["Alt+Up", "Backspace"], where: "free" },
   { id: "home", label: "Go home", group: "Go", keys: ["Alt+Home"] },
+  { id: "homePage", label: "Home page", group: "Go", keys: ["Alt+Shift+Home"] },
   { id: "path", label: "Go to path", group: "Go", keys: ["Ctrl+L", "Alt+D"] },
   { id: "search", label: "Search", group: "Go", keys: ["Ctrl+F"] },
   { id: "refresh", label: "Refresh", group: "Go", keys: ["F5"] },
@@ -58,6 +59,10 @@ export const KEYS: KeyCommand[] = [
 
   { id: "list", label: "List view", group: "View", keys: ["Alt+Shift+1"] },
   { id: "grid", label: "Grid view", group: "View", keys: ["Alt+Shift+2"] },
+  { id: "gallery", label: "Gallery view", group: "View", keys: ["Alt+Shift+3"] },
+  { id: "columns", label: "Column view", group: "View", keys: ["Alt+Shift+4"] },
+  // Not while typing: AltGr is Ctrl+Alt, and AltGr+L types a letter on some keyboards.
+  { id: "lockView", label: "Lock this folder's view", group: "View", keys: ["Ctrl+Alt+L"], where: "free" },
   { id: "largerTiles", label: "Larger tiles", group: "View", keys: ["Ctrl+=", "Ctrl+Shift+="] },
   { id: "smallerTiles", label: "Smaller tiles", group: "View", keys: ["Ctrl+-"] },
   { id: "hidden", label: "Show hidden files", group: "View", keys: ["Ctrl+H"] },

@@ -1002,6 +1002,38 @@
   overflow-wrap: anywhere;
 }
 
+/* Tags on the selected item; each one shows everything else with it. */
+.details-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  margin: 0 0 var(--space-3);
+}
+
+.details-tag {
+  padding: 2px 8px;
+  border: 0;
+  border-radius: 999px;
+  background: color-mix(in oklch, var(--tag) 18%, transparent);
+  color: var(--text);
+  font-size: 12px;
+  transition: background var(--motion);
+}
+
+.details-tag::before {
+  content: "";
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-right: 6px;
+  border-radius: 50%;
+  background: var(--tag);
+}
+
+.details-tag:hover {
+  background: color-mix(in oklch, var(--tag) 30%, transparent);
+}
+
 /* Each label sits over its value, so a date or a size never has to break in a narrow column. */
 .details-facts {
   margin: 0;

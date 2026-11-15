@@ -26,6 +26,8 @@ export interface SavedTab {
   stacked?: boolean;
   /** The panes follow each other. */
   linked?: boolean;
+  /** The home page shows in place of the panes. */
+  home?: boolean;
 }
 
 export interface Session {
@@ -51,7 +53,7 @@ function cleanPane(pane: Partial<SavedPane> | null): SavedPane[] {
   const lists = { expanded: texts(pane.expanded), back: texts(pane.back), forward: texts(pane.forward), select: texts(pane.select) };
   const scrollTop = typeof pane.scrollTop === "number" && pane.scrollTop > 0 ? pane.scrollTop : undefined;
   const kept = Object.entries({ ...lists, scrollTop }).filter(([, value]) => value !== undefined);
-  return [{ path: pane.path, sort, layout: pane.layout === "grid" ? "grid" : "list", ...Object.fromEntries(kept) }];
+  return [{ path: pane.path, sort, layout: pane.layout === "grid" || pane.layout === "gallery" || pane.layout === "columns" ? pane.layout : "list", ...Object.fromEntries(kept) }];
 }
 
 function inRange(index: unknown, count: number) {
@@ -71,6 +73,7 @@ function cleanTab(tab: SavedTab): SavedTab | undefined {
     ...(typeof tab.split === "number" && tab.split > 0 && tab.split < 1 ? { split: tab.split } : {}),
     ...(tab.stacked === true ? { stacked: true } : {}),
     ...(tab.linked === true ? { linked: true } : {}),
+    ...(tab.home === true ? { home: true } : {}),
   };
 }
 

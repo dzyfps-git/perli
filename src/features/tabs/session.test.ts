@@ -77,6 +77,15 @@ test("parseSession keeps the folders opened in place, and only their names", () 
   assert.equal(session?.tabs[0].panes[1].expanded, undefined);
 });
 
+test("a tab on the home page stays there, after a restart or a move to another window", () => {
+  const session = parseSession(JSON.stringify({ tabs: [{ panes: [pane], home: true }, { panes: [pane], home: "yes" }] }));
+  assert.deepEqual(
+    session?.tabs.map((tab) => tab.home),
+    [true, undefined],
+  );
+  assert.equal(parseMoved(JSON.stringify({ tab: { panes: [pane], home: true } }))?.tab.home, true);
+});
+
 test("parseMoved keeps the tab's history, selection, scroll and the window's place", () => {
   const moving = { ...pane, back: ["C:\b", 3], forward: [], select: ["x.txt"], scrollTop: 420 };
   const moved = parseMoved(

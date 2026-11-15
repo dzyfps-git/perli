@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { folderKey, remembered } from "./sortMemory.ts";
+import { coveringEntry, folderKey, remembered } from "./sortMemory.ts";
 
 const bySize = { key: "size", descending: true } as const;
 const byName = { key: "name", descending: false } as const;
@@ -27,4 +27,13 @@ test("remembered drops the oldest folder once full", () => {
   assert.equal(folders.length, 1000);
   assert.equal(folders[0], "c:\\1x");
   assert.equal(folders.at(-1), "c:\\1000x");
+});
+
+test("coveringEntry takes a folder's own entry, then the nearest one above that covers it", () => {
+  const memory = { "c:\\": { below: true, n: 1 }, "c:\\a": { below: false, n: 2 }, "c:\\a\\b": { below: true, n: 3 } };
+  assert.equal(coveringEntry(memory, "C:\\A\\")?.value.n, 2);
+  assert.equal(coveringEntry(memory, "C:\\A\\B\\C\\D")?.value.n, 3);
+  assert.deepEqual(coveringEntry(memory, "C:\\A\\X"), { key: "c:\\", value: { below: true, n: 1 } });
+  assert.equal(coveringEntry(memory, "D:\\A"), undefined);
+  assert.equal(coveringEntry({ "c:\\a": { below: false } }, "C:\\A\\B"), undefined);
 });

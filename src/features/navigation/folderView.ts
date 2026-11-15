@@ -25,6 +25,9 @@ import {
   inlineFolders,
   lastLayout,
   lastSort,
+  lockOf,
+  lockView,
+  picturesInGallery,
   rememberedFilter,
   rememberedGroup,
   rememberedSort,
@@ -135,8 +138,17 @@ export function createFolderView(id: number, saved?: SavedPane) {
   const [trail, setTrail] = createSignal("");
   const [backStack, setBackStack] = createSignal<string[]>(saved?.back ?? []);
   const [forwardStack, setForwardStack] = createSignal<string[]>(saved?.forward ?? []);
-  const [sort, setSortValue] = createSignal(saved?.sort ?? lastSort());
-  const [layout, setLayoutValue] = createSignal(saved?.layout ?? lastLayout());
+  /** A pane restored in a locked folder shows the lock's look, not the passing changes it saved. */
+  const savedLock = saved && lockOf(saved.path)?.value;
+  const [sort, setSortValue] = createSignal(savedLock?.sort ?? saved?.sort ?? lastSort());
+  const [layout, setLayoutValue] = createSignal(savedLock?.layout ?? saved?.layout ?? lastLayout());
+  /** The pane's layout from before it went into a locked folder, which it takes back on leaving. */
+  let layoutBeforeLock: Layout | undefined = savedLock ? lastLayout() : undefined;
+  /** The lock on the shown folder, if any. Changes made there show but don't stick. */
+  const lock = () => {
+    const shown = folder()?.path;
+    return shown && !query() ? lockOf(shown) : undefined;
+  };
   const [editingPath, setEditingPath] = createSignal(false);
   /** What the rows are a search for. Empty for a plain folder. */
   const [query, setQuery] = createSignal("");
@@ -156,7 +168,7 @@ export function createFolderView(id: number, saved?: SavedPane) {
   /** The folders opened in place in each folder this pane left, by lowercase path. */
   const openedIn = new Map<string, string[]>();
   /** What the folder's rows gather under headers by, and a search's, which the folder keeps apart. */
-  const [groupBy, setGroupByValue] = createSignal<GroupBy>(saved ? rememberedGroup(saved.path) : "none");
+  const [groupBy, setGroupByValue] = createSignal<GroupBy>(saved ? (savedLock?.groupBy ?? rememberedGroup(saved.path)) : "none");
   const [searchGroupBy, setSearchGroupBy] = createSignal<GroupBy>("none");
   /** Groups whose rows are out of sight, by key. They open again when the view goes elsewhere. */
   const [folded, setFolded] = createSignal<string[]>([]);
@@ -238,6 +250,8 @@ export function createFolderView(id: number, saved?: SavedPane) {
   /** Memory is for arriving at a folder. A refresh or restore keeps this pane's own sort. */
   function arrivalSort(target: string) {
     if (samePath(path(), target)) return undefined;
+    const locked = lockOf(target);
+    if (locked) return locked.value.sort;
     const remembered = rememberedSort(target);
     if (remembered) return remembered;
     if (isBin(target)) return BIN_SORT;
@@ -265,7 +279,28 @@ export function createFolderView(id: number, saved?: SavedPane) {
     const files = await countWhere(id, opened.request, { ...toFilter(NO_FILTER), kinds: "files" });
     const [songs, pictures] = files === 0 ? [0, 0] : await Promise.all([ask(["audio"]), ask(["picture"])]);
     if (folder()?.request !== opened.request) return;
-    setColumnSet(songs >= files * SET_SHARE && files > 0 ? "music" : pictures >= files * SET_SHARE && files > 0 ? "pictures" : "plain");
+    const set = songs >= files * SET_SHARE && files > 0 ? "music" : pictures >= files * SET_SHARE && files > 0 ? "pictures" : "plain";
+    setColumnSet(set);
+    pictureLayout(set);
+  }
+
+  /** The layout the pane had before a picture folder opened in the gallery on its own. */
+  let layoutBeforePictures: Layout | undefined;
+
+  /** A picture folder opens in the gallery if the user wants that, and the next folder that is
+   *  none gets the pane's layout back. A lock, or a layout picked meanwhile, wins. */
+  function pictureLayout(set: ColumnSet) {
+    const shown = path();
+    if (!shown || lockOf(shown)) return;
+    const before = layoutBeforePictures;
+    if (set === "pictures" && picturesInGallery()) {
+      if (layout() === "gallery") return;
+      layoutBeforePictures ??= layout();
+      morph(() => setLayoutValue("gallery"), "layout");
+    } else if (before) {
+      layoutBeforePictures = undefined;
+      morph(() => setLayoutValue(before), "layout");
+    }
   }
 
   /** Adds up the folders shown, if the user wants that. */
@@ -283,7 +318,7 @@ export function createFolderView(id: number, saved?: SavedPane) {
     const folderSort = arrivalSort(target);
     // Only a folder already open has a form of its own. A restored one reads its pinned filter.
     const form = samePath(folder()?.path, target) ? filterForm() : (rememberedFilter(target) ?? NO_FILTER);
-    const by = samePath(path(), target) ? groupBy() : rememberedGroup(target);
+    const by = samePath(path(), target) ? groupBy() : (lockOf(target)?.value.groupBy ?? rememberedGroup(target));
     opening = true;
     try {
       const wanted = openingOrder(target, folderSort ?? sort(), form, by);
@@ -306,6 +341,15 @@ export function createFolderView(id: number, saved?: SavedPane) {
           else if (before) openedIn.delete(before.toLowerCase());
           setExpanded(wanted.expanded ?? []);
           setFolded([]);
+          // A locked folder shows its own layout; the pane's comes back on leaving it.
+          const locked = lockOf(opened.path)?.value.layout;
+          if (locked) {
+            layoutBeforeLock ??= layout();
+            setLayoutValue(locked);
+          } else if (layoutBeforeLock) {
+            setLayoutValue(layoutBeforeLock);
+            layoutBeforeLock = undefined;
+          }
         }
         setGroupByValue(by);
         show({ ...opened, scrollTo });
@@ -314,8 +358,10 @@ export function createFolderView(id: number, saved?: SavedPane) {
       setTrail(nextTrail(trail(), opened.path));
       if (before && !samePath(before, opened.path)) follower?.(before, opened.path);
       scanFolder();
-      if (isBin(opened.path) || opened.archive) setColumnSet("plain");
-      else noteColumnSet(opened).catch(console.error);
+      if (isBin(opened.path) || opened.archive) {
+        setColumnSet("plain");
+        pictureLayout("plain");
+      } else noteColumnSet(opened).catch(console.error);
       return opened;
     } catch (failure) {
       if (request === latestRequest && !quiet) {
@@ -465,9 +511,11 @@ export function createFolderView(id: number, saved?: SavedPane) {
     }
     setSortValue(next);
     const path = folder()?.path;
-    // Its sorts make no sense for normal folders, so new panes must not pick them up.
-    if (!isBin(path)) setLastSort(next);
-    if (path) rememberSort(path, next);
+    if (!lock()) {
+      // Its sorts make no sense for normal folders, so new panes must not pick them up.
+      if (!isBin(path)) setLastSort(next);
+      if (path) rememberSort(path, next);
+    }
     rearrange();
   }
 
@@ -481,7 +529,7 @@ export function createFolderView(id: number, saved?: SavedPane) {
     }
     setGroupByValue(next);
     const shown = folder()?.path;
-    if (shown && !isBin(shown)) rememberGroup(shown, next);
+    if (shown && !isBin(shown) && !lock()) rememberGroup(shown, next);
     if (next !== "none" && expanded().length > 0) {
       setExpanded([]);
       return reload();
@@ -498,8 +546,9 @@ export function createFolderView(id: number, saved?: SavedPane) {
   }
 
   function setLayout(next: Layout) {
+    layoutBeforePictures = undefined;
     if (next !== layout()) morph(() => setLayoutValue(next), "layout");
-    setLastLayout(next);
+    if (!lock()) setLastLayout(next);
     if (next !== "list") collapseAll();
   }
 
@@ -610,6 +659,21 @@ export function createFolderView(id: number, saved?: SavedPane) {
     setSort,
     layout,
     setLayout,
+    lock,
+    /**
+     * Locks the shown folder's look as it is now, or takes the lock that covers it away. `below`
+     * turns the folders inside on or off instead, locking here first if nothing is locked yet.
+     */
+    toggleLock(below = false) {
+      const shown = folder()?.path;
+      if (!shown || query() || isBin(shown)) return;
+      const had = lockOf(shown);
+      if (!had) return lockView(shown, { sort: sort(), groupBy: groupBy(), layout: layout(), below, path: shown });
+      if (below) return lockView(had.key, { ...had.value, below: !had.value.below });
+      lockView(had.key, undefined);
+      // The look on show is the pane's own from now on.
+      layoutBeforeLock = undefined;
+    },
     editingPath,
     setEditingPath,
     rearrange,

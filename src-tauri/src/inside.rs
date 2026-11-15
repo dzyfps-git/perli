@@ -459,6 +459,43 @@ pub(crate) fn decode(bytes: &[u8], edge: u32) -> windows::core::Result<Vec<u8>> 
     }
 }
 
+/// Videos the gallery shows at their usual shape.
+const VIDEO_TYPES: [&str; 8] = ["mp4", "m4v", "webm", "mov", "mkv", "ogv", "avi", "wmv"];
+
+/// How wide each picture shows for its height, turned the way its EXIF says, from its header.
+/// Anything that is no picture by its name, can't be read, or is only in the cloud gets 0.
+pub fn shown_aspects(paths: &[PathBuf]) -> Vec<f32> {
+    let _com = Com::enter();
+    let Ok(factory) = (unsafe { CoCreateInstance::<_, IWICImagingFactory>(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER) }) else {
+        return vec![0.0; paths.len()];
+    };
+    let aspect = |path: &PathBuf| -> Option<f32> {
+        let extension = path.extension().and_then(|ext| ext.to_str()).unwrap_or_default();
+        let is = |types: &[&str]| types.iter().any(|known| extension.eq_ignore_ascii_case(known));
+        // ponytail: every video shows wide; read System.Video.FrameWidth/Height if tall phone videos crop badly.
+        if is(&VIDEO_TYPES) {
+            return Some(16.0 / 9.0);
+        }
+        if !is(&crate::folder::PICTURE_TYPES) || crate::thumbs::is_online_only(path) {
+            return None;
+        }
+        unsafe {
+            let decoder = factory
+                .CreateDecoderFromFilename(&HSTRING::from(path.as_path()), None, GENERIC_READ, WICDecodeMetadataCacheOnDemand)
+                .ok()?;
+            let frame = decoder.GetFrame(0).ok()?;
+            let (mut width, mut height) = (0, 0);
+            frame.GetSize(&raw mut width, &raw mut height).ok()?;
+            if width == 0 || height == 0 {
+                return None;
+            }
+            let turned = matches!(orientation(&frame), Some(5..=8));
+            Some(if turned { height as f32 / width as f32 } else { width as f32 / height as f32 })
+        }
+    };
+    paths.iter().map(|path| aspect(path).unwrap_or(0.0)).collect()
+}
+
 /// A picture file's own width and height, read from its header by Windows' imaging, or `None`
 /// for a format only the shell can draw. A file in the cloud stays there.
 pub fn pixel_size(path: &Path) -> Option<(u32, u32)> {
@@ -994,6 +1031,21 @@ pub(crate) mod tests {
         assert_eq!(seen(6), ((32, 64), "green", "red"));
         assert_eq!(seen(7), ((32, 64), "black", "blue"));
         assert_eq!(seen(8), ((32, 64), "blue", "black"));
+    }
+
+    #[test]
+    fn the_gallery_sees_a_photo_the_way_its_exif_turns_it() {
+        let folder = std::env::temp_dir().join(format!("perli-aspects-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let flat = folder.join("flat.jpg");
+        let turned = folder.join("turned.JPG");
+        let note = folder.join("note.txt");
+        std::fs::write(&flat, turned_jpeg(1)).unwrap();
+        std::fs::write(&turned, turned_jpeg(6)).unwrap();
+        std::fs::write(&note, b"no picture").unwrap();
+        let aspects = shown_aspects(&[flat, turned, note, PathBuf::new(), folder.join("gone.png"), folder.join("clip.MP4")]);
+        assert_eq!(aspects, [2.0, 0.5, 0.0, 0.0, 0.0, 16.0 / 9.0]);
+        std::fs::remove_dir_all(folder).unwrap();
     }
 
     #[test]

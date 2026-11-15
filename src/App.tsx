@@ -82,13 +82,20 @@ import { BIN_COLUMNS, FLAT_COLUMNS, nextGrouping, nextSort, SEARCH_COLUMNS, ZIP_
 import { GROUP_CHOICES, groupLabel } from "./features/filelist/groups";
 import type { Empty } from "./features/filelist/EmptyState";
 import { FileList } from "./features/filelist/FileList";
+import { FolderColumns } from "./features/filelist/FolderColumns";
 import { FilterDialog } from "./features/filelist/FilterDialog";
 import { clampTile, isLargestTile, isSmallestTile, TILE_STEP, type Layout } from "./features/filelist/layout";
 import {
   columnsOf,
   detailsPanel,
   pictureWall,
+  picturesInGallery,
+  newTabOpens,
+  newTabFolder,
+  setNewTabOpens,
+  setNewTabFolder,
   setPictureWall,
+  setPicturesInGallery,
   setSizeBars,
   sizeBars,
   previewPane,
@@ -169,6 +176,7 @@ import { holdBack } from "./features/preview/popOut";
 import type { HandBack } from "./features/mini/handover";
 import { BACKDROPS, SCALES, setBackdrop, setUiScale } from "./features/settings/appearance";
 import { Settings } from "./features/settings/Settings";
+import { HomePage } from "./features/home/HomePage";
 import { putOffUpdate, setUpdateSheet, startUpdates, updateSheet, updateState } from "./features/settings/updates";
 import { UpdateSheet } from "./features/settings/UpdateSheet";
 import { BookmarksBar } from "./features/sidebar/BookmarksBar";
@@ -216,6 +224,7 @@ const WINDOW_WAIT_MS = 600;
 const MOUSE_BACK = 3;
 const MOUSE_FORWARD = 4;
 const ICON_SETTINGS = "\uE713";
+const ICON_HOME_PAGE = "\uECA5";
 
 // Waits for the frame after the rows are drawn, so this means the user can see them.
 function markReady() {
@@ -245,7 +254,7 @@ const MOST_TABS_BEHIND = 8;
 const MOST_OFFERS = 8;
 /** What "sort by" and "view" take in the palette. */
 const SORT_WORDS = ["name", "modified", "created", "type", "size"];
-const VIEW_WORDS = ["list", "grid", "compact", "cozy", "roomy"];
+const VIEW_WORDS = ["list", "grid", "gallery", "columns", "compact", "cozy", "roomy"];
 /** Sorted by nothing a column stands for, so the next sort takes its own first direction. */
 const UNSORTED: Sort = { key: "found", descending: false };
 const ICON_PIN = "\uE718";
@@ -313,6 +322,10 @@ const ownColumns = (view: FolderView) =>
           : undefined;
 /** A folder's kept columns, or the ones a search or the bin always has. */
 const shownColumns = (view: FolderView) => ownColumns(view) ?? columnsOf(view.columnSet());
+/** Tiles of one size or another, which take the tile size items. */
+const tiled = (view: FolderView) => view.layout() === "grid" || view.layout() === "gallery";
+/** The column view shows the folders above beside the list, but not for a search or the bin. */
+const inColumns = (view: FolderView) => view.layout() === "columns" && !view.query() && !view.isBin();
 
 /** What a view's rows can gather under headers by. Only rows from many folders have a folder each. */
 function groupByItems(view: FolderView) {
@@ -402,7 +415,7 @@ function groupItem(path: string): MenuItem {
 export function App() {
   const tabs = createTabs();
   /** `from` is the path crumb whose menu this is. */
-  const [menu, setMenu] = createSignal<{ x: number; y: number; items: MenuItem[]; from?: string }>();
+  const [menu, setMenu] = createSignal<{ x: number; y: number; above?: number; items: MenuItem[]; from?: string }>();
   /** The settings are a tab of their own: it can exist without being the one in front. */
   const [settingsOpen, setSettingsOpen] = createSignal(false);
   const [settingsShown, setSettingsShown] = createSignal(false);
@@ -668,6 +681,15 @@ export function App() {
         : [
             { label: "Search here", action: () => searchIn(view, path) },
             { label: "Copy path", action: () => quietly(copyFolderPath(path)) },
+            {
+              label: "New tabs open here",
+              checked: newTabOpens() === "folder" && samePath(newTabFolder() ?? "", path),
+              action: () => {
+                const on = !(newTabOpens() === "folder" && samePath(newTabFolder() ?? "", path));
+                setNewTabFolder(on ? path : null);
+                setNewTabOpens(on ? "folder" : "same");
+              },
+            },
             ...keepItems(path),
             ...shell.placeItems(path, { x: event.clientX, y: event.clientY }),
             ...(isDriveRoot(path) ? networkItems() : []),
@@ -904,7 +926,8 @@ export function App() {
     setLastSort(sort);
     setLastLayout(layout);
     for (const other of tabs.allViews()) {
-      if (other.isBin()) continue;
+      // A locked folder keeps its own look.
+      if (other.isBin() || other.lock()) continue;
       other.setLayout(layout);
       if (!other.query()) other.setSort(sort);
     }
@@ -1172,6 +1195,7 @@ export function App() {
         action: () => setTileSize(clampTile(tileSize() - TILE_STEP)),
       },
       { label: "Picture folders as a wall", checked: pictureWall(), action: () => setPictureWall(!pictureWall()) },
+      { label: "Picture folders open in gallery", checked: picturesInGallery(), action: () => setPicturesInGallery(!picturesInGallery()) },
     ];
     const own = ownColumns(view);
     const sortItems = own
@@ -1194,7 +1218,9 @@ export function App() {
         items: [
           layoutItem("List", "list"),
           layoutItem("Grid", "grid"),
-          ...(view.layout() === "grid" ? tileItems : rowItems),
+          layoutItem("Gallery", "gallery"),
+          layoutItem("Columns", "columns"),
+          ...(tiled(view) ? tileItems : rowItems),
           { label: "Windows icons", divider: true, checked: windowsIcons(), action: () => setWindowsIcons(!windowsIcons()) },
           { label: "Details panel", checked: detailsPanel(), action: toggleDetails },
           { label: "Preview pane", checked: previewPane(), action: () => setPreviewPane(!previewPane()) },
@@ -1239,6 +1265,12 @@ export function App() {
         ? []
         : [{ label: "Flat view", checked: view.query() === FLAT_QUERY, action: () => toggleFlat(view) }]),
       ...(own ? [] : [{ label: "Use this view for all folders", action: () => viewForAll(view) }]),
+      ...(view.isBin() || view.query()
+        ? []
+        : [
+            { label: "Lock this folder's view", checked: !!view.lock(), action: () => view.toggleLock() },
+            { label: "Lock the folders inside too", checked: !!view.lock()?.value.below, action: () => view.toggleLock(true) },
+          ]),
     ];
   }
 
@@ -1348,10 +1380,31 @@ export function App() {
     };
   }
 
+  /** The home page over the tab on show, or the tab's folder again when it is already there. */
+  function showHomePage() {
+    const tab = tabs.active();
+    const shown = tab.home() && !settingsShown();
+    setSettingsShown(false);
+    tab.setHome(!shown);
+  }
+
+  /** Leaves the home page for the tab's folder, then does `then` in it. */
+  async function leaveHome(then: (view: FolderView) => unknown) {
+    const tab = tabs.active();
+    tab.setHome(false);
+    await then(tab.active());
+  }
+
+  /** Opens what Settings says a new tab shows. A set folder that is gone opens the one on show. */
   const newTab = async () => {
     setSettingsShown(false);
-    const path = tabs.activeView().folder()?.path;
-    if (path) await tabs.add([path]);
+    const here = tabs.activeView().folder()?.path;
+    const choice = newTabOpens();
+    const set = choice === "folder" ? newTabFolder() : null;
+    if (set && (await tabs.add([set]))) return;
+    // The home page needs a folder behind it, for when a card or Back leaves it.
+    const path = choice === "home" ? (homePath ?? here) : here;
+    if (path) await tabs.add([path], undefined, false, choice === "home" ? { home: true } : {});
   };
 
   function splitView() {
@@ -1361,7 +1414,7 @@ export function App() {
 
   // List view has no tiles, so these keys do nothing there.
   function resizeTiles(view: FolderView, change: number) {
-    if (view.layout() === "grid") setTileSize(clampTile(tileSize() + change));
+    if (tiled(view)) setTileSize(clampTile(tileSize() + change));
   }
 
   function togglePalette() {
@@ -1420,7 +1473,9 @@ export function App() {
       },
       { says: "tag", words: allTags().map((tag) => tag.name), run: (word) => quietly(tagSelected(view, word, true)) },
       { says: "untag", words: allTags().map((tag) => tag.name), run: (word) => quietly(tagSelected(view, word, false)) },
-      { says: "view", words: VIEW_WORDS, run: (word) => (word === "list" || word === "grid" ? view.setLayout(word) : setRowDensity(word as Density)) },
+      { says: "view", words: VIEW_WORDS, run: (word) =>
+          word === "list" || word === "grid" || word === "gallery" || word === "columns" ? view.setLayout(word) : setRowDensity(word as Density),
+      },
       { says: "select", words: "free", run: (word) => quietly(selectMatching(view, word)) },
       { says: "search", words: "free", run: (word) => view.search(word) },
       { says: "open in", words: Object.values(TERMINAL_NAMES), run: (word) => terminalHere(view, terminal(word)) },
@@ -1547,11 +1602,8 @@ export function App() {
 
   /** Each folder gets a tab, in order, and the tab on show stays where it is. */
   async function openTabsBehind(paths: string[]) {
-    let after = tabs.active();
-    for (const path of paths) {
-      await tabs.add([path], after, true);
-      after = tabs.tabs()[tabs.tabs().indexOf(after) + 1] ?? after;
-    }
+    // Tabs opened from the one on show line up after it in the order they were opened.
+    for (const path of paths) await tabs.add([path], tabs.active(), true);
   }
 
   function openBehind(view: FolderView, row: Row) {
@@ -1601,7 +1653,8 @@ export function App() {
         .then((title) => jobs.notify(`Sent to "${title || "file dialog"}"`, `It now shows ${baseName(folder) || folder}.`))
         .catch(jobs.report);
     },
-    back: () => here().back(),
+    back: () => (tabs.active().home() ? tabs.active().setHome(false) : here().back()),
+    homePage: showHomePage,
     forward: () => here().forward(),
     up: () => here().up(),
     path: () => here().setEditingPath(true),
@@ -1615,6 +1668,9 @@ export function App() {
     ...numbered("tag", (place) => toggleTagKey(here(), place)),
     list: () => here().setLayout("list"),
     grid: () => here().setLayout("grid"),
+    gallery: () => here().setLayout("gallery"),
+    columns: () => here().setLayout("columns"),
+    lockView: () => here().toggleLock(),
     largerTiles: () => resizeTiles(here(), TILE_STEP),
     smallerTiles: () => resizeTiles(here(), -TILE_STEP),
     hidden: toggleHidden,
@@ -1698,7 +1754,7 @@ export function App() {
     });
     const under = (anchor: HTMLElement, items: MenuItem[]) => {
       const box = anchor.getBoundingClientRect();
-      setMenu({ x: box.left, y: box.bottom + 4, items });
+      setMenu({ x: box.left, y: box.bottom + 4, above: box.top - 2, items });
     };
     if (view.isBin()) {
       return [
@@ -1867,6 +1923,10 @@ export function App() {
         })),
         { label: sizeBars() ? "Hide size bars" : "Show size bars", run: () => setSizeBars(!sizeBars()) },
         { label: pictureWall() ? "Picture folders with names" : "Picture folders as a wall", run: () => setPictureWall(!pictureWall()) },
+        {
+          label: picturesInGallery() ? "Picture folders open in their layout" : "Picture folders open in gallery",
+          run: () => setPicturesInGallery(!picturesInGallery()),
+        },
         ...BACKDROPS.map(({ id, label }) => ({ label: `Window backdrop: ${label}`, run: () => setBackdrop(id) })),
         ...SCALES.map((scale) => ({
           label: `Text and interface size: ${Math.round(scale * 100)}%`,
@@ -2053,6 +2113,10 @@ export function App() {
               </button>
             </div>
           </Show>
+          <div class="file-stage">
+          <Show when={inColumns(view)}>
+            <FolderColumns view={view} onMenu={(event, path) => showFolderMenu(event, view, path)} onNewTab={(path) => tabs.add([path])} />
+          </Show>
           {/* A real arrival starts the list over. A reload only swaps its rows, so nothing blinks. */}
           <Show when={view.folder() && view.arrival()} keyed>
             {(_arrival) => (
@@ -2071,7 +2135,7 @@ export function App() {
                 onLeave={view.keep}
                 onBackgroundDoubleClick={() => upOnDoubleClick() && void view.up()}
                 thumbs={!view.isBin()}
-                columns={shownColumns(view)}
+                columns={inColumns(view) ? shownColumns(view).filter((column) => column.id === "name") : shownColumns(view)}
                 columnSet={view.columnSet()}
                 fixedColumns={ownColumns(view) !== undefined}
                 groups={view.folder()!.groups}
@@ -2089,7 +2153,7 @@ export function App() {
                 expanded={view.expanded()}
                 // Rows gathered under headers can't also nest under their folders.
                 onExpand={
-                  inlineFolders() && !view.query() && !view.isBin() && !view.isZip() && view.groupBy() === "none"
+                  inlineFolders() && !view.query() && !view.isBin() && !view.isZip() && view.groupBy() === "none" && !inColumns(view)
                     ? (path) => void view.toggleExpand(path)
                     : undefined
                 }
@@ -2097,7 +2161,7 @@ export function App() {
                 empty={emptyState(view)}
                 match={view.query() === FLAT_QUERY ? undefined : view.query()}
                 active={tab === tabs.active() && view === tab.active()}
-                layout={view.layout()}
+                layout={view.layout() === "columns" ? "list" : view.layout()}
                 sort={view.sort()}
                 onSort={(key) => view.setSort(nextSort(view.sort(), key))}
                 onDragOut={() => actions.dragOut(view)}
@@ -2132,9 +2196,11 @@ export function App() {
                 onOpenBehind={(row) => openBehind(view, row)}
                 barItems={(two) => barItems(view, two)}
                 connect={view.connectList}
+                onUp={inColumns(view) ? () => void view.up() : undefined}
               />
             )}
           </Show>
+          </div>
         </div>
       </section>
     );
@@ -2177,6 +2243,17 @@ export function App() {
         <CutChip onShow={(folder, names) => quietly(showCut(tabs.activeView(), folder, names))} />
         <button
           class="settings-button"
+          aria-current={tabs.active().home() && !settingsShown() ? "page" : undefined}
+          aria-keyshortcuts={keyText("homePage").replace("Ctrl", "Control") || undefined}
+          onClick={showHomePage}
+        >
+          <span class="settings-icon" aria-hidden="true">
+            {ICON_HOME_PAGE}
+          </span>
+          <span class="settings-label">Home page</span>
+        </button>
+        <button
+          class="settings-button"
           aria-label={updateState() === "ready" ? "Settings, update ready" : "Settings"}
           aria-keyshortcuts="Control+,"
           onClick={showSettings}
@@ -2205,7 +2282,7 @@ export function App() {
         />
         <For each={tabs.tabs()}>
           {(tab) => (
-            <div class="panes" hidden={tab !== tabs.active() || settingsShown()}>
+            <div class="panes" hidden={tab !== tabs.active() || settingsShown() || tab.home()}>
               <div
                 class="pane-pair"
                 classList={{ "panes-swapped": tab.swapped(), "pane-pair-stacked": tab.stacked() }}
@@ -2216,7 +2293,8 @@ export function App() {
                   <PaneDivider tab={tab} />
                 </Show>
               </div>
-              <Show when={detailsPanel() && tab === tabs.active()}>
+              {/* The column view's last column is the details of what is selected. */}
+              <Show when={(detailsPanel() || tab.active().layout() === "columns") && tab === tabs.active()}>
                 <DetailsPanel view={tab.active()} />
               </Show>
               <Show when={previewPane() && tab === tabs.active()}>
@@ -2230,6 +2308,18 @@ export function App() {
             </div>
           )}
         </For>
+        <Show when={tabs.active().home() && !settingsShown()}>
+          <HomePage
+            drives={places()?.drives}
+            pinned={pinned()}
+            folders={recentFolders()}
+            onOpen={(path) => leaveHome((view) => view.open(path))}
+            onOpenFile={(path) => leaveHome(() => previewOf(path))}
+            onMenu={(event, path) => showFolderMenu(event, tabs.activeView(), path)}
+            onEject={(path) => quietly(ejectDrive(path))}
+            onSearch={(text) => leaveHome((view) => view.search(text))}
+          />
+        </Show>
         <Settings
           open={settingsOpen()}
           shown={settingsShown()}
@@ -2243,7 +2333,7 @@ export function App() {
         />
       </main>
       <Show when={menu()} keyed>
-        {(open) => <Menu x={open.x} y={open.y} items={open.items} onClose={closeMenu} />}
+        {(open) => <Menu x={open.x} y={open.y} above={open.above} items={open.items} onClose={closeMenu} />}
       </Show>
       <Show when={lookFor()} keyed>
         {(path) => <LookPicker path={path} onClose={() => setLookFor(undefined)} />}

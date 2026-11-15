@@ -459,3 +459,20 @@
 .settings-note .settings-chip {
   margin-left: var(--space-2);
 }
+
+/* A locked folder's chip unlocks it; the open lock shows on hover. */
+.settings-lock-icon {
+  color: var(--text-muted);
+  font: 11px / 1 var(--font-icons);
+  opacity: 0;
+  translate: -4px 0;
+  transition:
+    opacity var(--motion),
+    translate var(--motion-slide);
+}
+
+.settings-lock:hover .settings-lock-icon,
+.settings-lock:focus-visible .settings-lock-icon {
+  opacity: 1;
+  translate: 0 0;
+}

@@ -15,3 +15,19 @@ export function remembered<T>(memory: Record<string, T>, path: string, value: T 
   const kept = value === undefined ? others : [...others, [key, value] as const];
   return Object.fromEntries(kept.slice(-MAX_FOLDERS));
 }
+
+/**
+ * What applies to a folder from a memory where some entries also cover the folders inside:
+ * its own entry first, then the nearest folder above it whose entry has `below` set.
+ */
+export function coveringEntry<T extends { below?: boolean }>(memory: Record<string, T>, path: string) {
+  let key = folderKey(path);
+  if (memory[key]) return { key, value: memory[key] };
+  for (let at = key.lastIndexOf("\\"); at > 0; at = key.lastIndexOf("\\")) {
+    key = key.slice(0, at);
+    // A drive root keeps its trailing slash.
+    const found = [key, `${key}\\`].find((candidate) => memory[candidate]?.below);
+    if (found) return { key: found, value: memory[found] };
+  }
+  return undefined;
+}

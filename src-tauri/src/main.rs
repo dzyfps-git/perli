@@ -1525,6 +1525,22 @@ async fn picture_size(view: u32, request: u64, row: u32, views: State<'_, Views>
     blocking(move || Ok(inside::pixel_size(&path))).await
 }
 
+/// The most rows the gallery asks the shape of. Past this, pictures show square.
+// ponytail: one pass over the whole folder; read in pages as the gallery scrolls if huge folders lag.
+const MOST_ASPECTS: usize = 5000;
+
+/// How wide each row's picture shows for its height, for the gallery to lay out. Folders and
+/// files that are no picture get 0.
+#[tauri::command]
+async fn picture_aspects(view: u32, request: u64, views: State<'_, Views>) -> Result<Vec<f32>, String> {
+    let selection = Selection { view, request, rows: Vec::new(), ranges: Vec::new() };
+    let paths = views.read(&selection, |listing, _| {
+        let rows: Vec<u32> = (0..listing.len().min(MOST_ASPECTS) as u32).collect();
+        listing.row_paths(&rows)
+    })?;
+    blocking(move || Ok(inside::shown_aspects(&paths))).await
+}
+
 /// A picture a Markdown file points to, beside it on this PC.
 #[tauri::command]
 async fn picture_file(path: PathBuf, edge: u32) -> Response {
@@ -2495,6 +2511,7 @@ fn main() {
             big_picture,
             unlock_zip,
             picture_size,
+            picture_aspects,
             archive_text,
             archive_password,
             archive_test,
