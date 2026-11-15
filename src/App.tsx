@@ -490,7 +490,8 @@ export function App() {
       places()?.drives.find((drive) => drive.removable && path.toLowerCase().startsWith(drive.path.toLowerCase()))?.path,
   });
   const [zipping, setZipping] = createSignal<ZipRequest>();
-  const actions = createFileActions(jobs, setDeleting, () => tabs.active().other(), setRenaming, setZipping);
+  // The pane beside the one acting, which a button in a pane that isn't active must still find.
+  const actions = createFileActions(jobs, setDeleting, (view) => tabs.active().panes().find((other) => other !== view), setRenaming, setZipping);
   const shell = createShellItems(jobs, actions, {
     properties: (target, at) => setShowingProperties({ target, at }),
     pickApp: setPickingApp,
