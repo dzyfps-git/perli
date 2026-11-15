@@ -91,6 +91,7 @@ function thenText(card: JobCard, jobs: Jobs) {
 function factsText(card: JobCard) {
   const { progress, rate, paused } = card;
   if (card.waiting) return waitText(card.waiting);
+  if (card.elevating) return "Windows will ask for permission";
   if (!progress) return "Getting ready";
   const done =
     progress.totalBytes > 0

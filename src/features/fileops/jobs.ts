@@ -62,6 +62,8 @@ export interface JobCard {
   then: Then;
   /** The drives it waits for while another job uses them. */
   waiting?: string[];
+  /** Windows is asking for permission, so the card says why the screen dimmed. */
+  elevating?: boolean;
   /** Folding away, just before it goes. */
   leaving?: boolean;
   /** Set once the job is over. */
@@ -208,6 +210,7 @@ export function createJobs(views: () => FolderView[], host: JobsHost) {
     const { id } = event;
     if (event.kind === "started") started(event);
     else if (event.kind === "asked") patch(id, { question: event.question, shown: true });
+    else if (event.kind === "elevating") patch(id, { elevating: true, shown: true });
     else if (event.kind === "finished") finished(event);
     // A job held up for its drive shows at once, so the wait is never a mystery.
     else if (event.kind === "waiting") patch(id, event.drives.length > 0 ? { waiting: event.drives, shown: true } : { waiting: undefined });
@@ -216,7 +219,7 @@ export function createJobs(views: () => FolderView[], host: JobsHost) {
       if (!card) return;
       const rate = nextRate(card.rate, event, performance.now());
       const speeds = rate === card.rate ? card.speeds : withSpeed(card.speeds, rate.speed);
-      patch(id, { progress: event, rate, speeds });
+      patch(id, { progress: event, rate, speeds, elevating: undefined });
     }
   }
 

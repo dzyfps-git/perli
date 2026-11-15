@@ -16,7 +16,7 @@ use windows::Win32::UI::Shell::{
     IShellItem, IShellLinkW, SHCreateItemFromParsingName, ShellLink, COPYENGINE_E_USER_CANCELLED,
     COPYENGINE_S_DONT_PROCESS_CHILDREN, FILEOPERATION_FLAGS,
     FOFX_RECYCLEONDELETE, FOFX_REQUIREELEVATION, FOFX_SHOWELEVATIONPROMPT, FOF_ALLOWUNDO,
-    FOF_NOCONFIRMMKDIR, FOF_NORECURSEREPARSE, FOF_NO_UI, SIGDN_FILESYSPATH,
+    FOF_NORECURSEREPARSE, FOF_NO_UI, FOF_RENAMEONCOLLISION, SIGDN_FILESYSPATH,
     TSF_DELETE_RECYCLE_IF_POSSIBLE,
 };
 
@@ -411,6 +411,8 @@ impl Run<'_> {
             Elevated::Recycle { path } => path,
             _ => unreachable!("partitioned above"),
         });
+        // The card says so first, because UAC covers the screen.
+        self.host.elevating();
         let extra = FILEOPERATION_FLAGS(FOFX_REQUIREELEVATION.0 | FOFX_SHOWELEVATIONPROMPT.0);
         self.recycle_with(paths.collect(), extra)?;
         if others.is_empty() {
@@ -418,14 +420,8 @@ impl Run<'_> {
         }
 
         let slots = Arc::new(Mutex::new(vec![Slot::Waiting; others.len()]));
-        let flags = FOF_NOCONFIRMMKDIR.0 | FOF_ALLOWUNDO.0 | FOF_NORECURSEREPARSE.0 | extra.0;
-        let performed = perform_elevated(
-            &others,
-            FILEOPERATION_FLAGS(flags),
-            self.host.owner(),
-            &slots,
-            self.control,
-        );
+        let flags = FILEOPERATION_FLAGS(ELEVATED_FLAGS.0 | extra.0);
+        let performed = perform_elevated(&others, flags, self.host.owner(), &slots, self.control);
         let slots = slots.lock().unwrap_or_else(|error| error.into_inner()).clone();
         for (entry, slot) in others.into_iter().zip(slots) {
             self.record_elevated(entry, slot);
@@ -455,6 +451,12 @@ impl Run<'_> {
     }
 }
 
+/// Only UAC shows: no progress window, no error box and no Replace or Skip. Perli asked about
+/// every name already, so a name taken since then keeps both, and a replace the user chose
+/// sends the old item to the Recycle Bin first.
+const ELEVATED_FLAGS: FILEOPERATION_FLAGS =
+    FILEOPERATION_FLAGS(FOF_NO_UI.0 | FOF_RENAMEONCOLLISION.0 | FOF_ALLOWUNDO.0 | FOF_NORECURSEREPARSE.0);
+
 fn perform_elevated(
     list: &[Elevated],
     flags: FILEOPERATION_FLAGS,
@@ -474,13 +476,15 @@ fn perform_elevated(
             }
             .into();
             match entry {
-                Elevated::Copy { source, target } => {
-                    let folder = shell_item(&sys::parent(target))?;
-                    operation.CopyItem(&shell_item(source)?, &folder, &name_of(target), &sink)?;
+                Elevated::Copy { source, target, replace } => {
+                    let (source, folder) = (shell_item(source)?, shell_item(&sys::parent(target))?);
+                    clear_for_replace(&operation, target, *replace)?;
+                    operation.CopyItem(&source, &folder, &name_of(target), &sink)?;
                 }
-                Elevated::Move { source, target } => {
-                    let folder = shell_item(&sys::parent(target))?;
-                    operation.MoveItem(&shell_item(source)?, &folder, &name_of(target), &sink)?;
+                Elevated::Move { source, target, replace } => {
+                    let (source, folder) = (shell_item(source)?, shell_item(&sys::parent(target))?);
+                    clear_for_replace(&operation, target, *replace)?;
+                    operation.MoveItem(&source, &folder, &name_of(target), &sink)?;
                 }
                 Elevated::New { target, directory } => {
                     let attributes = if *directory {
@@ -500,11 +504,20 @@ fn perform_elevated(
     }
 }
 
+/// Queues the old item's trip to the Recycle Bin ahead of the one that takes its name. If that
+/// fails, the new one lands beside it under another name, so nothing is lost either way.
+unsafe fn clear_for_replace(operation: &IFileOperation, target: &Path, replace: bool) -> Result<()> {
+    if replace && matches!(sys::stat(target), Ok(Some(_))) {
+        unsafe { operation.DeleteItem(&shell_item(target)?, None) }?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
 
-    use windows::Win32::UI::Shell::{COPYENGINE_S_USER_IGNORED, FOF_RENAMEONCOLLISION};
+    use windows::Win32::UI::Shell::COPYENGINE_S_USER_IGNORED;
 
     use super::super::tests::Sandbox;
     use super::super::Run;
@@ -545,18 +558,23 @@ mod tests {
         let file = sandbox.file("a.txt", "new");
         let moved = sandbox.file("b.txt", "move");
         sandbox.file(r"folder\child.txt", "child");
+        let replaced = sandbox.file(r"to\c.txt", "old c");
+        let newer = sandbox.file("c.txt", "new c");
         let list = vec![
-            Elevated::Copy { source: file, target: old.clone() },
+            Elevated::Copy { source: file, target: old.clone(), replace: false },
             Elevated::Copy {
                 source: sandbox.path("folder"),
                 target: sandbox.path(r"to\folder"),
+                replace: false,
             },
-            Elevated::Move { source: moved.clone(), target: sandbox.path(r"to\b.txt") },
+            Elevated::Move { source: moved.clone(), target: sandbox.path(r"to\b.txt"), replace: false },
             Elevated::New { target: sandbox.path(r"to\new"), directory: true },
+            Elevated::Copy { source: newer, target: replaced.clone(), replace: true },
         ];
         let slots = Arc::new(Mutex::new(vec![Slot::Waiting; list.len()]));
         let control = Arc::new(Control::default());
-        let flags = FILEOPERATION_FLAGS(FOF_NO_UI.0 | FOF_RENAMEONCOLLISION.0);
+        // The real flags, less the Recycle Bin, which tests stay out of.
+        let flags = FILEOPERATION_FLAGS(ELEVATED_FLAGS.0 & !FOF_ALLOWUNDO.0);
 
         perform_elevated(&list, flags, 0, &slots, &control).unwrap();
 
@@ -567,6 +585,7 @@ mod tests {
             run.record_elevated(entry, slot);
         }
         assert_eq!(fs::read_to_string(&old).unwrap(), "old");
+        assert_eq!(fs::read_to_string(&replaced).unwrap(), "new c", "a chosen replace writes over");
         // Only the names, because the shell spells out a temp folder given in short 8.3 form.
         let name = |path: &Path| path.file_name().unwrap().to_str().unwrap().to_string();
         let made: Vec<_> = run
@@ -588,6 +607,7 @@ mod tests {
                 ("created", "folder".to_string()),
                 ("moved", "b.txt".to_string()),
                 ("created", "new".to_string()),
+                ("created", "c.txt".to_string()),
             ]
         );
     }

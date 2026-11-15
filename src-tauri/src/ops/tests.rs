@@ -2438,6 +2438,7 @@ fn an_existing_target_does_not_prove_an_elevated_copy() {
     run.elevated.push(Elevated::Copy {
         source: sandbox.path("missing.txt"),
         target: target.clone(),
+        replace: false,
     });
 
     assert!(run.finish_elevated().is_ok());

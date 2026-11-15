@@ -235,6 +235,7 @@ impl Run<'_> {
                 let elevated = Elevated::Move {
                     source: source.to_path_buf(),
                     target: target.clone(),
+                    replace: false,
                 };
                 match self.first_rename(source, target, elevated)? {
                     Renamed::Done => {
@@ -254,6 +255,7 @@ impl Run<'_> {
                 let elevated = Elevated::Move {
                     source: source.to_path_buf(),
                     target: target.clone(),
+                    replace: true,
                 };
                 match self.first_rename(source, &staged, elevated)? {
                     Renamed::Done => {
@@ -423,17 +425,17 @@ impl Run<'_> {
         }
     }
 
-    fn elevated_copy(node: &Node, target: &Path, moving: bool) -> Elevated {
+    fn elevated_copy(node: &Node, target: &Path, moving: bool, replace: bool) -> Elevated {
         let (source, target) = (node.path.clone(), target.to_path_buf());
         if moving {
-            Elevated::Move { source, target }
+            Elevated::Move { source, target, replace }
         } else {
-            Elevated::Copy { source, target }
+            Elevated::Copy { source, target, replace }
         }
     }
 
     fn place_folder(&mut self, node: &mut Node, target: &Path, moving: bool) -> Flow {
-        let elevated = Self::elevated_copy(node, target, moving);
+        let elevated = Self::elevated_copy(node, target, moving, false);
         let stat = node.stat;
         let handed = self.elevated.len();
         let made = self.attempt(&node.path.clone(), Some(elevated), |_| {
@@ -492,7 +494,7 @@ impl Run<'_> {
         let temp = self.temp_beside(target);
         let base = self.progress.bytes;
         let path = node.path.clone();
-        let elevated = Self::elevated_copy(node, target, moving);
+        let elevated = Self::elevated_copy(node, target, moving, replace);
         let handed = self.elevated.len();
         let verify = self.host.verify_copies();
         let copied = self.attempt(&path, Some(elevated), |run| {

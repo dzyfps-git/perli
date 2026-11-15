@@ -291,6 +291,8 @@ export type JobEvent = { id: number } & (
       /** The folder the job fills, for what to do when it is done. */
       target: string | null;
     }
+  /** Windows is about to ask for permission, with UAC over the whole screen. */
+  | { kind: "elevating" }
   /** Waits for another job on these drives. Empty once it starts. */
   | { kind: "waiting"; drives: string[] }
   | ({ kind: "progress" } & Progress)
