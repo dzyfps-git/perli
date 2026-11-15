@@ -336,6 +336,8 @@ export function PictureView(live: PictureViewProps) {
   };
 
   function onPointerDown(event: PointerEvent) {
+    // A press on a control is its own: a drag held by the stage would take its click.
+    if ((event.target as Element).closest("button, input, [role=toolbar]")) return;
     if (event.button === 0 && cropping()) return drawCrop(event);
     if (event.button === 0 && picking() && event.target === canvas) return pick(event);
     if (event.button !== 0 || zoom() === null) return;
@@ -359,11 +361,16 @@ export function PictureView(live: PictureViewProps) {
     fit: () => zoomTo(null),
     /** Mirrored, a turn right on screen is a turn left underneath. */
     turn: (by: number) => {
+      // A crop is drawn over the picture as it stands, and can't be saved turned.
+      stopCrop();
       setTurn(turn() + (flip() ? -by : by));
       zoomTo(null);
     },
     /** A mirror on screen, left to right, whichever way the picture stands now. */
-    flip: () => setFlip(!flip()),
+    flip: () => {
+      stopCrop();
+      setFlip(!flip());
+    },
   };
 
   /** Runs one of the file tools, and says how it went. */
