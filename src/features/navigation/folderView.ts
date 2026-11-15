@@ -27,6 +27,7 @@ import {
   lastSort,
   lockOf,
   lockView,
+  picturesInGallery,
   rememberedFilter,
   rememberedGroup,
   rememberedSort,
@@ -276,7 +277,28 @@ export function createFolderView(id: number, saved?: SavedPane) {
     const files = await countWhere(id, opened.request, { ...toFilter(NO_FILTER), kinds: "files" });
     const [songs, pictures] = files === 0 ? [0, 0] : await Promise.all([ask(["audio"]), ask(["picture"])]);
     if (folder()?.request !== opened.request) return;
-    setColumnSet(songs >= files * SET_SHARE && files > 0 ? "music" : pictures >= files * SET_SHARE && files > 0 ? "pictures" : "plain");
+    const set = songs >= files * SET_SHARE && files > 0 ? "music" : pictures >= files * SET_SHARE && files > 0 ? "pictures" : "plain";
+    setColumnSet(set);
+    pictureLayout(set);
+  }
+
+  /** The layout the pane had before a picture folder opened in the gallery on its own. */
+  let layoutBeforePictures: Layout | undefined;
+
+  /** A picture folder opens in the gallery if the user wants that, and the next folder that is
+   *  none gets the pane's layout back. A lock, or a layout picked meanwhile, wins. */
+  function pictureLayout(set: ColumnSet) {
+    const shown = path();
+    if (!shown || lockOf(shown)) return;
+    const before = layoutBeforePictures;
+    if (set === "pictures" && picturesInGallery()) {
+      if (layout() === "gallery") return;
+      layoutBeforePictures ??= layout();
+      morph(() => setLayoutValue("gallery"), "layout");
+    } else if (before) {
+      layoutBeforePictures = undefined;
+      morph(() => setLayoutValue(before), "layout");
+    }
   }
 
   /** Adds up the folders shown, if the user wants that. */
@@ -334,8 +356,10 @@ export function createFolderView(id: number, saved?: SavedPane) {
       setTrail(nextTrail(trail(), opened.path));
       if (before && !samePath(before, opened.path)) follower?.(before, opened.path);
       scanFolder();
-      if (isBin(opened.path) || opened.archive) setColumnSet("plain");
-      else noteColumnSet(opened).catch(console.error);
+      if (isBin(opened.path) || opened.archive) {
+        setColumnSet("plain");
+        pictureLayout("plain");
+      } else noteColumnSet(opened).catch(console.error);
       return opened;
     } catch (failure) {
       if (request === latestRequest && !quiet) {
@@ -520,6 +544,7 @@ export function createFolderView(id: number, saved?: SavedPane) {
   }
 
   function setLayout(next: Layout) {
+    layoutBeforePictures = undefined;
     if (next !== layout()) morph(() => setLayoutValue(next), "layout");
     if (!lock()) setLastLayout(next);
     if (next !== "list") collapseAll();

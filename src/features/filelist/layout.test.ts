@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { besidePoint, groupedMove, moveTarget, placesOf } from "./layout.ts";
+import { besidePoint, groupedMove, justifiedPlaces, moveTarget, placesOf } from "./layout.ts";
 
 const list = { count: 100, perRow: 1, pageRows: 10 };
 const grid = { count: 10, perRow: 4, pageRows: 2 };
@@ -108,4 +108,53 @@ test("grid up and down step between groups, keeping the tile and skipping folded
   assert.equal(groupedMove("ArrowUp", 1, groups, 3), 1, "the top stays put");
   assert.equal(groupedMove("ArrowDown", 8, groups, 3), 8, "the bottom stays put");
   assert.equal(groupedMove("ArrowLeft", 1, groups, 3), undefined);
+});
+
+test("a gallery fills each line to the width, keeps shapes, and leaves the last line short", () => {
+  // Three squares fill 308 pixels at 100 tall with two gaps of 4. The rest start a new line.
+  const shapes = [1, 1, 1, 2, 1];
+  const wall = justifiedPlaces([], 5, (index) => shapes[index], 308, 100, 4, 30);
+  assert.deepEqual([0, 1, 2].map(wall.x), [0, 104, 208]);
+  assert.deepEqual([0, 1, 2].map(wall.width), [100, 100, 100]);
+  assert.equal(wall.top(3), 104);
+  assert.equal(wall.lineHeight(3), 100);
+  assert.equal(wall.width(3), 200);
+  assert.equal(wall.x(4), 204);
+  assert.equal(wall.height, 204);
+  assert.equal(wall.firstAt(0), 0);
+  assert.equal(wall.firstAt(150), 3);
+  assert.equal(wall.firstAt(1000), 5);
+});
+
+test("a gallery line stops one picture early when that comes closer to the height wanted", () => {
+  // Two squares at 300 wide make a line 150 tall; a third makes it 100. 150 is nearer 140.
+  const wall = justifiedPlaces([], 3, () => 1, 300, 140, 0, 0);
+  assert.equal(wall.lineHeight(0), 150);
+  assert.equal(wall.top(2), 150);
+  // A picture with no shape known shows square, and a panorama crops to three times as wide.
+  const odd = justifiedPlaces([], 2, (index) => [0, 10][index], 1000, 100, 0, 0);
+  assert.deepEqual([odd.width(0), odd.width(1)], [100, 300]);
+});
+
+test("gallery groups start their own lines under their headers", () => {
+  const groups = [{ start: 0, count: 2 }, { start: 2, count: 0 }, { start: 2, count: 1 }];
+  const wall = justifiedPlaces(groups, 3, () => 1, 200, 100, 0, 30);
+  assert.deepEqual(wall.tops, [0, 130, 160]);
+  assert.equal(wall.top(0), 30);
+  assert.equal(wall.top(2), 190);
+  assert.equal(wall.groupOf(2), 2);
+  assert.equal(wall.height, 290);
+});
+
+test("gallery up and down land on the picture nearest across", () => {
+  // Line one: a square then a wide 3, 100 tall; line two: three squares, short.
+  const shapes = [1, 3, 1, 1, 1];
+  const wall = justifiedPlaces([], 5, (index) => shapes[index], 400, 100, 0, 0);
+  assert.equal(wall.nearest(1, 1), 4);
+  assert.equal(wall.nearest(0, 1), 2);
+  assert.equal(wall.nearest(4, -1), 1);
+  assert.equal(wall.nearest(0, -1), 0);
+  assert.equal(wall.nearest(2, 5), 2);
+  assert.equal(wall.most(100), 5);
+  assert.equal(wall.most(0), 3);
 });

@@ -59,6 +59,7 @@ export const KEYS: KeyCommand[] = [
 
   { id: "list", label: "List view", group: "View", keys: ["Alt+Shift+1"] },
   { id: "grid", label: "Grid view", group: "View", keys: ["Alt+Shift+2"] },
+  { id: "gallery", label: "Gallery view", group: "View", keys: ["Alt+Shift+3"] },
   // Not while typing: AltGr is Ctrl+Alt, and AltGr+L types a letter on some keyboards.
   { id: "lockView", label: "Lock this folder's view", group: "View", keys: ["Ctrl+Alt+L"], where: "free" },
   { id: "largerTiles", label: "Larger tiles", group: "View", keys: ["Ctrl+=", "Ctrl+Shift+="] },

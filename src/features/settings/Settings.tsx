@@ -18,6 +18,8 @@ import {
   openInWindow,
   pictureWall,
   setPictureWall,
+  picturesInGallery,
+  setPicturesInGallery,
   setViewLocks,
   viewLocks,
   lockView,
@@ -619,7 +621,7 @@ export function Settings(props: {
           <section
             class="settings-section"
             data-section="files"
-            data-words="rows density compact cozy roomy height icons windows list status bar count selected items hover cards preview tooltip picture folder sizes space disk dates ago iso modified selection actions keyboard shortcuts keys copy copying verify check queue drive turn double click up parent terminal powershell command prompt console lock locked unlock view new tab tabs open end next home page"
+            data-words="rows density compact cozy roomy height icons windows list status bar count selected items hover cards preview tooltip picture folder sizes space disk dates ago iso modified selection actions keyboard shortcuts keys copy copying verify check queue drive turn double click up parent terminal powershell command prompt console lock locked unlock view new tab tabs open end next home page gallery photos wall justified"
           >
             <h3>Files</h3>
             <h4 id="settings-rows">Row height</h4>
@@ -701,6 +703,12 @@ export function Settings(props: {
               note="In the grid, a folder of pictures shows them as even tiles edge to edge, with no names under them."
               checked={pictureWall()}
               onChange={setPictureWall}
+            />
+            <Switch
+              label="Open picture folders in the gallery"
+              note="A folder that is mostly pictures shows them in their own shapes, lines filling the width. The next other folder gets the layout back."
+              checked={picturesInGallery()}
+              onChange={setPicturesInGallery}
             />
             <Switch
               label="Double-click empty space to go up"

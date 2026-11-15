@@ -1014,6 +1014,10 @@ export const fetchBigPicture = (view: number, request: number, row: number, edge
 export const pictureSize = (view: number, request: number, row: number) =>
   invoke<[number, number] | null>("picture_size", { view, request, row });
 
+/** How wide each row of a snapshot shows for its height, turned the way its photo says, for the
+ *  gallery. 0 for a row that is no picture. */
+export const pictureAspects = (view: number, request: number) => invoke<number[]>("picture_aspects", { view, request });
+
 /** A comic page or a book's picture, by its name inside the archive. */
 export const fetchArchivePicture = (view: number, request: number, row: number, entry: string, edge: number, password?: string) =>
   invoke<ArrayBuffer>("archive_picture", { view, request, row, entry, edge, password: password ?? null }).then(decodeThumb);

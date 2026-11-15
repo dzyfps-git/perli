@@ -16,6 +16,7 @@ const ICON_UP = "";
 
 const ICON_LIST = "\uE8FD";
 const ICON_GRID = "\uF0E2";
+const ICON_GALLERY = "\uE91B";
 const ICON_SHOWN = "\uE7B3";
 const ICON_HIDDEN = "\uED1A";
 const ICON_FILTER = "\uE71C";
@@ -659,6 +660,14 @@ export function PathBar(props: {
         </button>
         <button aria-label="Grid" aria-keyshortcuts={ariaKeys("grid")} aria-pressed={props.view.layout() === "grid"} onClick={() => setLayout("grid")}>
           {ICON_GRID}
+        </button>
+        <button
+          aria-label="Gallery"
+          aria-keyshortcuts={ariaKeys("gallery")}
+          aria-pressed={props.view.layout() === "gallery"}
+          onClick={() => setLayout("gallery")}
+        >
+          {ICON_GALLERY}
         </button>
       </div>
     </nav>

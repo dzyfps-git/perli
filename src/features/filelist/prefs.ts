@@ -63,6 +63,8 @@ export const [grouping, setGrouping] = stored<Grouping>(
 export const [sizeBars, setSizeBars] = stored("size-bars", saved("size-bars") !== false);
 /** Picture folders in the grid show an even wall of pictures, edge to edge, with no names. */
 export const [pictureWall, setPictureWall] = stored("picture-wall", saved("picture-wall") === true);
+/** Picture folders open in the gallery, and the layout before comes back in the next other folder. */
+export const [picturesInGallery, setPicturesInGallery] = stored("pictures-in-gallery", saved("pictures-in-gallery") === true);
 /** The user's own look for file icons, over Perli's. */
 export const [iconTheme, setIconTheme] = stored("icon-theme", cleanTheme(saved("icon-theme")));
 /** Costs a walk of every folder opened, so it waits to be asked for. */

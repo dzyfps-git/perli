@@ -88,11 +88,13 @@ import {
   columnsOf,
   detailsPanel,
   pictureWall,
+  picturesInGallery,
   newTabOpens,
   newTabFolder,
   setNewTabOpens,
   setNewTabFolder,
   setPictureWall,
+  setPicturesInGallery,
   setSizeBars,
   sizeBars,
   previewPane,
@@ -251,7 +253,7 @@ const MOST_TABS_BEHIND = 8;
 const MOST_OFFERS = 8;
 /** What "sort by" and "view" take in the palette. */
 const SORT_WORDS = ["name", "modified", "created", "type", "size"];
-const VIEW_WORDS = ["list", "grid", "compact", "cozy", "roomy"];
+const VIEW_WORDS = ["list", "grid", "gallery", "compact", "cozy", "roomy"];
 /** Sorted by nothing a column stands for, so the next sort takes its own first direction. */
 const UNSORTED: Sort = { key: "found", descending: false };
 const ICON_PIN = "\uE718";
@@ -1188,6 +1190,7 @@ export function App() {
         action: () => setTileSize(clampTile(tileSize() - TILE_STEP)),
       },
       { label: "Picture folders as a wall", checked: pictureWall(), action: () => setPictureWall(!pictureWall()) },
+      { label: "Picture folders open in gallery", checked: picturesInGallery(), action: () => setPicturesInGallery(!picturesInGallery()) },
     ];
     const own = ownColumns(view);
     const sortItems = own
@@ -1210,7 +1213,8 @@ export function App() {
         items: [
           layoutItem("List", "list"),
           layoutItem("Grid", "grid"),
-          ...(view.layout() === "grid" ? tileItems : rowItems),
+          layoutItem("Gallery", "gallery"),
+          ...(view.layout() !== "list" ? tileItems : rowItems),
           { label: "Windows icons", divider: true, checked: windowsIcons(), action: () => setWindowsIcons(!windowsIcons()) },
           { label: "Details panel", checked: detailsPanel(), action: toggleDetails },
           { label: "Preview pane", checked: previewPane(), action: () => setPreviewPane(!previewPane()) },
@@ -1404,7 +1408,7 @@ export function App() {
 
   // List view has no tiles, so these keys do nothing there.
   function resizeTiles(view: FolderView, change: number) {
-    if (view.layout() === "grid") setTileSize(clampTile(tileSize() + change));
+    if (view.layout() !== "list") setTileSize(clampTile(tileSize() + change));
   }
 
   function togglePalette() {
@@ -1463,7 +1467,7 @@ export function App() {
       },
       { says: "tag", words: allTags().map((tag) => tag.name), run: (word) => quietly(tagSelected(view, word, true)) },
       { says: "untag", words: allTags().map((tag) => tag.name), run: (word) => quietly(tagSelected(view, word, false)) },
-      { says: "view", words: VIEW_WORDS, run: (word) => (word === "list" || word === "grid" ? view.setLayout(word) : setRowDensity(word as Density)) },
+      { says: "view", words: VIEW_WORDS, run: (word) => (word === "list" || word === "grid" || word === "gallery" ? view.setLayout(word) : setRowDensity(word as Density)) },
       { says: "select", words: "free", run: (word) => quietly(selectMatching(view, word)) },
       { says: "search", words: "free", run: (word) => view.search(word) },
       { says: "open in", words: Object.values(TERMINAL_NAMES), run: (word) => terminalHere(view, terminal(word)) },
@@ -1656,6 +1660,7 @@ export function App() {
     ...numbered("tag", (place) => toggleTagKey(here(), place)),
     list: () => here().setLayout("list"),
     grid: () => here().setLayout("grid"),
+    gallery: () => here().setLayout("gallery"),
     lockView: () => here().toggleLock(),
     largerTiles: () => resizeTiles(here(), TILE_STEP),
     smallerTiles: () => resizeTiles(here(), -TILE_STEP),
@@ -1909,6 +1914,10 @@ export function App() {
         })),
         { label: sizeBars() ? "Hide size bars" : "Show size bars", run: () => setSizeBars(!sizeBars()) },
         { label: pictureWall() ? "Picture folders with names" : "Picture folders as a wall", run: () => setPictureWall(!pictureWall()) },
+        {
+          label: picturesInGallery() ? "Picture folders open in their layout" : "Picture folders open in gallery",
+          run: () => setPicturesInGallery(!picturesInGallery()),
+        },
         ...BACKDROPS.map(({ id, label }) => ({ label: `Window backdrop: ${label}`, run: () => setBackdrop(id) })),
         ...SCALES.map((scale) => ({
           label: `Text and interface size: ${Math.round(scale * 100)}%`,
