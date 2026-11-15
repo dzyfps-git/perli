@@ -26,6 +26,8 @@ export interface SavedTab {
   stacked?: boolean;
   /** The panes follow each other. */
   linked?: boolean;
+  /** The home page shows in place of the panes. */
+  home?: boolean;
 }
 
 export interface Session {

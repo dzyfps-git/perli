@@ -88,6 +88,10 @@ import {
   columnsOf,
   detailsPanel,
   pictureWall,
+  newTabOpens,
+  newTabFolder,
+  setNewTabOpens,
+  setNewTabFolder,
   setPictureWall,
   setSizeBars,
   sizeBars,
@@ -668,6 +672,15 @@ export function App() {
         : [
             { label: "Search here", action: () => searchIn(view, path) },
             { label: "Copy path", action: () => quietly(copyFolderPath(path)) },
+            {
+              label: "New tabs open here",
+              checked: newTabOpens() === "folder" && samePath(newTabFolder() ?? "", path),
+              action: () => {
+                const on = !(newTabOpens() === "folder" && samePath(newTabFolder() ?? "", path));
+                setNewTabFolder(on ? path : null);
+                setNewTabOpens(on ? "folder" : "same");
+              },
+            },
             ...keepItems(path),
             ...shell.placeItems(path, { x: event.clientX, y: event.clientY }),
             ...(isDriveRoot(path) ? networkItems() : []),
@@ -1355,10 +1368,16 @@ export function App() {
     };
   }
 
+  /** Opens what Settings says a new tab shows. A set folder that is gone opens the one on show. */
   const newTab = async () => {
     setSettingsShown(false);
-    const path = tabs.activeView().folder()?.path;
-    if (path) await tabs.add([path]);
+    const here = tabs.activeView().folder()?.path;
+    const choice = newTabOpens();
+    const set = choice === "folder" ? newTabFolder() : null;
+    if (set && (await tabs.add([set]))) return;
+    // The home page needs a folder behind it, for when a card or Back leaves it.
+    const path = choice === "home" ? (homePath ?? here) : here;
+    if (path) await tabs.add([path], undefined, false, choice === "home" ? { home: true } : {});
   };
 
   function splitView() {
@@ -1554,11 +1573,8 @@ export function App() {
 
   /** Each folder gets a tab, in order, and the tab on show stays where it is. */
   async function openTabsBehind(paths: string[]) {
-    let after = tabs.active();
-    for (const path of paths) {
-      await tabs.add([path], after, true);
-      after = tabs.tabs()[tabs.tabs().indexOf(after) + 1] ?? after;
-    }
+    // Tabs opened from the one on show line up after it in the order they were opened.
+    for (const path of paths) await tabs.add([path], tabs.active(), true);
   }
 
   function openBehind(view: FolderView, row: Row) {

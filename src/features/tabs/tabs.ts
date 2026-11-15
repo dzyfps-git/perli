@@ -1,6 +1,7 @@
 import { createEffect, createSignal } from "solid-js";
 import { closeView, openWindow } from "../../api";
 import { morph } from "../../ui/morph";
+import { newTabPlace } from "../filelist/prefs";
 import { createFolderView, type FolderView } from "../navigation/folderView";
 import { followTarget } from "../navigation/path";
 import type { Place, SavedPane, SavedTab, Session } from "./session";
@@ -14,7 +15,7 @@ let tabCount = 0;
 const MOST_CLOSED = 20;
 
 /** How a tab's two panes sit: side by side or stacked, the first one's share, and linked. */
-type Layout = Pick<SavedTab, "split" | "stacked" | "linked">;
+type Layout = Pick<SavedTab, "split" | "stacked" | "linked" | "home">;
 
 /** One title bar tab: 1 or 2 folder views side by side, or one over the other. */
 function createTab(views: FolderView[], startSwapped = false, saved: Layout = {}) {
@@ -27,6 +28,8 @@ function createTab(views: FolderView[], startSwapped = false, saved: Layout = {}
   const [stacked, setStacked] = createSignal(saved.stacked === true);
   /** Linked panes follow each other into folders and back up. */
   const [linked, setLinked] = createSignal(saved.linked === true);
+  /** The home page shows in place of the panes, which wait behind it. */
+  const [home, setHome] = createSignal(saved.home === true);
   /** Where the tab itself is taking each pane, so getting there leads the other pane nowhere. */
   const led = new Map<FolderView, string>();
   const lead = (view: FolderView, target: string, quiet = false) => {
@@ -81,12 +84,15 @@ function createTab(views: FolderView[], startSwapped = false, saved: Layout = {}
     stack: () => morph(() => setStacked(!stacked()), "panes"),
     linked,
     setLinked,
+    home,
+    setHome,
     /** What to save of how the panes sit. Only what differs from a new tab. */
     layout(): Layout {
       return {
         ...(split() !== EVEN_SPLIT ? { split: split() } : {}),
         ...(stacked() ? { stacked: true } : {}),
         ...(linked() ? { linked: true } : {}),
+        ...(home() ? { home: true } : {}),
       };
     },
   };
@@ -110,20 +116,35 @@ export function createTabs() {
     for (const view of active().panes()) view.openSaved();
   });
 
+  /** The tab others were last opened from, and the last of them, which the next one follows. */
+  let openedFrom: { tab: Tab; last: Tab } | undefined;
+  // Looking at another tab starts a new line, as in a browser.
+  createEffect(() => {
+    if (openedFrom && active() !== openedFrom.tab) openedFrom = undefined;
+  });
+
+  /** Where a tab opened from `after` goes: at the end, or after it and the ones opened from it already. */
+  function placeAfter(after: Tab) {
+    if (newTabPlace() === "end") return tabs().at(-1) ?? after;
+    return openedFrom?.tab === after && tabs().includes(openedFrom.last) ? openedFrom.last : after;
+  }
+
   /** Answers with the new tab's first pane, or nothing when no folder opened. `behind` leaves
-   * the tab on show where it is. */
-  async function add(paths: string[], after = active(), behind = false) {
+   * the tab on show where it is. `layout` is how the new tab starts, such as on the home page. */
+  async function add(paths: string[], after = active(), behind = false, layout: Layout = {}) {
     const views = paths.map(() => newView());
     const results = await Promise.all(views.map((view, index) => view.open(paths[index])));
     const opened = views.filter((_, index) => results[index]);
     if (opened.length === 0) return;
 
-    const tab = createTab(opened);
+    const tab = createTab(opened, false, layout);
+    const place = placeAfter(after);
+    openedFrom = behind ? { tab: after, last: tab } : undefined;
     // Tab changes land a frame later, once the old look is captured, so each one reads the list
     // as it is by then. Closing several at once never brings back one closed just before.
     const placed = morph(() => {
       const result = [...tabs()];
-      result.splice(result.indexOf(after) + 1, 0, tab);
+      result.splice(result.indexOf(place) + 1, 0, tab);
       setTabs(inOrder(result));
       if (!behind) setActive(tab);
     }, "tabs");

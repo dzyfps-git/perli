@@ -21,6 +21,11 @@ import {
   setViewLocks,
   viewLocks,
   lockView,
+  newTabOpens,
+  setNewTabOpens,
+  newTabFolder,
+  newTabPlace,
+  setNewTabPlace,
   setSizeBars,
   sizeBars,
   ROW_HEIGHTS,
@@ -614,7 +619,7 @@ export function Settings(props: {
           <section
             class="settings-section"
             data-section="files"
-            data-words="rows density compact cozy roomy height icons windows list status bar count selected items hover cards preview tooltip picture folder sizes space disk dates ago iso modified selection actions keyboard shortcuts keys copy copying verify check queue drive turn double click up parent terminal powershell command prompt console lock locked unlock view"
+            data-words="rows density compact cozy roomy height icons windows list status bar count selected items hover cards preview tooltip picture folder sizes space disk dates ago iso modified selection actions keyboard shortcuts keys copy copying verify check queue drive turn double click up parent terminal powershell command prompt console lock locked unlock view new tab tabs open end next home page"
           >
             <h3>Files</h3>
             <h4 id="settings-rows">Row height</h4>
@@ -729,6 +734,35 @@ export function Settings(props: {
               </div>
               <p class="settings-note">Each opens with its own view every time. {keyText("lockView")} locks or unlocks the folder on show.</p>
             </Show>
+            <h4 id="settings-new-tab">New tabs</h4>
+            <div class="settings-chips" role="radiogroup" aria-labelledby="settings-new-tab">
+              <button class="settings-chip" role="radio" aria-checked={newTabOpens() === "same"} onClick={() => setNewTabOpens("same")}>
+                The folder on show
+              </button>
+              <button class="settings-chip" role="radio" aria-checked={newTabOpens() === "home"} onClick={() => setNewTabOpens("home")}>
+                The home page
+              </button>
+              <button
+                class="settings-chip"
+                role="radio"
+                aria-checked={newTabOpens() === "folder"}
+                disabled={!newTabFolder()}
+                onClick={() => setNewTabOpens("folder")}
+              >
+                {newTabFolder() ? baseName(newTabFolder()!) || newTabFolder() : "A set folder"}
+              </button>
+            </div>
+            <div class="settings-chips" role="radiogroup" aria-label="Where new tabs go">
+              <button class="settings-chip" role="radio" aria-checked={newTabPlace() === "next"} onClick={() => setNewTabPlace("next")}>
+                Next to the tab they came from
+              </button>
+              <button class="settings-chip" role="radio" aria-checked={newTabPlace() === "end"} onClick={() => setNewTabPlace("end")}>
+                At the end
+              </button>
+            </div>
+            <p class="settings-note">
+              To set a folder, right-click it in the sidebar and choose New tabs open here. Several tabs opened from one line up in the order they were opened.
+            </p>
             <h4 id="settings-terminal">Terminal</h4>
             <div class="settings-chips" role="radiogroup" aria-labelledby="settings-terminal">
               <For each={found()}>

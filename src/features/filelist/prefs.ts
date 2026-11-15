@@ -95,6 +95,18 @@ export const [lastLayout, setLastLayout] = stored<Layout>(
   "layout",
   (saved("layout") as Layout | null) ?? "list",
 );
+/** What a new tab shows: the folder on show, the home page, or one folder always. */
+export type NewTabOpens = "same" | "home" | "folder";
+export const [newTabOpens, setNewTabOpens] = stored<NewTabOpens>(
+  "new-tab-opens",
+  (["same", "home", "folder"] as const).find((choice) => choice === saved("new-tab-opens")) ?? "same",
+);
+export const [newTabFolder, setNewTabFolder] = stored<string | null>(
+  "new-tab-folder",
+  typeof saved("new-tab-folder") === "string" ? (saved("new-tab-folder") as string) : null,
+);
+/** Where a new tab goes: next to the one it came from, or at the end of the strip. */
+export const [newTabPlace, setNewTabPlace] = stored<"next" | "end">("new-tab-place", saved("new-tab-place") === "end" ? "end" : "next");
 /** A card with a file's details and a preview, when the pointer rests on its row. */
 export const [hoverCards, setHoverCards] = stored("hover-cards", saved("hover-cards") !== false);
 /** Where a folder opened from outside Perli goes while Perli runs. */
