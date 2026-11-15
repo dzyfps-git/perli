@@ -1,7 +1,8 @@
-import { batch, createSignal, untrack } from "solid-js";
+import { batch, createMemo, createResource, createSignal, untrack } from "solid-js";
 import {
   arrangeView,
   countWhere,
+  gitStatus,
   openFolder,
   reloadView,
   scanSizes,
@@ -21,6 +22,7 @@ import { extensionsOf, type Kind } from "../filelist/fileKinds";
 import { dateGroups, KIND_GROUPS } from "../filelist/groups";
 import {
   folderSizes,
+  gitBadges,
   grouping,
   inlineFolders,
   lastLayout,
@@ -52,6 +54,8 @@ const BIN_SORT: Sort = { key: "modified", descending: true };
 const SEARCH_SORT: Sort = { key: "found", descending: false };
 /** Asks a search for every file, which makes a flat view of the folder. */
 export const FLAT_QUERY = "*";
+/** Looks for files with the same content as another, in sets. */
+export const COPIES_QUERY = "copies:";
 /** A folder is one of songs or pictures when at least this share of its files are. */
 const SET_SHARE = 0.6;
 /** The extensions of each kind group, as the listing sorts them in. */
@@ -330,6 +334,8 @@ export function createFolderView(id: number, saved?: SavedPane) {
       batch(() => {
         // Text typed while this opened is a search of the new folder, which is waiting to start.
         if (query() === searched) {
+          // The sets of copies mean nothing to the next search.
+          if (searched === COPIES_QUERY) setSearchGroupBy("none");
           setQuery("");
           setWalk("done");
         }
@@ -441,6 +447,9 @@ export function createFolderView(id: number, saved?: SavedPane) {
     if (!query()) setSearchSort(SEARCH_SORT);
     // Groups of the folder mean nothing to a search, and the other way round.
     if (!query() || !text) setFolded([]);
+    // Copies only make sense in their sets, and the sets mean nothing to another search.
+    if (text === COPIES_QUERY) setSearchGroupBy("copies");
+    else if (query() === COPIES_QUERY) setSearchGroupBy("none");
     setQuery(text);
     if (!text) setWalk("done");
     readAgain({ select: [], rename: false, step: "start", top: true });
@@ -522,6 +531,8 @@ export function createFolderView(id: number, saved?: SavedPane) {
   /** A folder keeps how it is grouped. Rows that nest under their folders can't be grouped, so
    *  those folders close, which needs a new read. */
   function setGroupBy(next: GroupBy) {
+    // Copies stay in their sets, which say what is kept and what is extra.
+    if (query() === COPIES_QUERY) return;
     setFolded([]);
     if (query()) {
       setSearchGroupBy(next);
@@ -614,9 +625,29 @@ export function createFolderView(id: number, saved?: SavedPane) {
     }
   }
 
+  // Each read asks git again, so a save or a commit shows on the next reload.
+  const [gitRead] = createResource(
+    () => {
+      const shown = folder();
+      return gitBadges() && shown && !query() && !shown.archive && !isBin(shown.path) ? shown : undefined;
+    },
+    async (shown) => ({ path: shown.path, status: await gitStatus(shown.path).catch(() => null) }),
+  );
+  /** What git says of the folder on show, kept through a reload so the marks don't blink. */
+  const git = createMemo(() => {
+    const read = gitRead.latest;
+    return gitBadges() && !query() && read && read.path === folder()?.path ? (read.status ?? undefined) : undefined;
+  });
+  const gitMarks = createMemo(() => {
+    const status = git();
+    return status && new Map(status.marks);
+  });
+
   return {
     id,
     folder,
+    git,
+    gitMarks,
     arrival,
     path,
     isBin: () => isBin(folder()?.path),

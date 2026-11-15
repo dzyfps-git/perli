@@ -79,6 +79,8 @@ export const [verifyCopies, setVerifyCopies] = stored("verify-copies", saved("ve
 /** Copies to or from one drive wait their turn, which a hard disk likes better than all at once. */
 export const [onePerDrive, setOnePerDrive] = stored("one-per-drive", saved("one-per-drive") === true);
 export const [tileSize, setTileSize] = stored("tile-size", (saved("tile-size") as number | null) ?? 112);
+/** Rows in a git repository show whether they changed, and the path bar shows the branch. */
+export const [gitBadges, setGitBadges] = stored("git-badges", saved("git-badges") !== false);
 /** A double click on no row goes up a folder. Off at first, so a missed click goes nowhere. */
 export const [upOnDoubleClick, setUpOnDoubleClick] = stored("up-on-double-click", saved("up-on-double-click") === true);
 /** Each terminal Perli can start, by the name Rust takes, in the order they are offered. */

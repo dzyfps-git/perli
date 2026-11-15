@@ -42,12 +42,14 @@ import {
   setWindowsIcons,
   setTerminalChoice,
   setUpOnDoubleClick,
+  setGitBadges,
   showHidden,
   showSystem,
   statusBar,
   terminalChoice,
   TERMINAL_NAMES,
   upOnDoubleClick,
+  gitBadges,
   windowsIcons,
   type DateForm,
   type Density,
@@ -715,6 +717,12 @@ export function Settings(props: {
               note="A double click below the rows, or between tiles, opens the folder this one is in."
               checked={upOnDoubleClick()}
               onChange={setUpOnDoubleClick}
+            />
+            <Switch
+              label="Show git status"
+              note="In a git repository, changed, new and ignored files show it, and the path bar shows the branch. Needs git installed."
+              checked={gitBadges()}
+              onChange={setGitBadges}
             />
             <Switch
               label="Show protected system files"

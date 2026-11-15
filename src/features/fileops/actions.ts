@@ -20,11 +20,11 @@ import type { ZipRequest } from "./ZipOptions";
 
 export type FileActions = ReturnType<typeof createFileActions>;
 
-/** What the keys and menus can do to files. `otherView` is the split pane, if there is one. */
+/** What the keys and menus can do to files. `otherView` is the pane beside the one given, if there is one. */
 export function createFileActions(
   jobs: Jobs,
   confirmDelete: (request: DeleteRequest) => void,
-  otherView: () => FolderView | undefined,
+  otherView: (view: FolderView) => FolderView | undefined,
   askRenames: (request: RenameRequest) => void,
   askZip: (request: ZipRequest) => void,
 ) {
@@ -80,7 +80,7 @@ export function createFileActions(
 
     toOtherPane(view: FolderView, kind: "copy" | "move") {
       const selection = kind === "move" ? changeable(view) : movable(view);
-      const other = otherView();
+      const other = otherView(view);
       const folder = other?.folder()?.path;
       if (selection && folder && writable(other!)) start(view, { kind, selection, folder });
     },
