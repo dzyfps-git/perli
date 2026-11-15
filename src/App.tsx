@@ -208,6 +208,7 @@ import {
 import { folderGlyph, FOLDERS, Sidebar } from "./features/sidebar/Sidebar";
 import { parseMoved, parseSession } from "./features/tabs/session";
 import { createTabs, type Tab } from "./features/tabs/tabs";
+import { createWorkspaces, workspaces } from "./features/tabs/workspaces";
 import { NewTag } from "./features/tags/NewTag";
 import { refreshTags, TAG_DROP, tagQuery, tags as allTags } from "./features/tags/tags";
 import { TitleBar } from "./features/titlebar/TitleBar";
@@ -259,6 +260,11 @@ const VIEW_WORDS = ["list", "grid", "gallery", "columns", "compact", "cozy", "ro
 const UNSORTED: Sort = { key: "found", descending: false };
 const ICON_PIN = "\uE718";
 const ICON_REOPEN = "\uE7A7";
+const ICON_WORKSPACE = "\uE8A9";
+const ICON_CHECK = "\uE73E";
+const ICON_ADD = "\uE710";
+const ICON_RENAME = "\uE8AC";
+const ICON_DELETE = "\uE74D";
 /** How many files of each kind the palette can find by name. */
 const PALETTE_FILES = 200;
 const ICON_FOLDER = "\uE8B7";
@@ -414,6 +420,7 @@ function groupItem(path: string): MenuItem {
 // The main layout. Moving parts of the app around should only change this file.
 export function App() {
   const tabs = createTabs();
+  const spaces = createWorkspaces(tabs);
   /** `from` is the path crumb whose menu this is. */
   const [menu, setMenu] = createSignal<{ x: number; y: number; above?: number; items: MenuItem[]; from?: string }>();
   /** The settings are a tab of their own: it can exist without being the one in front. */
@@ -429,8 +436,8 @@ export function App() {
     tabs.activeView().list()?.focus();
   };
   const [paletteOpen, setPaletteOpen] = createSignal(false);
-  /** The palette asks for a tab instead of any command. */
-  const [paletteScope, setPaletteScope] = createSignal<"tabs">();
+  /** The palette asks for a tab, a workspace or a workspace's new name instead of any command. */
+  const [paletteScope, setPaletteScope] = createSignal<"tabs" | "workspaces" | "renameWorkspace">();
   /** Where Alt+Home leads, as Windows tells it at the start. */
   let homePath: string | undefined;
   const [foundFiles, setFoundFiles] = createSignal<Command[]>([]);
@@ -1428,12 +1435,79 @@ export function App() {
     setPaletteOpen(!paletteOpen());
   }
 
-  /** The palette, asking for one of the open or lately closed tabs. Asked again, it closes. */
-  function searchTabs() {
-    if (paletteOpen() && paletteScope()) return setPaletteOpen(false);
-    setPaletteScope("tabs");
+  /** The palette, asking for one kind of thing. Asked again for the same, it closes. */
+  function askFor(scope: "tabs" | "workspaces" | "renameWorkspace") {
+    if (paletteOpen() && paletteScope() === scope) return setPaletteOpen(false);
+    setPaletteScope(scope);
     setPaletteOpen(true);
   }
+  /** One of the open or lately closed tabs. */
+  const searchTabs = () => askFor("tabs");
+  const askWorkspace = () => askFor("workspaces");
+
+  const tabCount = (count: number) => (count === 1 ? "1 tab" : `${count} tabs`);
+
+  /** The workspaces to switch to, and what can be done with the one on screen. */
+  function workspaceCommands(): Command[] {
+    const now = spaces.current();
+    return [
+      ...workspaces().map((one) => ({
+        label: one.name,
+        group: "Workspaces",
+        icon: one.name === now ? ICON_CHECK : ICON_WORKSPACE,
+        // The one on screen counts what is open now, not what was kept on leaving it.
+        keys: tabCount(one.name === now ? tabs.tabs().length : one.tabs.length),
+        run: () => {
+          setSettingsShown(false);
+          spaces.switchTo(one.name).catch(console.error);
+        },
+      })),
+      ...(now === undefined
+        ? []
+        : [
+            { label: "Rename this workspace", group: "This workspace", icon: ICON_RENAME, run: () => askFor("renameWorkspace") },
+            { label: "Delete this workspace", group: "This workspace", icon: ICON_DELETE, keys: "Its tabs stay open", run: spaces.remove },
+          ]),
+    ];
+  }
+
+  /** A name typed makes a workspace of it, unless one has it already. */
+  function workspaceWords(text: string): Command[] {
+    const name = text.trim();
+    if (!spaces.free(name)) return [];
+    const home = homePath;
+    return [
+      { label: `Save tabs as workspace "${name}"`, group: "New workspace", icon: ICON_ADD, keys: tabCount(tabs.tabs().length), run: () => spaces.saveAs(name) },
+      // With no workspace on screen, starting afresh would leave these tabs in none.
+      ...(spaces.current() !== undefined && home
+        ? [{ label: `New workspace "${name}"`, group: "New workspace", icon: ICON_ADD, keys: "Starts on Home", run: () => void spaces.create(name, home) }]
+        : []),
+    ];
+  }
+
+  const renameWords = (text: string): Command[] => {
+    const name = text.trim();
+    return spaces.free(name) ? [{ label: `Rename to "${name}"`, icon: ICON_RENAME, run: () => spaces.rename(name) }] : [];
+  };
+
+  /** What the palette asks for, in its own scope. */
+  const scoped = () => {
+    const scope = paletteScope();
+    if (scope === "tabs") return { commands: tabCommands, scope: { label: "Search tabs", placeholder: "Find an open or closed tab" } };
+    if (scope === "workspaces")
+      return {
+        commands: workspaceCommands,
+        words: workspaceWords,
+        scope: { label: "Workspaces", placeholder: "Pick a workspace, or type a new name", empty: "Type a name to keep these tabs as a workspace" },
+      };
+    if (scope === "renameWorkspace")
+      return {
+        commands: () => [],
+        words: renameWords,
+        scope: { label: "Rename workspace", placeholder: `New name for "${spaces.current() ?? ""}"`, empty: "Type the new name, then press Enter" },
+      };
+    return undefined;
+  };
 
   function tabCommands(): Command[] {
     const named = (paths: string[]) => paths.map((path) => baseName(path) || path).join(" | ");
@@ -1707,6 +1781,9 @@ export function App() {
     keys: () => setKeysOpen(true),
     home: () => homePath && here().open(homePath),
     tabSearch: searchTabs,
+    workspaces: askWorkspace,
+    nextWorkspace: () => spaces.cycle(1)?.catch(console.error),
+    previousWorkspace: () => spaces.cycle(-1)?.catch(console.error),
     stackPanes: () => tabs.active().panes().length > 1 && tabs.active().stack(),
     linkPanes: () => tabs.active().panes().length > 1 && tabs.active().setLinked(!tabs.active().linked()),
     mirrorPane: () => quietly(Promise.resolve(tabs.mirror())),
@@ -2042,6 +2119,8 @@ export function App() {
     }
     // Only the first window keeps its tabs for the next start.
     setKeepSession(!start.folder && !start.moved);
+    // Its tabs came back with the session, so its workspace does too.
+    if (keepSession()) spaces.resume();
     // Starts handed over while this window loaded wait in the back end until now.
     await openListener;
     for (const ask of await asksWaiting()) await openAsked(ask).catch(console.error);
@@ -2214,6 +2293,8 @@ export function App() {
         tabs={tabs}
         onNewTab={newTab}
         onTabSearch={searchTabs}
+        workspace={spaces.current()}
+        onWorkspaces={askWorkspace}
         settings={
           settingsOpen()
             ? {
@@ -2483,9 +2564,9 @@ export function App() {
       </Show>
       <Palette
         open={paletteOpen()}
-        commands={paletteScope() ? tabCommands : commands}
-        words={paletteScope() ? undefined : paletteWords}
-        scope={paletteScope() ? { label: "Search tabs", placeholder: "Find an open or closed tab" } : undefined}
+        commands={scoped()?.commands ?? commands}
+        words={scoped() ? scoped()!.words : paletteWords}
+        scope={scoped()?.scope}
         onClose={() => setPaletteOpen(false)}
         focusList={() => tabs.activeView().list()?.focus()}
       />

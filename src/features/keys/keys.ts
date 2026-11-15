@@ -94,6 +94,10 @@ export const KEYS: KeyCommand[] = [
   { id: "linkPanes", label: "Link or unlink panes", group: "Tabs and panes", keys: [] },
   { id: "mirrorPane", label: "Same folder in other pane", group: "Tabs and panes", keys: [] },
   { id: "tabSearch", label: "Search tabs", group: "Tabs and panes", keys: ["Ctrl+Shift+L"] },
+  // Ctrl+Alt is AltGr on some keyboards, which types into a text box.
+  { id: "workspaces", label: "Switch workspace", group: "Tabs and panes", keys: ["Ctrl+Alt+W"], where: "free" },
+  { id: "nextWorkspace", label: "Next workspace", group: "Tabs and panes", keys: [] },
+  { id: "previousWorkspace", label: "Previous workspace", group: "Tabs and panes", keys: [] },
   { id: "nextTab", label: "Next tab", group: "Tabs and panes", keys: ["Ctrl+Tab", "Ctrl+PageDown"] },
   { id: "previousTab", label: "Previous tab", group: "Tabs and panes", keys: ["Ctrl+Shift+Tab", "Ctrl+PageUp"] },
   ...nine.map(

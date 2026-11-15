@@ -88,6 +88,31 @@ export function parseSession(text: string | null | undefined): Omit<Session, "st
   }
 }
 
+/** A named set of tabs to switch to. */
+export interface Workspace {
+  name: string;
+  tabs: SavedTab[];
+  active: number;
+}
+
+/** Saved workspaces as far as usable: each named once, each with a folder to open. */
+export function parseWorkspaces(value: unknown): Workspace[] {
+  if (!Array.isArray(value)) return [];
+  const kept: Workspace[] = [];
+  for (const one of value) {
+    const name = typeof one?.name === "string" ? one.name.trim() : "";
+    const session = parseSession(JSON.stringify(one ?? null));
+    if (name && session && !kept.some((other) => other.name === name)) kept.push({ name, ...session });
+  }
+  return kept;
+}
+
+/** `list` with `workspace` in place of the one of its name, or added at the end. */
+export function put(list: Workspace[], workspace: Workspace): Workspace[] {
+  const at = list.findIndex((one) => one.name === workspace.name);
+  return at < 0 ? [...list, workspace] : list.map((one, index) => (index === at ? workspace : one));
+}
+
 /** Where a window that takes a moved tab goes, in physical pixels. */
 export interface Place {
   x: number;

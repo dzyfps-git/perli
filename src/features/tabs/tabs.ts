@@ -210,11 +210,27 @@ export function createTabs() {
     return tab;
   };
 
-  function restore(session: Omit<Session, "start">) {
+  /** Every tab gives way to `list`. The ones replaced can be reopened when `remembered`. */
+  function replaceAll(list: Tab[], shown: Tab, remembered: boolean) {
+    for (const tab of tabs()) {
+      if (remembered) remember(tab.paths());
+      for (const view of tab.panes()) closeView(view.id).catch(console.error);
+    }
+    setTabs(inOrder(list));
+    setActive(shown);
+  }
+
+  function restore(session: Omit<Session, "start">, remembered = false) {
     const restored = session.tabs.map(fromSaved);
-    for (const view of first.panes()) closeView(view.id).catch(console.error);
-    setTabs(inOrder(restored));
-    setActive(restored[session.active]);
+    replaceAll(restored, restored[session.active], remembered);
+  }
+
+  /** Every tab gives way to one new tab on `path`, laid out as `layout` says. */
+  function startOver(path: string, layout: Layout, remembered = false) {
+    const view = newView();
+    const tab = createTab([view], false, layout);
+    replaceAll([tab], tab, remembered);
+    return view.open(path);
   }
 
   /** A tab as saved, its panes written by `pane`. */
@@ -248,7 +264,10 @@ export function createTabs() {
     tabs,
     active,
     restore,
+    startOver,
     session,
+    /** Every tab with its panes' history, selection and scroll, as a workspace keeps them. */
+    snapshot: () => ({ tabs: tabs().map(handover), active: tabs().indexOf(active()) }),
     activeView: () => active().active(),
     allViews: () => tabs().flatMap((tab) => tab.panes()),
     add,
