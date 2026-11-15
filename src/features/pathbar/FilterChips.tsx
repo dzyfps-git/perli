@@ -12,7 +12,8 @@ import {
   toggleTypes,
   type Since,
 } from "../filelist/filter";
-import { FLAT_QUERY, type FolderView } from "../navigation/folderView";
+import { formatSize } from "../../ui/format";
+import { COPIES_QUERY, FLAT_QUERY, type FolderView } from "../navigation/folderView";
 
 const ICON_PIN = "";
 const ICON_CLEAR = "";
@@ -49,14 +50,27 @@ const DATE_CHIPS: { since: Since; label: string; hint: string }[] = [
  * A row of chips under the path bar that narrow what the list shows, one tap each. The full
  * filter is one more tap away, and a filter can be pinned so the folder opens with it.
  */
-export function FilterChips(props: { view: FolderView; onMore: () => void }) {
+export function FilterChips(props: { view: FolderView; onMore: () => void; onRecycle: () => void }) {
   const form = () => props.view.filterForm();
   const change = (next: typeof NO_FILTER) => props.view.setFilterForm(next);
   // A flat view and a tag search have no text for the files to hold.
   const searchesText = () => {
     const query = props.view.query();
-    return !!query && query !== FLAT_QUERY && !query.startsWith("tag:");
+    return !!query && query !== FLAT_QUERY && query !== COPIES_QUERY && !query.startsWith("tag:");
   };
+  const groups = () => props.view.folder()?.groups ?? [];
+  /** The sets found, and the room every copy but one of each takes. */
+  const copiesNote = () => {
+    if (props.view.searching() && groups().length === 0) return "Comparing files…";
+    const extra = groups().reduce((sum, group) => {
+      const [copies, size] = group.key.split(" ").map(Number);
+      return sum + (copies - 1) * size;
+    }, 0);
+    return `${groups().length === 1 ? "1 set" : `${groups().length.toLocaleString()} sets`}, ${formatSize(extra)} in extra copies`;
+  };
+  /** Every copy but the first of each set. The sort decides which comes first. */
+  const selectExtras = () =>
+    props.view.list()?.select(groups().flatMap((group) => Array.from({ length: Math.max(0, group.count - 1) }, (_, at) => group.start + 1 + at)));
   const count = () => props.view.folder()?.count ?? 0;
 
   function Chip(chip: { label: string; hint: string; pressed: boolean; onClick: () => void }) {
@@ -78,6 +92,31 @@ export function FilterChips(props: { view: FolderView; onMore: () => void }) {
         props.view.list()?.focus();
       }}
     >
+      <Show when={props.view.query() === COPIES_QUERY}>
+        <span class="chip-count chip-copies" aria-live="polite">
+          {copiesNote()}
+        </span>
+        <button
+          class="chip"
+          data-tip="Selects every copy but the first of each set. Sort by date to keep the oldest or the newest."
+          disabled={groups().length === 0}
+          onClick={selectExtras}
+        >
+          Select extra copies
+        </button>
+        <button
+          class="chip"
+          data-tip="Sends every copy but the first of each set to the Recycle Bin, where they can be put back."
+          disabled={groups().length === 0}
+          onClick={() => {
+            selectExtras();
+            props.onRecycle();
+          }}
+        >
+          Recycle extra copies
+        </button>
+        <span class="chip-gap" />
+      </Show>
       <Show when={searchesText()}>
         <Chip
           label="Inside files"

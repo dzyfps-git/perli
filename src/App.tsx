@@ -133,12 +133,14 @@ import {
   setIconTheme,
 } from "./features/filelist/prefs";
 import { SelectPattern } from "./features/filelist/SelectPattern";
-import { FLAT_QUERY, type FolderView, type RowAt } from "./features/navigation/folderView";
+import { COPIES_QUERY, FLAT_QUERY, type FolderView, type RowAt } from "./features/navigation/folderView";
 import { BIN_PATH, isBin, isDriveRoot, isArchiveName, join, parentOf, baseName, relativeTo, samePath, type Crumb } from "./features/navigation/path";
 import { Palette, type Command } from "./features/palette/Palette";
 import { wordsFor, type Verb } from "./features/palette/words";
 import { PaneDivider } from "./features/tabs/PaneDivider";
 import { PathBar, type Suggested, type Suggestion } from "./features/pathbar/PathBar";
+import { CompareBar } from "./features/pathbar/CompareBar";
+import { formatSize } from "./ui/format";
 import { ZipBar } from "./features/pathbar/ZipBar";
 import { commandFor, keyText } from "./features/keys/keybinds";
 import { comboOf, KEYS } from "./features/keys/keys";
@@ -336,6 +338,8 @@ function groupByItems(view: FolderView) {
     ...GROUP_CHOICES.filter(({ by }) => by !== "folder" || !!view.query() || view.isBin()).map(({ by, label }) => ({
       label,
       checked: view.groupBy() === by,
+      // Copies stay in their sets.
+      disabled: view.query() === COPIES_QUERY,
       action: () => view.setGroupBy(by),
     })),
     ...(groups.length > 0
@@ -348,6 +352,7 @@ function groupByItems(view: FolderView) {
 }
 const rowPath = (view: FolderView, row: Row) => join(row.location || view.folder()!.path, row.name);
 const toggleFlat = (view: FolderView) => view.search(view.query() === FLAT_QUERY ? "" : FLAT_QUERY);
+const findCopies = (view: FolderView) => view.search(view.query() === COPIES_QUERY ? "" : COPIES_QUERY);
 
 /** Long enough for "Renamed a long name to another", short enough for a menu. */
 const UNDO_LABEL_LENGTH = 48;
@@ -414,6 +419,11 @@ function groupItem(path: string): MenuItem {
 // The main layout. Moving parts of the app around should only change this file.
 export function App() {
   const tabs = createTabs();
+  /** With two panes in the tab, turning on or off the marks of how their rows stand against each other. */
+  const compareItems = () => {
+    const tab = tabs.active();
+    return tab.panes().length > 1 ? [{ label: "Compare with other pane", checked: tab.comparing(), action: () => tab.setComparing(!tab.comparing()) }] : [];
+  };
   /** `from` is the path crumb whose menu this is. */
   const [menu, setMenu] = createSignal<{ x: number; y: number; above?: number; items: MenuItem[]; from?: string }>();
   /** The settings are a tab of their own: it can exist without being the one in front. */
@@ -482,7 +492,8 @@ export function App() {
       places()?.drives.find((drive) => drive.removable && path.toLowerCase().startsWith(drive.path.toLowerCase()))?.path,
   });
   const [zipping, setZipping] = createSignal<ZipRequest>();
-  const actions = createFileActions(jobs, setDeleting, () => tabs.active().other(), setRenaming, setZipping);
+  // The pane beside the one acting, which a button in a pane that isn't active must still find.
+  const actions = createFileActions(jobs, setDeleting, (view) => tabs.active().panes().find((other) => other !== view), setRenaming, setZipping);
   const shell = createShellItems(jobs, actions, {
     properties: (target, at) => setShowingProperties({ target, at }),
     pickApp: setPickingApp,
@@ -680,6 +691,7 @@ export function App() {
         ? []
         : [
             { label: "Search here", action: () => searchIn(view, path) },
+            { label: "Find copies here", action: async () => void ((await view.open(path)) && findCopies(view)) },
             { label: "Copy path", action: () => quietly(copyFolderPath(path)) },
             {
               label: "New tabs open here",
@@ -753,7 +765,7 @@ export function App() {
     const folder = view.folder()?.path;
     if (!folder || view.isBin()) return;
     const query = view.query();
-    const start = query && query !== FLAT_QUERY ? query.replace(/^tag:/, "") : baseName(folder) || folder;
+    const start = query && query !== FLAT_QUERY && query !== COPIES_QUERY ? query.replace(/^tag:/, "") : baseName(folder) || folder;
     setNaming({
       title: "New smart folder",
       confirm: "Save",
@@ -1331,6 +1343,8 @@ export function App() {
           { label: "Paste as shortcut", disabled: !(await clipboardHasFiles()), action: () => actions.pasteShortcut(view) },
           { label: "New…", action: () => setMaking({ view, x, y }) },
           { label: "Search here", action: () => view.askSearch() },
+          { label: "Find copies", checked: view.query() === COPIES_QUERY, action: () => findCopies(view) },
+          ...compareItems(),
           { label: "Select by pattern…", action: () => setSelectingPattern(view) },
           { label: "Invert selection", action: () => invertSelection(view) },
           { label: "Filter…", action: () => setFiltering(view) },
@@ -1361,6 +1375,13 @@ export function App() {
       // A 7z can lock its very names, so nothing shows until its password is in.
       const hidden = view.locked() && samePath(view.folder()?.path, view.archive() ?? "");
       return { art: "folder", text: hidden ? "Its names are under the password too. Enter it to see inside." : "This folder in the archive is empty.", actions: [] };
+    }
+    if (view.query() === COPIES_QUERY) {
+      return {
+        art: "search",
+        text: "No copies here. Every file is the only one with its content.",
+        actions: [{ label: "Stop looking", keys: "Esc", run: () => view.search("") }],
+      };
     }
     if (view.query()) {
       const flat = view.query() === FLAT_QUERY;
@@ -1895,6 +1916,8 @@ export function App() {
           { label: "Save as template", run: () => actions.saveTemplate(view) },
           { label: "Open templates folder", run: () => actions.openTemplates(view) },
           { label: "Flat view", run: () => toggleFlat(view) },
+          { label: "Find copies", run: () => findCopies(view) },
+          ...compareItems().map((item) => ({ label: item.checked ? "Stop comparing folders" : "Compare folders", run: item.action })),
           { label: "Use this view for all folders", run: () => viewForAll(view) },
           ...keepCommands(view),
         ];
@@ -2087,9 +2110,10 @@ export function App() {
           onCrumbContext={(path, event) => showFolderMenu(event, view, path)}
           onFoldedMenu={(crumbs, x, y) => showFolded(view, crumbs, x, y)}
           linked={tab.panes().length > 1 ? { on: tab.linked(), toggle: () => tab.setLinked(!tab.linked()) } : undefined}
+          compare={tab.panes().length > 1 ? { on: tab.comparing(), toggle: () => tab.setComparing(!tab.comparing()) } : undefined}
         />
         <Show when={view.chipsShown()}>
-          <FilterChips view={view} onMore={() => setFiltering(view)} />
+          <FilterChips view={view} onMore={() => setFiltering(view)} onRecycle={() => actions.remove(view, false)} />
         </Show>
         <Show when={selectingPattern() === view}>
           <SelectPattern view={view} onClose={() => setSelectingPattern(undefined)} />
@@ -2097,6 +2121,14 @@ export function App() {
         <div class="file-area">
           <Show when={view.isZip()}>
             <ZipBar view={view} onExtract={() => actions.extractAll(view)} />
+          </Show>
+          <Show when={tab.comparing() && !view.query()}>
+            <CompareBar
+              view={view}
+              marks={tab.marksOf(view)}
+              onCopyOver={() => actions.toOtherPane(view, "copy")}
+              onStop={() => tab.setComparing(false)}
+            />
           </Show>
           <Show when={view.error()}>
             <div class="message" role="alert">
@@ -2144,12 +2176,15 @@ export function App() {
                   groupLabel(view.groupBy(), key, new Date(), {
                     tag: (id) => allTags().find((known) => known.id === id)?.name,
                     folder: (path) => relativeTo(view.folder()!.path, path) || "This folder",
+                    size: formatSize,
                   })
                 }
                 onFold={view.toggleFold}
                 paths={view.query() === FLAT_QUERY}
                 wall={pictureWall() && view.columnSet() === "pictures"}
                 cut={view.query() ? undefined : cutNames(view.folder()!.path)}
+                marks={tab.marksOf(view)}
+                git={view.gitMarks()}
                 expanded={view.expanded()}
                 // Rows gathered under headers can't also nest under their folders.
                 onExpand={
@@ -2159,7 +2194,7 @@ export function App() {
                 }
                 synced={!view.query() && inCloud(view.folder()!.path)}
                 empty={emptyState(view)}
-                match={view.query() === FLAT_QUERY ? undefined : view.query()}
+                match={view.query() === FLAT_QUERY || view.query() === COPIES_QUERY ? undefined : view.query()}
                 active={tab === tabs.active() && view === tab.active()}
                 layout={view.layout() === "columns" ? "list" : view.layout()}
                 sort={view.sort()}

@@ -104,7 +104,6 @@ dialog:modal::backdrop {
 
   .place-label,
   .place-heading,
-  .place-day,
   .settings-label,
   .cut-label {
     opacity: 0;
@@ -158,7 +157,6 @@ dialog:modal::backdrop {
 
   .place-label,
   .place-heading,
-  .place-day,
   .settings-label,
   .cut-label {
     opacity: 1;

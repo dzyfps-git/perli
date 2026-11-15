@@ -1,5 +1,5 @@
-import { createEffect, createSignal, on } from "solid-js";
-import { closeView, openWindow } from "../../api";
+import { createEffect, createResource, createSignal, on } from "solid-js";
+import { closeView, compared, openWindow, type Marks } from "../../api";
 import { morph } from "../../ui/morph";
 import { newTabPlace } from "../filelist/prefs";
 import { createFolderView, type FolderView } from "../navigation/folderView";
@@ -40,6 +40,33 @@ function createTab(views: FolderView[], startSwapped = false, saved: Layout = {}
       },
     ),
   );
+  /** The two panes mark how each row stands against the other pane's row of the same name. */
+  const [comparing, setComparing] = createSignal(false);
+  createEffect(() => {
+    if (panes().length < 2) setComparing(false);
+  });
+  // Either pane reading again, sorting or going elsewhere compares anew. Searches have no marks.
+  const [marks] = createResource(
+    () => {
+      const [one, two] = panes();
+      const shown = [one?.folder(), two?.folder()];
+      if (!comparing() || !shown[0] || !shown[1] || one.query() || two.query()) return undefined;
+      return [one, shown[0].request, two, shown[1].request] as const;
+    },
+    async ([one, oneRequest, two, twoRequest]): Promise<Map<FolderView, Marks>> => {
+      try {
+        const [first, second] = await Promise.all([compared(one.id, oneRequest, two.id, twoRequest), compared(two.id, twoRequest, one.id, oneRequest)]);
+        return new Map([
+          [one, { snapshot: oneRequest, marks: first }],
+          [two, { snapshot: twoRequest, marks: second }],
+        ]);
+      } catch {
+        // A newer read took the place of one side meanwhile, and it compares in its turn.
+        return marks.latest ?? new Map();
+      }
+    },
+  );
+
   /** Where the tab itself is taking each pane, so getting there leads the other pane nowhere. */
   const led = new Map<FolderView, string>();
   const lead = (view: FolderView, target: string, quiet = false) => {
@@ -96,6 +123,10 @@ function createTab(views: FolderView[], startSwapped = false, saved: Layout = {}
     setLinked,
     home,
     setHome,
+    comparing,
+    setComparing,
+    /** How the rows of `view` stand against the other pane's, while the two are compared. */
+    marksOf: (view: FolderView) => (comparing() ? marks.latest?.get(view) : undefined),
     /** What to save of how the panes sit. Only what differs from a new tab. */
     layout(): Layout {
       return {

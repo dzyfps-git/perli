@@ -1445,3 +1445,106 @@ html[data-blurred] :is(.empty-float, .empty-shadow) {
     scale: none;
   }
 }
+
+/* Comparing panes, in rows and in the bar's counts: a word after the name says what sets a row apart from its twin across the
+   way, and rows that match on both sides step back. */
+[data-compare="only"] {
+  --compare: var(--tag-3);
+  --compare-word: "Only here";
+}
+
+[data-compare="newer"] {
+  --compare: var(--tag-5);
+  --compare-word: "Newer";
+}
+
+[data-compare="older"] {
+  --compare: var(--tag-1);
+  --compare-word: "Older";
+}
+
+[data-compare="differs"] {
+  --compare: var(--tag-0);
+  --compare-word: "Differs";
+}
+
+.file-row[data-compare]:not([data-compare="same"]) .file-name::after {
+  content: var(--compare-word);
+  flex: none;
+  margin-left: 6px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--compare) 16%, transparent);
+  color: color-mix(in srgb, var(--compare) 80%, var(--text));
+  font: 600 10px / 1.4 var(--font);
+  animation: compare-in 360ms var(--spring) backwards;
+}
+
+.file-row[data-compare]:not([data-compare="same"]) {
+  background-image: linear-gradient(90deg, color-mix(in srgb, var(--compare) 10%, transparent), transparent 45%);
+}
+
+.file-row[data-compare="same"]:not([aria-selected="true"]) :is(.file-name, .file-icon, .file-meta) {
+  opacity: 55%;
+}
+
+@keyframes compare-in {
+  from {
+    opacity: 0;
+    scale: 0.6;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .file-row[data-compare] .file-name::after {
+    animation: none;
+  }
+}
+
+/* Rows in a git repository: the name takes the color of what changed, with its letter in the
+   row's end padding, as code editors show it. Ignored rows step back. */
+[data-git="modified"] {
+  --git: var(--tag-2);
+  --git-letter: "M";
+}
+
+[data-git="added"] {
+  --git: var(--tag-3);
+  --git-letter: "A";
+}
+
+[data-git="new"] {
+  --git: var(--tag-3);
+  --git-letter: "U";
+}
+
+[data-git="conflict"] {
+  --git: var(--tag-0);
+  --git-letter: "!";
+}
+
+.file-row[data-git]:not([data-git="ignored"]) .file-name {
+  color: color-mix(in srgb, var(--git) 70%, var(--text));
+}
+
+.file-row[data-git]:not([data-git="ignored"])::before {
+  content: var(--git-letter);
+  position: absolute;
+  top: 50%;
+  right: 2px;
+  color: var(--git);
+  font: 700 9px / 1 var(--font);
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+
+.file-grid[data-layout="grid"] .file-row[data-git]::before {
+  top: var(--space-2);
+  right: auto;
+  left: var(--space-2);
+  transform: none;
+}
+
+.file-row[data-git="ignored"]:not([aria-selected="true"]) :is(.file-name, .file-icon) {
+  opacity: 50%;
+}
