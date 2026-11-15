@@ -50,7 +50,7 @@ const DATE_CHIPS: { since: Since; label: string; hint: string }[] = [
  * A row of chips under the path bar that narrow what the list shows, one tap each. The full
  * filter is one more tap away, and a filter can be pinned so the folder opens with it.
  */
-export function FilterChips(props: { view: FolderView; onMore: () => void }) {
+export function FilterChips(props: { view: FolderView; onMore: () => void; onRecycle: () => void }) {
   const form = () => props.view.filterForm();
   const change = (next: typeof NO_FILTER) => props.view.setFilterForm(next);
   // A flat view and a tag search have no text for the files to hold.
@@ -103,6 +103,17 @@ export function FilterChips(props: { view: FolderView; onMore: () => void }) {
           onClick={selectExtras}
         >
           Select extra copies
+        </button>
+        <button
+          class="chip"
+          data-tip="Sends every copy but the first of each set to the Recycle Bin, where they can be put back."
+          disabled={groups().length === 0}
+          onClick={() => {
+            selectExtras();
+            props.onRecycle();
+          }}
+        >
+          Recycle extra copies
         </button>
         <span class="chip-gap" />
       </Show>

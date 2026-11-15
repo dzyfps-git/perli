@@ -839,6 +839,16 @@
   }
 }
 
+/* In a narrow pane the buttons drop to a second line, so the counts are never cut. */
+.compare-bar {
+  flex-wrap: wrap;
+  row-gap: var(--space-1);
+}
+
+.compare-bar .zip-bar-name {
+  overflow: visible;
+}
+
 /* The bar's counts take the colors of the words on the rows they count. */
 .compare-count {
   color: color-mix(in srgb, var(--compare, var(--text-muted)) 80%, var(--text));

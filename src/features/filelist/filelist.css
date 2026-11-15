@@ -1523,7 +1523,7 @@ html[data-blurred] :is(.empty-float, .empty-shadow) {
   --git-letter: "!";
 }
 
-.file-row[data-git]:not([data-git="ignored"]) .file-label {
+.file-row[data-git]:not([data-git="ignored"]) .file-name {
   color: color-mix(in srgb, var(--git) 70%, var(--text));
 }
 
@@ -1531,7 +1531,7 @@ html[data-blurred] :is(.empty-float, .empty-shadow) {
   content: var(--git-letter);
   position: absolute;
   top: 50%;
-  right: 3px;
+  right: 4px;
   color: var(--git);
   font: 700 9px / 1 var(--font);
   transform: translateY(-50%);

@@ -2110,7 +2110,7 @@ export function App() {
           compare={tab.panes().length > 1 ? { on: tab.comparing(), toggle: () => tab.setComparing(!tab.comparing()) } : undefined}
         />
         <Show when={view.chipsShown()}>
-          <FilterChips view={view} onMore={() => setFiltering(view)} />
+          <FilterChips view={view} onMore={() => setFiltering(view)} onRecycle={() => actions.remove(view, false)} />
         </Show>
         <Show when={selectingPattern() === view}>
           <SelectPattern view={view} onClose={() => setSelectingPattern(undefined)} />
