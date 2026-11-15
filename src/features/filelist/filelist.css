@@ -1223,6 +1223,159 @@ html[data-blurred] :is(.empty-float, .empty-shadow) {
   border-radius: 3px;
 }
 
+/* The column view: a column for each folder above the one on show, from the drive down, beside
+   its list. The strip scrolls sideways when the columns don't fit, nearest folders kept in sight. */
+.file-stage {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.file-stage > .file-list {
+  min-width: 0;
+}
+
+.folder-columns {
+  display: flex;
+  flex: none;
+  max-width: calc(100% - 260px);
+  overflow: auto hidden;
+  border-right: 1px solid var(--border);
+  scrollbar-width: thin;
+}
+
+.folder-column {
+  position: relative;
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  min-height: 0;
+  border-right: 1px solid var(--border);
+  animation: folder-column-in var(--motion-slide);
+}
+
+.folder-column:last-child {
+  border-right: 0;
+}
+
+.folder-column-head {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-2);
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  color: var(--text-muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.folder-column-head > span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.folder-column-count {
+  font-variant-numeric: tabular-nums;
+}
+
+.folder-column-list {
+  flex: 1;
+  min-height: 0;
+  padding: 0 var(--space-1) var(--space-2);
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+
+.folder-column-list button {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  height: 28px;
+  padding: 0 var(--space-2);
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  transition: background var(--motion);
+}
+
+.folder-column-list button::after {
+  content: "\E76C";
+  flex: none;
+  margin-left: auto;
+  color: var(--text-muted);
+  font: 9px / 1 var(--font-icons);
+  opacity: 0;
+  transition: opacity var(--motion);
+}
+
+.folder-column-list .file-icon {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  margin: 0;
+}
+
+.folder-column-name {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.folder-column-list button:hover {
+  background: var(--surface-hover);
+}
+
+.folder-column-list button[aria-current] {
+  background: var(--surface-selected);
+}
+
+.folder-column-list button:hover::after,
+.folder-column-list button[aria-current]::after {
+  opacity: 1;
+}
+
+.folder-column-list button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.folder-column-empty {
+  margin: var(--space-2);
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.folder-column-edge {
+  position: absolute;
+  inset: 0 -3px 0 auto;
+  z-index: 1;
+  width: 6px;
+  cursor: col-resize;
+  transition: background var(--motion);
+}
+
+.folder-column-edge:hover,
+.folder-column[data-resizing] .folder-column-edge {
+  background: color-mix(in srgb, var(--accent) 50%, transparent);
+}
+
+@keyframes folder-column-in {
+  from {
+    translate: 24px 0;
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .folder-column {
+    animation: none;
+  }
+}
+
 /* The gallery: each picture in its own shape, the lines filling the width, a small gap between.
    Pictures lift a little under the pointer. Files that are no picture keep their names. */
 .file-grid[data-gallery] .file-row,

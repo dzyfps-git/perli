@@ -63,6 +63,11 @@ export const [grouping, setGrouping] = stored<Grouping>(
 export const [sizeBars, setSizeBars] = stored("size-bars", saved("size-bars") !== false);
 /** Picture folders in the grid show an even wall of pictures, edge to edge, with no names. */
 export const [pictureWall, setPictureWall] = stored("picture-wall", saved("picture-wall") === true);
+/** How wide the column view's columns of folders are, unless one was dragged. */
+export const [folderColumnWidth, setFolderColumnWidth] = stored(
+  "folder-column-width",
+  typeof saved("folder-column-width") === "number" ? (saved("folder-column-width") as number) : 200,
+);
 /** Picture folders open in the gallery, and the layout before comes back in the next other folder. */
 export const [picturesInGallery, setPicturesInGallery] = stored("pictures-in-gallery", saved("pictures-in-gallery") === true);
 /** The user's own look for file icons, over Perli's. */

@@ -1,4 +1,4 @@
-export type Layout = "list" | "grid" | "gallery";
+export type Layout = "list" | "grid" | "gallery" | "columns";
 
 export const TILE_STEP = 16;
 export const MIN_TILE = 80;

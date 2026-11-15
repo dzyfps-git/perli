@@ -395,6 +395,8 @@ export function FileList(props: {
   onLeave?: (folder: string, names: string[], scrollTop: number) => void;
   /** A double click on no row. */
   onBackgroundDoubleClick?: () => void;
+  /** In the column view, Left goes up a folder and Right opens the folder selected. */
+  onUp?: () => void;
 }) {
   const pages = new Map<number, Row[]>();
   const loading = new Set<number>();
@@ -1537,6 +1539,10 @@ export function FileList(props: {
       openIndex(focused, false);
     } else if (event.ctrlKey && !event.shiftKey && event.key.toLowerCase() === "a") {
       selection.selectAll(props.count);
+    } else if (props.onUp && plain && (event.key === "ArrowLeft" || event.key === "ArrowRight")) {
+      if (event.key === "ArrowLeft") props.onUp();
+      else if (focused >= 0 && rowAt(focused)?.isDir) openIndex(focused, false);
+      else return;
     } else if (event.key === "Escape") {
       selection.clear();
       props.onEscape();

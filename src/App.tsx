@@ -82,6 +82,7 @@ import { BIN_COLUMNS, FLAT_COLUMNS, nextGrouping, nextSort, SEARCH_COLUMNS, ZIP_
 import { GROUP_CHOICES, groupLabel } from "./features/filelist/groups";
 import type { Empty } from "./features/filelist/EmptyState";
 import { FileList } from "./features/filelist/FileList";
+import { FolderColumns } from "./features/filelist/FolderColumns";
 import { FilterDialog } from "./features/filelist/FilterDialog";
 import { clampTile, isLargestTile, isSmallestTile, TILE_STEP, type Layout } from "./features/filelist/layout";
 import {
@@ -253,7 +254,7 @@ const MOST_TABS_BEHIND = 8;
 const MOST_OFFERS = 8;
 /** What "sort by" and "view" take in the palette. */
 const SORT_WORDS = ["name", "modified", "created", "type", "size"];
-const VIEW_WORDS = ["list", "grid", "gallery", "compact", "cozy", "roomy"];
+const VIEW_WORDS = ["list", "grid", "gallery", "columns", "compact", "cozy", "roomy"];
 /** Sorted by nothing a column stands for, so the next sort takes its own first direction. */
 const UNSORTED: Sort = { key: "found", descending: false };
 const ICON_PIN = "\uE718";
@@ -321,6 +322,10 @@ const ownColumns = (view: FolderView) =>
           : undefined;
 /** A folder's kept columns, or the ones a search or the bin always has. */
 const shownColumns = (view: FolderView) => ownColumns(view) ?? columnsOf(view.columnSet());
+/** Tiles of one size or another, which take the tile size items. */
+const tiled = (view: FolderView) => view.layout() === "grid" || view.layout() === "gallery";
+/** The column view shows the folders above beside the list, but not for a search or the bin. */
+const inColumns = (view: FolderView) => view.layout() === "columns" && !view.query() && !view.isBin();
 
 /** What a view's rows can gather under headers by. Only rows from many folders have a folder each. */
 function groupByItems(view: FolderView) {
@@ -1214,7 +1219,8 @@ export function App() {
           layoutItem("List", "list"),
           layoutItem("Grid", "grid"),
           layoutItem("Gallery", "gallery"),
-          ...(view.layout() !== "list" ? tileItems : rowItems),
+          layoutItem("Columns", "columns"),
+          ...(tiled(view) ? tileItems : rowItems),
           { label: "Windows icons", divider: true, checked: windowsIcons(), action: () => setWindowsIcons(!windowsIcons()) },
           { label: "Details panel", checked: detailsPanel(), action: toggleDetails },
           { label: "Preview pane", checked: previewPane(), action: () => setPreviewPane(!previewPane()) },
@@ -1408,7 +1414,7 @@ export function App() {
 
   // List view has no tiles, so these keys do nothing there.
   function resizeTiles(view: FolderView, change: number) {
-    if (view.layout() !== "list") setTileSize(clampTile(tileSize() + change));
+    if (tiled(view)) setTileSize(clampTile(tileSize() + change));
   }
 
   function togglePalette() {
@@ -1467,7 +1473,9 @@ export function App() {
       },
       { says: "tag", words: allTags().map((tag) => tag.name), run: (word) => quietly(tagSelected(view, word, true)) },
       { says: "untag", words: allTags().map((tag) => tag.name), run: (word) => quietly(tagSelected(view, word, false)) },
-      { says: "view", words: VIEW_WORDS, run: (word) => (word === "list" || word === "grid" || word === "gallery" ? view.setLayout(word) : setRowDensity(word as Density)) },
+      { says: "view", words: VIEW_WORDS, run: (word) =>
+          word === "list" || word === "grid" || word === "gallery" || word === "columns" ? view.setLayout(word) : setRowDensity(word as Density),
+      },
       { says: "select", words: "free", run: (word) => quietly(selectMatching(view, word)) },
       { says: "search", words: "free", run: (word) => view.search(word) },
       { says: "open in", words: Object.values(TERMINAL_NAMES), run: (word) => terminalHere(view, terminal(word)) },
@@ -1661,6 +1669,7 @@ export function App() {
     list: () => here().setLayout("list"),
     grid: () => here().setLayout("grid"),
     gallery: () => here().setLayout("gallery"),
+    columns: () => here().setLayout("columns"),
     lockView: () => here().toggleLock(),
     largerTiles: () => resizeTiles(here(), TILE_STEP),
     smallerTiles: () => resizeTiles(here(), -TILE_STEP),
@@ -2104,6 +2113,10 @@ export function App() {
               </button>
             </div>
           </Show>
+          <div class="file-stage">
+          <Show when={inColumns(view)}>
+            <FolderColumns view={view} onMenu={(event, path) => showFolderMenu(event, view, path)} onNewTab={(path) => tabs.add([path])} />
+          </Show>
           {/* A real arrival starts the list over. A reload only swaps its rows, so nothing blinks. */}
           <Show when={view.folder() && view.arrival()} keyed>
             {(_arrival) => (
@@ -2122,7 +2135,7 @@ export function App() {
                 onLeave={view.keep}
                 onBackgroundDoubleClick={() => upOnDoubleClick() && void view.up()}
                 thumbs={!view.isBin()}
-                columns={shownColumns(view)}
+                columns={inColumns(view) ? shownColumns(view).filter((column) => column.id === "name") : shownColumns(view)}
                 columnSet={view.columnSet()}
                 fixedColumns={ownColumns(view) !== undefined}
                 groups={view.folder()!.groups}
@@ -2140,7 +2153,7 @@ export function App() {
                 expanded={view.expanded()}
                 // Rows gathered under headers can't also nest under their folders.
                 onExpand={
-                  inlineFolders() && !view.query() && !view.isBin() && !view.isZip() && view.groupBy() === "none"
+                  inlineFolders() && !view.query() && !view.isBin() && !view.isZip() && view.groupBy() === "none" && !inColumns(view)
                     ? (path) => void view.toggleExpand(path)
                     : undefined
                 }
@@ -2148,7 +2161,7 @@ export function App() {
                 empty={emptyState(view)}
                 match={view.query() === FLAT_QUERY ? undefined : view.query()}
                 active={tab === tabs.active() && view === tab.active()}
-                layout={view.layout()}
+                layout={view.layout() === "columns" ? "list" : view.layout()}
                 sort={view.sort()}
                 onSort={(key) => view.setSort(nextSort(view.sort(), key))}
                 onDragOut={() => actions.dragOut(view)}
@@ -2183,9 +2196,11 @@ export function App() {
                 onOpenBehind={(row) => openBehind(view, row)}
                 barItems={(two) => barItems(view, two)}
                 connect={view.connectList}
+                onUp={inColumns(view) ? () => void view.up() : undefined}
               />
             )}
           </Show>
+          </div>
         </div>
       </section>
     );
@@ -2278,7 +2293,8 @@ export function App() {
                   <PaneDivider tab={tab} />
                 </Show>
               </div>
-              <Show when={detailsPanel() && tab === tabs.active()}>
+              {/* The column view's last column is the details of what is selected. */}
+              <Show when={(detailsPanel() || tab.active().layout() === "columns") && tab === tabs.active()}>
                 <DetailsPanel view={tab.active()} />
               </Show>
               <Show when={previewPane() && tab === tabs.active()}>

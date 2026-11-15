@@ -4,6 +4,7 @@ import type { FolderView } from "../navigation/folderView";
 import { Checksum } from "./Checksum";
 import { headline } from "./pictureFacts";
 import { draw } from "./QuickPreview";
+import { tagColor, tagQuery, tags } from "../tags/tags";
 
 /** Arrow keys held down skip past rows, so a row has to stay selected this long first. */
 const SETTLE_MS = 120;
@@ -69,6 +70,21 @@ export function DetailsPanel(props: { view: FolderView }) {
           {(thumb) => <canvas ref={(canvas) => draw(canvas, thumb)} class="details-picture" />}
         </Show>
         <p class="details-name">{shown()!.row.name}</p>
+        <Show when={tags().filter((tag) => shown()!.row.tags.includes(tag.id))}>
+          {(own) => (
+            <Show when={own().length > 0}>
+              <div class="details-tags" role="group" aria-label="Tags">
+                <For each={own()}>
+                  {(tag) => (
+                    <button class="details-tag" style={{ "--tag": tagColor(tag.color) }} onClick={() => props.view.search(tagQuery(tag.name))}>
+                      {tag.name}
+                    </button>
+                  )}
+                </For>
+              </div>
+            </Show>
+          )}
+        </Show>
         <Show when={headline(facts()).length > 0}>
           <ul class="details-headline">
             <For each={headline(facts())}>{(fact) => <li>{fact}</li>}</For>

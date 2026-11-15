@@ -53,7 +53,7 @@ function cleanPane(pane: Partial<SavedPane> | null): SavedPane[] {
   const lists = { expanded: texts(pane.expanded), back: texts(pane.back), forward: texts(pane.forward), select: texts(pane.select) };
   const scrollTop = typeof pane.scrollTop === "number" && pane.scrollTop > 0 ? pane.scrollTop : undefined;
   const kept = Object.entries({ ...lists, scrollTop }).filter(([, value]) => value !== undefined);
-  return [{ path: pane.path, sort, layout: pane.layout === "grid" || pane.layout === "gallery" ? pane.layout : "list", ...Object.fromEntries(kept) }];
+  return [{ path: pane.path, sort, layout: pane.layout === "grid" || pane.layout === "gallery" || pane.layout === "columns" ? pane.layout : "list", ...Object.fromEntries(kept) }];
 }
 
 function inRange(index: unknown, count: number) {

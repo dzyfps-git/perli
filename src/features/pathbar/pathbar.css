@@ -331,6 +331,10 @@
   transform: translateX(56px);
 }
 
+.layout-pill[data-layout="columns"]::before {
+  transform: translateX(84px);
+}
+
 .layout-pill button {
   position: relative;
   width: 28px;
