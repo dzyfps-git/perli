@@ -1,7 +1,21 @@
 import { createMemo, createSignal } from "solid-js";
 import { saved, stored } from "../filelist/prefs";
 import { coveringEntry, folderKey, remembered } from "../filelist/sortMemory";
-import { bound, changedFrom, cleanOverrides, KEYS, keysOf, rebound, reset, type Overrides } from "./keys";
+import {
+  bound,
+  changedFrom,
+  cleanFolderKeys,
+  cleanOverrides,
+  cleanWorkspaceKeys,
+  KEYS,
+  keysOf,
+  parseKeysFile,
+  rebound,
+  reset,
+  type FolderKeys,
+  type KeysFile,
+  type Overrides,
+} from "./keys";
 
 /**
  * The user's own keys, kept between runs, and what every part of Perli asks about them. Keys can
@@ -9,33 +23,11 @@ import { bound, changedFrom, cleanOverrides, KEYS, keysOf, rebound, reset, type 
  * win over the workspace's, which win over the ones set everywhere.
  */
 
-/** A folder's own keys, which hold in the folders inside it too. `path` is as it was shown. */
-export interface FolderKeys {
-  keys: Overrides;
-  below: true;
-  path: string;
-}
-
 export type KeyScope = "all" | "workspace" | "folder";
 
-/** Each entry of a saved map of scopes as far as usable. */
-function cleanMap<T>(value: unknown, clean: (one: unknown) => T | undefined): Record<string, T> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
-  return Object.fromEntries(Object.entries(value).flatMap(([key, one]) => {
-    const kept = clean(one);
-    return kept === undefined ? [] : [[key, kept] as const];
-  }));
-}
-const cleanFolder = (one: unknown): FolderKeys | undefined => {
-  const entry = one as Partial<FolderKeys> | null;
-  return typeof entry?.path === "string" ? { keys: cleanOverrides(KEYS, entry.keys), below: true, path: entry.path } : undefined;
-};
-export const cleanFolderKeys = (value: unknown) => cleanMap(value, cleanFolder);
-export const cleanWorkspaceKeys = (value: unknown) => cleanMap(value, (one) => cleanOverrides(KEYS, one));
-
 export const [overrides, setOverrides] = stored<Overrides>("keybinds", cleanOverrides(KEYS, saved("keybinds")));
-export const [folderKeys, setFolderKeys] = stored<Record<string, FolderKeys>>("folder-keys", cleanFolderKeys(saved("folder-keys")));
-export const [workspaceKeys, setWorkspaceKeys] = stored<Record<string, Overrides>>("workspace-keys", cleanWorkspaceKeys(saved("workspace-keys")));
+export const [folderKeys, setFolderKeys] = stored<Record<string, FolderKeys>>("folder-keys", cleanFolderKeys(KEYS, saved("folder-keys")));
+export const [workspaceKeys, setWorkspaceKeys] = stored<Record<string, Overrides>>("workspace-keys", cleanWorkspaceKeys(KEYS, saved("workspace-keys")));
 
 /** Where keys are looked up: the folder on screen and the workspace, which the app keeps told. */
 const [place, setPlace] = createSignal<{ folder?: string; workspace?: string }>({});
@@ -151,4 +143,23 @@ export const resetKeys = (scope: KeyScope) => setLayer(scope, {});
 export function moveWorkspaceKeys(from: string, to: string | undefined) {
   const { [from]: kept, ...rest } = workspaceKeys();
   if (kept) setWorkspaceKeys(to === undefined ? rest : { ...rest, [to]: kept });
+}
+
+/** Every key set, everywhere and in each workspace and folder, as a file's text. */
+export const keysText = () =>
+  JSON.stringify({ perli: "keys", keys: overrides(), workspaces: workspaceKeys(), folders: folderKeys() } satisfies KeysFile, null, 2);
+
+/**
+ * Takes in the keys of a file: the ones set everywhere in place of these, and each workspace's and
+ * folder's in place of the same one's here. False when the text is no keys file.
+ */
+export function readKeys(text: string) {
+  const file = parseKeysFile(KEYS, text);
+  if (!file) return false;
+  setOverrides(file.keys);
+  setWorkspaceKeys({ ...workspaceKeys(), ...file.workspaces });
+  let folders = folderKeys();
+  for (const entry of Object.values(file.folders)) folders = remembered(folders, entry.path, entry);
+  setFolderKeys(folders);
+  return true;
 }

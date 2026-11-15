@@ -210,3 +210,52 @@ export function changedFrom(table: KeyCommand[], below: Overrides, next: Overrid
     }),
   );
 }
+
+/** A folder's own keys, which hold in the folders inside it too. `path` is as it was shown. */
+export interface FolderKeys {
+  keys: Overrides;
+  below: true;
+  path: string;
+}
+
+/** Each usable entry of a saved map of scopes. */
+function cleanMap<T>(value: unknown, clean: (one: unknown) => T | undefined): Record<string, T> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return Object.fromEntries(
+    Object.entries(value).flatMap(([key, one]) => {
+      const kept = clean(one);
+      return kept === undefined ? [] : [[key, kept] as const];
+    }),
+  );
+}
+
+export const cleanFolderKeys = (table: KeyCommand[], value: unknown) =>
+  cleanMap(value, (one): FolderKeys | undefined => {
+    const entry = one as Partial<FolderKeys> | null;
+    return typeof entry?.path === "string" ? { keys: cleanOverrides(table, entry.keys), below: true, path: entry.path } : undefined;
+  });
+export const cleanWorkspaceKeys = (table: KeyCommand[], value: unknown) => cleanMap(value, (one) => cleanOverrides(table, one));
+
+/** Keys written to a file: the ones set everywhere, each workspace's and each folder's. */
+export interface KeysFile {
+  perli: "keys";
+  keys: Overrides;
+  workspaces: Record<string, Overrides>;
+  folders: Record<string, FolderKeys>;
+}
+
+/** A keys file as far as usable, or nothing when it is no keys file. */
+export function parseKeysFile(table: KeyCommand[], text: string): KeysFile | undefined {
+  try {
+    const value = JSON.parse(text);
+    if (value?.perli !== "keys") return undefined;
+    return {
+      perli: "keys",
+      keys: cleanOverrides(table, value.keys),
+      workspaces: cleanWorkspaceKeys(table, value.workspaces),
+      folders: cleanFolderKeys(table, value.folders),
+    };
+  } catch {
+    return undefined;
+  }
+}

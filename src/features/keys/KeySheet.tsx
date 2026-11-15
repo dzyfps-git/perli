@@ -1,7 +1,8 @@
 import { createSignal, For, onMount, Show } from "solid-js";
+import { exportSettings, importSettings } from "../../api";
 import { openSheet } from "../../ui/sheet";
 import { fitsSearch } from "../settings/search";
-import { rebind, resetKey, resetKeys, scopeKeys, scopeName, scopeOwn, unbind, type KeyScope } from "./keybinds";
+import { keysText, readKeys, rebind, resetKey, resetKeys, scopeKeys, scopeName, scopeOwn, unbind, type KeyScope } from "./keybinds";
 import { bound, comboOf, KEYS, keysOf, taken, type KeyCommand } from "./keys";
 import "../settings/settings.css";
 import "../fileops/fileops.css";
@@ -61,6 +62,24 @@ export function KeySheet(props: { onClose: () => void }) {
   onMount(() => {
     close = openSheet(dialog);
   });
+
+  /** Every key set, everywhere and in each workspace and folder, to a file to take elsewhere. */
+  async function exportKeys() {
+    try {
+      if (await exportSettings(keysText(), "Perli keys.json")) setSaid("Keys saved.");
+    } catch (failure) {
+      setSaid(String(failure));
+    }
+  }
+
+  async function importKeys() {
+    try {
+      const text = await importSettings();
+      if (text !== null) setSaid(readKeys(text) ? "Keys taken in." : "That file holds no keys.");
+    } catch (failure) {
+      setSaid(String(failure));
+    }
+  }
 
   return (
     <dialog ref={dialog} class="settings confirm key-sheet" aria-label="Keyboard shortcuts" onClose={props.onClose} onKeyDown={onKeyDown}>
@@ -134,6 +153,12 @@ export function KeySheet(props: { onClose: () => void }) {
         </For>
       </div>
       <div class="confirm-buttons">
+        <button class="job-choice key-file" onClick={() => void importKeys()}>
+          Import…
+        </button>
+        <button class="job-choice key-file" onClick={() => void exportKeys()}>
+          Export…
+        </button>
         <Show when={Object.keys(scopeOwn(scope())).length > 0}>
           <button
             class="job-choice"

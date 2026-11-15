@@ -183,3 +183,8 @@ button.key-chip:hover {
     transition: none;
   }
 }
+
+/* The keys file sits apart from the buttons that end the sheet. */
+.key-file + .key-file {
+  margin-right: auto;
+}

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { bound, changedFrom, cleanOverrides, comboOf, KEYS, keysOf, rebound, reset, taken } from "./keys.ts";
+import { bound, changedFrom, cleanOverrides, comboOf, KEYS, keysOf, parseKeysFile, rebound, reset, taken } from "./keys.ts";
 
 const press = (key: string, code = "", held: Partial<Record<"ctrlKey" | "altKey" | "shiftKey", boolean>> = {}) =>
   comboOf({ key, code, ctrlKey: false, altKey: false, shiftKey: false, ...held });
@@ -84,4 +84,20 @@ test("a scope keeps only what it changes, a key moved from another command too",
   // Laid over what is beneath, the scope gives the keys it was made from.
   const layered = { ...below, ...changedFrom(KEYS, below, next) };
   assert.equal(bound(KEYS, layered).get("Ctrl+Q")?.id, "cut");
+});
+
+test("a keys file comes back as written, keeping only what is usable", () => {
+  const file = {
+    perli: "keys",
+    keys: { copy: ["Ctrl+Q"] },
+    workspaces: { Work: { cut: ["Ctrl+J"] }, Bad: "x" },
+    folders: { "c:\\code": { keys: { paste: ["Ctrl+B"], nope: ["F2"] }, below: true, path: "C:\\Code" }, "c:\\x": { keys: {} } },
+  };
+  assert.deepEqual(parseKeysFile(KEYS, JSON.stringify(file)), {
+    perli: "keys",
+    keys: { copy: ["Ctrl+Q"] },
+    workspaces: { Work: { cut: ["Ctrl+J"] }, Bad: {} },
+    folders: { "c:\\code": { keys: { paste: ["Ctrl+B"] }, below: true, path: "C:\\Code" } },
+  });
+  for (const text of ["", "nope", "{}", '{"perli":"palette"}']) assert.equal(parseKeysFile(KEYS, text), undefined);
 });
