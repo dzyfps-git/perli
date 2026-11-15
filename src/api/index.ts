@@ -464,6 +464,11 @@ export const checkUpdate = () => invoke<UpdateOffer | null>("check_update");
 
 /** Ends Perli once the installer starts. */
 export const installUpdate = () => invoke<void>("install_update");
+/** How much of the update has come down, and how big it is when the server says. */
+export const onUpdateProgress = (handler: (done: number, total: number | null) => void) =>
+  listen<[number, number | null]>("update-progress", (event) => handler(...event.payload));
+/** The download is done and the installer is starting. Perli closes, then reopens. */
+export const onUpdateDownloaded = (handler: () => void) => listen("update-downloaded", handler);
 
 export const recentFiles = (limit: number) => invoke<Recent[]>("recent_files", { limit });
 

@@ -1935,14 +1935,30 @@ async fn check_update(app: AppHandle, pending: State<'_, PendingUpdate>) -> Resu
 /// opens the new version. Running jobs would be cut off, so they must finish first, and none
 /// may start until the install fails or Perli ends.
 #[tauri::command]
-async fn install_update(pending: State<'_, PendingUpdate>, jobs: State<'_, Jobs>) -> Result<(), String> {
+async fn install_update(app: AppHandle, pending: State<'_, PendingUpdate>, jobs: State<'_, Jobs>) -> Result<(), String> {
     if !jobs.close() {
         return Err("Jobs are still running. Let them finish, then install the update.".into());
     }
     // A copy stays, so a failed download can be tried again.
     let update = pending.0.lock().unwrap_or_else(PoisonError::into_inner).clone();
     let installed = match update {
-        Some(update) => update.download_and_install(|_, _| {}, || {}).await.map_err(|error| error.to_string()),
+        Some(update) => {
+            // The installer runs with no window of its own, so Perli's sheet shows the download.
+            let (mut done, mut said) = (0u64, u64::MAX);
+            let on_chunk = |chunk: usize, total: Option<u64>| {
+                done += chunk as u64;
+                // Once a percent, or once a megabyte when the size is unknown.
+                let step = total.map_or(done >> 20, |total| done * 100 / total.max(1));
+                if step != said {
+                    said = step;
+                    let _ = app.emit("update-progress", (done, total));
+                }
+            };
+            let finished = || {
+                let _ = app.emit("update-downloaded", ());
+            };
+            update.download_and_install(on_chunk, finished).await.map_err(|error| error.to_string())
+        }
         None => Err("No update is waiting. Check for updates first.".into()),
     };
     if installed.is_err() {

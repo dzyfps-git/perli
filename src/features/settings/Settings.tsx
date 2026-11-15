@@ -98,7 +98,9 @@ import { fitsSearch } from "./search";
 import {
   checkOnStart,
   currentVersion,
+  downloadText,
   installNow,
+  updateDownload,
   lookForUpdate,
   setCheckOnStart,
   updateFailure,
@@ -980,7 +982,7 @@ export function Settings(props: {
                   disabled={updateState() === "installing"}
                   onClick={() => installNow(props.onBeforeUpdate)}
                 >
-                  Install and restart
+                  {updateState() === "installing" ? downloadText(updateDownload()) : "Install and restart"}
                 </button>
               </Show>
             </div>

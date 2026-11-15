@@ -1,8 +1,11 @@
 import { createSignal } from "solid-js";
-import { appVersion, checkUpdate, installUpdate, type UpdateOffer } from "../../api";
+import { appVersion, checkUpdate, installUpdate, onUpdateDownloaded, onUpdateProgress, type UpdateOffer } from "../../api";
 import { saved, stored } from "../filelist/prefs";
 
 export type UpdateState = "idle" | "checking" | "current" | "ready" | "installing" | "failed";
+/** How far the download is, from 0 to 1, or null while its size is unknown. "done" once the
+ *  installer runs, which closes Perli and opens the new version. */
+export type UpdateDownload = number | null | "done";
 
 /** Waits for the window to settle, so a check never slows the start. */
 const START_DELAY_MS = 5000;
@@ -11,6 +14,8 @@ const [state, setState] = createSignal<UpdateState>("idle");
 const [offer, setOffer] = createSignal<UpdateOffer>();
 const [failure, setFailure] = createSignal<string>();
 const [version, setVersion] = createSignal("");
+const [download, setDownload] = createSignal<UpdateDownload>(null);
+export const updateDownload = download;
 
 export const updateState = state;
 export const updateOffer = offer;
@@ -44,6 +49,11 @@ export async function lookForUpdate(quiet = false) {
 export async function installNow(beforeExit: () => Promise<unknown>) {
   setState("installing");
   setFailure(undefined);
+  setDownload(null);
+  const listeners = [
+    onUpdateProgress((done, total) => setDownload(total ? Math.min(1, done / total) : null)),
+    onUpdateDownloaded(() => setDownload("done")),
+  ];
   try {
     await beforeExit().catch((error: unknown) => {
       // Shown as is, like the backend's own failures.
@@ -53,7 +63,15 @@ export async function installNow(beforeExit: () => Promise<unknown>) {
   } catch (error) {
     setState("ready");
     setFailure(String(error));
+  } finally {
+    for (const listener of listeners) listener.then((stop) => stop());
   }
+}
+
+/** What the install button says while it works. */
+export function downloadText(state: UpdateDownload) {
+  if (state === "done") return "Perli reopens in a moment";
+  return state === null ? "Downloading…" : `Downloading ${Math.round(state * 100)}%`;
 }
 
 export function startUpdates() {

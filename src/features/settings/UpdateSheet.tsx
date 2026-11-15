@@ -1,7 +1,7 @@
 import { For, Match, onMount, Show, Switch } from "solid-js";
 import { openSheet } from "../../ui/sheet";
 import { noteBlocks } from "./notes";
-import { currentVersion, installNow, updateFailure, updateOffer, updateState } from "./updates";
+import { currentVersion, downloadText, installNow, updateDownload, updateFailure, updateOffer, updateState } from "./updates";
 import "./settings.css";
 import "../fileops/fileops.css";
 
@@ -11,6 +11,10 @@ export function UpdateSheet(props: { onBeforeUpdate: () => Promise<unknown>; onL
   let close!: ReturnType<typeof openSheet>;
   onMount(() => (close = openSheet(dialog)));
   const installing = () => updateState() === "installing";
+  const shareDone = () => {
+    const state = updateDownload();
+    return state === "done" ? 1 : (state ?? 0);
+  };
 
   return (
     <dialog ref={dialog} class="settings update-sheet" aria-label="Update ready" onClose={props.onClose}>
@@ -33,6 +37,11 @@ export function UpdateSheet(props: { onBeforeUpdate: () => Promise<unknown>; onL
           )}
         </For>
       </div>
+      <Show when={installing()}>
+        <div class="update-progress" role="progressbar" aria-label="Download" aria-valuenow={Math.round(shareDone() * 100)}>
+          <span style={{ transform: `scaleX(${shareDone()})` }} />
+        </div>
+      </Show>
       <Show when={updateFailure()}>
         <p class="settings-note" role="alert">
           {updateFailure()}
@@ -43,7 +52,7 @@ export function UpdateSheet(props: { onBeforeUpdate: () => Promise<unknown>; onL
           Later
         </button>
         <button class="job-choice update-install" disabled={installing()} onClick={() => installNow(props.onBeforeUpdate)}>
-          {installing() ? "Downloading…" : "Install now"}
+          {installing() ? downloadText(updateDownload()) : "Install now"}
         </button>
       </div>
     </dialog>
