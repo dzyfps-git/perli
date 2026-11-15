@@ -2,8 +2,9 @@ import { createEffect, createSignal, For, onCleanup, onMount, Show, type JSX } f
 import type { BookHeading } from "../../api";
 import { saved, stored } from "../filelist/prefs";
 import { ToolCog } from "../../ui/Controls";
+import { morph } from "../../ui/morph";
 import { createFind, findIn } from "./FindBar";
-import { hasDraft, ICON_EDIT, QuickEdit, type EditTarget } from "./QuickEdit";
+import { ICON_EDIT, QuickEdit, startsEditing, type EditTarget } from "./QuickEdit";
 import {
   asSource,
   BOOK_THEMES,
@@ -111,12 +112,12 @@ const plainKey = (event: KeyboardEvent) => !event.ctrlKey && !event.altKey && !(
 /** A Markdown file with its contents beside it and find. */
 export function MarkdownView(live: { html: string; source: string; fill: (article: HTMLElement) => void; keys: Keys; edit?: EditTarget }) {
   const props = { ...live };
-  /** Unsaved text left behind earlier opens the box again. */
-  const [editing, setEditing] = createSignal(!!props.edit && hasDraft(props.edit.path));
+  /** Unsaved text left behind earlier, or a menu's "Edit", opens the box at once. */
+  const [editing, setEditing] = createSignal(!!props.edit && startsEditing(props.edit.path));
   let editKeys: ((event: KeyboardEvent) => boolean) | undefined;
   function edit() {
     find.close();
-    setEditing(true);
+    morph(() => setEditing(true), "edit");
   }
   let scroller!: HTMLDivElement;
   let article!: HTMLElement;
@@ -195,7 +196,7 @@ export function MarkdownView(live: { html: string; source: string; fill: (articl
             keys={(handler) => (editKeys = handler)}
             onLeave={(saved) => {
               const { refresh } = target();
-              setEditing(false);
+              morph(() => setEditing(false), "edit");
               if (saved) refresh();
             }}
           />

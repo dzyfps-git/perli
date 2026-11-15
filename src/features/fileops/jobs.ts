@@ -33,6 +33,12 @@ const UNDO_TOAST_MS = 6000;
 const LEAVE_MS = 280;
 const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
 
+/** A button on a card that only tells something, such as an offer to save. */
+export interface CardAction {
+  label: string;
+  run: () => void;
+}
+
 export interface JobCard {
   id: number;
   title: string;
@@ -68,6 +74,7 @@ export interface JobCard {
     retries: boolean;
     /** The undo step this job added. */
     step: number | null;
+    action?: CardAction;
   };
 }
 
@@ -194,10 +201,11 @@ export function createJobs(views: () => FolderView[], host: JobsHost) {
     }
   }
 
-  /** A card with no job behind it, which only tells the user something. A `brief` one folds away by itself. */
-  function notify(title: string, note: string, brief = false) {
+  /** A card with no job behind it, which only tells the user something. A `brief` one folds away by
+   *  itself, later when it offers an `action`, so there is time to reach for it. */
+  function notify(title: string, note: string, brief = false, action?: CardAction) {
     const id = --failures;
-    if (brief) setTimeout(() => remove(id), LINGER_MS);
+    if (brief) setTimeout(() => remove(id), action ? UNDO_TOAST_MS : LINGER_MS);
     setCards(cards.length, {
       id,
       title,
@@ -210,7 +218,7 @@ export function createJobs(views: () => FolderView[], host: JobsHost) {
       speeds: [],
       target: null,
       then: "none",
-      ended: { note, done: false, kept: [], failed: [], retries: false, step: null },
+      ended: { note, done: false, kept: [], failed: [], retries: false, step: null, action },
     });
   }
 

@@ -1870,8 +1870,39 @@
 }
 
 .picture-stage[data-picking],
-.picture-stage[data-picking][data-zoomed] {
+.picture-stage[data-picking][data-zoomed],
+.picture-stage[data-cropping] {
   cursor: crosshair;
+}
+
+/* The part kept stays bright, and the rest dims around it. */
+.picture-crop {
+  position: absolute;
+  border: 1px solid white;
+  outline: 1px dashed rgb(0 0 0 / 0.5);
+  box-shadow: 0 0 0 100vmax rgb(0 0 0 / 0.45);
+  pointer-events: none;
+  animation: find-in var(--motion-spring);
+}
+
+.picture-crop-size {
+  position: absolute;
+  top: var(--space-1);
+  left: var(--space-1);
+  padding: 1px var(--space-2);
+  border-radius: var(--space-1);
+  background: rgb(0 0 0 / 0.6);
+  color: white;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.chip-guess {
+  margin-left: var(--space-1);
+  color: var(--text-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
 }
 
 .picture-chips {
@@ -3771,6 +3802,12 @@ th[aria-sort="descending"] .table-sort::after {
 .quick-edit-colors {
   pointer-events: none;
   background: transparent;
+}
+
+/* Without colors the text under the box is only there for find to mark. */
+.quick-edit-colors[data-plain],
+.quick-edit-colors[data-plain]::highlight(find-current) {
+  color: transparent;
 }
 
 .quick-edit-scroll[data-wrap] .preview-text {

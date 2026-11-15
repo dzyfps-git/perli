@@ -1,6 +1,7 @@
 import { createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
-import type { PictureEdit, PictureFormat, Thumb } from "../../api";
+import { COPY_EDGES, PICTURE_FORMATS, type PictureEdit, type PictureFormat, type Thumb } from "../../api";
 import { ToolCog } from "../../ui/Controls";
+import { formatSize } from "../../ui/format";
 import { draw } from "./QuickPreview";
 import { cameraFacts, hexAt, tintOf } from "./pictureFacts";
 import { Minimap } from "./Minimap";
@@ -20,9 +21,6 @@ const ICON_SHOW = "\uE786";
 const ICON_PICK = "\uEF3C";
 const ICON_COPY = "\uE8C8";
 const ICON_TOOLS = "\uE70F";
-/** Sizes a smaller copy can take, by its longer side. */
-const COPY_EDGES = [3840, 2560, 1920, 1280, 800];
-const FORMATS: [PictureFormat, string][] = [["png", "PNG"], ["jpeg", "JPEG"], ["tiff", "TIFF"], ["bmp", "BMP"]];
 /** A frame that names no time of its own stays this long, as browsers do. */
 const FRAME_MS = 100;
 const SAID_MS = 1600;
@@ -33,6 +31,16 @@ const MOST_ZOOM = 16;
 const STEP = 1.25;
 /** How far one notch of the wheel zooms. */
 const WHEEL = 0.0015;
+/** Sizes are guessed from a copy this long on its longer side, whatever size the copy will be. */
+const GUESS_EDGE = 1024;
+/** A crop smaller than this on screen is a slip, not a choice. */
+const LEAST_CROP = 4;
+/** Each copy tool's own JPEG quality, as Perli writes it. */
+const QUALITY = 0.92;
+const SHARE_QUALITY = 0.85;
+const SHARE_EDGE = 2048;
+/** A BMP's header before its pixels. */
+const BMP_HEADER = 54;
 
 export interface PictureViewProps {
   load: (edge: number) => Promise<Thumb | null>;
@@ -60,6 +68,16 @@ export interface PictureTools {
   /** Runs an edit as a job. True once it is done. */
   run: (edit: PictureEdit) => Promise<boolean>;
   wallpaper: () => Promise<boolean>;
+  /** Offers to save a turn the picture was left with, once it is gone from view. */
+  offerTurn?: (edit: PictureEdit) => void;
+}
+
+/** Where a crop is, on the stage. */
+interface CropBox {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
 }
 
 /**
@@ -78,10 +96,21 @@ export function PictureView(live: PictureViewProps) {
   const [pan, setPan] = createSignal({ x: 0, y: 0 });
   /** Quarter turns. It only grows or shrinks, so a turn always spins the short way. */
   const [turn, setTurn] = createSignal(0);
-  /** Mirrored left to right, before the turn, as a saved turn writes it. */
+  /** Mirrored left to right on screen, after the turn, so a mirror never spins the picture. */
   const [flip, setFlip] = createSignal(false);
-  /** The turn as the file would take it: quarter turns clockwise, 0 to 3. */
-  const quarters = () => ((turn() % 4) + 4) % 4;
+  /** The turn as the file takes it: a mirror first, then quarter turns clockwise, 0 to 3. A mirror
+   *  after a turn is the same as the mirror first and the turn the other way round. */
+  const quarters = () => {
+    const quarter = flip() ? -turn() : turn();
+    return ((quarter % 4) + 4) % 4;
+  };
+  /** Choosing a part of the picture to copy, and the part chosen so far. */
+  const [cropping, setCropping] = createSignal(false);
+  const [cropBox, setCropBox] = createSignal<CropBox>();
+  /** Bytes per pixel each kind of copy takes, guessed from this picture. */
+  const [rates, setRates] = createSignal<{ png: number; jpeg: number; share: number }>();
+  /** A turn being saved, or saved, which leaving needs no offer for. */
+  let kept = false;
   const [working, setWorking] = createSignal(false);
   let toolsButton: HTMLButtonElement | undefined;
   let toolsPanel: HTMLDivElement | undefined;
@@ -154,6 +183,8 @@ export function PictureView(live: PictureViewProps) {
     const from = pan();
     const ratio = after / before;
     setZoom(next === null || Math.abs(after - fit()) < 0.001 ? null : after);
+    // The box was drawn over the picture as it showed, which a zoom moves.
+    setCropBox(undefined);
     setPan(zoom() === null ? { x: 0, y: 0 } : { x: at.x - (at.x - from.x) * ratio, y: at.y - (at.y - from.y) * ratio });
     sharpen();
   }
@@ -228,7 +259,86 @@ export function PictureView(live: PictureViewProps) {
     }, "image/png");
   }
 
+  /** The picture's place on the stage, as much of it as shows. */
+  function shownArea() {
+    const area = canvas.getBoundingClientRect();
+    const origin = stage.getBoundingClientRect();
+    return {
+      origin,
+      area,
+      left: Math.max(area.left - origin.left, 0),
+      top: Math.max(area.top - origin.top, 0),
+      right: Math.min(area.right - origin.left, origin.width),
+      bottom: Math.min(area.bottom - origin.top, origin.height),
+    };
+  }
+
+  /** A drag draws the part to keep, never past the picture. Shift keeps it square. */
+  function drawCrop(event: PointerEvent) {
+    const { origin, left, top, right, bottom } = shownArea();
+    const at = (moved: PointerEvent) => ({
+      x: Math.min(Math.max(moved.clientX - origin.left, left), right),
+      y: Math.min(Math.max(moved.clientY - origin.top, top), bottom),
+    });
+    const from = at(event);
+    stage.setPointerCapture(event.pointerId);
+    const move = (moved: PointerEvent) => {
+      const to = at(moved);
+      let [width, height] = [to.x - from.x, to.y - from.y];
+      if (moved.shiftKey) {
+        const side = Math.min(Math.abs(width), Math.abs(height));
+        [width, height] = [Math.sign(width) * side, Math.sign(height) * side];
+      }
+      setCropBox({ left: Math.min(from.x, from.x + width), top: Math.min(from.y, from.y + height), width: Math.abs(width), height: Math.abs(height) });
+    };
+    const up = () => stage.removeEventListener("pointermove", move);
+    stage.addEventListener("pointermove", move);
+    stage.addEventListener("pointerup", up, { once: true });
+    stage.addEventListener("pointercancel", up, { once: true });
+  }
+
+  /** The crop as shares of the whole picture, which is what a saved crop takes. */
+  function cropShares() {
+    const chosen = cropBox();
+    if (!chosen || chosen.width < LEAST_CROP || chosen.height < LEAST_CROP) return undefined;
+    const { origin, area } = shownArea();
+    return {
+      left: (chosen.left + origin.left - area.left) / area.width,
+      top: (chosen.top + origin.top - area.top) / area.height,
+      width: chosen.width / area.width,
+      height: chosen.height / area.height,
+    };
+  }
+
+  function startCrop() {
+    zoomTo(null);
+    setPicking(false);
+    setCropping(true);
+  }
+
+  function stopCrop() {
+    setCropping(false);
+    setCropBox(undefined);
+  }
+
+  function saveCrop() {
+    const shares = cropShares();
+    if (!shares) return;
+    stopCrop();
+    void edit({ kind: "crop", ...shares }, "Cropped copy made beside it");
+  }
+
+  /** The crop's size in the picture's own pixels, as the box is drawn. */
+  const cropPixels = () => {
+    const shares = cropShares();
+    const own = natural();
+    return shares && own ? `${Math.round(shares.width * own[0]).toLocaleString()} × ${Math.round(shares.height * own[1]).toLocaleString()}` : "";
+  };
+
   function onPointerDown(event: PointerEvent) {
+    // A press on a control is its own: a drag held by the stage would take its click.
+    if ((event.target as Element).closest("button, input, [role=toolbar]")) return;
+    if (event.button === 0 && cropping()) return drawCrop(event);
     if (event.button === 0 && picking() && event.target === canvas) return pick(event);
     if (event.button !== 0 || zoom() === null) return;
     stage.setPointerCapture(event.pointerId);
@@ -249,13 +359,16 @@ export function PictureView(live: PictureViewProps) {
     out: () => zoomTo(scale() / STEP),
     actual: () => zoomTo(zoom() === null ? 1 : null),
     fit: () => zoomTo(null),
+    /** Mirrored, a turn right on screen is a turn left underneath. */
     turn: (by: number) => {
-      setTurn(turn() + by);
+      // A crop is drawn over the picture as it stands, and can't be saved turned.
+      stopCrop();
+      setTurn(turn() + (flip() ? -by : by));
       zoomTo(null);
     },
     /** A mirror on screen, left to right, whichever way the picture stands now. */
     flip: () => {
-      setTurn(-turn());
+      stopCrop();
       setFlip(!flip());
     },
   };
@@ -275,14 +388,47 @@ export function PictureView(live: PictureViewProps) {
   }
   const edit = (change: PictureEdit, done: string) => work(() => props.tools!.run(change), done);
   // The saved file comes back as a new view, standing as it was turned here.
-  const saveTurn = () => edit({ kind: "turn", quarters: quarters(), flip: flip() }, "Turn saved");
+  async function saveTurn() {
+    kept = true;
+    await work(async () => (kept = await props.tools!.run({ kind: "turn", quarters: quarters(), flip: flip() })), "Turn saved");
+  }
   const turned = () => quarters() !== 0 || flip();
   const smaller = () => COPY_EDGES.filter((edge) => edge < Math.max(...(natural() ?? [0])));
+
+  /** How many bytes each kind of copy takes per pixel, from a small copy of what shows. */
+  async function guessRates() {
+    if (rates() || !canvas.width) return;
+    const sample = Math.min(1, GUESS_EDGE / Math.max(canvas.width, canvas.height));
+    const [width, height] = [Math.max(1, Math.round(canvas.width * sample)), Math.max(1, Math.round(canvas.height * sample))];
+    const board = new OffscreenCanvas(width, height);
+    board.getContext("2d")!.drawImage(canvas, 0, 0, width, height);
+    const rate = async (type: string, quality?: number) => (await board.convertToBlob({ type, quality })).size / (width * height);
+    const [png, jpeg, share] = [await rate("image/png"), await rate("image/jpeg", QUALITY), await rate("image/jpeg", SHARE_QUALITY)];
+    if (!gone) setRates({ png, jpeg, share });
+  }
+
+  /** About how big a copy comes out, `edge` long at most. TIFF and moving pictures go unguessed. */
+  function guess(format: PictureFormat | "share", edge = Infinity) {
+    const own = natural();
+    const rate = rates();
+    if (!own || !rate || frames()) return undefined;
+    const shrink = Math.min(1, edge / Math.max(...own));
+    const pixels = Math.round(own[0] * shrink) * Math.round(own[1] * shrink);
+    const bytes = {
+      png: rate.png * pixels,
+      jpeg: rate.jpeg * pixels,
+      share: rate.share * pixels,
+      bmp: pixels * (look()?.clear ? 4 : 3) + BMP_HEADER,
+      tiff: NaN,
+    }[format];
+    return Number.isFinite(bytes) ? `≈${formatSize(bytes)}` : undefined;
+  }
 
   function toggleTools() {
     if (!toolsButton || !toolsPanel) return;
     if (toolsPanel.matches(":popover-open")) return toolsPanel.hidePopover();
     toolsPanel.showPopover();
+    guessRates().catch(console.error);
     const { right, bottom } = toolsButton.getBoundingClientRect();
     const { width, height } = toolsPanel.getBoundingClientRect();
     toolsPanel.style.left = `${Math.max(4, right - width)}px`;
@@ -293,7 +439,10 @@ export function PictureView(live: PictureViewProps) {
     const key = event.key.toLowerCase();
     if (event.ctrlKey && key === "c" && !getSelection()?.toString()) return copyPicture(), true;
     if (event.ctrlKey || event.altKey || event.target instanceof HTMLInputElement && event.target.type !== "range") return false;
-    if (key === "+" || key === "=") tools.in();
+    if (cropping() && key === "enter") saveCrop();
+    else if (cropping() && key === "escape") stopCrop();
+    else if (key === "c" && props.tools && !turned() && !frames()) (cropping() ? stopCrop : startCrop)();
+    else if (key === "+" || key === "=") tools.in();
     else if (key === "-") tools.out();
     else if (key === "1") zoomTo(1);
     else if (key === "0") tools.fit();
@@ -330,6 +479,7 @@ export function PictureView(live: PictureViewProps) {
   });
 
   onCleanup(() => {
+    if (!kept && props.tools?.canSave && turned() && !frames()) props.tools.offerTurn?.({ kind: "turn", quarters: quarters(), flip: flip() });
     gone = true;
     window.clearTimeout(frameTimer);
     window.clearTimeout(saidTimer);
@@ -345,7 +495,7 @@ export function PictureView(live: PictureViewProps) {
       visibility: own ? undefined : ("hidden" as const),
       width: own ? `${own[0] / devicePixelRatio}px` : undefined,
       height: own ? `${own[1] / devicePixelRatio}px` : undefined,
-      transform: `translate(-50%, -50%) translate(${x}px, ${y}px) rotate(${turn() * 90}deg) scaleX(${flip() ? -1 : 1}) scale(${scale()})`,
+      transform: `translate(-50%, -50%) translate(${x}px, ${y}px) scaleX(${flip() ? -1 : 1}) rotate(${turn() * 90}deg) scale(${scale()})`,
     };
   };
 
@@ -358,10 +508,11 @@ export function PictureView(live: PictureViewProps) {
       data-dragging={dragging() || undefined}
       data-clear={look()?.clear || undefined}
       data-picking={picking() || undefined}
+      data-cropping={cropping() || undefined}
       style={{ "--picture-tint": look()?.tint ?? "transparent" }}
       onWheel={onWheel}
       onPointerDown={onPointerDown}
-      onDblClick={(event) => !picking() && zoomTo(zoom() === null ? 1 : null, zoom() === null ? fromMiddle(event) : undefined)}
+      onDblClick={(event) => !picking() && !cropping() && zoomTo(zoom() === null ? 1 : null, zoom() === null ? fromMiddle(event) : undefined)}
     >
       <canvas ref={canvas} class="preview-picture" style={style()} />
       <Show when={mapped()}>
@@ -369,10 +520,23 @@ export function PictureView(live: PictureViewProps) {
           source={() => canvas}
           aspect={() => shownSize().width / shownSize().height}
           turn={turn}
+          flip={flip}
           view={() => viewWindow(box(), shownSize(), pan())}
           onMove={(center) => setPan(panFor(center, shownSize()))}
           live={frames() > 0}
         />
+      </Show>
+      <Show when={cropping() && cropBox()}>
+        {(chosen) => (
+          <div
+            class="picture-crop"
+            style={{ left: `${chosen().left}px`, top: `${chosen().top}px`, width: `${chosen().width}px`, height: `${chosen().height}px` }}
+          >
+            <Show when={cropPixels()}>
+              <span class="picture-crop-size">{cropPixels()} px</span>
+            </Show>
+          </div>
+        )}
       </Show>
       <Show when={chips().length > 0}>
         <ul class="picture-chips" aria-label="Camera">
@@ -390,6 +554,15 @@ export function PictureView(live: PictureViewProps) {
         )}
       </Show>
       <div class="preview-tools picture-tools" role="toolbar" aria-label="Picture">
+        <Show when={cropping()}>
+          <span class="zoom-chip picture-crop-hint">{cropShares() ? "Shift keeps it square" : "Drag over the part to keep"}</span>
+          <button class="preview-chip" aria-keyshortcuts="Enter" disabled={!cropShares() || working()} onClick={saveCrop}>
+            Save crop
+          </button>
+          <button class="preview-chip" aria-keyshortcuts="Escape" onClick={stopCrop}>
+            Cancel
+          </button>
+        </Show>
         <Show when={frames()}>
           <button class="strip-icon" aria-label="Frame back" aria-keyshortcuts="," onClick={() => stepFrame(-1)}>
             {ICON_BACK}
@@ -464,6 +637,16 @@ export function PictureView(live: PictureViewProps) {
                   <button class="preview-chip" onClick={() => (toolsPanel?.hidePopover(), tools.flip())}>
                     Mirror <kbd>H</kbd>
                   </button>
+                  <Show when={!frames()}>
+                    <button
+                      class="preview-chip"
+                      disabled={turned()}
+                      aria-describedby={turned() ? "picture-crop-why" : undefined}
+                      onClick={() => (toolsPanel?.hidePopover(), startCrop())}
+                    >
+                      Crop <kbd>C</kbd>
+                    </button>
+                  </Show>
                   <Show when={own().canSave && !frames()}>
                     <button class="preview-chip" disabled={!turned()} onClick={() => void saveTurn()}>
                       Save turn
@@ -480,6 +663,7 @@ export function PictureView(live: PictureViewProps) {
                       {(edge) => (
                         <button class="preview-chip" onClick={() => void edit({ kind: "resize", longest: edge }, "Smaller copy made beside it")}>
                           {edge.toLocaleString()} px
+                          <Show when={guess(own().format ?? "png", edge)}>{(about) => <small class="chip-guess">{about()}</small>}</Show>
                         </button>
                       )}
                     </For>
@@ -487,18 +671,25 @@ export function PictureView(live: PictureViewProps) {
                 </Show>
                 <p class="picture-tools-head">Copy as</p>
                 <div class="picture-tools-row">
-                  <For each={FORMATS.filter(([format]) => format !== own().format)}>
+                  <For each={PICTURE_FORMATS.filter(([format]) => format !== own().format)}>
                     {([format, name]) => (
                       <button class="preview-chip" onClick={() => void edit({ kind: "convert", format }, `${name} copy made beside it`)}>
                         {name}
+                        <Show when={guess(format)}>{(about) => <small class="chip-guess">{about()}</small>}</Show>
                       </button>
                     )}
                   </For>
                   <button class="preview-chip" onClick={() => void edit({ kind: "share" }, "Copy to share made beside it")}>
                     To share
+                    <Show when={guess("share", SHARE_EDGE)}>{(about) => <small class="chip-guess">{about()}</small>}</Show>
                   </button>
                 </div>
-                <p class="cog-note">A copy to share is a smaller JPEG with no place or camera in it. Copies go beside the picture.</p>
+                <p class="cog-note">
+                  A copy to share is a smaller JPEG with no place or camera in it. Copies go beside the picture, and sizes are a guess.
+                  <Show when={turned() && !frames()}>
+                    <span id="picture-crop-why"> Save the turn first to crop it.</span>
+                  </Show>
+                </p>
               </div>
             </>
           )}

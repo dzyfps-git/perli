@@ -1,5 +1,5 @@
-import { createSignal, For, Show, type JSX } from "solid-js";
-import { hexToHsv, hsvToHex, parseHex, type Hsv } from "./color";
+import { createSignal, For, onMount, Show, type JSX } from "solid-js";
+import { cssHex, hexToHsv, hsvToHex, parseHex, type Hsv } from "./color";
 import { monthAfter, monthGrid, parseDay, toDay } from "./dates";
 import "./controls.css";
 
@@ -161,11 +161,20 @@ type EyeDropperWindow = Window & { EyeDropper?: new () => { open(): Promise<{ sR
  * A color as `#rrggbb`, shown as a swatch that opens Perli's own picker: a square for how strong
  * and how bright, a strip for the hue, and a box for the hex. It can also take a color from
  * anywhere on screen. The picker is a popover, so it shows above the dialog it is in.
+ * `value` may be any CSS color, such as a variable: the picker starts from what the swatch shows.
+ * `opened` opens the picker at once, and `onClose` says when it shuts.
  */
-export function ColorField(props: { value: string; label: string; onChange: (value: string) => void }) {
+export function ColorField(props: {
+  value: string;
+  label: string;
+  onChange: (value: string) => void;
+  opened?: boolean;
+  onClose?: () => void;
+}) {
+  const hexNow = () => parseHex(props.value) ?? cssHex(getComputedStyle(swatch).backgroundColor);
   // Kept apart from the hex, so the hue of a gray and the strength of a black aren't lost.
-  const [color, setColor] = createSignal<Hsv>(hexToHsv(props.value));
-  const [typed, setTyped] = createSignal(props.value);
+  const [color, setColor] = createSignal<Hsv>(hexToHsv(parseHex(props.value) ?? "#000000"));
+  const [typed, setTyped] = createSignal(parseHex(props.value) ?? "");
   let swatch!: HTMLButtonElement;
   let panel!: HTMLDivElement;
   let native!: HTMLInputElement;
@@ -173,8 +182,9 @@ export function ColorField(props: { value: string; label: string; onChange: (val
 
   function open() {
     if (panel.matches(":popover-open")) return panel.hidePopover();
-    setColor(hexToHsv(props.value));
-    setTyped(props.value);
+    const hex = hexNow();
+    setColor(hexToHsv(hex));
+    setTyped(hex);
     panel.showPopover();
     const { left, bottom } = swatch.getBoundingClientRect();
     const { width, height } = panel.getBoundingClientRect();
@@ -191,6 +201,8 @@ export function ColorField(props: { value: string; label: string; onChange: (val
   function take(hex: string | undefined) {
     if (hex) change(hexToHsv(hex));
   }
+
+  onMount(() => props.opened && requestAnimationFrame(open));
 
   const within = (value: number) => Math.max(0, Math.min(1, value));
 
@@ -224,7 +236,14 @@ export function ColorField(props: { value: string; label: string; onChange: (val
         style={{ "--color": props.value }}
         onClick={open}
       />
-      <div ref={panel} class="color-panel" popover="auto" role="dialog" aria-label={props.label}>
+      <div
+        ref={panel}
+        class="color-panel"
+        popover="auto"
+        role="dialog"
+        aria-label={props.label}
+        onToggle={(event) => event.newState === "closed" && props.onClose?.()}
+      >
         <div
           class="color-shade"
           role="slider"
@@ -288,7 +307,7 @@ export function ColorField(props: { value: string; label: string; onChange: (val
           type="color"
           tabindex="-1"
           aria-hidden="true"
-          value={props.value}
+          value={parseHex(props.value) ?? typed()}
           onInput={(event) => take(parseHex(event.currentTarget.value))}
         />
       </div>

@@ -12,6 +12,21 @@ export function parseHex(text: string) {
   return /^[0-9a-f]{6}$/.test(digits) ? `#${digits}` : undefined;
 }
 
+/** Any CSS color the page can draw, such as `oklch(from ...)` or a variable of the page, as
+ *  `#rrggbb`. The page resolves it first, then a pixel is drawn in it. Browser only. */
+export function cssHex(color: string) {
+  const probe = document.createElement("i");
+  probe.style.color = color;
+  document.body.append(probe);
+  const resolved = getComputedStyle(probe).color;
+  probe.remove();
+  const pixel = new OffscreenCanvas(1, 1).getContext("2d", { willReadFrequently: true })!;
+  pixel.fillStyle = resolved;
+  pixel.fillRect(0, 0, 1, 1);
+  const [red, green, blue] = pixel.getImageData(0, 0, 1, 1).data;
+  return `#${[red, green, blue].map((part) => part.toString(16).padStart(2, "0")).join("")}`;
+}
+
 export function hexToHsv(hex: string): Hsv {
   const [r, g, b] = [1, 3, 5].map((at) => parseInt(hex.slice(at, at + 2), 16) / 255);
   const [most, least] = [Math.max(r, g, b), Math.min(r, g, b)];

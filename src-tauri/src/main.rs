@@ -1688,6 +1688,22 @@ async fn font_face(view: u32, request: u64, row: u32, index: u32, views: State<'
     Ok(Response::new(bytes))
 }
 
+/// The desktop picture now, if it is a file, so Settings can take icon colors from it.
+#[tauri::command]
+async fn wallpaper_now() -> Result<Option<PathBuf>, String> {
+    blocking(|| {
+        let _com = ops::Com::enter();
+        Ok(ops::wallpaper_shown())
+    })
+    .await
+}
+
+/// How a file stands now, as a quick edit's read says it, so a save right after another still checks.
+#[tauri::command]
+async fn file_seen(path: PathBuf) -> Result<Option<String>, String> {
+    blocking(move || Ok(preview::seen_text(&path))).await
+}
+
 /// Whether a row's font is installed, and for whom.
 #[tauri::command]
 async fn font_installed(view: u32, request: u64, row: u32, views: State<'_, Views>) -> Result<fonts::Installed, String> {
@@ -2505,6 +2521,8 @@ fn main() {
             open_streamed,
             font_face,
             font_installed,
+            file_seen,
+            wallpaper_now,
             install_font,
             db_count,
             db_rows,

@@ -54,6 +54,9 @@ import { previewWidth } from "../filelist/prefs";
 import { DockEdge } from "./DockEdge";
 import type { TextPiece, TextViewProps } from "./TextView";
 import type { EditTarget } from "./QuickEdit";
+import type { CardAction } from "../fileops/jobs";
+
+type Notify = (title: string, note: string, brief?: boolean, action?: CardAction) => void;
 import type { PictureTools } from "./PictureView";
 import type { BookViewProps } from "./DocView";
 import type { ComicViewProps } from "./ComicView";
@@ -168,6 +171,8 @@ export function QuickPreview(props: {
   onOpenWith?: (path: string) => void;
   /** Shows the file in its own folder, for a file found further down. */
   onShow?: (path: string) => void;
+  /** Tells the user something on a card of its own, which outlives the preview. */
+  notify?: Notify;
 }) {
   const [index, setIndex] = createSignal(props.at.index);
   const [row, setRow] = createSignal<Row>();
@@ -360,6 +365,11 @@ export function QuickPreview(props: {
       format,
       run: async (edit) => ran(await runJob({ kind: "picture", paths: [path], edit }, view)),
       wallpaper: async () => ran(await runJob({ kind: "wallpaper", path }, view)),
+      offerTurn: (edit) =>
+        props.notify?.(`Keep the turn of ${item.name}?`, "It was only turned on screen.", true, {
+          label: "Save turn",
+          run: () => void runJob({ kind: "picture", paths: [path], edit }, view),
+        }),
     };
   }
 
@@ -843,7 +853,7 @@ function Neighbours(props: { at: PreviewAt; index: number; onPick: (index: numbe
 }
 
 /** The preview kept beside the list, showing the one row selected there. */
-export function PreviewDock(props: { view: FolderView; onOpen: (row: Row) => void; onClose: () => void }) {
+export function PreviewDock(props: { view: FolderView; onOpen: (row: Row) => void; onClose: () => void; notify?: Notify }) {
   const [at, setAt] = createSignal<PreviewAt>();
   let timer: number | undefined;
   createEffect(
@@ -892,7 +902,7 @@ export function PreviewDock(props: { view: FolderView; onOpen: (row: Row) => voi
           </p>
         }
       >
-        {(now) => <QuickPreview at={now} docked onStep={() => undefined} onOpen={props.onOpen} onClose={props.onClose} />}
+        {(now) => <QuickPreview at={now} docked onStep={() => undefined} onOpen={props.onOpen} onClose={props.onClose} notify={props.notify} />}
       </Show>
     </aside>
   );

@@ -563,3 +563,17 @@ input[type="range"].color-hue::-webkit-slider-runnable-track {
     animation: none;
   }
 }
+
+/* A picker opened from a menu: the swatch only marks where the panel goes. */
+.color-at {
+  position: fixed;
+  z-index: 1;
+}
+
+.color-at > .color-swatch {
+  width: 0;
+  height: 0;
+  border: 0;
+  opacity: 0;
+  pointer-events: none;
+}

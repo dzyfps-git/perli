@@ -1,4 +1,10 @@
 import {
+  COPY_EDGES,
+  fontInstalled,
+  installFont,
+  PICTURE_FORMATS,
+  startJob,
+  type PictureEdit,
   appsFor,
   commonTags,
   fileUsers,
@@ -21,6 +27,7 @@ import {
   type ShellTarget,
 } from "../../api";
 import type { MenuItem } from "../../ui/Menu";
+import { kindOf, type Kind } from "../filelist/fileKinds";
 import { setTerminalChoice, terminalChoice, TERMINAL_NAMES } from "../filelist/prefs";
 import type { FolderView } from "../navigation/folderView";
 import { archiveStem, isArchiveName } from "../navigation/path";
@@ -53,6 +60,58 @@ export function createShellItems(
   function withRows(view: FolderView, run: (selection: Selection) => Promise<unknown>) {
     const selection = actions.selected(view);
     if (selection) run(selection).catch(report);
+  }
+
+  /** Turns and copies for every selected picture at once, as one job with one Undo. */
+  function pictureMenu(view: FolderView, count: number): MenuItem {
+    const edit = (change: PictureEdit) => withRows(view, (selection) => startJob({ kind: "picture", selection, edit: change }, view.id));
+    return {
+      label: count === 1 ? "Picture" : `${count} pictures`,
+      items: [
+        { label: "Turn right", action: () => edit({ kind: "turn", quarters: 1, flip: false }) },
+        { label: "Turn left", action: () => edit({ kind: "turn", quarters: 3, flip: false }) },
+        { label: "Mirror", action: () => edit({ kind: "turn", quarters: 0, flip: true }) },
+        {
+          label: count === 1 ? "Smaller copy" : "Smaller copies",
+          divider: true,
+          items: COPY_EDGES.map((edge) => ({ label: `${edge.toLocaleString()} px`, action: () => edit({ kind: "resize", longest: edge }) })),
+        },
+        { label: "Copy as", items: PICTURE_FORMATS.map(([format, name]) => ({ label: name, action: () => edit({ kind: "convert", format }) })) },
+        { label: "Copy to share", action: () => edit({ kind: "share" }) },
+        ...(count === 1
+          ? [
+              {
+                label: "Set as wallpaper",
+                divider: true,
+                action: () =>
+                  withRows(view, async (selection) => {
+                    const [path] = (await itemFacts({ kind: "rows", selection })).paths;
+                    return startJob({ kind: "wallpaper", path }, view.id);
+                  }),
+              },
+            ]
+          : []),
+      ],
+    };
+  }
+
+  /** Each selected font for this user, one after another. Ones already in are skipped. */
+  function installFonts(view: FolderView) {
+    withRows(view, async ({ request, rows }) => {
+      const failed: string[] = [];
+      let done = 0;
+      for (const row of rows) {
+        if ((await fontInstalled(view.id, request, row).catch(() => "no")) !== "no") continue;
+        await installFont(view.id, request, row, false).then(
+          () => done++,
+          (failure) => failed.push(String(failure)),
+        );
+      }
+      const skipped = rows.length - done - failed.length;
+      const note = skipped ? `${skipped} ${skipped === 1 ? "was" : "were"} in already.` : "For you alone. Apps opened from now on can use them.";
+      if (done || !failed.length) jobs.notify(done === 1 ? "Font installed" : `${done} fonts installed`, note, true);
+      if (failed.length) jobs.notify(failed.length === 1 ? "A font wasn't installed" : `${failed.length} fonts weren't installed`, failed[0]);
+    });
   }
 
   const physical = ({ x, y }: Point) =>
@@ -180,8 +239,11 @@ export function createShellItems(
     /** `row` is the row the menu opened on. Extracting only fits when all the rows are archives. */
     async fileToolItems(view: FolderView, row: Row, at: Point): Promise<MenuItem[]> {
       const selection = actions.selected(view);
-      const facts = selection && isArchive(row.name, row.isDir) ? await rowFacts(selection).catch(report) : undefined;
+      const kind = kindOf(row.name, row.isDir);
+      const asked = isArchive(row.name, row.isDir) || kind === "picture" || kind === "font";
+      const facts = selection && asked ? await rowFacts(selection).catch(report) : undefined;
       const zips = !!facts?.every(([name, isDir]) => isArchive(name, isDir));
+      const every = (wanted: Kind) => !!facts?.every(([name, isDir]) => kindOf(name, isDir) === wanted);
       const stem = archiveStem(row.name);
       return [
         { label: "Compress to ZIP", divider: true, action: () => actions.compress(view) },
@@ -199,6 +261,10 @@ export function createShellItems(
           : []),
         ...(selection?.rows.length === 1 && !row.isDir
           ? [{ label: "Save as template", action: () => actions.saveTemplate(view) }]
+          : []),
+        ...(facts && every("picture") ? [pictureMenu(view, facts.length)] : []),
+        ...(facts && every("font")
+          ? [{ label: facts.length === 1 ? "Install for me" : `Install ${facts.length} fonts for me`, action: () => installFonts(view) }]
           : []),
       ];
     },

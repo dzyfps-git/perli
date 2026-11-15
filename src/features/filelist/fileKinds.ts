@@ -123,10 +123,16 @@ export const hasPicture = (kind: Kind) => PICTURED.has(kind);
 /** The extensions that make a file this kind. Folders and plain files have none. */
 export const extensionsOf = (kind: Kind) => KINDS[kind][2].split(" ").filter(Boolean);
 
-const color = (hue: number) =>
+/** A kind's hue, or nothing for the quiet gray ones. Folders take the accent. */
+export const hueOf = (kind: Kind) => (KINDS[kind][0] === PLAIN ? undefined : KINDS[kind][0]);
+
+/** Perli's color for a hue. Following the accent, the hues spread 30 degrees either side of it. */
+const color = (hue: number, accent: boolean) =>
   hue === PLAIN
     ? "var(--text-muted)"
-    : `light-dark(oklch(0.52 0.15 ${hue}), oklch(0.82 0.11 ${hue}))`;
+    : accent
+      ? `oklch(from var(--accent) l c calc(h + ${Math.round((hue - 180) / 6)}))`
+      : `light-dark(oklch(0.52 0.15 ${hue}), oklch(0.82 0.11 ${hue}))`;
 
 const drawingUrl = (drawing: string) =>
   `url("data:image/svg+xml,${encodeURIComponent(
@@ -135,11 +141,11 @@ const drawingUrl = (drawing: string) =>
 
 /** The style rules that give every kind its drawing and color, with the user's own colors over
  *  Perli's. A folder takes the accent. */
-export const iconSheet = (own: Readonly<Partial<Record<Kind, string>>> = {}) =>
+export const iconSheet = (own: Readonly<Partial<Record<Kind, string>>> = {}, accent = false) =>
   Object.entries(KINDS)
     .map(
       ([kind, [hue, drawing]]) =>
-        `[data-kind="${kind}"]{--kind-icon:${drawingUrl(drawing)};--kind-color:${own[kind as Kind] ?? (kind === "folder" ? "var(--accent)" : color(hue))}}`,
+        `[data-kind="${kind}"]{--kind-icon:${drawingUrl(drawing)};--kind-color:${own[kind as Kind] ?? (kind === "folder" ? "var(--accent)" : color(hue, accent))}}`,
     )
     .join("\n");
 

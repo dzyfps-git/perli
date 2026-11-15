@@ -226,6 +226,10 @@ export type Task =
   | { kind: "wallpaper"; path: string };
 
 export type PictureFormat = "png" | "jpeg" | "tiff" | "bmp";
+/** The formats a picture can be copied as, and their names. */
+export const PICTURE_FORMATS: [PictureFormat, string][] = [["png", "PNG"], ["jpeg", "JPEG"], ["tiff", "TIFF"], ["bmp", "BMP"]];
+/** Sizes a smaller copy can take, by its longer side. */
+export const COPY_EDGES = [3840, 2560, 1920, 1280, 800];
 /** A turn saves into the file. The rest make a new picture beside it. */
 export type PictureEdit =
   /** Quarter turns clockwise, after a mirror left to right with `flip`. */
@@ -234,7 +238,9 @@ export type PictureEdit =
   | { kind: "resize"; longest: number }
   | { kind: "convert"; format: PictureFormat }
   /** A smaller JPEG with no place or camera in it. */
-  | { kind: "share" };
+  | { kind: "share" }
+  /** A copy of part of it. Each side is a share of the whole picture as it shows, from 0 to 1. */
+  | { kind: "crop"; left: number; top: number; width: number; height: number };
 
 export interface Progress {
   bytes: number;
@@ -1218,6 +1224,11 @@ export const songAudio = (view: number, request: number, row: number, how?: { pl
   });
 
 export const forgetSong = (number: number) => invoke<void>("forget_song", { number });
+
+/** The desktop picture now, if it is a file. */
+export const wallpaperNow = () => invoke<string | null>("wallpaper_now");
+/** How a file stands now, the stamp a quick edit's save checks. */
+export const fileSeen = (path: string) => invoke<string | null>("file_seen", { path });
 
 /** A picture on this PC that a Markdown file points to. */
 export const fetchPictureFile = (path: string, edge: number) =>
