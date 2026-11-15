@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { dateGroups, groupLabel } from "./groups.ts";
 
-const names = { tag: (id: number) => (id === 3 ? "Work" : undefined), folder: (path: string) => path || "This folder" };
+const names = { tag: (id: number) => (id === 3 ? "Work" : undefined), folder: (path: string) => path || "This folder", size: (bytes: number) => `${bytes} B` };
 
 test("date groups start at midnight, with weeks from Monday", () => {
   // A Wednesday.
@@ -28,4 +28,5 @@ test("headers name each kind of group, and the rest", () => {
   assert.equal(groupLabel("tag", "3", now, names), "Work");
   assert.equal(groupLabel("tag", "none", now, names), "No tag");
   assert.equal(groupLabel("folder", "", now, names), "This folder");
+  assert.equal(groupLabel("copies", "3 512", now, names), "3 copies, 512 B each");
 });

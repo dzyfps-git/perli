@@ -1,6 +1,5 @@
 import type { GroupBy } from "../../api";
 import type { Kind } from "./fileKinds";
-import { formatSize } from "../../ui/format";
 
 /** What the list can gather rows under headers by, as menus offer it. Folder is for searches. */
 export const GROUP_CHOICES: { by: GroupBy; label: string }[] = [
@@ -55,12 +54,12 @@ export function dateGroups(now: Date) {
   ];
 }
 
-/** What a header says for a group's key. Tag names and folder paths come from elsewhere. */
+/** What a header says for a group's key. Tag names, folder paths and sizes come from elsewhere. */
 export function groupLabel(
   by: GroupBy,
   key: string,
   now: Date,
-  names: { tag: (id: number) => string | undefined; folder: (path: string) => string },
+  names: { tag: (id: number) => string | undefined; folder: (path: string) => string; size: (bytes: number) => string },
 ) {
   if (key === "folders") return "Folders";
   switch (by) {
@@ -76,7 +75,7 @@ export function groupLabel(
       return names.folder(key);
     case "copies": {
       const [copies, size] = key.split(" ").map(Number);
-      return `${copies} copies, ${formatSize(size)} each`;
+      return `${copies} copies, ${names.size(size)} each`;
     }
     default:
       return key;

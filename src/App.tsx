@@ -140,6 +140,7 @@ import { wordsFor, type Verb } from "./features/palette/words";
 import { PaneDivider } from "./features/tabs/PaneDivider";
 import { PathBar, type Suggested, type Suggestion } from "./features/pathbar/PathBar";
 import { CompareBar } from "./features/pathbar/CompareBar";
+import { formatSize } from "./ui/format";
 import { ZipBar } from "./features/pathbar/ZipBar";
 import { commandFor, keyText } from "./features/keys/keybinds";
 import { comboOf, KEYS } from "./features/keys/keys";
@@ -2172,6 +2173,7 @@ export function App() {
                   groupLabel(view.groupBy(), key, new Date(), {
                     tag: (id) => allTags().find((known) => known.id === id)?.name,
                     folder: (path) => relativeTo(view.folder()!.path, path) || "This folder",
+                    size: formatSize,
                   })
                 }
                 onFold={view.toggleFold}
