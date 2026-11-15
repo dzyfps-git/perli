@@ -22,7 +22,6 @@ import {
   comeForward,
   otherWindows,
   sendTab,
-  ejectDrive,
   keepOnDevice,
   fetchRows,
   setTagPaths,
@@ -501,6 +500,7 @@ export function App() {
     // A drive Windows can eject is one the sidebar shows with its eject button.
     ejectRoot: (path) =>
       places()?.drives.find((drive) => drive.removable && path.toLowerCase().startsWith(drive.path.toLowerCase()))?.path,
+    driveName: (root) => places()?.drives.find((drive) => samePath(drive.path, root))?.name ?? root,
   });
   const [zipping, setZipping] = createSignal<ZipRequest>();
   // The pane beside the one acting, which a button in a pane that isn't active must still find.
@@ -725,7 +725,7 @@ export function App() {
             ...shell.placeItems(path, { x: event.clientX, y: event.clientY }),
             ...(isDriveRoot(path) ? networkItems() : []),
             ...(places()?.drives.some((drive) => drive.removable && samePath(drive.path, path))
-              ? [{ label: "Eject", divider: true, action: () => quietly(ejectDrive(path)) }]
+              ? [{ label: "Eject", divider: true, action: () => jobs.eject(path) }]
               : []),
           ]),
     ];
@@ -2366,6 +2366,7 @@ export function App() {
           onSmart={(smart) => quietly(openSmart(tabs.activeView(), smart))}
           onSmartMenu={showSmartMenu}
           onPlaces={setPlaces}
+          onEject={jobs.eject}
           report={jobs.report}
         />
         <MiniPlayer onOpen={() => void backToPlayer().catch(jobs.report)} />
@@ -2445,7 +2446,7 @@ export function App() {
             onOpen={(path) => leaveHome((view) => view.open(path))}
             onOpenFile={(path) => leaveHome(() => previewOf(path))}
             onMenu={(event, path) => showFolderMenu(event, tabs.activeView(), path)}
-            onEject={(path) => quietly(ejectDrive(path))}
+            onEject={jobs.eject}
             onSearch={(text) => leaveHome((view) => view.search(text))}
           />
         </Show>

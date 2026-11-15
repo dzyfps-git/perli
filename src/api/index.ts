@@ -446,8 +446,11 @@ export const saveSession = (text: string) => invoke<void>("save_session", { text
 
 export const listPlaces = () => invoke<Places>("list_places");
 
-/** Ejects a card, a disc or a USB disk. Windows says so itself when a file on it is still open. */
-export const ejectDrive = (path: string) => invoke<void>("eject_drive", { path });
+/** How an eject went. A busy drive says what still holds it. */
+export type Ejected = { kind: "done" } | { kind: "busy"; reason: string };
+
+/** Ejects a card, a disc or a USB disk. A drive still in use says why, with no box from Windows. */
+export const ejectDrive = (path: string) => invoke<Ejected>("eject_drive", { path });
 
 /** Shows a phone's files in File Explorer. */
 export const openDevice = (id: string) => invoke<void>("open_device", { id });

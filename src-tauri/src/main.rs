@@ -3,6 +3,7 @@
 mod clipboard;
 mod copies;
 mod default_app;
+mod eject;
 mod explorer;
 mod filedialog;
 mod drag;
@@ -1189,12 +1190,21 @@ async fn open_file(path: String) -> Result<(), String> {
 
 /// Ejects a card, a disc or a USB disk. Only the top of a drive can be asked for.
 #[tauri::command]
-async fn eject_drive(path: PathBuf, app: AppHandle) -> Result<(), String> {
+async fn eject_drive(path: PathBuf, app: AppHandle) -> Result<eject::Ejected, String> {
     if path.parent().is_some() {
         return Err("Only a drive can be ejected".to_string());
     }
     let main = jobs::owner(&app);
-    off_main(move || menus::eject(path, main)).await
+    let ejected = async_runtime::spawn_blocking({
+        let path = path.clone();
+        move || eject::eject(&path)
+    })
+    .await
+    .map_err(|error| error.to_string())?;
+    match ejected {
+        Some(ejected) => ejected,
+        None => off_main(move || menus::eject(path, main)).await.map(|()| eject::Ejected::Done),
+    }
 }
 
 /// Shows a phone's files in Explorer.
