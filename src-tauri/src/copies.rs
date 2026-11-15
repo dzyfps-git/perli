@@ -21,11 +21,11 @@ const GOING_GAP: Duration = Duration::from_millis(400);
 
 type Candidate = (Entry, Arc<[u16]>);
 
-/// The files under `folder` (only in it, unless `deep`) that have the same content as another,
+/// The files under `folders` (only in them, unless `deep`) that have the same content as another,
 /// in sets: the set that wastes the most room first, and the oldest file of each set first. Empty
 /// files, files in the cloud (reading would fetch them), links and what `sight` hides take no
 /// part. `lane` is the checksum lane, so another look cancels nothing of this one's.
-pub fn find(folder: &Path, deep: bool, sight: Sight, lane: u32, stopped: &dyn Fn() -> bool, going: &dyn Fn()) -> Found {
+pub fn find(folders: &[PathBuf], deep: bool, sight: Sight, lane: u32, stopped: &dyn Fn() -> bool, going: &dyn Fn()) -> Found {
     let mut reported = Instant::now();
     let mut tick = || {
         if reported.elapsed() >= GOING_GAP {
@@ -36,7 +36,7 @@ pub fn find(folder: &Path, deep: bool, sight: Sight, lane: u32, stopped: &dyn Fn
 
     // Only files of the same size can be the same.
     let mut by_size: HashMap<u64, Vec<Candidate>> = HashMap::new();
-    let mut below = VecDeque::from([folder.to_path_buf()]);
+    let mut below = VecDeque::from(folders.to_vec());
     while let Some(at) = below.pop_front() {
         if stopped() {
             return Found::default();
@@ -137,15 +137,22 @@ mod tests {
         let sets = |found: &Found| found.sets_and_names();
         let set = |pairs: &[(u32, &str)]| pairs.iter().map(|&(set, name)| (set, name.to_string())).collect::<Vec<_>>();
 
-        let found = find(&root, true, sight, 900, &|| false, &|| ());
+        let found = find(std::slice::from_ref(&root), true, sight, 900, &|| false, &|| ());
         assert_eq!(sets(&found), set(&[(0, "a.bin"), (0, "b.bin"), (1, "x.txt"), (1, "y.txt")]));
 
         // Only in the folder itself, the copy in `deep` is no copy.
-        let flat = find(&root, false, sight, 901, &|| false, &|| ());
+        let flat = find(std::slice::from_ref(&root), false, sight, 901, &|| false, &|| ());
         assert_eq!(sets(&flat), set(&[(0, "x.txt"), (0, "y.txt")]));
 
         // A stopped look finds nothing.
-        assert_eq!(find(&root, true, sight, 902, &|| true, &|| ()).len(), 0);
+        assert_eq!(find(std::slice::from_ref(&root), true, sight, 902, &|| true, &|| ()).len(), 0);
+
+        // Copies split across places, as on two drives, are one set.
+        let apart = find(&[root.join("deep"), root.join("none"), root.clone()], false, sight, 903, &|| false, &|| ());
+        // Files written in the same instant are as old as each other, so their order is the walk's.
+        let mut apart = sets(&apart);
+        apart.sort();
+        assert_eq!(apart, set(&[(0, "a.bin"), (0, "b.bin"), (1, "x.txt"), (1, "y.txt")]));
         fs::remove_dir_all(&root).unwrap();
     }
 }

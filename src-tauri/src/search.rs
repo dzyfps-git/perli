@@ -515,10 +515,14 @@ impl Searches {
             return Ok(Listing::searched(found, order));
         }
         if asked.query == COPIES {
-            let folder = match asked.scope {
+            let mut folders = vec![match asked.scope {
                 Scope::Drive | Scope::Drives => root_of(&shown_folder),
                 Scope::Below | Scope::Folder => shown_folder,
-            };
+            }];
+            // Every drive, so a file and its copy on another drive are one set.
+            if asked.scope == Scope::Drives {
+                folders.extend(other_drives(&folders[0]));
+            }
             // The rows stay as they are until the look is done, as a quiet search's do.
             let shown = running.filter(|_| asked.step == Step::Again).map_or_else(Found::default, |search| search.found().clone());
             self.stop(view);
@@ -526,7 +530,7 @@ impl Searches {
             self.all().insert(view, search.clone());
             let (deep, sight) = (asked.scope != Scope::Folder, order.sight());
             thread::spawn(move || {
-                let found = copies::find(&folder, deep, sight, COPIES_LANE | view, &|| search.stopped(), &|| report(Walk::Going));
+                let found = copies::find(&folders, deep, sight, COPIES_LANE | view, &|| search.stopped(), &|| report(Walk::Going));
                 if !search.stopped() {
                     *search.found() = found;
                     report(Walk::Done);

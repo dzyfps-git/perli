@@ -334,6 +334,8 @@ export function createFolderView(id: number, saved?: SavedPane) {
       batch(() => {
         // Text typed while this opened is a search of the new folder, which is waiting to start.
         if (query() === searched) {
+          // The sets of copies mean nothing to the next search.
+          if (searched === COPIES_QUERY) setSearchGroupBy("none");
           setQuery("");
           setWalk("done");
         }
@@ -529,6 +531,8 @@ export function createFolderView(id: number, saved?: SavedPane) {
   /** A folder keeps how it is grouped. Rows that nest under their folders can't be grouped, so
    *  those folders close, which needs a new read. */
   function setGroupBy(next: GroupBy) {
+    // Copies stay in their sets, which say what is kept and what is extra.
+    if (query() === COPIES_QUERY) return;
     setFolded([]);
     if (query()) {
       setSearchGroupBy(next);

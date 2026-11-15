@@ -684,8 +684,10 @@ impl Listing {
             key => key.property().map(|name| self.prop_ranks(name)).unwrap_or_default(),
         };
         let mut groups = Vec::new();
+        // Only a look for copies knows each row's set. Anything else asked for its sets has none.
+        let no_sets = order.group_by == GroupBy::Copies && self.sets.len() != entries.len();
         // Grouped rows leave folders opened in place, which the UI doesn't offer then.
-        if order.group_by != GroupBy::None {
+        if order.group_by != GroupBy::None && !no_sets {
             let (group_of, also_in, group_keys) = self.group_places(&order, places);
             let mut placed: Vec<(u32, u32)> = visible.iter().map(|&row| (group_of[row as usize], row)).collect();
             if !also_in.is_empty() {
@@ -1436,6 +1438,11 @@ mod tests {
 
         let plain = Listing::read(path, Order::default()).unwrap();
         assert!(plain.shape().groups.is_empty());
+
+        // Only a look for copies has sets. Anything else asked for them shows no groups.
+        let no_sets = Listing::read(path, by(GroupBy::Copies, &[])).unwrap();
+        assert!(no_sets.shape().groups.is_empty());
+        assert_eq!(names(&no_sets).len(), 4);
     }
 
     #[test]

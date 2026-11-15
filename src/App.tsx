@@ -338,6 +338,8 @@ function groupByItems(view: FolderView) {
     ...GROUP_CHOICES.filter(({ by }) => by !== "folder" || !!view.query() || view.isBin()).map(({ by, label }) => ({
       label,
       checked: view.groupBy() === by,
+      // Copies stay in their sets.
+      disabled: view.query() === COPIES_QUERY,
       action: () => view.setGroupBy(by),
     })),
     ...(groups.length > 0
