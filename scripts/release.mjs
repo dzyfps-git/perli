@@ -1,4 +1,4 @@
-// Builds a signed installer and publishes it to the public releases repo, where installed
+// Builds a signed installer and publishes it on Perli's own GitHub page, where installed
 // copies of Perli look for updates. Run from a clean `main`: `npm run release -- "notes"`.
 // `--dry-run` builds and writes latest.json without publishing anything.
 import { execFileSync, execSync } from "node:child_process";
@@ -7,7 +7,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
-export const RELEASES_REPO = "dzyfps-git/perli-releases";
+export const RELEASES_REPO = "dzyfps-git/perli";
 
 /** The file the updater reads. Its URL must match the asset `gh release create` uploads. */
 export function manifest({ version, notes, signature, date = new Date() }) {
