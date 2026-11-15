@@ -72,6 +72,8 @@ export function Menu(props: {
   parent?: { left: number; onBack: () => void };
   /** Set when this replaces a menu already on screen, which should not appear again. */
   still?: boolean;
+  /** The top of the button that opened it: with no room below, the menu ends just above that. */
+  above?: number;
 }) {
   let menu!: HTMLDivElement;
   let sideTimer: ReturnType<typeof setTimeout> | undefined;
@@ -134,11 +136,13 @@ export function Menu(props: {
     const overflows = props.x + width + EDGE_GAP > innerWidth;
     const x = props.parent && overflows ? props.parent.left - SIDE_GAP - width : props.x;
     const left = Math.max(EDGE_GAP, Math.min(x, innerWidth - width - EDGE_GAP));
-    const top = Math.max(EDGE_GAP, Math.min(props.y, innerHeight - height - EDGE_GAP));
+    const below = props.y + height + EDGE_GAP <= innerHeight;
+    const y = props.above !== undefined && !below ? props.above - SIDE_GAP - height : props.y;
+    const top = Math.max(EDGE_GAP, Math.min(y, innerHeight - height - EDGE_GAP));
     menu.style.left = `${left}px`;
     menu.style.top = `${top}px`;
     // It grows out of where it was asked for, even when the window edge pushed it aside.
-    menu.style.transformOrigin = `${props.x - left}px ${props.y - top}px`;
+    menu.style.transformOrigin = `${props.x - left}px ${(y === props.y ? props.y : props.above!) - top}px`;
     menu.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus();
   });
   onCleanup(() => {

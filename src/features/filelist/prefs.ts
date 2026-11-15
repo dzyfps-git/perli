@@ -3,7 +3,7 @@ import type { GroupBy, Grouping, Sort, Terminal } from "../../api";
 import { movedColumn, restoreColumns, startColumns, type Column, type ColumnId, type ColumnSet } from "./columns";
 import type { Layout } from "./layout";
 import { NO_FILTER, type FilterForm } from "./filter";
-import { folderKey, remembered, type SortMemory } from "./sortMemory";
+import { coveringEntry, folderKey, remembered, type SortMemory } from "./sortMemory";
 import { cleanTheme } from "./iconTheme";
 
 export function saved(key: string): unknown {
@@ -184,6 +184,28 @@ export const rememberedGroup = (path: string): GroupBy => groupMemory()[folderKe
 /** No groups is where every folder starts, so it needs no keeping. */
 export const rememberGroup = (path: string, by: GroupBy) =>
   setGroupMemory(remembered(groupMemory(), path, by === "none" ? undefined : by));
+
+/** A folder's locked look, which it opens with every time. Changes made there don't stick. */
+export interface ViewLock {
+  sort: Sort;
+  groupBy: GroupBy;
+  layout: Layout;
+  /** The folders inside wear the same look. */
+  below: boolean;
+  /** The folder as it was shown, since the key is lowercase. */
+  path?: string;
+}
+
+export const [viewLocks, setViewLocks] = stored<Record<string, ViewLock>>(
+  "folder-locks",
+  (saved("folder-locks") as Record<string, ViewLock> | null) ?? {},
+);
+
+/** The lock on a folder, its own or one from a folder above it that covers the folders inside. */
+export const lockOf = (path: string) => coveringEntry(viewLocks(), path);
+
+/** No lock unlocks it. `key` is the folder as the locks keep it. */
+export const lockView = (key: string, lock: ViewLock | undefined) => setViewLocks(remembered(viewLocks(), key, lock));
 
 export const moveColumn = (set: ColumnSet, id: ColumnId, target: ColumnId) =>
   setColumnsOf(set, movedColumn(columnsOf(set), id, target));

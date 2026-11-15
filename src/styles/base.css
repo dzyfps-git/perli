@@ -26,6 +26,16 @@ html[data-backdrop="solid"] body {
   background: var(--surface-hover);
 }
 
+/* `openSheet` seats a sheet below the path bar when it fits there. */
+dialog:modal {
+  inset-block-start: var(--clear-top, 0px);
+}
+
+/* The window behind a sheet softens as well as dims, so an edge cut across text reads as calm. */
+dialog:modal::backdrop {
+  backdrop-filter: blur(4px);
+}
+
 /* With Windows transparency off, Mica is gone and nothing else fills the sidebar. */
 @media (prefers-reduced-transparency: reduce) {
   html,

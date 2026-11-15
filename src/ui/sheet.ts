@@ -7,6 +7,8 @@ const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
 const GROW_MS = 420;
 const RETURN_MS = 170;
 const SMALL = 0.35;
+/** Room kept between a sheet and the path bar above it. */
+const CLEAR_GAP = 12;
 
 let asked: { x: number; y: number } | undefined;
 
@@ -28,11 +30,35 @@ window.addEventListener(
 );
 
 /**
+ * A sheet that fits below the path bar sits there, so its edge never cuts across the crumbs. One
+ * too tall for that stays centered over the whole window.
+ */
+function seat(dialog: HTMLDialogElement) {
+  dialog.style.removeProperty("--clear-top");
+  const bar = document.querySelector(".pathbar")?.getBoundingClientRect().bottom ?? 0;
+  if (bar > 0 && dialog.offsetHeight + bar + 2 * CLEAR_GAP <= innerHeight) dialog.style.setProperty("--clear-top", `${bar}px`);
+}
+
+/**
  * Shows a dialog as a sheet. Answers with what closes it: the sheet goes back to where it came
  * from, and `after` runs once it is gone. Escape closes it the same way.
  */
 export function openSheet(dialog: HTMLDialogElement) {
   dialog.showModal();
+  seat(dialog);
+  // The window or the sheet can change size while it is open.
+  const reseat = () => seat(dialog);
+  const watch = new ResizeObserver(reseat);
+  watch.observe(dialog);
+  window.addEventListener("resize", reseat);
+  dialog.addEventListener(
+    "close",
+    () => {
+      watch.disconnect();
+      window.removeEventListener("resize", reseat);
+    },
+    { once: true },
+  );
   const box = dialog.getBoundingClientRect();
   const from = asked ?? { x: box.left + box.width / 2, y: box.top + box.height / 2 };
   dialog.style.transformOrigin = `${from.x - box.left}px ${from.y - box.top}px`;

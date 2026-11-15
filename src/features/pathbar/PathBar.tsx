@@ -23,6 +23,7 @@ const ICON_AWAY = "\uE8CD";
 const ICON_CHEVRON = "\uE76C";
 const ICON_LINK = "\uE71B";
 const ICON_MORE = "\uE712";
+const ICON_LOCK = "\uE72E";
 
 const ICON_FORGET = "";
 
@@ -634,6 +635,23 @@ export function PathBar(props: {
             )}
           </For>
         </div>
+      </Show>
+      <Show when={props.view.lock()} keyed>
+        {(lock) => (
+          <button
+            class="lock-chip"
+            aria-label={
+              samePath(lock.key, props.view.folder()?.path ?? "")
+                ? `This folder's view is locked${lock.value.below ? ", with the folders inside" : ""}. Changes here don't stick. Press to unlock`
+                : // The key is the folder above in lowercase, so its name comes from the shown path.
+                  `View locked by ${nameOf((props.view.folder()?.path ?? "").slice(0, lock.key.length))}, with the folders inside. Changes here don't stick. Press to unlock`
+            }
+            aria-keyshortcuts={ariaKeys("lockView")}
+            onClick={() => props.view.toggleLock()}
+          >
+            {ICON_LOCK}
+          </button>
+        )}
       </Show>
       <div class="layout-pill" role="group" aria-label="Layout" data-layout={props.view.layout()}>
         <button aria-label="List" aria-keyshortcuts={ariaKeys("list")} aria-pressed={props.view.layout() === "list"} onClick={() => setLayout("list")}>

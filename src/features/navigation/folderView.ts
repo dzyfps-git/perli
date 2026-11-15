@@ -25,6 +25,8 @@ import {
   inlineFolders,
   lastLayout,
   lastSort,
+  lockOf,
+  lockView,
   rememberedFilter,
   rememberedGroup,
   rememberedSort,
@@ -137,6 +139,13 @@ export function createFolderView(id: number, saved?: SavedPane) {
   const [forwardStack, setForwardStack] = createSignal<string[]>(saved?.forward ?? []);
   const [sort, setSortValue] = createSignal(saved?.sort ?? lastSort());
   const [layout, setLayoutValue] = createSignal(saved?.layout ?? lastLayout());
+  /** The pane's layout from before it went into a locked folder, which it takes back on leaving. */
+  let layoutBeforeLock: Layout | undefined;
+  /** The lock on the shown folder, if any. Changes made there show but don't stick. */
+  const lock = () => {
+    const shown = folder()?.path;
+    return shown && !query() ? lockOf(shown) : undefined;
+  };
   const [editingPath, setEditingPath] = createSignal(false);
   /** What the rows are a search for. Empty for a plain folder. */
   const [query, setQuery] = createSignal("");
@@ -238,6 +247,8 @@ export function createFolderView(id: number, saved?: SavedPane) {
   /** Memory is for arriving at a folder. A refresh or restore keeps this pane's own sort. */
   function arrivalSort(target: string) {
     if (samePath(path(), target)) return undefined;
+    const locked = lockOf(target);
+    if (locked) return locked.value.sort;
     const remembered = rememberedSort(target);
     if (remembered) return remembered;
     if (isBin(target)) return BIN_SORT;
@@ -283,7 +294,7 @@ export function createFolderView(id: number, saved?: SavedPane) {
     const folderSort = arrivalSort(target);
     // Only a folder already open has a form of its own. A restored one reads its pinned filter.
     const form = samePath(folder()?.path, target) ? filterForm() : (rememberedFilter(target) ?? NO_FILTER);
-    const by = samePath(path(), target) ? groupBy() : rememberedGroup(target);
+    const by = samePath(path(), target) ? groupBy() : (lockOf(target)?.value.groupBy ?? rememberedGroup(target));
     opening = true;
     try {
       const wanted = openingOrder(target, folderSort ?? sort(), form, by);
@@ -306,6 +317,15 @@ export function createFolderView(id: number, saved?: SavedPane) {
           else if (before) openedIn.delete(before.toLowerCase());
           setExpanded(wanted.expanded ?? []);
           setFolded([]);
+          // A locked folder shows its own layout; the pane's comes back on leaving it.
+          const locked = lockOf(opened.path)?.value.layout;
+          if (locked) {
+            layoutBeforeLock ??= layout();
+            setLayoutValue(locked);
+          } else if (layoutBeforeLock) {
+            setLayoutValue(layoutBeforeLock);
+            layoutBeforeLock = undefined;
+          }
         }
         setGroupByValue(by);
         show({ ...opened, scrollTo });
@@ -465,9 +485,11 @@ export function createFolderView(id: number, saved?: SavedPane) {
     }
     setSortValue(next);
     const path = folder()?.path;
-    // Its sorts make no sense for normal folders, so new panes must not pick them up.
-    if (!isBin(path)) setLastSort(next);
-    if (path) rememberSort(path, next);
+    if (!lock()) {
+      // Its sorts make no sense for normal folders, so new panes must not pick them up.
+      if (!isBin(path)) setLastSort(next);
+      if (path) rememberSort(path, next);
+    }
     rearrange();
   }
 
@@ -481,7 +503,7 @@ export function createFolderView(id: number, saved?: SavedPane) {
     }
     setGroupByValue(next);
     const shown = folder()?.path;
-    if (shown && !isBin(shown)) rememberGroup(shown, next);
+    if (shown && !isBin(shown) && !lock()) rememberGroup(shown, next);
     if (next !== "none" && expanded().length > 0) {
       setExpanded([]);
       return reload();
@@ -499,7 +521,7 @@ export function createFolderView(id: number, saved?: SavedPane) {
 
   function setLayout(next: Layout) {
     if (next !== layout()) morph(() => setLayoutValue(next), "layout");
-    setLastLayout(next);
+    if (!lock()) setLastLayout(next);
     if (next !== "list") collapseAll();
   }
 
@@ -610,6 +632,21 @@ export function createFolderView(id: number, saved?: SavedPane) {
     setSort,
     layout,
     setLayout,
+    lock,
+    /**
+     * Locks the shown folder's look as it is now, or takes the lock that covers it away. `below`
+     * turns the folders inside on or off instead, locking here first if nothing is locked yet.
+     */
+    toggleLock(below = false) {
+      const shown = folder()?.path;
+      if (!shown || query() || isBin(shown)) return;
+      const had = lockOf(shown);
+      if (!had) return lockView(shown, { sort: sort(), groupBy: groupBy(), layout: layout(), below, path: shown });
+      if (below) return lockView(had.key, { ...had.value, below: !had.value.below });
+      lockView(had.key, undefined);
+      // The look on show is the pane's own from now on.
+      layoutBeforeLock = undefined;
+    },
     editingPath,
     setEditingPath,
     rearrange,

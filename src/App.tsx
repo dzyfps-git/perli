@@ -402,7 +402,7 @@ function groupItem(path: string): MenuItem {
 export function App() {
   const tabs = createTabs();
   /** `from` is the path crumb whose menu this is. */
-  const [menu, setMenu] = createSignal<{ x: number; y: number; items: MenuItem[]; from?: string }>();
+  const [menu, setMenu] = createSignal<{ x: number; y: number; above?: number; items: MenuItem[]; from?: string }>();
   /** The settings are a tab of their own: it can exist without being the one in front. */
   const [settingsOpen, setSettingsOpen] = createSignal(false);
   const [settingsShown, setSettingsShown] = createSignal(false);
@@ -904,7 +904,8 @@ export function App() {
     setLastSort(sort);
     setLastLayout(layout);
     for (const other of tabs.allViews()) {
-      if (other.isBin()) continue;
+      // A locked folder keeps its own look.
+      if (other.isBin() || other.lock()) continue;
       other.setLayout(layout);
       if (!other.query()) other.setSort(sort);
     }
@@ -1239,6 +1240,12 @@ export function App() {
         ? []
         : [{ label: "Flat view", checked: view.query() === FLAT_QUERY, action: () => toggleFlat(view) }]),
       ...(own ? [] : [{ label: "Use this view for all folders", action: () => viewForAll(view) }]),
+      ...(view.isBin() || view.query()
+        ? []
+        : [
+            { label: "Lock this folder's view", checked: !!view.lock(), action: () => view.toggleLock() },
+            { label: "Lock the folders inside too", checked: !!view.lock()?.value.below, action: () => view.toggleLock(true) },
+          ]),
     ];
   }
 
@@ -1615,6 +1622,7 @@ export function App() {
     ...numbered("tag", (place) => toggleTagKey(here(), place)),
     list: () => here().setLayout("list"),
     grid: () => here().setLayout("grid"),
+    lockView: () => here().toggleLock(),
     largerTiles: () => resizeTiles(here(), TILE_STEP),
     smallerTiles: () => resizeTiles(here(), -TILE_STEP),
     hidden: toggleHidden,
@@ -1698,7 +1706,7 @@ export function App() {
     });
     const under = (anchor: HTMLElement, items: MenuItem[]) => {
       const box = anchor.getBoundingClientRect();
-      setMenu({ x: box.left, y: box.bottom + 4, items });
+      setMenu({ x: box.left, y: box.bottom + 4, above: box.top - 2, items });
     };
     if (view.isBin()) {
       return [
@@ -2243,7 +2251,7 @@ export function App() {
         />
       </main>
       <Show when={menu()} keyed>
-        {(open) => <Menu x={open.x} y={open.y} items={open.items} onClose={closeMenu} />}
+        {(open) => <Menu x={open.x} y={open.y} above={open.above} items={open.items} onClose={closeMenu} />}
       </Show>
       <Show when={lookFor()} keyed>
         {(path) => <LookPicker path={path} onClose={() => setLookFor(undefined)} />}

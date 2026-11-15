@@ -18,6 +18,9 @@ import {
   openInWindow,
   pictureWall,
   setPictureWall,
+  setViewLocks,
+  viewLocks,
+  lockView,
   setSizeBars,
   sizeBars,
   ROW_HEIGHTS,
@@ -43,6 +46,7 @@ import {
   type Density,
 } from "../filelist/prefs";
 import { keyText } from "../keys/keybinds";
+import { baseName } from "../navigation/path";
 import { VIEWER_SETTINGS } from "../preview/viewerPrefs";
 import { bookmarksCompact, setBookmarksCompact, setSidebarOpen, sidebarOpen } from "../sidebar/saved";
 import { rememberRecent, setRememberRecent } from "../reach/reach";
@@ -610,7 +614,7 @@ export function Settings(props: {
           <section
             class="settings-section"
             data-section="files"
-            data-words="rows density compact cozy roomy height icons windows list status bar count selected items hover cards preview tooltip picture folder sizes space disk dates ago iso modified selection actions keyboard shortcuts keys copy copying verify check queue drive turn double click up parent terminal powershell command prompt console"
+            data-words="rows density compact cozy roomy height icons windows list status bar count selected items hover cards preview tooltip picture folder sizes space disk dates ago iso modified selection actions keyboard shortcuts keys copy copying verify check queue drive turn double click up parent terminal powershell command prompt console lock locked unlock view"
           >
             <h3>Files</h3>
             <h4 id="settings-rows">Row height</h4>
@@ -705,6 +709,26 @@ export function Settings(props: {
               checked={showHidden() && showSystem()}
               onChange={props.onToggleSystem}
             />
+            <Show when={Object.keys(viewLocks()).length > 0}>
+              <h4 id="settings-locks">Locked views</h4>
+              <div class="settings-chips" role="group" aria-labelledby="settings-locks">
+                <For each={Object.entries(viewLocks())}>
+                  {([key, lock]) => (
+                    <button class="settings-chip settings-lock" aria-label={`Unlock ${lock.path ?? key}`} onClick={() => lockView(key, undefined)}>
+                      {baseName(lock.path ?? key) || (lock.path ?? key)}
+                      {lock.below ? " and inside" : ""}
+                      <span class="settings-lock-icon" aria-hidden="true">
+                        {""}
+                      </span>
+                    </button>
+                  )}
+                </For>
+                <button class="settings-chip" onClick={() => setViewLocks({})}>
+                  Unlock all
+                </button>
+              </div>
+              <p class="settings-note">Each opens with its own view every time. {keyText("lockView")} locks or unlocks the folder on show.</p>
+            </Show>
             <h4 id="settings-terminal">Terminal</h4>
             <div class="settings-chips" role="radiogroup" aria-labelledby="settings-terminal">
               <For each={found()}>

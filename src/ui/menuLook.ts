@@ -67,6 +67,8 @@ const LOOK: Record<string, [icon: string, keys?: string]> = {
   "Show hidden files": ["", "Ctrl+H"],
   "Flat view": [""],
   "Use this view for all folders": [""],
+  "Lock this folder's view": ["", "Ctrl+Alt+L"],
+  "Lock the folders inside too": [""],
   List: ["", "Alt+Shift+1"],
   Grid: ["", "Alt+Shift+2"],
   "Compact rows": ["\uE14C"],
