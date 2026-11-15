@@ -18,7 +18,6 @@ import {
   type Tag,
   type Thumb,
 } from "../../api";
-import { ago } from "../../ui/dates";
 import { formatSize } from "../../ui/format";
 import { draw } from "../preview/QuickPreview";
 import { rememberRecent, servers } from "../reach/reach";
@@ -26,7 +25,8 @@ import { landed } from "../fileops/landed";
 import { TAG_DROP, tagColor, tagQuery, tags } from "../tags/tags";
 import type { FolderView } from "../navigation/folderView";
 import { BIN_PATH, samePath } from "../navigation/path";
-import { byDay, movedTo, placeLabel } from "./placeLists";
+import { movedTo, placeLabel } from "./placeLists";
+import { RecentFlyout } from "./RecentFlyout";
 import { showsSmart, type SmartFolder } from "../smart/smartList";
 import {
   foldedSections,
@@ -44,7 +44,7 @@ import "./sidebar.css";
 const ICON_DRIVE = "";
 const ICON_BIN = "";
 export const ICON_FOLDER = "";
-const ICON_FILE = "";
+const ICON_RECENT = "";
 const ICON_CHEVRON = "";
 
 export const FOLDERS: Record<string, { label: string; icon: string }> = {
@@ -68,8 +68,8 @@ const ICON_LOCK = "\uE72E";
 const FULL_SHARE = 0.9;
 /** How long a drive's bar takes to make its wave. */
 const WAVE_MS = 1200;
-/** How many recent files the sidebar lists. */
-const RECENT_COUNT = 10;
+/** How many recent files the Recent panel lists. */
+const RECENT_COUNT = 30;
 /** How far a pinned place moves under the pointer before it is being dragged, not clicked. */
 const DRAG_START = 4;
 const GLIDE = { duration: 180, easing: "cubic-bezier(0.2, 0.8, 0.2, 1)" };
@@ -97,7 +97,9 @@ function Place(props: {
   color?: string;
   onMenu: PlaceMenu;
   /** Set for what is not a folder to browse, such as a recent file. */
-  onOpen?: () => void;
+  onOpen?: (event: MouseEvent) => void;
+  /** Set on a place that opens a panel: whether the panel is open. */
+  expanded?: boolean;
   space?: DriveSpace;
   /** A copy or a move just landed on this drive. */
   wave?: boolean;
@@ -123,7 +125,8 @@ function Place(props: {
         class="place"
         data-drop={props.onOpen ? undefined : props.path}
         aria-current={samePath(props.view.folder()?.path, props.path) ? "location" : undefined}
-        onClick={() => (props.onOpen ? props.onOpen() : props.view.open(props.path))}
+        aria-expanded={props.expanded}
+        onClick={(event) => (props.onOpen ? props.onOpen(event) : props.view.open(props.path))}
         onContextMenu={(event) => props.onMenu(event, props.path)}
         aria-label={props.about ? `${props.label}, ${props.about}` : undefined}
       >
@@ -219,6 +222,8 @@ export function Sidebar(props: {
   const [places, setPlaces] = createSignal<Places>();
   const [spaces, setSpaces] = createSignal<Record<string, DriveSpace>>({});
   const [recent, setRecent] = createSignal<Recent[]>([]);
+  /** Where the Recent panel shows, while it does. */
+  const [recentAt, setRecentAt] = createSignal<{ left: number; top: number; opener: Element }>();
   const [bin, setBin] = createSignal<{ size: number; limit: number | null }>();
   /** Whether each server and network drive answers. Missing while the first ask is out. */
   const [reach, setReach] = createSignal<Record<string, boolean>>({});
@@ -490,7 +495,40 @@ export function Sidebar(props: {
             }
           />
         </Show>
+        {/* One row, not a list: the files show in a panel beside the sidebar when asked for. */}
+        <Show when={rememberRecent() && recent().length > 0 && !hiddenSections().includes("recent")}>
+          <Place
+            view={props.view}
+            path=""
+            label="Recent"
+            icon={ICON_RECENT}
+            about={`${recent().length} opened lately`}
+            expanded={!!recentAt()}
+            // Its right-click is the sections menu, as on a heading.
+            onMenu={() => undefined}
+            onOpen={(event) => {
+              if (recentAt()) return setRecentAt(undefined);
+              const opener = event.currentTarget as HTMLElement;
+              const left = nav.closest(".sidebar")!.getBoundingClientRect().right + 6;
+              setRecentAt({ left, top: opener.getBoundingClientRect().top - 8, opener });
+            }}
+          />
+        </Show>
       </Section>
+      <Show when={recentAt()} keyed>
+        {(at) => (
+          <RecentFlyout
+            items={recent()}
+            left={at.left}
+            top={at.top}
+            opener={at.opener}
+            onOpen={openRecent}
+            onForget={forget}
+            onMenu={(event, item) => props.onRecentMenu(event, item, () => forget(item))}
+            onClose={() => setRecentAt(undefined)}
+          />
+        )}
+      </Show>
       <Show when={smartFolders().length}>
         <Section id="smart" label="Smart folders">
           <For each={smartFolders()}>
@@ -518,30 +556,6 @@ export function Sidebar(props: {
                   <span class="place-label">{smart.name}</span>
                 </button>
               </li>
-            )}
-          </For>
-        </Section>
-      </Show>
-      <Show when={rememberRecent() && recent().length}>
-        <Section id="recent" label="Recent">
-          <For each={byDay(recent(), new Date())}>
-            {(day) => (
-              <>
-                <li class="place-day">{day.label}</li>
-                <For each={day.items}>
-                  {(item) => (
-                    <Place
-                      view={props.view}
-                      path={item.path}
-                      label={item.name}
-                      icon={item.isDir ? ICON_FOLDER : ICON_FILE}
-                      about={`opened ${ago(item.opened, Date.now())}`}
-                      onOpen={() => openRecent(item)}
-                      onMenu={(event) => props.onRecentMenu(event, item, () => forget(item))}
-                    />
-                  )}
-                </For>
-              </>
             )}
           </For>
         </Section>

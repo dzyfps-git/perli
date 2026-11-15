@@ -825,14 +825,6 @@ html[data-blurred] .place-used::before {
   }
 }
 
-/* Recent, under the day each item was opened. */
-.place-day {
-  padding: var(--space-1) var(--space-2) 2px calc(var(--space-2) + 22px);
-  color: var(--text-muted);
-  font-size: 10.5px;
-  opacity: 0.8;
-}
-
 /* A lock or a dot sits on the icon's corner, as Explorer marks a drive, so the rail shows it too. */
 /* A small disc on the icon's corner, like the reach dot, so the lock reads at a glance. */
 .place-badge {
@@ -899,6 +891,181 @@ html[data-blurred] .place-used::before {
 
 @media (prefers-reduced-motion: reduce) {
   .place-reach[data-reach="asking"] {
+    animation: none;
+  }
+}
+
+/* Recent: one row in the sidebar, and its files in a panel beside it. */
+.recent-flyout {
+  position: fixed;
+  z-index: 9;
+  display: flex;
+  flex-direction: column;
+  width: 320px;
+  max-height: min(520px, calc(100vh - 16px));
+  padding: var(--space-1);
+  background: var(--overlay-tint);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-large);
+  box-shadow: var(--shadow);
+  backdrop-filter: var(--blur);
+  animation: recent-in var(--motion-spring);
+}
+
+@keyframes recent-in {
+  from {
+    translate: -8px 0;
+    opacity: 0;
+  }
+}
+
+.recent-filter {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 2px 2px var(--space-1);
+  padding: 0 var(--space-2);
+  height: 30px;
+  background: var(--surface-hover);
+  border-radius: var(--radius);
+
+  input {
+    flex: 1;
+    min-width: 0;
+    color: var(--text);
+    background: none;
+    border: none;
+    outline: none;
+    font: inherit;
+  }
+}
+
+.recent-filter-icon {
+  color: var(--text-muted);
+  font-family: var(--font-icons);
+  font-size: 12px;
+}
+
+.recent-scroll {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+}
+
+.recent-day h3 {
+  margin: var(--space-2) var(--space-2) 2px;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.recent-day ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.recent-item {
+  position: relative;
+}
+
+.recent-open {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  padding: 5px var(--space-2);
+  color: var(--text);
+  text-align: start;
+  background: none;
+  border: none;
+  border-radius: var(--radius);
+  transition: background var(--motion);
+}
+
+.recent-open:hover,
+.recent-open:focus-visible {
+  background: var(--surface-hover);
+  outline: none;
+}
+
+.recent-icon {
+  flex: none;
+  color: var(--text-muted);
+  font-family: var(--font-icons);
+  font-size: 15px;
+}
+
+.recent-text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.recent-name,
+.recent-where {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.recent-where {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.recent-when {
+  flex: none;
+  color: var(--text-muted);
+  font-size: 11px;
+  transition: opacity var(--motion);
+}
+
+/* The way off the list takes the time's place under the pointer. */
+.recent-forget {
+  position: absolute;
+  inset: 50% var(--space-2) auto auto;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  color: var(--text-muted);
+  font-family: var(--font-icons);
+  font-size: 10px;
+  background: none;
+  border: none;
+  border-radius: var(--radius);
+  opacity: 0;
+  translate: 0 -50%;
+  transition:
+    opacity var(--motion),
+    background var(--motion);
+}
+
+.recent-item:is(:hover, :focus-within) {
+  .recent-forget {
+    opacity: 1;
+  }
+
+  .recent-when {
+    opacity: 0;
+  }
+}
+
+.recent-forget:hover {
+  color: var(--text);
+  background: var(--surface);
+}
+
+.recent-empty {
+  margin: var(--space-3) var(--space-2);
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .recent-flyout {
     animation: none;
   }
 }
