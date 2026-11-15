@@ -52,6 +52,8 @@ const BIN_SORT: Sort = { key: "modified", descending: true };
 const SEARCH_SORT: Sort = { key: "found", descending: false };
 /** Asks a search for every file, which makes a flat view of the folder. */
 export const FLAT_QUERY = "*";
+/** Looks for files with the same content as another, in sets. */
+export const COPIES_QUERY = "copies:";
 /** A folder is one of songs or pictures when at least this share of its files are. */
 const SET_SHARE = 0.6;
 /** The extensions of each kind group, as the listing sorts them in. */
@@ -441,6 +443,9 @@ export function createFolderView(id: number, saved?: SavedPane) {
     if (!query()) setSearchSort(SEARCH_SORT);
     // Groups of the folder mean nothing to a search, and the other way round.
     if (!query() || !text) setFolded([]);
+    // Copies only make sense in their sets, and the sets mean nothing to another search.
+    if (text === COPIES_QUERY) setSearchGroupBy("copies");
+    else if (query() === COPIES_QUERY) setSearchGroupBy("none");
     setQuery(text);
     if (!text) setWalk("done");
     readAgain({ select: [], rename: false, step: "start", top: true });

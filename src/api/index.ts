@@ -72,7 +72,7 @@ export interface Sort {
 export type Grouping = "foldersFirst" | "filesFirst" | "mixed";
 
 /** What rows gather under headers by. `folder` is where a search found each one. */
-export type GroupBy = "none" | "date" | "kind" | "size" | "tag" | "folder";
+export type GroupBy = "none" | "date" | "kind" | "size" | "tag" | "folder" | "copies";
 
 /** Rows under one header. */
 export interface Group {

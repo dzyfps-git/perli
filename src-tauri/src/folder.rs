@@ -110,6 +110,8 @@ pub enum GroupBy {
     Tag,
     /// Where a search found each row.
     Folder,
+    /// Each set of files with the same content, for a look for copies.
+    Copies,
 }
 
 /// Explorer's size groups, largest first: a file goes in the first one it is bigger than.
@@ -368,6 +370,11 @@ impl Entry {
         self.size
     }
 
+    /// FILETIME ticks.
+    pub fn modified(&self) -> u64 {
+        self.modified
+    }
+
     pub fn is_dir(&self) -> bool {
         self.is_dir
     }
@@ -428,12 +435,25 @@ pub struct Found {
     tags: tags::Tagged,
     /// Files with the tag searched for that are on a drive or computer that isn't here.
     pub away: usize,
+    /// A look for copies: the set of each row, in the same order as `entries`. Empty otherwise.
+    sets: Vec<u32>,
 }
 
 impl Found {
     pub fn push(&mut self, entry: Entry, location: Arc<[u16]>) {
         self.entries.push(entry);
         self.locations.push(location);
+    }
+
+    #[cfg(test)]
+    pub fn sets_and_names(&self) -> Vec<(u32, String)> {
+        self.sets.iter().zip(&self.entries).map(|(&set, entry)| (set, entry.file_name().to_string_lossy().into_owned())).collect()
+    }
+
+    /// A row of a look for copies, in `set` with the files that have its content.
+    pub fn push_copy(&mut self, entry: Entry, location: Arc<[u16]>, set: u32) {
+        self.sets.push(set);
+        self.push(entry, location);
     }
 
     pub fn push_tagged(&mut self, entry: Entry, location: Arc<[u16]>, tags: Box<[u32]>) {
@@ -457,6 +477,7 @@ impl Found {
         self.tags.extend(other.tags.drain().map(|(row, tags)| (row + after, tags)));
         self.entries.append(&mut other.entries);
         self.locations.append(&mut other.locations);
+        self.sets.append(&mut other.sets);
         self.away += std::mem::take(&mut other.away);
     }
 
@@ -490,6 +511,8 @@ pub struct Listing {
     tags: Arc<tags::Tagged>,
     /// Files a search by tag couldn't reach, on a drive or computer that isn't here.
     away: usize,
+    /// A look for copies: the set of each of `entries`. Empty otherwise.
+    sets: Arc<Vec<u32>>,
     visible: Vec<u32>,
     groups: Vec<Group>,
     order: Order,
@@ -601,6 +624,7 @@ impl Listing {
             found_in: Arc::new(found.locations),
             tags: Arc::new(found.tags),
             away: found.away,
+            sets: Arc::new(found.sets),
             ..Self::default()
         }
         .arrange(order)
@@ -774,6 +798,16 @@ impl Listing {
                 let place = |entry: usize| places[location_of(locations, entry as u32)];
                 let keys = folders.iter().map(|folder| String::from_utf16_lossy(&folder[..folder.len() - 1])).collect();
                 (each(&place), keys)
+            }
+            GroupBy::Copies => {
+                // Sets come biggest waste first, so their numbers are already their places. Each
+                // key says how many copies of how many bytes, for the header to put in words.
+                let mut sets = vec![(0u64, 0u32); self.sets.iter().max().map_or(0, |&last| last as usize + 1)];
+                for (entry, &set) in self.sets.iter().enumerate() {
+                    sets[set as usize] = (self.entries[entry].size, sets[set as usize].1 + 1);
+                }
+                let place = |entry: usize| self.sets.get(entry).map_or(0, |&set| set as usize);
+                (each(&place), sets.iter().map(|(size, copies)| format!("{copies} {size}")).collect())
             }
         };
         (places, Vec::new(), keys)

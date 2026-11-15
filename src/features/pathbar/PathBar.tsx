@@ -4,7 +4,7 @@ import { ariaKeys } from "../keys/keybinds";
 import { looksLikeName, readTyped } from "../reach/lists";
 import type { Layout } from "../filelist/layout";
 import { forgetSearch, recentSearches, rememberSearch, showHidden } from "../filelist/prefs";
-import { FLAT_QUERY, type FolderView } from "../navigation/folderView";
+import { COPIES_QUERY, FLAT_QUERY, type FolderView } from "../navigation/folderView";
 import { archiveKind, baseName, isBin, parentOf, relativeTo, samePath, toCrumbs, typedPath, type Crumb } from "../navigation/path";
 import { lookOf } from "../sidebar/saved";
 import { tagColor } from "../tags/tags";
@@ -280,7 +280,7 @@ export function PathBar(props: {
   /** A search the user moved on from is one worth offering again. */
   function keepSearch() {
     const text = searchBox.value.trim();
-    if (text && text !== FLAT_QUERY) rememberSearch(text);
+    if (text && text !== FLAT_QUERY && text !== COPIES_QUERY) rememberSearch(text);
   }
 
   function searchAgain(text: string) {

@@ -1,5 +1,6 @@
 import type { GroupBy } from "../../api";
 import type { Kind } from "./fileKinds";
+import { formatSize } from "../../ui/format";
 
 /** What the list can gather rows under headers by, as menus offer it. Folder is for searches. */
 export const GROUP_CHOICES: { by: GroupBy; label: string }[] = [
@@ -73,6 +74,10 @@ export function groupLabel(
       return key === "none" ? "No tag" : (names.tag(Number(key)) ?? "A tag that is gone");
     case "folder":
       return names.folder(key);
+    case "copies": {
+      const [copies, size] = key.split(" ").map(Number);
+      return `${copies} copies, ${formatSize(size)} each`;
+    }
     default:
       return key;
   }

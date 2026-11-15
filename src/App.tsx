@@ -133,7 +133,7 @@ import {
   setIconTheme,
 } from "./features/filelist/prefs";
 import { SelectPattern } from "./features/filelist/SelectPattern";
-import { FLAT_QUERY, type FolderView, type RowAt } from "./features/navigation/folderView";
+import { COPIES_QUERY, FLAT_QUERY, type FolderView, type RowAt } from "./features/navigation/folderView";
 import { BIN_PATH, isBin, isDriveRoot, isArchiveName, join, parentOf, baseName, relativeTo, samePath, type Crumb } from "./features/navigation/path";
 import { Palette, type Command } from "./features/palette/Palette";
 import { wordsFor, type Verb } from "./features/palette/words";
@@ -348,6 +348,7 @@ function groupByItems(view: FolderView) {
 }
 const rowPath = (view: FolderView, row: Row) => join(row.location || view.folder()!.path, row.name);
 const toggleFlat = (view: FolderView) => view.search(view.query() === FLAT_QUERY ? "" : FLAT_QUERY);
+const findCopies = (view: FolderView) => view.search(view.query() === COPIES_QUERY ? "" : COPIES_QUERY);
 
 /** Long enough for "Renamed a long name to another", short enough for a menu. */
 const UNDO_LABEL_LENGTH = 48;
@@ -680,6 +681,7 @@ export function App() {
         ? []
         : [
             { label: "Search here", action: () => searchIn(view, path) },
+            { label: "Find copies here", action: async () => void ((await view.open(path)) && findCopies(view)) },
             { label: "Copy path", action: () => quietly(copyFolderPath(path)) },
             {
               label: "New tabs open here",
@@ -753,7 +755,7 @@ export function App() {
     const folder = view.folder()?.path;
     if (!folder || view.isBin()) return;
     const query = view.query();
-    const start = query && query !== FLAT_QUERY ? query.replace(/^tag:/, "") : baseName(folder) || folder;
+    const start = query && query !== FLAT_QUERY && query !== COPIES_QUERY ? query.replace(/^tag:/, "") : baseName(folder) || folder;
     setNaming({
       title: "New smart folder",
       confirm: "Save",
@@ -1331,6 +1333,7 @@ export function App() {
           { label: "Paste as shortcut", disabled: !(await clipboardHasFiles()), action: () => actions.pasteShortcut(view) },
           { label: "New…", action: () => setMaking({ view, x, y }) },
           { label: "Search here", action: () => view.askSearch() },
+          { label: "Find copies", checked: view.query() === COPIES_QUERY, action: () => findCopies(view) },
           { label: "Select by pattern…", action: () => setSelectingPattern(view) },
           { label: "Invert selection", action: () => invertSelection(view) },
           { label: "Filter…", action: () => setFiltering(view) },
@@ -1361,6 +1364,13 @@ export function App() {
       // A 7z can lock its very names, so nothing shows until its password is in.
       const hidden = view.locked() && samePath(view.folder()?.path, view.archive() ?? "");
       return { art: "folder", text: hidden ? "Its names are under the password too. Enter it to see inside." : "This folder in the archive is empty.", actions: [] };
+    }
+    if (view.query() === COPIES_QUERY) {
+      return {
+        art: "search",
+        text: "No copies here. Every file is the only one with its content.",
+        actions: [{ label: "Stop looking", keys: "Esc", run: () => view.search("") }],
+      };
     }
     if (view.query()) {
       const flat = view.query() === FLAT_QUERY;
@@ -1895,6 +1905,7 @@ export function App() {
           { label: "Save as template", run: () => actions.saveTemplate(view) },
           { label: "Open templates folder", run: () => actions.openTemplates(view) },
           { label: "Flat view", run: () => toggleFlat(view) },
+          { label: "Find copies", run: () => findCopies(view) },
           { label: "Use this view for all folders", run: () => viewForAll(view) },
           ...keepCommands(view),
         ];
@@ -2159,7 +2170,7 @@ export function App() {
                 }
                 synced={!view.query() && inCloud(view.folder()!.path)}
                 empty={emptyState(view)}
-                match={view.query() === FLAT_QUERY ? undefined : view.query()}
+                match={view.query() === FLAT_QUERY || view.query() === COPIES_QUERY ? undefined : view.query()}
                 active={tab === tabs.active() && view === tab.active()}
                 layout={view.layout() === "columns" ? "list" : view.layout()}
                 sort={view.sort()}

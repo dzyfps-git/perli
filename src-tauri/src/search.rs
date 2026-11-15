@@ -21,7 +21,7 @@ use crate::folder::Filter;
 use crate::folder::{self, Entry, Found, GroupBy, Listing, Order, Sight, SortKey};
 use crate::network;
 use crate::ops::sys::{self, Stat};
-use crate::{tags, zipped};
+use crate::{copies, tags, zipped};
 
 /// How many rows past the user the walk keeps ready. Scrolling never catches up, so the list
 /// feels endless, while a search nobody scrolls goes no further than this.
@@ -36,6 +36,10 @@ const SKIPPED_COST: i32 = 1;
 const EVERY_FILE: &str = "*";
 /// Starts a search for the files that have a tag, by its name. No file name can hold a colon.
 const TAGGED: &str = "tag:";
+/// Starts a look for files with the same content as another. No file name can hold a colon.
+const COPIES: &str = "copies:";
+/// Checksums of a look for copies use their own lanes, one per view.
+const COPIES_LANE: u32 = 0x8000_0000;
 /// Past this a file takes too long to read for a search that reads every one it passes.
 const INSIDE_MAX: u64 = 2 * 1024 * 1024;
 /// Files whose content is text a search inside files may read.
@@ -509,6 +513,26 @@ impl Searches {
             self.all().insert(view, Arc::new(Search::new(found.clone(), usize::MAX)));
             report(Walk::Done);
             return Ok(Listing::searched(found, order));
+        }
+        if asked.query == COPIES {
+            let folder = match asked.scope {
+                Scope::Drive | Scope::Drives => root_of(&shown_folder),
+                Scope::Below | Scope::Folder => shown_folder,
+            };
+            // The rows stay as they are until the look is done, as a quiet search's do.
+            let shown = running.filter(|_| asked.step == Step::Again).map_or_else(Found::default, |search| search.found().clone());
+            self.stop(view);
+            let search = Arc::new(Search::new(shown.clone(), usize::MAX));
+            self.all().insert(view, search.clone());
+            let (deep, sight) = (asked.scope != Scope::Folder, order.sight());
+            thread::spawn(move || {
+                let found = copies::find(&folder, deep, sight, COPIES_LANE | view, &|| search.stopped(), &|| report(Walk::Going));
+                if !search.stopped() {
+                    *search.found() = found;
+                    report(Walk::Done);
+                }
+            });
+            return Ok(Listing::searched(shown, order));
         }
         if let Some((archive, inner)) = zipped::split(&shown_folder) {
             let found = in_zip(&archive, &inner, &shown_folder, &asked)?;
