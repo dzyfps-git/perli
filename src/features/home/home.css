@@ -6,6 +6,10 @@
   overflow: auto;
   padding: var(--space-4) var(--space-4) var(--space-4);
   outline: none;
+  /* The same ground as the panes it stands in for, so its titles read over any backdrop. */
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-large);
 }
 
 .home-top {

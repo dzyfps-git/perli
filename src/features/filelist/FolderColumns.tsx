@@ -1,4 +1,4 @@
-import { createEffect, createMemo, createSignal, For, on, onCleanup, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
 import { subfolders } from "../../api";
 import type { FolderView } from "../navigation/folderView";
 import { baseName, join, parentOf } from "../navigation/path";
@@ -44,6 +44,10 @@ export function FolderColumns(props: ColumnsProps) {
       requestAnimationFrame(() => strip.scrollTo({ left: strip.scrollWidth, behavior: reducedMotion.matches ? "auto" : "smooth" })),
     ),
   );
+  // When the strip gets narrower (the details panel arrives, the window shrinks), its end stays in sight too.
+  const pinned = new ResizeObserver(() => strip.scrollTo({ left: strip.scrollWidth }));
+  onMount(() => pinned.observe(strip));
+  onCleanup(() => pinned.disconnect());
 
   /** The folder a column leads down to: the next column's, or the one on show. */
   const litIn = (path: string) => {
@@ -110,8 +114,18 @@ function FolderColumn(props: ColumnProps) {
     const lit = props.lit();
     return lit && parentOf(lit)?.toLowerCase() === props.path.toLowerCase() ? baseName(lit).toLowerCase() : undefined;
   };
-  // The way down shows, however long the column.
-  createEffect(on([names, litName], () => requestAnimationFrame(() => list?.querySelector("[aria-current]")?.scrollIntoView({ block: "nearest" }))));
+  // The way down shows, however long the column. Only the column scrolls: scrollIntoView would
+  // also pull the strip sideways to this column and hide the nearest ones.
+  createEffect(
+    on([names, litName], () =>
+      requestAnimationFrame(() => {
+        const item = list?.querySelector("[aria-current]")?.getBoundingClientRect();
+        if (!item) return;
+        const room = list.getBoundingClientRect();
+        list.scrollTop += Math.min(0, item.top - room.top) || Math.max(0, item.bottom - room.bottom);
+      }),
+    ),
+  );
 
   const buttons = () => [...list.querySelectorAll<HTMLButtonElement>("button")];
   const litButton = (of: Element | null | undefined) =>

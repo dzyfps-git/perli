@@ -335,6 +335,18 @@
   transform: translateX(84px);
 }
 
+.layout-columns-icon {
+  display: inline-block;
+  width: 13px;
+  height: 11px;
+  border: 1.25px solid currentColor;
+  border-radius: 3px;
+  background:
+    linear-gradient(currentColor, currentColor) 32% 0 / 1.25px 100% no-repeat,
+    linear-gradient(currentColor, currentColor) 68% 0 / 1.25px 100% no-repeat;
+  vertical-align: middle;
+}
+
 .layout-pill button {
   position: relative;
   width: 28px;

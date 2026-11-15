@@ -72,7 +72,7 @@ const LOOK: Record<string, [icon: string, keys?: string]> = {
   List: ["", "Alt+Shift+1"],
   Grid: ["", "Alt+Shift+2"],
   Gallery: ["\uE91B", "Alt+Shift+3"],
-  Columns: ["\uE8A9", "Alt+Shift+4"],
+  Columns: ["\uF574", "Alt+Shift+4"],
   "Compact rows": ["\uE14C"],
   "Cozy rows": ["\uE8FD"],
   "Roomy rows": ["\uE8C4"],

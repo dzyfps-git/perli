@@ -17,7 +17,6 @@ const ICON_UP = "";
 const ICON_LIST = "\uE8FD";
 const ICON_GRID = "\uF0E2";
 const ICON_GALLERY = "\uE91B";
-const ICON_COLUMNS = "\uE8A9";
 const ICON_SHOWN = "\uE7B3";
 const ICON_HIDDEN = "\uED1A";
 const ICON_FILTER = "\uE71C";
@@ -676,7 +675,8 @@ export function PathBar(props: {
           aria-pressed={props.view.layout() === "columns"}
           onClick={() => setLayout("columns")}
         >
-          {ICON_COLUMNS}
+          {/* The icon font has no three columns side by side, so this one is drawn. */}
+          <span class="layout-columns-icon" aria-hidden="true" />
         </button>
       </div>
     </nav>
