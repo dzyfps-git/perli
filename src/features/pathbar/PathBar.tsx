@@ -70,7 +70,6 @@ export function PathBar(props: {
   view: FolderView;
   onToggleHidden: () => void;
   onFilter: () => void;
-  onInputMenu: (event: MouseEvent) => void;
   /** A crumb's chevron asks for the folders inside it, in a menu at `x`, `y`. */
   onCrumbMenu: (path: string, x: number, y: number) => void;
   /** The crumb whose menu is open. */
@@ -449,7 +448,6 @@ export function PathBar(props: {
               offer(event.currentTarget.value);
             }}
             onKeyDown={onInputKey}
-            onContextMenu={props.onInputMenu}
             onBlur={closeOnBlur}
           />
           <Show when={offered().items.length > 0}>
@@ -594,7 +592,6 @@ export function PathBar(props: {
           value={props.view.query()}
           onInput={onSearchInput}
           onKeyDown={onSearchKey}
-          onContextMenu={props.onInputMenu}
           onFocus={() => setRecentOpen(!searchBox.value)}
           onBlur={() => {
             setRecentOpen(false);

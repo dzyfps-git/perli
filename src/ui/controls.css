@@ -145,6 +145,11 @@ select option:checked {
   background: var(--surface-selected);
 }
 
+/* A choice that is taken, such as a drive letter in use, stays readable but out of reach. */
+select option:disabled {
+  color: var(--text-muted);
+}
+
 /* A number with a step button on each side, and a day with its calendar button. */
 .number-field,
 .date-field {

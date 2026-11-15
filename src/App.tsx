@@ -245,7 +245,13 @@ const drawsEdge = !matchMedia("(prefers-reduced-motion: reduce)").matches;
 const isTyping = (event: Event) => event.target instanceof HTMLInputElement;
 // A job's Delete key must only ever mean the files, never a focused button.
 const isInList = (event: Event) => (event.target as HTMLElement).classList?.contains("file-grid");
-const hideBrowserMenu = (event: MouseEvent) => event.preventDefault();
+/** Inputs that take typed text, whose right-click gives Perli's own Cut, Copy and Paste. */
+const TEXT_TYPES = new Set(["text", "search", "url", "email", "tel", "number"]);
+function textField(target: EventTarget | null) {
+  if (target instanceof HTMLTextAreaElement) return target;
+  if (target instanceof HTMLInputElement) return TEXT_TYPES.has(target.type) ? target : undefined;
+  if (target instanceof HTMLElement && target.isContentEditable) return target;
+}
 /** A menu longer than this would only be scrolled past. */
 const MOST_CRUMB_FOLDERS = 300;
 /** Longer than any press and release of one click. */
@@ -433,7 +439,7 @@ export function App() {
     return tab.panes().length > 1 ? [{ label: "Compare with other pane", checked: tab.comparing(), action: () => tab.setComparing(!tab.comparing()) }] : [];
   };
   /** `from` is the path crumb whose menu this is. */
-  const [menu, setMenu] = createSignal<{ x: number; y: number; above?: number; items: MenuItem[]; from?: string }>();
+  const [menu, setMenu] = createSignal<{ x: number; y: number; above?: number; items: MenuItem[]; from?: string; mount?: HTMLElement }>();
   /** The settings are a tab of their own: it can exist without being the one in front. */
   const [settingsOpen, setSettingsOpen] = createSignal(false);
   const [settingsShown, setSettingsShown] = createSignal(false);
@@ -1109,16 +1115,30 @@ export function App() {
     setMenu({ x: event.clientX, y: event.clientY, items: [...items, { label: "Group by", divider: true, items: groupByItems(view) }] });
   }
 
-  function showInputMenu(event: MouseEvent) {
+  /** The browser's own menu never shows. A text field gets Perli's, in every pane and sheet. */
+  function onContextMenu(event: MouseEvent) {
+    event.preventDefault();
+    const field = textField(event.target);
+    if (field) showInputMenu(event, field);
+  }
+
+  function showInputMenu(event: MouseEvent, field: HTMLElement) {
     const paste = async () => {
       document.execCommand("insertText", false, await clipboardText());
     };
-    const items = [
-      { label: "Cut", action: () => document.execCommand("cut") },
-      { label: "Copy", action: () => document.execCommand("copy") },
-      { label: "Paste", action: () => paste().catch(console.error) },
+    const editable = !(field as HTMLInputElement).readOnly && !(field as HTMLInputElement).disabled;
+    // A number or a rich field can't say what is selected, so it keeps Cut and Copy on.
+    const box = field as HTMLInputElement;
+    const picked = box.selectionStart == null || box.selectionStart !== box.selectionEnd;
+    const items: MenuItem[] = [
+      { label: "Undo", disabled: !editable, action: () => document.execCommand("undo") },
+      { label: "Cut", divider: true, disabled: !editable || !picked, action: () => document.execCommand("cut") },
+      { label: "Copy", disabled: !picked, action: () => document.execCommand("copy") },
+      { label: "Paste", disabled: !editable, action: () => paste().catch(console.error) },
+      { label: "Select all", divider: true, action: () => document.execCommand("selectAll") },
     ];
-    setMenu({ x: event.clientX, y: event.clientY, items });
+    // Inside a modal sheet the menu must be too, or it would sit out of reach behind it.
+    setMenu({ x: event.clientX, y: event.clientY, items, mount: field.closest<HTMLElement>("dialog[open]") ?? undefined });
   }
 
   function changeOrder(apply: () => void) {
@@ -2126,7 +2146,8 @@ export function App() {
   onMount(async () => {
     window.addEventListener("keydown", onKeyDown);
     window.addEventListener("mouseup", onMouseButton);
-    window.addEventListener("contextmenu", hideBrowserMenu);
+    // First, so a field's own menu wins over any row or pane under it.
+    window.addEventListener("contextmenu", onContextMenu, true);
     window.addEventListener("wheel", blockBrowserZoom, { passive: false });
     window.addEventListener("focus", trackWindowFocus);
     window.addEventListener("blur", trackWindowFocus);
@@ -2169,7 +2190,7 @@ export function App() {
     sizesListener.then((stop) => stop());
     window.removeEventListener("keydown", onKeyDown);
     window.removeEventListener("mouseup", onMouseButton);
-    window.removeEventListener("contextmenu", hideBrowserMenu);
+    window.removeEventListener("contextmenu", onContextMenu, true);
     window.removeEventListener("wheel", blockBrowserZoom);
     window.removeEventListener("focus", trackWindowFocus);
     window.removeEventListener("blur", trackWindowFocus);
@@ -2193,7 +2214,6 @@ export function App() {
           view={view}
           onToggleHidden={toggleHidden}
           onFilter={() => view.toggleChips()}
-          onInputMenu={showInputMenu}
           onCrumbMenu={(path, x, y) => showCrumbMenu(view, path, x, y)}
           menuFor={menu()?.from}
           onNewTab={(path) => tabs.add([path])}
@@ -2310,7 +2330,6 @@ export function App() {
                   // Kept as it was, the new file opens at once. A new name waits for the rows to show it.
                   if (writesIn(view) && !writing!.name) writeSelected(view);
                 }}
-                onInputMenu={showInputMenu}
                 onFirstPaint={markReady}
                 onSwapped={(snapshot) => {
                   view.swapped(snapshot);
@@ -2463,7 +2482,7 @@ export function App() {
         />
       </main>
       <Show when={menu()} keyed>
-        {(open) => <Menu x={open.x} y={open.y} above={open.above} items={open.items} onClose={closeMenu} />}
+        {(open) => <Menu x={open.x} y={open.y} above={open.above} items={open.items} mount={open.mount} onClose={closeMenu} />}
       </Show>
       <Show when={lookFor()} keyed>
         {(path) => <LookPicker path={path} onClose={() => setLookFor(undefined)} />}

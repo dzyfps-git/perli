@@ -8,6 +8,8 @@ import "../settings/settings.css";
 import "../fileops/fileops.css";
 import "./dialogs.css";
 
+/** Every letter, Z first like Windows. A taken one stays in the list, greyed, saying what holds it. */
+const ALL_LETTERS = [..."ZYXWVUTSRQPONMLKJIHGFEDCBA"].map((letter) => `${letter}:`);
 const strings = (value: unknown) => (Array.isArray(value) ? value.filter((one) => typeof one === "string") : []);
 const [recent, setRecent] = stored<string[]>("recent-shares", strings(saved("recent-shares")));
 
@@ -33,6 +35,8 @@ export function MapDrive(props: {
   let close!: ReturnType<typeof openSheet>;
 
   const share = () => shareText(typed());
+  /** What holds a taken letter: the share mapped to it, or a drive of this PC. */
+  const heldBy = (letter: string) => letters()?.mapped.find((one) => one.letter === letter)?.remote ?? "in use";
   const chosen = () => letter() ?? letters()?.free[0];
   const ready = () => !busy() && !!chosen() && isShare(share());
   const hint = () => {
@@ -79,7 +83,13 @@ export function MapDrive(props: {
         <label class="rename-field">
           Letter
           <select value={chosen()} aria-label="Drive letter" onChange={(event) => setLetter(event.currentTarget.value)}>
-            <For each={letters()?.free ?? []}>{(free) => <option value={free}>{free}</option>}</For>
+            <For each={ALL_LETTERS}>
+              {(each) => (
+                <option value={each} disabled={!letters()?.free.includes(each)}>
+                  {letters()?.free.includes(each) ? each : `${each}  ${heldBy(each)}`}
+                </option>
+              )}
+            </For>
           </select>
         </label>
         <label class="rename-field">

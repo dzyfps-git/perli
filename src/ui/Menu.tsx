@@ -74,6 +74,9 @@ export function Menu(props: {
   still?: boolean;
   /** The top of the button that opened it: with no room below, the menu ends just above that. */
   above?: number;
+  /** The open sheet it belongs to. Everything outside a modal sheet is out of reach, so the menu
+   *  goes inside it and shows in the top layer, above the sheet. */
+  mount?: HTMLElement;
 }) {
   let menu!: HTMLDivElement;
   let sideTimer: ReturnType<typeof setTimeout> | undefined;
@@ -114,7 +117,11 @@ export function Menu(props: {
   function onKeyDown(event: KeyboardEvent) {
     const buttons = [...menu.querySelectorAll<HTMLButtonElement>("button:not(:disabled)")];
     const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
-    if (event.key === "Escape") (props.parent?.onBack ?? props.onClose)();
+    if (event.key === "Escape") {
+      // A sheet under the menu would close on the same key.
+      event.preventDefault();
+      (props.parent?.onBack ?? props.onClose)();
+    }
     else if (event.key === "ArrowLeft" && props.parent) props.parent.onBack();
     else if (event.key === "ArrowRight") {
       if (buttons[index]?.ariaHasPopup) buttons[index].click();
@@ -132,6 +139,7 @@ export function Menu(props: {
 
   onMount(() => {
     window.addEventListener("pointerdown", onPointerDown, true);
+    if (props.mount) menu.showPopover();
     const [width, height] = [menu.offsetWidth, menu.offsetHeight];
     const overflows = props.x + width + EDGE_GAP > innerWidth;
     const x = props.parent && overflows ? props.parent.left - SIDE_GAP - width : props.x;
@@ -152,9 +160,10 @@ export function Menu(props: {
   });
 
   return (
-    <Portal>
+    <Portal mount={props.mount}>
       <div
         ref={menu}
+        popover={props.mount ? "manual" : undefined}
         class="menu"
         classList={{ "menu-still": props.still }}
         role="menu"
@@ -225,6 +234,7 @@ export function Menu(props: {
             still={open.loaded}
             onClose={props.onClose}
             parent={{ left: open.left, onBack: () => setSide(undefined) }}
+            mount={props.mount}
           />
         )}
       </Show>

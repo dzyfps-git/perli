@@ -398,7 +398,6 @@ export function FileList(props: {
   /** Rejects with the reason a name can't be used, which keeps the editor open. */
   onRename: (selection: Selection, name: string) => Promise<unknown>;
   onEditEnd: () => void;
-  onInputMenu: (event: MouseEvent) => void;
   /** The rows are a new order of the folder already shown. */
   rearranged?: boolean;
   onFirstPaint: () => void;
@@ -1531,10 +1530,10 @@ export function FileList(props: {
     if (document.hasFocus() && !movedToMenu) commitRename();
   }
 
+  /** The app's own text menu has already opened, and the row's must not replace it. */
   function onEditorMenu(event: MouseEvent) {
     event.preventDefault();
     event.stopPropagation();
-    props.onInputMenu(event);
   }
 
   function onKeyDown(event: KeyboardEvent) {

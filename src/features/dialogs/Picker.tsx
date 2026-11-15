@@ -474,7 +474,6 @@ function Picker(props: { ask: Asked; panes: PickerPanes; report: (failure: unkno
                   onGroup={() => undefined}
                   onRename={(selection, newName) => startJob({ kind: "rename", selection, name: newName }, PICKER_VIEW)}
                   onEditEnd={view.editEnded}
-                  onInputMenu={(event) => event.preventDefault()}
                   onFirstPaint={() => undefined}
                   onSwapped={view.swapped}
                   onEscape={() => close()}
