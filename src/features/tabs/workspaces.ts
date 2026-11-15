@@ -45,22 +45,29 @@ export function createWorkspaces(tabs: Tabs) {
    * has. Tabs no workspace holds can still be reopened from the closed tabs.
    */
   async function leave(change: (unnamed: boolean) => void) {
-    busy = true;
     const was = current();
     if (was !== undefined) keepAs(was);
+    await morph(() => change(was === undefined), "tabs")?.updateCallbackDone.catch(() => undefined);
+  }
+
+  /** One change of workspace at a time, from its start till the new one is named. */
+  async function alone(work: () => Promise<void> | void) {
+    if (busy) return;
+    busy = true;
     try {
-      await morph(() => change(was === undefined), "tabs")?.updateCallbackDone.catch(() => undefined);
+      await work();
     } finally {
       busy = false;
     }
   }
 
-  async function switchTo(name: string) {
-    const target = workspaces().find((one) => one.name === name);
-    if (busy || !target || name === current()) return;
-    await leave((unnamed) => tabs.restore(target, unnamed));
-    show(name);
-  }
+  const switchTo = (name: string) =>
+    alone(async () => {
+      const target = workspaces().find((one) => one.name === name);
+      if (!target || name === current()) return;
+      await leave((unnamed) => tabs.restore(target, unnamed));
+      show(name);
+    });
 
   return {
     current,
@@ -73,26 +80,28 @@ export function createWorkspaces(tabs: Tabs) {
     },
     switchTo,
     /** The tabs on screen become workspace `name`, the one on show. */
-    saveAs(name: string) {
-      if (!free(name)) return;
-      keepAs(name);
-      show(name);
-    },
+    saveAs: (name: string) =>
+      alone(() => {
+        if (!free(name)) return;
+        keepAs(name);
+        show(name);
+      }),
     /** A workspace of one tab, on the home page at `home`. */
-    async create(name: string, home: string) {
-      if (busy || !free(name)) return;
-      let opened: Promise<unknown> | undefined;
-      // The folder is read after the change, so the change never waits on the disk.
-      await leave((unnamed) => {
-        opened = tabs.startOver(home, { home: true }, unnamed);
-      });
-      await opened;
-      keepAs(name);
-      show(name);
-    },
+    create: (name: string, home: string) =>
+      alone(async () => {
+        if (!free(name)) return;
+        let opened: Promise<unknown> | undefined;
+        // The folder is read after the change, so the change never waits on the disk.
+        await leave((unnamed) => {
+          opened = tabs.startOver(home, { home: true }, unnamed);
+        });
+        await opened;
+        keepAs(name);
+        show(name);
+      }),
     rename(name: string) {
       const was = current();
-      if (was === undefined || !free(name)) return;
+      if (busy || was === undefined || !free(name)) return;
       setWorkspaces(workspaces().map((one) => (one.name === was ? { ...one, name } : one)));
       moveWorkspaceKeys(was, name);
       show(name);
@@ -100,7 +109,7 @@ export function createWorkspaces(tabs: Tabs) {
     /** The workspace goes, and its tabs stay on screen with no name. */
     remove() {
       const was = current();
-      if (was === undefined) return;
+      if (busy || was === undefined) return;
       setWorkspaces(workspaces().filter((one) => one.name !== was));
       moveWorkspaceKeys(was, undefined);
       show(undefined);

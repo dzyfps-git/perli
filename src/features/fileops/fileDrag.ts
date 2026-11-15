@@ -11,6 +11,8 @@ interface Spot {
   element: HTMLElement;
   folder: string;
   view?: FolderView;
+  /** The pane a place inside it, such as a folder in column view, opens in when a drag rests there. */
+  pane?: FolderView;
 }
 
 const OVER = "data-drop-over";
@@ -174,11 +176,11 @@ const ACTION_LABELS: Record<DropAction, string> = {
 function spotAt(x: number, y: number, views: FolderView[]): Spot | undefined {
   const scale = window.devicePixelRatio;
   const under = document.elementFromPoint(x / scale, y / scale);
-  const place = under?.closest<HTMLElement>("[data-drop]");
-  if (place) return { element: place, folder: place.dataset.drop! };
-
   const pane = under?.closest<HTMLElement>(".pane");
   const view = views.find((item) => String(item.id) === pane?.dataset.view);
+  const place = under?.closest<HTMLElement>("[data-drop]");
+  if (place) return { element: place, folder: place.dataset.drop!, pane: pane?.contains(place) ? view : undefined };
+
   const path = view?.folder()?.path;
   // A search's rows are from all over, so nothing there says where a drop would land.
   if (!pane || !view || !path || view.query() || view.isZip()) return undefined;
@@ -255,6 +257,7 @@ export function followFileDrag(
       stopOpening();
       if (element.matches(".tab")) element.click();
       else if (spot.view && element.matches(".file-row")) spot.view.open(spot.folder);
+      else if (spot.pane) spot.pane.open(spot.folder);
       else openPlace(spot.folder);
     };
     element.setAttribute(OPENING, "");

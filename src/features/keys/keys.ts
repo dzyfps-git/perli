@@ -180,6 +180,26 @@ export function rebound(table: KeyCommand[], overrides: Overrides, id: string, c
   return { ...given(table, overrides, id, [combo]), [id]: [combo] };
 }
 
+/** `keys` become `id`'s own, and are taken from whatever else had them. */
+export function withKeys(table: KeyCommand[], overrides: Overrides, id: string, keys: string[]): Overrides {
+  return { ...given(table, overrides, id, keys), [id]: keys };
+}
+
+/**
+ * A scope's keys laid over the keys beneath it. A key the scope gives a command is taken from
+ * whatever had it beneath, so the nearer scope always wins.
+ */
+export function layered(table: KeyCommand[], below: Overrides, top: Overrides): Overrides {
+  const claimed = new Set(Object.values(top).flat());
+  const next: Overrides = { ...below, ...top };
+  for (const command of table) {
+    if (command.id in top || command.fixed) continue;
+    const had = keysOf(command, below);
+    if (had.some((key) => claimed.has(key))) next[command.id] = had.filter((key) => !claimed.has(key));
+  }
+  return next;
+}
+
 /** `id` gets the keys it started with back, taking them from whatever had them since. */
 export function reset(table: KeyCommand[], overrides: Overrides, id: string): Overrides {
   const { [id]: _gone, ...rest } = overrides;

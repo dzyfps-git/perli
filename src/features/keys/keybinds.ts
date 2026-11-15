@@ -9,9 +9,11 @@ import {
   cleanWorkspaceKeys,
   KEYS,
   keysOf,
+  layered,
   parseKeysFile,
   rebound,
   reset,
+  withKeys,
   type FolderKeys,
   type KeysFile,
   type Overrides,
@@ -49,11 +51,11 @@ const layer = (scope: KeyScope): Overrides => {
   return folderEntry()?.value.keys ?? {};
 };
 const ORDER: KeyScope[] = ["all", "workspace", "folder"];
-/** The keys as they hold in `scope`, with every scope under it beneath. */
-const upTo = (scope: KeyScope, own = true) => {
-  const layers = ORDER.slice(0, ORDER.indexOf(scope) + (own ? 1 : 0)).map(layer);
-  return Object.assign({}, ...layers) as Overrides;
-};
+/** The keys as they hold in `scope`, with every scope under it beneath, the nearer winning. */
+const upTo = (scope: KeyScope, own = true) =>
+  ORDER.slice(0, ORDER.indexOf(scope) + (own ? 1 : 0))
+    .map(layer)
+    .reduce((below, top) => layered(KEYS, below, top), {});
 
 /** What a scope is called, or nothing when there is none here. */
 export function scopeName(scope: KeyScope) {
@@ -132,10 +134,11 @@ const own = (scope: KeyScope, next: Overrides) => (scope === "all" ? next : chan
 
 export const rebind = (scope: KeyScope, id: string, combo: string) => setLayer(scope, own(scope, rebound(KEYS, upTo(scope), id, combo)));
 export const unbind = (scope: KeyScope, id: string) => setLayer(scope, own(scope, { ...upTo(scope), [id]: [] }));
+/** `id` gets back the keys it has beneath the scope, taking them from whatever had them since. */
 export function resetKey(scope: KeyScope, id: string) {
   if (scope === "all") return setOverrides(reset(KEYS, overrides(), id));
-  const { [id]: _gone, ...rest } = layer(scope);
-  setLayer(scope, rest);
+  const found = KEYS.find((one) => one.id === id);
+  if (found) setLayer(scope, own(scope, withKeys(KEYS, upTo(scope), id, keysOf(found, upTo(scope, false)))));
 }
 export const resetKeys = (scope: KeyScope) => setLayer(scope, {});
 
