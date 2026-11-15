@@ -104,6 +104,7 @@ pub(super) struct Script {
     questions: RefCell<Vec<Question>>,
     during: Option<During>,
     verify: bool,
+    kept: Option<PathBuf>,
 }
 
 impl Script {
@@ -144,6 +145,10 @@ impl Host for Script {
 
     fn verify_copies(&self) -> bool {
         self.verify
+    }
+
+    fn kept_folder(&self) -> Option<PathBuf> {
+        self.kept.clone()
     }
 }
 
@@ -2623,4 +2628,111 @@ fn undoing_a_rename_then_a_move_of_the_same_file_runs_them_in_turn() {
     go(Job::Undo { records });
 
     assert!(exists(&a) && !exists(&b) && !exists(&moved));
+}
+
+/// A host that keeps what a write replaces in `kept`, inside the sandbox.
+fn keeping(sandbox: &Sandbox) -> Script {
+    Script { kept: Some(sandbox.path("kept")), ..Script::default() }
+}
+
+#[test]
+fn a_save_keeps_the_old_text_for_undo_and_redo() {
+    let sandbox = Sandbox::new();
+    let notes = sandbox.file(r"docs\notes.txt", "old");
+    let zone = b"[ZoneTransfer]\r\nZoneId=3\r\n";
+    sys::write_zone(&notes, zone).unwrap();
+    let host = keeping(&sandbox);
+
+    let saved = run_with(Job::Save { path: notes.clone(), bytes: b"new".to_vec(), read: seen(&notes) }, &host);
+    assert_eq!(read(&notes), "new");
+    assert_eq!(sys::read_zone(&notes).as_deref(), Some(&zone[..]), "the mark of where it came from stays");
+    let [Done::Replaced { path, kept }] = &saved.done[..] else { panic!("{:?}", saved.done) };
+    assert_eq!((path, read(kept)), (&notes, "old".to_string()));
+    assert_eq!(sandbox.names("docs"), ["notes.txt"], "nothing is left beside it");
+
+    let undone = run_with(Job::Undo { records: saved.done.clone() }, &host);
+    assert_eq!(read(&notes), "old");
+    assert!(!exists(kept), "what came back is no longer kept");
+    let redone = run_with(Job::Undo { records: undone.done }, &host);
+    assert_eq!(read(&notes), "new");
+    assert_eq!(redone.done.len(), 1);
+}
+
+#[test]
+fn a_save_over_a_file_that_changed_asks_first() {
+    let sandbox = Sandbox::new();
+    let notes = sandbox.file("notes.txt", "old");
+    let read_then = seen(&notes);
+    fs::write(&notes, "theirs").unwrap();
+    let save = || Job::Save { path: notes.clone(), bytes: b"mine".to_vec(), read: read_then };
+
+    let host = Script::answering(&[Answer::Cancel]);
+    run_with(save(), &host);
+    assert_eq!((read(&notes), host.asked()), ("theirs".to_string(), 1));
+    // Only Replace writes over it.
+    run_with(save(), &Script::default());
+    assert_eq!(read(&notes), "theirs");
+    run_with(save(), &Script::answering(&[Answer::Replace]));
+    assert_eq!(read(&notes), "mine");
+    // Nothing to compare with, nothing to ask.
+    let host = Script::default();
+    run_with(Job::Save { path: notes.clone(), bytes: b"again".to_vec(), read: None }, &host);
+    assert_eq!((read(&notes), host.asked()), ("again".to_string(), 0));
+}
+
+#[test]
+fn pictures_turn_in_place_and_change_as_copies() {
+    use crate::picture::{Edit, Format};
+    let sandbox = Sandbox::new();
+    let photo = sandbox.path("photo.jpg");
+    let original = crate::inside::tests::turned_jpeg(1);
+    fs::write(&photo, &original).unwrap();
+    let host = keeping(&sandbox);
+    let edit = |edit: Edit, path: &Path| run_with(Job::Picture { paths: vec![path.to_path_buf()], edit }, &host);
+
+    // A JPEG's turn changes one number, so it is as long as before.
+    let turned = edit(Edit::Turn { quarters: 1, flip: false }, &photo);
+    let now = fs::read(&photo).unwrap();
+    assert!(now != original && now.len() == original.len());
+    run_with(Job::Undo { records: turned.done }, &host);
+    assert_eq!(fs::read(&photo).unwrap(), original);
+
+    edit(Edit::Resize { longest: 32 }, &photo);
+    edit(Edit::Convert { format: Format::Png }, &photo);
+    edit(Edit::Share, &photo);
+    assert_eq!(sandbox.names(""), ["kept", "photo (32×16).jpg", "photo (to share).jpg", "photo.jpg", "photo.png"]);
+
+    // Any other picture is drawn again, standing the new way.
+    let png = sandbox.path("photo.png");
+    let size = |path: &Path| {
+        let bytes = fs::read(path).unwrap();
+        (u32::from_be_bytes(bytes[16..20].try_into().unwrap()), u32::from_be_bytes(bytes[20..24].try_into().unwrap()))
+    };
+    assert_eq!(size(&png), (64, 32));
+    let made = edit(Edit::Turn { quarters: 1, flip: true }, &png);
+    assert_eq!(size(&png), (32, 64));
+    assert!(matches!(made.done[..], [Done::Replaced { .. }]));
+}
+
+#[test]
+fn the_wallpaper_goes_back_on_undo_to_each_screen_still_there() {
+    use super::wallpaper::desktop::SCREENS;
+    let sandbox = Sandbox::new();
+    let sea = sandbox.file("sea.jpg", "x");
+    let shown = || SCREENS.with(|screens| screens.borrow().iter().map(|(_, picture)| picture.clone()).collect::<Vec<_>>());
+    let old = shown();
+
+    let set = go(Job::Wallpaper { picture: sea.clone() });
+    assert_eq!(shown(), [sea.clone(), sea.clone()]);
+    let undone = go(Job::Undo { records: set.done });
+    assert_eq!(shown(), old);
+    go(Job::Undo { records: undone.done });
+    assert_eq!(shown(), [sea.clone(), sea.clone()]);
+
+    // A screen unplugged since is left out.
+    let set = go(Job::Wallpaper { picture: sea.clone() });
+    SCREENS.with(|screens| screens.borrow_mut().pop());
+    let undone = go(Job::Undo { records: set.done });
+    assert!(undone.failed.is_empty());
+    assert_eq!(shown(), [sea]);
 }

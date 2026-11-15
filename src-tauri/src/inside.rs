@@ -417,7 +417,7 @@ fn transform(orientation: u16) -> Option<WICBitmapTransformOptions> {
 }
 
 /// A JPEG's EXIF orientation, or nothing for any other picture or one without it.
-unsafe fn orientation(frame: &IWICBitmapFrameDecode) -> Option<u16> {
+pub(crate) unsafe fn orientation(frame: &IWICBitmapFrameDecode) -> Option<u16> {
     let reader = frame.GetMetadataQueryReader().ok()?;
     let mut value = PROPVARIANT::default();
     reader.GetMetadataByName(w!("/app1/ifd/{ushort=274}"), &raw mut value).ok()?;
@@ -838,7 +838,7 @@ fn opening(name: &str, tag: &str, start: &BytesStart) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::io::Write;
     use zip::write::SimpleFileOptions;
@@ -915,7 +915,7 @@ mod tests {
     }
 
     /// A 64x32 JPEG in four colours, red, blue / green, black, with `orientation` in its EXIF.
-    fn turned_jpeg(orientation: u16) -> Vec<u8> {
+    pub(crate) fn turned_jpeg(orientation: u16) -> Vec<u8> {
         use windows::Win32::Foundation::E_FAIL;
         use windows::Win32::Graphics::Imaging::{GUID_ContainerFormatJpeg, GUID_WICPixelFormat24bppBGR, WICBitmapEncoderNoCache};
         use windows::Win32::System::Com::{IStream, STATFLAG_NONAME, STATSTG, STREAM_SEEK_SET};

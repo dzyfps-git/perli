@@ -1,7 +1,7 @@
 //! Runs file jobs on their own threads and reports to the UI through the `job` event.
 
 use std::cell::Cell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -24,6 +24,8 @@ const EVENT: &str = "job";
 const REPORT_GAP: Duration = Duration::from_millis(100);
 const UNDO_LIMIT: usize = 100;
 const UNDO_FILE: &str = "undo.json";
+/// Where the old content of files written over waits for Undo.
+const KEPT_FOLDER: &str = "kept";
 /// Selecting more new items than this helps nobody, and sending them all is slow.
 const SELECT_LIMIT: usize = 10_000;
 /// How often a job waiting for its drive looks again, for a cancel or a "Start now".
@@ -225,9 +227,17 @@ fn describe(records: &[Done]) -> (String, PathBuf) {
         [Done::Recycled { original, .. }, ..] if records.iter().all(|record| matches!(record, Done::Recycled { .. })) => {
             (counted("Recycled", original), original.parent().unwrap_or(original).to_path_buf())
         }
+        [Done::Replaced { path, .. }, ..] if records.iter().all(|record| matches!(record, Done::Replaced { .. })) => {
+            (counted("Changed", path), path.clone())
+        }
+        [Done::Wallpaper { after, .. }] => (format!("Set {} as the wallpaper", name_of(after)), after.clone()),
         [first, ..] => {
             let path = match first {
-                Done::Created { path } | Done::Moved { to: path, .. } | Done::Recycled { original: path, .. } => path,
+                Done::Created { path }
+                | Done::Moved { to: path, .. }
+                | Done::Recycled { original: path, .. }
+                | Done::Replaced { path, .. }
+                | Done::Wallpaper { after: path, .. } => path,
             };
             (format!("Changed {} items", records.len()), path.clone())
         }
@@ -327,6 +337,15 @@ impl UndoLog {
             self.steps.remove(0);
         }
         Some(id)
+    }
+
+    /// Every file kept for a step that can still be undone or redone.
+    fn kept(&self) -> HashSet<PathBuf> {
+        let records = self.steps.iter().chain(&self.redo).flat_map(|step| &step.records);
+        records.filter_map(|record| match record {
+            Done::Replaced { kept, .. } => Some(kept.clone()),
+            _ => None,
+        }).collect()
     }
 
     fn latest(&self) -> Option<u64> {
@@ -452,8 +471,15 @@ impl Jobs {
     pub fn loading_history() -> Self {
         let file = session::data_file(UNDO_FILE);
         let read = file.clone();
+        let load = move || {
+            let log = read.map(|file| UndoLog::load(&file)).unwrap_or_default();
+            if let Some(folder) = session::data_file(KEPT_FOLDER) {
+                ops::sweep_kept(&folder, &log.kept());
+            }
+            log
+        };
         Self {
-            loading: Mutex::new(Some(thread::spawn(move || read.map(|file| UndoLog::load(&file)).unwrap_or_default()))),
+            loading: Mutex::new(Some(thread::spawn(load))),
             undo_file: file,
             ..Self::default()
         }
@@ -641,9 +667,9 @@ fn target_of(job: &Job) -> Option<String> {
     }
 }
 
-/// Starts a job on its own thread and returns right away. One job per thread lets jobs run
-/// side by side, and each thread hosts its own shell work.
-pub fn start(app: &AppHandle, plan: Plan) -> Result<(), String> {
+/// Starts a job on its own thread and returns its id right away. One job per thread lets jobs
+/// run side by side, and each thread hosts its own shell work.
+pub fn start(app: &AppHandle, plan: Plan) -> Result<u64, String> {
     let jobs = app.state::<Jobs>();
     let id = jobs.next.fetch_add(1, Ordering::Relaxed);
     let entry = Arc::<Entry>::default();
@@ -659,7 +685,7 @@ pub fn start(app: &AppHandle, plan: Plan) -> Result<(), String> {
         .name(format!("job {id}"))
         .stack_size(STACK_BYTES)
         .spawn(move || bridge.work(plan))
-        .map(drop)
+        .map(|_| id)
         .map_err(|error| {
             lock(&jobs.running).remove(&id);
             error.to_string()
@@ -680,7 +706,8 @@ fn replay(
                 history,
                 ..Job::Undo { records }.into()
             },
-        ),
+        )
+        .map(drop),
         None => Ok(()),
     }
 }
@@ -810,6 +837,10 @@ impl Host for Bridge {
     fn verify_copies(&self) -> bool {
         self.app.state::<Jobs>().verify.load(Ordering::Relaxed)
     }
+
+    fn kept_folder(&self) -> Option<PathBuf> {
+        session::data_file(KEPT_FOLDER)
+    }
 }
 
 /// The main window, which UAC prompts and the clipboard need.
@@ -830,7 +861,7 @@ fn text_of(path: &Path) -> String {
 fn created(done: &[Done]) -> Vec<String> {
     let made = done.iter().filter_map(|record| match record {
         Done::Created { path } | Done::Moved { to: path, .. } => Some(text(path)),
-        Done::Recycled { .. } => None,
+        Done::Recycled { .. } | Done::Replaced { .. } | Done::Wallpaper { .. } => None,
     });
     made.take(SELECT_LIMIT).collect()
 }
@@ -865,6 +896,17 @@ fn title(job: &Job) -> String {
         Job::Purge { items } => deleted("Deleting", items),
         Job::Empty => "Emptying the Recycle Bin".to_string(),
         Job::Undo { .. } => "Undoing".to_string(),
+        Job::Save { path, .. } => named("Saving", &[path.as_path()]),
+        Job::Picture { paths, edit } => listed(
+            match edit {
+                crate::picture::Edit::Turn { .. } => "Turning",
+                crate::picture::Edit::Resize { .. } => "Resizing",
+                crate::picture::Edit::Convert { .. } => "Converting",
+                crate::picture::Edit::Share => "Making a copy to share of",
+            },
+            paths,
+        ),
+        Job::Wallpaper { picture } => named("Setting as the wallpaper:", &[picture.as_path()]),
     }
 }
 
@@ -924,6 +966,14 @@ mod tests {
         assert_eq!(describe(&[bin]), ("Recycled gone.txt".to_string(), path(r"C:\a")));
         let gathered = [Done::Created { path: path(r"C:\a\Trip") }, moved(r"C:\a\1", r"C:\a\Trip\1"), moved(r"C:\a\2", r"C:\a\Trip\2")];
         assert_eq!(describe(&gathered), ("Made Trip with 2 inside".to_string(), path(r"C:\a\Trip")));
+        let saved = Done::Replaced { path: path(r"C:\a\notes.txt"), kept: path(r"C:\k\1-notes.txt") };
+        assert_eq!(told(std::slice::from_ref(&saved)), "Changed notes.txt");
+        let wallpaper = Done::Wallpaper { before: Vec::new(), after: path(r"C:\a\sea.jpg") };
+        assert_eq!(told(&[wallpaper]), "Set sea.jpg as the wallpaper");
+        // What Undo keeps is known for every step, so a sweep leaves it alone.
+        let mut log = UndoLog::default();
+        log.record(History::New, vec![saved]);
+        assert_eq!(log.kept(), HashSet::from([path(r"C:\k\1-notes.txt")]));
     }
 
     #[test]

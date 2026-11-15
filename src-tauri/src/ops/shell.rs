@@ -578,7 +578,7 @@ mod tests {
                     assert_eq!(*from, moved);
                     ("moved", name(to))
                 }
-                Done::Recycled { .. } => unreachable!("nothing went to the bin"),
+                _ => unreachable!("nothing went to the bin or was replaced"),
             })
             .collect();
         assert_eq!(

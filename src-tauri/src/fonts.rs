@@ -2,8 +2,9 @@
 //! to draw with. TrueType, OpenType, WOFF, WOFF2 and collections of faces (`.ttc`) all read.
 
 use std::borrow::Cow;
+use std::fs;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 use ttf_parser::{name_id, Face, Language, Permissions, RawFace};
@@ -322,6 +323,152 @@ fn unwrap_woff2(bytes: &[u8]) -> Result<Vec<u8>, String> {
     Ok(write_sfnt(flavor, &mut tables))
 }
 
+/// Where Windows keeps fonts it shows to every app, in the registry.
+const FONTS_KEY: &str = r"Software\Microsoft\Windows NT\CurrentVersion\Fonts";
+
+/// Who a font is installed for.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Installed {
+    No,
+    /// This user alone, which Perli can undo.
+    User,
+    /// Everyone on the PC, which takes an admin to change.
+    System,
+}
+
+fn user_fonts() -> Option<PathBuf> {
+    Some(PathBuf::from(std::env::var_os("LOCALAPPDATA")?).join(r"Microsoft\Windows\Fonts"))
+}
+
+fn system_fonts() -> Option<PathBuf> {
+    Some(PathBuf::from(std::env::var_os("WINDIR")?).join("Fonts"))
+}
+
+/// The installed copy's file name. Windows can't use a web font, so the font inside one is
+/// installed instead, as `.otf` or `.ttf` by its outlines.
+fn installed_name(path: &Path, start: &[u8]) -> String {
+    let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+    if !matches!(start.get(..4), Some(b"wOFF" | b"wOF2")) {
+        return name;
+    }
+    let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+    match start.get(4..8) {
+        Some(b"OTTO") => format!("{stem}.otf"),
+        _ => format!("{stem}.ttf"),
+    }
+}
+
+/// The name Windows lists a font under: each face's full name, then the kind of its outlines.
+fn registry_name(faces: &[Facts]) -> String {
+    let mut names: Vec<&str> = Vec::new();
+    for face in faces {
+        let name = if face.full_name.is_empty() { face.family.as_str() } else { face.full_name.as_str() };
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    let kind = if faces.first().is_some_and(|face| face.outlines.starts_with("CFF")) { "OpenType" } else { "TrueType" };
+    format!("{} ({kind})", names.join(" & "))
+}
+
+fn same_folder(a: &Path, b: &Path) -> bool {
+    a.to_string_lossy().eq_ignore_ascii_case(&b.to_string_lossy())
+}
+
+/// The first bytes of a file, enough to tell a web font and its outlines.
+fn start_of(path: &Path) -> Vec<u8> {
+    let mut start = Vec::new();
+    let _ = fs::File::open(path).map(|file| file.take(8).read_to_end(&mut start));
+    start
+}
+
+/// Where the font at `path` is installed, by a file of its name and size in Windows' font folders.
+pub fn installed(path: &Path) -> Installed {
+    let folder = path.parent().unwrap_or(Path::new(""));
+    if user_fonts().is_some_and(|fonts| same_folder(folder, &fonts)) {
+        return Installed::User;
+    }
+    if system_fonts().is_some_and(|fonts| same_folder(folder, &fonts)) {
+        return Installed::System;
+    }
+    let start = start_of(path);
+    let web = matches!(start.get(..4), Some(b"wOFF" | b"wOF2"));
+    let name = installed_name(path, &start);
+    let size = path.metadata().map_or(0, |facts| facts.len());
+    let there = |fonts: Option<PathBuf>| {
+        fonts.and_then(|fonts| fonts.join(&name).metadata().ok()).is_some_and(|facts| web || facts.len() == size)
+    };
+    if there(user_fonts()) {
+        Installed::User
+    } else if there(system_fonts()) {
+        Installed::System
+    } else {
+        Installed::No
+    }
+}
+
+/// Tells every open app the fonts changed, as Windows' own font installer does.
+fn tell_apps() {
+    use windows::Win32::Foundation::{LPARAM, WPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{SendMessageTimeoutW, HWND_BROADCAST, SMTO_ABORTIFHUNG, WM_FONTCHANGE};
+    unsafe { SendMessageTimeoutW(HWND_BROADCAST, WM_FONTCHANGE, WPARAM(0), LPARAM(0), SMTO_ABORTIFHUNG, 1000, None) };
+}
+
+/// Installs the font for this user alone, as Windows does without an admin: a copy in the
+/// user's font folder, named in the registry, and loaded for the apps open now.
+pub fn install(path: &Path) -> Result<(), String> {
+    use windows::Win32::Graphics::Gdi::AddFontResourceW;
+    use windows::Win32::System::Registry::HKEY_CURRENT_USER;
+    let bytes = read(path)?;
+    let content = match bytes.get(..4) {
+        Some(b"wOFF" | b"wOF2") => sfnt(&bytes, 0)?.into_owned(),
+        _ => bytes.clone(),
+    };
+    let count = ttf_parser::fonts_in_collection(&content).unwrap_or(1).min(MOST_FACES);
+    let faces = (0..count).map(|index| facts(&sfnt(&content, index)?)).collect::<Result<Vec<_>, _>>()?;
+    let folder = user_fonts().ok_or("Windows has no font folder for this user")?;
+    let target = folder.join(installed_name(path, &bytes));
+    if target.exists() {
+        return Err(format!("Another font named {} is installed already.", target.file_name().unwrap_or_default().to_string_lossy()));
+    }
+    fs::create_dir_all(&folder).map_err(|error| error.to_string())?;
+    fs::write(&target, &content).map_err(|error| error.to_string())?;
+    let named = crate::registry::write_text(HKEY_CURRENT_USER, FONTS_KEY, &registry_name(&faces), &target.to_string_lossy());
+    if let Err(error) = named {
+        let _ = fs::remove_file(&target);
+        return Err(error.message());
+    }
+    unsafe { AddFontResourceW(&windows::core::HSTRING::from(target.as_path())) };
+    tell_apps();
+    Ok(())
+}
+
+/// Takes back a font installed for this user alone.
+pub fn uninstall(path: &Path) -> Result<(), String> {
+    use windows::Win32::Graphics::Gdi::RemoveFontResourceW;
+    use windows::Win32::System::Registry::HKEY_CURRENT_USER;
+    if installed(path) != Installed::User {
+        return Err("It isn't installed for you alone, so Perli can't take it back.".into());
+    }
+    let folder = user_fonts().ok_or("Windows has no font folder for this user")?;
+    let target = if path.parent().is_some_and(|parent| same_folder(parent, &folder)) {
+        path.to_path_buf()
+    } else {
+        folder.join(installed_name(path, &start_of(path)))
+    };
+    let faces = faces(&target)?;
+    let _ = unsafe { RemoveFontResourceW(&windows::core::HSTRING::from(target.as_path())) };
+    // Windows' own installer may have said the other kind of outlines.
+    let name = registry_name(&faces);
+    let base = name.trim_end_matches(" (TrueType)").trim_end_matches(" (OpenType)");
+    for kind in ["TrueType", "OpenType"] {
+        crate::registry::delete_value(HKEY_CURRENT_USER, FONTS_KEY, &format!("{base} ({kind})"));
+    }
+    tell_apps();
+    fs::remove_file(&target).map_err(|_| "Windows took it out, but an app still holds the file, so it stays in your font folder for now.".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -347,6 +494,20 @@ mod tests {
         assert_eq!(facts.weight, 400);
         assert!(facts.characters.contains(&[0x20, 0x7e]), "{:?}", &facts.characters[..4]);
         assert!(facts.axes.is_empty());
+    }
+
+    #[test]
+    fn an_installed_font_is_named_the_way_windows_names_it() {
+        let arial = facts(&arial()).unwrap();
+        assert_eq!(registry_name(&[arial]), "Arial (TrueType)");
+        let cambria = std::fs::read(r"C:\Windows\Fonts\cambria.ttc").unwrap();
+        let both: Vec<Facts> = (0..2).map(|index| facts(&split(&cambria, index).unwrap()).unwrap()).collect();
+        assert_eq!(registry_name(&both), "Cambria & Cambria Math (TrueType)");
+        // A web font installs as the plain font inside it.
+        assert_eq!(installed_name(Path::new(r"C:\a\Inter.woff2"), b"wOF2OTTO"), "Inter.otf");
+        assert_eq!(installed_name(Path::new(r"C:\a\Inter.woff"), b"wOFF\0\x01\0\0"), "Inter.ttf");
+        assert_eq!(installed_name(Path::new(r"C:\a\Inter.ttf"), b"\0\x01\0\0"), "Inter.ttf");
+        assert_eq!(installed(Path::new(r"C:\Windows\Fonts\arial.ttf")), Installed::System);
     }
 
     #[test]
