@@ -2156,6 +2156,15 @@ fn templates_folder() -> Result<PathBuf, String> {
     templates::own_folder()
 }
 
+/// Whether Space is held, for a drag resting on a folder to open it at once. A drag holds the
+/// mouse and keys while it runs, so the page hears no key of its own.
+#[tauri::command]
+fn space_down() -> bool {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_SPACE};
+    let state = unsafe { GetAsyncKeyState(i32::from(VK_SPACE.0)) };
+    state < 0
+}
+
 #[tauri::command]
 async fn set_drop_target(folder: Option<PathBuf>, drags: State<'_, Arc<Drags>>) -> Result<(), String> {
     drags.aim(folder);
@@ -2563,6 +2572,7 @@ fn main() {
             check_update,
             install_update,
             set_drop_target,
+            space_down,
             list_tags,
             create_tag,
             edit_tag,

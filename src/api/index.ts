@@ -932,6 +932,9 @@ export const onFileDrag = (handler: (event: FileDrag) => void) =>
 /** Names the folder under a drag, which decides the cursor. */
 export const setDropTarget = (folder: string | null) => invoke<void>("set_drop_target", { folder });
 
+/** Whether Space is held, for a drag resting on a folder to open it at once. */
+export const spaceDown = () => invoke<boolean>("space_down");
+
 /** What the last drop can do on `folder`, for the user to pick from. */
 export const dropChoices = (folder: string) => invoke<DropAction[]>("drop_choices", { folder });
 
