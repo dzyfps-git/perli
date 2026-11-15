@@ -43,6 +43,11 @@ impl Run<'_> {
     }
 }
 
+/// The first screen's picture that is still a file, for colors taken from it.
+pub fn shown() -> Option<PathBuf> {
+    desktop::current().ok()?.into_iter().map(|(_, picture)| picture).find(|picture| picture.is_file())
+}
+
 #[cfg(not(test))]
 mod desktop {
     use std::path::{Path, PathBuf};

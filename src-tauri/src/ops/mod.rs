@@ -32,6 +32,7 @@ pub use incoming::{offers_files, Incoming};
 pub use names::{check_rename, check_renames};
 pub use replace::{seen, sweep as sweep_kept, Seen};
 pub use shell::{shell_item, Com};
+pub use wallpaper::shown as wallpaper_shown;
 #[cfg(test)]
 pub use shell::write_shortcut;
 pub use transfer::{is_temp_name, put_back, remove_leftovers};

@@ -903,6 +903,7 @@ fn title(job: &Job) -> String {
                 crate::picture::Edit::Resize { .. } => "Resizing",
                 crate::picture::Edit::Convert { .. } => "Converting",
                 crate::picture::Edit::Share => "Making a copy to share of",
+                crate::picture::Edit::Crop { .. } => "Cropping",
             },
             paths,
         ),

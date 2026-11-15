@@ -214,7 +214,7 @@ fn ansi_page() -> u32 {
 }
 
 /// How a file stands now, as a quick edit hands it back to say what it read.
-fn seen_text(path: &Path) -> Option<String> {
+pub fn seen_text(path: &Path) -> Option<String> {
     crate::ops::seen(path).map(|(modified, size)| format!("{modified}:{size}"))
 }
 
@@ -285,6 +285,20 @@ fn is_markdown(path: &Path) -> bool {
     matches!(extension.as_deref(), Some("md" | "markdown" | "mdown" | "mkd"))
 }
 
+/// Names a new, empty file is written under: plain text, notes, settings, code and web pages.
+fn is_written(path: &Path) -> bool {
+    let extension = path.extension().map(|extension| extension.to_string_lossy().to_lowercase());
+    matches!(
+        extension.as_deref(),
+        Some(
+            "txt" | "text" | "nfo" | "log" | "md" | "markdown" | "mdown" | "mkd" | "ini" | "cfg" | "conf" | "env" | "json" | "jsonc"
+                | "yaml" | "yml" | "toml" | "xml" | "csv" | "tsv" | "html" | "htm" | "css" | "js" | "mjs" | "ts" | "tsx" | "jsx"
+                | "py" | "rs" | "c" | "h" | "cpp" | "cs" | "java" | "go" | "rb" | "php" | "lua" | "sql" | "bat" | "cmd" | "ps1"
+                | "sh" | "reg" | "srt" | "vtt"
+        )
+    )
+}
+
 /// What a file shows, starting at `offset` for the later pieces of a text.
 pub fn read(path: &Path, offset: u64) -> Preview {
     if path.is_dir() {
@@ -305,6 +319,15 @@ pub fn read(path: &Path, offset: u64) -> Preview {
         };
     }
     let size = path.metadata().map_or(0, |data| data.len());
+    // A text file with nothing in it yet still shows as text, so it can be written in.
+    if offset == 0 && size == 0 && is_written(path) {
+        let seen = seen_text(path);
+        return if is_markdown(path) {
+            Preview::Markdown { html: String::new(), source: String::new(), seen }
+        } else {
+            Preview::Text { text: String::new(), next: None, end: 0, encoding: "UTF-8".into(), seen }
+        };
+    }
     if offset == 0 && is_markdown(path) && size <= MARKDOWN_BYTES {
         // Before the read, so a change during it shows as a change.
         let seen = seen_text(path);
@@ -945,6 +968,7 @@ mod tests {
         fs::write(folder.join("read.md"), "*hi*").unwrap();
         fs::write(folder.join("a.bin"), b"MZ\0\0").unwrap();
         fs::write(folder.join("empty.txt"), "").unwrap();
+        fs::write(folder.join("empty.png"), "").unwrap();
 
         assert_eq!(read(&folder.join("read.md"), 0), Preview::Markdown { html: "<p><em>hi</em></p>\n".into(), source: "*hi*".into(), seen: seen_text(&folder.join("read.md")) });
         // A text that is still being written is read on from where the last piece stopped.
@@ -955,7 +979,9 @@ mod tests {
         assert_eq!(read(&folder.join("grow.log"), end), Preview::Text { text: "two\n".into(), next: None, end: 8, encoding: "UTF-8".into(), seen: None });
         assert_eq!(read(&folder.join("grow.log"), 8), Preview::Text { text: String::new(), next: None, end: 8, encoding: "UTF-8".into(), seen: None });
         assert_eq!(read(&folder.join("a.bin"), 0), Preview::Picture);
-        assert_eq!(read(&folder.join("empty.txt"), 0), Preview::Picture);
+        let seen = seen_text(&folder.join("empty.txt"));
+        assert_eq!(read(&folder.join("empty.txt"), 0), Preview::Text { text: String::new(), next: None, end: 0, encoding: "UTF-8".into(), seen });
+        assert_eq!(read(&folder.join("empty.png"), 0), Preview::Picture, "only a text name is shown as text when empty");
         assert_eq!(read(&folder, 0), Preview::Picture);
         fs::remove_dir_all(folder).unwrap();
     }

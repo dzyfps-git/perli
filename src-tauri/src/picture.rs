@@ -13,7 +13,7 @@ use windows::Win32::Graphics::Imaging::{
     GUID_WICPixelFormat8bppIndexed, IWICBitmapSource, IWICImagingFactory, WICBitmapDitherTypeNone, WICBitmapEncoderNoCache,
     WICBitmapInterpolationModeHighQualityCubic, WICBitmapPaletteTypeCustom, WICBitmapTransformFlipHorizontal, WICBitmapTransformOptions,
     WICBitmapTransformRotate0, WICBitmapTransformRotate180, WICBitmapTransformRotate270, WICBitmapTransformRotate90,
-    WICConvertBitmapSource, WICDecodeMetadataCacheOnDemand,
+    WICConvertBitmapSource, WICDecodeMetadataCacheOnDemand, WICRect,
 };
 use windows::Win32::System::Com::StructuredStorage::PROPBAG2;
 use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
@@ -39,6 +39,9 @@ pub enum Edit {
     Convert { format: Format },
     /// A smaller JPEG copy that holds the picture alone: no place it was taken, no camera.
     Share,
+    /// A copy of part of the picture, each side a share of the whole from 0 to 1, of the picture
+    /// as it stands. Shares and not pixels, so a photo its EXIF turns crops where it shows.
+    Crop { left: f32, top: f32, width: f32, height: f32 },
 }
 
 /// The formats Windows can write.
@@ -107,6 +110,7 @@ pub fn copy_name(path: &Path, edit: Edit, (width, height): (u32, u32)) -> (Strin
         Edit::Resize { .. } => (format!("{stem} ({width}×{height})"), own()),
         Edit::Convert { format } => (stem.into_owned(), format.extension().to_string()),
         Edit::Share => (format!("{stem} (to share)"), Format::Jpeg.extension().to_string()),
+        Edit::Crop { .. } => (format!("{stem} (cropped)"), own()),
         Edit::Turn { .. } => (stem.into_owned(), own()),
     }
 }
@@ -290,6 +294,15 @@ pub fn write(source: &Path, target: &Path, edit: Edit) -> Result<(u32, u32)> {
             rotator.Initialize(&picture, wic(turn))?;
             picture = rotator.cast()?;
         }
+        if let Edit::Crop { left, top, width, height } = edit {
+            let (whole_width, whole_height) = size_of(&picture)?;
+            let (x, width) = span(left, width, whole_width);
+            let (y, height) = span(top, height, whole_height);
+            let rect = WICRect { X: x, Y: y, Width: width, Height: height };
+            let clipper = factory.CreateBitmapClipper()?;
+            clipper.Initialize(&picture, &raw const rect)?;
+            picture = clipper.cast()?;
+        }
         let (width, height) = size_of(&picture)?;
         let edge = match edit {
             Edit::Resize { longest } => Some(longest),
@@ -312,6 +325,14 @@ pub fn write(source: &Path, target: &Path, edit: Edit) -> Result<(u32, u32)> {
         encode(&factory, &picture, target, format, quality)?;
         size_of(&picture)
     }
+}
+
+/// Where a share of a side starts and how long it is in pixels: at least one, never past the edge.
+fn span(start: f32, length: f32, whole: u32) -> (i32, i32) {
+    let whole = f64::from(whole);
+    let from = (f64::from(start).clamp(0.0, 1.0) * whole).round().min(whole - 1.0);
+    let to = (f64::from(start + length).clamp(0.0, 1.0) * whole).round().max(from + 1.0);
+    (from as i32, (to - from) as i32)
 }
 
 unsafe fn encode(factory: &IWICImagingFactory, picture: &IWICBitmapSource, target: &Path, format: Format, quality: f32) -> Result<()> {
@@ -428,6 +449,10 @@ mod tests {
         assert_eq!(copy_name(photo, Edit::Resize { longest: 800 }, (800, 600)), ("Trip (800×600)".into(), ".jpg".into()));
         assert_eq!(copy_name(photo, Edit::Convert { format: Format::Png }, (1, 1)), ("Trip".into(), ".png".into()));
         assert_eq!(copy_name(Path::new("x.webp"), Edit::Share, (1, 1)), ("x (to share)".into(), ".jpg".into()));
+        assert_eq!(copy_name(photo, Edit::Crop { left: 0.0, top: 0.0, width: 1.0, height: 1.0 }, (1, 1)), ("Trip (cropped)".into(), ".jpg".into()));
+        assert_eq!(span(0.25, 0.5, 64), (16, 32));
+        assert_eq!(span(0.9, 0.5, 10), (9, 1), "past the edge it stops there");
+        assert_eq!(span(1.0, 0.0, 10), (9, 1), "never nothing");
         assert_eq!(copy_name(Path::new("x.webp"), Edit::Resize { longest: 9 }, (9, 9)).1, ".png");
         assert!(refusal(Path::new("x.webp"), Edit::Turn { quarters: 1, flip: false }).is_some());
         assert!(refusal(Path::new("x.png"), Edit::Turn { quarters: 1, flip: false }).is_none());

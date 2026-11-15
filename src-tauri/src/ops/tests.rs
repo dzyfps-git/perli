@@ -2709,6 +2709,9 @@ fn pictures_turn_in_place_and_change_as_copies() {
         (u32::from_be_bytes(bytes[16..20].try_into().unwrap()), u32::from_be_bytes(bytes[20..24].try_into().unwrap()))
     };
     assert_eq!(size(&png), (64, 32));
+    // A crop is a copy of the part asked for, and one reaching past the edge stops at it.
+    edit(Edit::Crop { left: 0.156_25, top: 0.125, width: 0.3125, height: 2.0 }, &png);
+    assert_eq!(size(&sandbox.path("photo (cropped).png")), (20, 28));
     let made = edit(Edit::Turn { quarters: 1, flip: true }, &png);
     assert_eq!(size(&png), (32, 64));
     assert!(matches!(made.done[..], [Done::Replaced { .. }]));
