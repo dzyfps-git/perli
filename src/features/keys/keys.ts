@@ -48,6 +48,7 @@ export const KEYS: KeyCommand[] = [
   { id: "forward", label: "Forward", group: "Go", keys: ["Alt+Right"] },
   { id: "up", label: "Up", group: "Go", keys: ["Alt+Up", "Backspace"], where: "free" },
   { id: "home", label: "Go home", group: "Go", keys: ["Alt+Home"] },
+  { id: "homePage", label: "Home page", group: "Go", keys: ["Alt+Shift+Home"] },
   { id: "path", label: "Go to path", group: "Go", keys: ["Ctrl+L", "Alt+D"] },
   { id: "search", label: "Search", group: "Go", keys: ["Ctrl+F"] },
   { id: "refresh", label: "Refresh", group: "Go", keys: ["F5"] },

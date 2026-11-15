@@ -173,6 +173,7 @@ import { holdBack } from "./features/preview/popOut";
 import type { HandBack } from "./features/mini/handover";
 import { BACKDROPS, SCALES, setBackdrop, setUiScale } from "./features/settings/appearance";
 import { Settings } from "./features/settings/Settings";
+import { HomePage } from "./features/home/HomePage";
 import { putOffUpdate, setUpdateSheet, startUpdates, updateSheet, updateState } from "./features/settings/updates";
 import { UpdateSheet } from "./features/settings/UpdateSheet";
 import { BookmarksBar } from "./features/sidebar/BookmarksBar";
@@ -220,6 +221,7 @@ const WINDOW_WAIT_MS = 600;
 const MOUSE_BACK = 3;
 const MOUSE_FORWARD = 4;
 const ICON_SETTINGS = "\uE713";
+const ICON_HOME_PAGE = "\uECA5";
 
 // Waits for the frame after the rows are drawn, so this means the user can see them.
 function markReady() {
@@ -1368,6 +1370,21 @@ export function App() {
     };
   }
 
+  /** The home page over the tab on show, or the tab's folder again when it is already there. */
+  function showHomePage() {
+    const tab = tabs.active();
+    const shown = tab.home() && !settingsShown();
+    setSettingsShown(false);
+    tab.setHome(!shown);
+  }
+
+  /** Leaves the home page for the tab's folder, then does `then` in it. */
+  async function leaveHome(then: (view: FolderView) => unknown) {
+    const tab = tabs.active();
+    tab.setHome(false);
+    await then(tab.active());
+  }
+
   /** Opens what Settings says a new tab shows. A set folder that is gone opens the one on show. */
   const newTab = async () => {
     setSettingsShown(false);
@@ -1624,7 +1641,8 @@ export function App() {
         .then((title) => jobs.notify(`Sent to "${title || "file dialog"}"`, `It now shows ${baseName(folder) || folder}.`))
         .catch(jobs.report);
     },
-    back: () => here().back(),
+    back: () => (tabs.active().home() ? tabs.active().setHome(false) : here().back()),
+    homePage: showHomePage,
     forward: () => here().forward(),
     up: () => here().up(),
     path: () => here().setEditingPath(true),
@@ -2201,6 +2219,17 @@ export function App() {
         <CutChip onShow={(folder, names) => quietly(showCut(tabs.activeView(), folder, names))} />
         <button
           class="settings-button"
+          aria-current={tabs.active().home() && !settingsShown() ? "page" : undefined}
+          aria-keyshortcuts={keyText("homePage").replace("Ctrl", "Control") || undefined}
+          onClick={showHomePage}
+        >
+          <span class="settings-icon" aria-hidden="true">
+            {ICON_HOME_PAGE}
+          </span>
+          <span class="settings-label">Home page</span>
+        </button>
+        <button
+          class="settings-button"
           aria-label={updateState() === "ready" ? "Settings, update ready" : "Settings"}
           aria-keyshortcuts="Control+,"
           onClick={showSettings}
@@ -2229,7 +2258,7 @@ export function App() {
         />
         <For each={tabs.tabs()}>
           {(tab) => (
-            <div class="panes" hidden={tab !== tabs.active() || settingsShown()}>
+            <div class="panes" hidden={tab !== tabs.active() || settingsShown() || tab.home()}>
               <div
                 class="pane-pair"
                 classList={{ "panes-swapped": tab.swapped(), "pane-pair-stacked": tab.stacked() }}
@@ -2254,6 +2283,18 @@ export function App() {
             </div>
           )}
         </For>
+        <Show when={tabs.active().home() && !settingsShown()}>
+          <HomePage
+            drives={places()?.drives}
+            pinned={pinned()}
+            folders={recentFolders()}
+            onOpen={(path) => leaveHome((view) => view.open(path))}
+            onOpenFile={(path) => leaveHome(() => previewOf(path))}
+            onMenu={(event, path) => showFolderMenu(event, tabs.activeView(), path)}
+            onEject={(path) => quietly(ejectDrive(path))}
+            onSearch={(text) => leaveHome((view) => view.search(text))}
+          />
+        </Show>
         <Settings
           open={settingsOpen()}
           shown={settingsShown()}

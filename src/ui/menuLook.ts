@@ -120,6 +120,8 @@ const LOOK: Record<string, [icon: string, keys?: string]> = {
   "Close tabs to the right": ["\uE8BB"],
   "Move to": ["\uE8DE"],
   "Copy path": ["\uE71B"],
+  "Home page": ["\uECA5", "Alt+Shift+Home"],
+  "New tabs open here": ["\uE8A0"],
   "New folder with selection": ["\uE8F4"],
   "Put on the shelf": ["\uE8F1"],
   "Activity log": ["\uE81C"],

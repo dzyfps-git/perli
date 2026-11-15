@@ -1,0 +1,412 @@
+/* The home page fills the room the panes would have. */
+.home-page {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  padding: var(--space-4) var(--space-4) var(--space-4);
+  outline: none;
+}
+
+.home-top {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  max-width: 1100px;
+  margin: 0 auto var(--space-4);
+}
+
+.home-search {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: var(--space-2);
+  height: 38px;
+  padding: 0 var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  transition:
+    border-color var(--motion),
+    box-shadow var(--motion);
+}
+
+.home-search:focus-within {
+  border-color: var(--accent);
+}
+
+.home-search-icon {
+  color: var(--text-muted);
+  font: 13px / 1 var(--font-icons);
+}
+
+.home-search input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+}
+
+.home-action {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: var(--space-2);
+  height: 32px;
+  padding: 0 var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  transition:
+    background var(--motion),
+    scale var(--motion-slide);
+}
+
+.home-action span {
+  font: 12px / 1 var(--font-icons);
+}
+
+.home-action:hover {
+  background: var(--surface-hover);
+}
+
+.home-action:active {
+  scale: 0.96;
+}
+
+.home-action[aria-pressed="true"] {
+  border-color: var(--accent);
+  background: var(--surface-selected);
+}
+
+.home-parts {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(420px, 100%), 1fr));
+  gap: var(--space-4);
+  max-width: 1100px;
+  margin: 0 auto;
+}
+
+.home-part {
+  min-width: 0;
+  animation: home-rise var(--motion-spring) both;
+  transition:
+    opacity var(--motion),
+    scale var(--motion-slide);
+}
+
+.home-part:nth-child(2) {
+  animation-delay: 40ms;
+}
+
+.home-part:nth-child(3) {
+  animation-delay: 80ms;
+}
+
+.home-part:nth-child(n + 4) {
+  animation-delay: 120ms;
+}
+
+@keyframes home-rise {
+  from {
+    opacity: 0;
+    translate: 0 16px;
+  }
+}
+
+.home-wide {
+  grid-column: 1 / -1;
+}
+
+/* While editing, a hidden part stays, faded, so it can come back. */
+.home-off {
+  opacity: 0.45;
+}
+
+.home-editing .home-part {
+  padding: var(--space-2);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-large);
+}
+
+.home-dragged {
+  scale: 0.98;
+  opacity: 0.8;
+}
+
+.home-part-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  margin-bottom: var(--space-2);
+}
+
+.home-part-head h2 {
+  flex: 1;
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.home-tool {
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text-muted);
+  font: 12px / 1 var(--font-icons);
+  animation: home-pop var(--motion-spring);
+  transition:
+    background var(--motion),
+    color var(--motion);
+}
+
+.home-tool:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.home-grip {
+  cursor: grab;
+  touch-action: none;
+}
+
+.home-grip:active {
+  cursor: grabbing;
+}
+
+@keyframes home-pop {
+  from {
+    opacity: 0;
+    scale: 0.5;
+  }
+}
+
+.home-empty {
+  margin: 0;
+  padding: var(--space-3);
+  border-radius: var(--radius-large);
+  background: var(--surface);
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.home-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: var(--space-2);
+}
+
+.home-card {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  width: 100%;
+  min-width: 0;
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-large);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  transition:
+    background var(--motion),
+    translate var(--motion-slide),
+    border-color var(--motion);
+}
+
+.home-card:hover {
+  background: var(--surface-hover);
+  translate: 0 -2px;
+}
+
+.home-card:active {
+  translate: 0 0;
+}
+
+.home-card:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* Files dragged over a drive or folder card land there. */
+.home-card[data-drop-over] {
+  border-color: var(--accent);
+  background: var(--surface-selected);
+}
+
+/* The number that opens the card, faint until the card is pointed at. */
+.home-card[data-key]::after {
+  content: attr(data-key);
+  position: absolute;
+  inset: 6px 8px auto auto;
+  color: var(--text-muted);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  opacity: 0;
+  transition: opacity var(--motion);
+}
+
+.home-card[data-key]:hover::after,
+.home-card[data-key]:focus-visible::after {
+  opacity: 0.8;
+}
+
+.home-icon {
+  flex: none;
+  color: var(--accent);
+  font: 20px / 1 var(--font-icons);
+}
+
+.home-card-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.home-card-name,
+.home-card-about {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.home-card-about {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.home-drives {
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+}
+
+.home-drive-wrap,
+.home-reading-wrap {
+  position: relative;
+}
+
+.home-drive {
+  padding-bottom: calc(var(--space-3) + 8px);
+}
+
+/* How full the drive is. It fills from empty with a spring when the page opens. */
+.home-bar {
+  position: absolute;
+  inset: auto var(--space-3) var(--space-3) var(--space-3);
+  height: 4px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--surface-hover);
+}
+
+.home-bar::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: var(--accent);
+  transform-origin: left;
+  scale: var(--used, 0) 1;
+  transition: scale 900ms var(--spring);
+  animation: home-fill 900ms var(--spring);
+}
+
+@keyframes home-fill {
+  from {
+    scale: 0 1;
+  }
+}
+
+.home-bar[data-low]::after {
+  background: var(--text-muted);
+}
+
+.home-eject,
+.home-forget {
+  position: absolute;
+  inset: 8px 8px auto auto;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text-muted);
+  font: 11px / 1 var(--font-icons);
+  opacity: 0;
+  transition:
+    opacity var(--motion),
+    background var(--motion);
+}
+
+.home-drive-wrap:hover .home-eject,
+.home-reading-wrap:hover .home-forget,
+.home-eject:focus-visible,
+.home-forget:focus-visible {
+  opacity: 1;
+}
+
+.home-eject:hover,
+.home-forget:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+/* A file's picture, which blurs in from soft as it arrives. */
+.home-thumb {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  overflow: hidden;
+  border-radius: var(--radius);
+  background: var(--surface-hover);
+  color: var(--text-muted);
+  font: 18px / 1 var(--font-icons);
+}
+
+.home-thumb canvas {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  animation: home-sharpen 500ms ease-out;
+}
+
+@keyframes home-sharpen {
+  from {
+    opacity: 0;
+    filter: blur(6px);
+  }
+}
+
+/* Parts travel to their new places with a spring when moved, widened or hidden. */
+html[data-morph="home"]::view-transition-group(*) {
+  animation-duration: 420ms;
+  animation-timing-function: var(--spring);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .home-part,
+  .home-tool,
+  .home-thumb canvas,
+  .home-bar::after {
+    animation: none;
+  }
+
+  .home-card,
+  .home-bar::after {
+    transition: none;
+  }
+}

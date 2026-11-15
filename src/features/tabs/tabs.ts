@@ -1,4 +1,4 @@
-import { createEffect, createSignal } from "solid-js";
+import { createEffect, createSignal, on } from "solid-js";
 import { closeView, openWindow } from "../../api";
 import { morph } from "../../ui/morph";
 import { newTabPlace } from "../filelist/prefs";
@@ -30,6 +30,16 @@ function createTab(views: FolderView[], startSwapped = false, saved: Layout = {}
   const [linked, setLinked] = createSignal(saved.linked === true);
   /** The home page shows in place of the panes, which wait behind it. */
   const [home, setHome] = createSignal(saved.home === true);
+  // Going anywhere in the tab, from the sidebar or a key, leaves the home page. A tab restored
+  // onto the home page reads its folder the first time, which is no going anywhere.
+  createEffect(
+    on(
+      () => active().path(),
+      (now, before) => {
+        if (before && now !== before) setHome(false);
+      },
+    ),
+  );
   /** Where the tab itself is taking each pane, so getting there leads the other pane nowhere. */
   const led = new Map<FolderView, string>();
   const lead = (view: FolderView, target: string, quiet = false) => {
