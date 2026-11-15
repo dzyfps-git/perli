@@ -1,7 +1,8 @@
 import { dropChoices, onFileDrag, setDropTarget, shelveDrop, startJob, type DropAction } from "../../api";
 import { setDragging, SHELF, shelve } from "../reach/reach";
 import type { MenuItem } from "../../ui/Menu";
-import { kindOf } from "../filelist/fileKinds";
+import { iconKindOf } from "../filelist/fileKinds";
+import { iconTheme } from "../filelist/prefs";
 import type { FolderView } from "../navigation/folderView";
 import { isBin, join } from "../navigation/path";
 
@@ -45,7 +46,7 @@ function createDeck() {
     }
     const icon = document.createElement("span");
     icon.className = "file-icon";
-    icon.dataset.kind = kindOf(name, folder);
+    icon.dataset.kind = iconKindOf(name, folder, iconTheme().extensions);
     deck.lastElementChild!.append(icon);
     if (count > 1) {
       const badge = document.createElement("span");

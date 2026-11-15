@@ -73,7 +73,7 @@ export interface ArchiveViewProps {
   /** Fails unless the password opens all of the entry. */
   check: (entry: string, password: string) => Promise<void>;
   /** Takes these entries out beside the archive. */
-  extract: (only: string[], password?: string) => Promise<void>;
+  extract: (only: string[], password?: string) => Promise<unknown>;
   test: (password?: string) => Promise<ArchiveTested>;
   /** Drags one file out, the way a row is dragged out of the list. */
   drag: (entry: string, password?: string) => Promise<void>;

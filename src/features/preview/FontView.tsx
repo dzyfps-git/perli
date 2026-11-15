@@ -1,5 +1,5 @@
 import { createEffect, createMemo, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
-import type { FontFacts } from "../../api";
+import type { FontFacts, FontInstalled } from "../../api";
 import { saved, stored } from "../filelist/prefs";
 
 const SIZES = [12, 16, 24, 32, 48, 72];
@@ -22,6 +22,9 @@ export interface FontViewProps {
   /** The other fonts chosen with this one. */
   others: () => Promise<OtherFont[]>;
   note: (text: string | undefined) => void;
+  /** Who the font is installed for, and a way to install it for this user or take it out. */
+  installed?: () => Promise<FontInstalled>;
+  install?: (remove: boolean) => Promise<void>;
 }
 
 let made = 0;
@@ -47,7 +50,27 @@ export function FontView(live: FontViewProps) {
   const [copied, setCopied] = createSignal<number>();
   const [count, setCount] = createSignal(CHUNK);
   const [others, setOthers] = createSignal<{ name: string; family: string }[]>([]);
+  const [installed, setInstalled] = createSignal<FontInstalled>();
+  const [installing, setInstalling] = createSignal(false);
   let gone = false;
+
+  /** Installs the font for this user, or takes back one installed that way. */
+  async function toggleInstall() {
+    const now = installed();
+    if (!props.install || installing() || !now || now === "system") return;
+    setInstalling(true);
+    setProblem(undefined);
+    try {
+      await props.install(now === "user");
+      if (!gone) setInstalled(now === "user" ? "no" : "user");
+    } catch (reason) {
+      if (!gone) setProblem(String(reason));
+    } finally {
+      if (!gone) setInstalling(false);
+    }
+  }
+  const installText = (state: FontInstalled) =>
+    state === "system" ? "Installed for everyone" : state === "user" ? (installing() ? "Taking it out…" : "Uninstall") : installing() ? "Installing…" : "Install for me";
 
   /** Loads a font's bytes under a name of its own for this window, and gives that name. */
   async function loadFace(bytes: ArrayBuffer) {
@@ -89,6 +112,7 @@ export function FontView(live: FontViewProps) {
   );
 
   onMount(() => {
+    props.installed?.().then((state) => !gone && setInstalled(state), console.error);
     void props
       .others()
       .then((fonts) =>
@@ -175,6 +199,23 @@ export function FontView(live: FontViewProps) {
       <h2 class="font-title" style={look()}>
         {facts().fullName || facts().family}
       </h2>
+      <Show when={installed()}>
+        {(state) => (
+          <div class="font-install">
+            <button
+              class="preview-chip"
+              data-installed={state() !== "no" || undefined}
+              disabled={state() === "system" || installing()}
+              onClick={() => void toggleInstall()}
+            >
+              {installText(state())}
+            </button>
+            <span class="font-install-note">
+              {state() === "user" ? "Installed for you. Apps see it now." : state() === "no" ? "For you alone, no administrator needed." : "Taking it out needs an administrator."}
+            </span>
+          </div>
+        )}
+      </Show>
       <input
         class="font-sample"
         style={look()}

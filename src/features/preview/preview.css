@@ -3718,3 +3718,121 @@ th[aria-sort="descending"] .table-sort::after {
 .textLayer.selecting .endOfContent {
   top: 0;
 }
+/* A quick edit: the box sits over the colored text in the same letters, so its own letters stay
+   clear and only its caret and selection show. Both grow with the text, and the sheet scrolls. */
+.quick-edit {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  background: var(--surface);
+}
+
+.quick-edit-scroll {
+  height: 100%;
+  overflow: auto;
+}
+
+.quick-edit-sheet {
+  display: grid;
+  min-width: max-content;
+  min-height: 100%;
+}
+
+.quick-edit-scroll[data-wrap] .quick-edit-sheet {
+  min-width: 0;
+}
+
+.quick-edit-sheet > * {
+  grid-area: 1 / 1;
+  min-width: 0;
+}
+
+.quick-edit-box {
+  field-sizing: content;
+  min-height: 100%;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--text);
+  caret-color: var(--text);
+  resize: none;
+  overflow: hidden;
+}
+
+.quick-edit-sheet[data-colored] .quick-edit-box {
+  color: transparent;
+}
+
+.quick-edit-sheet[data-colored] .quick-edit-box::selection {
+  background: color-mix(in srgb, var(--accent) 32%, transparent);
+  color: transparent;
+}
+
+.quick-edit-colors {
+  pointer-events: none;
+  background: transparent;
+}
+
+.quick-edit-scroll[data-wrap] .preview-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.quick-edit-status {
+  min-width: 0;
+  padding: 0 var(--space-2);
+  color: var(--text-muted);
+}
+
+.quick-edit-status[data-dirty] {
+  color: var(--text);
+}
+
+.font-install {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.font-install .preview-chip[data-installed] {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+}
+
+.font-install-note {
+  color: var(--text-muted);
+  font-size: 11.5px;
+}
+
+/* Picture tools: chips in rows, a few to a kind of change. */
+.picture-tools-panel {
+  width: 280px;
+}
+
+.picture-tools-head {
+  margin: var(--space-2) var(--space-2) var(--space-1);
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.picture-tools-head:first-child {
+  margin-top: 0;
+}
+
+.picture-tools-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  padding: 0 var(--space-1);
+}
+
+.picture-tools-row kbd {
+  margin-left: 4px;
+  color: var(--text-muted);
+  font: inherit;
+}
+
+.picture-save-turn {
+  align-self: center;
+  margin: 0 var(--space-1);
+  animation: tools-in var(--motion-spring);
+}

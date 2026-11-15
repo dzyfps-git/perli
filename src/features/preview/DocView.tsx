@@ -3,6 +3,7 @@ import type { BookHeading } from "../../api";
 import { saved, stored } from "../filelist/prefs";
 import { ToolCog } from "../../ui/Controls";
 import { createFind, findIn } from "./FindBar";
+import { hasDraft, ICON_EDIT, QuickEdit, type EditTarget } from "./QuickEdit";
 import {
   asSource,
   BOOK_THEMES,
@@ -108,8 +109,15 @@ function FindButton(props: { find: ReturnType<typeof createFind> }) {
 const plainKey = (event: KeyboardEvent) => !event.ctrlKey && !event.altKey && !(event.target instanceof HTMLInputElement);
 
 /** A Markdown file with its contents beside it and find. */
-export function MarkdownView(live: { html: string; source: string; fill: (article: HTMLElement) => void; keys: Keys }) {
+export function MarkdownView(live: { html: string; source: string; fill: (article: HTMLElement) => void; keys: Keys; edit?: EditTarget }) {
   const props = { ...live };
+  /** Unsaved text left behind earlier opens the box again. */
+  const [editing, setEditing] = createSignal(!!props.edit && hasDraft(props.edit.path));
+  let editKeys: ((event: KeyboardEvent) => boolean) | undefined;
+  function edit() {
+    find.close();
+    setEditing(true);
+  }
   let scroller!: HTMLDivElement;
   let article!: HTMLElement;
   let written!: HTMLPreElement;
@@ -145,10 +153,12 @@ export function MarkdownView(live: { html: string; source: string; fill: (articl
     scroller.scrollTo({ top: headings()[at].offsetTop - 12, behavior: reducedMotion.matches ? "auto" : "smooth" });
 
   props.keys((event) => {
+    if (editing()) return editKeys?.(event) ?? false;
     if (find.keys(event)) return true;
     if (!plainKey(event)) return false;
     const key = event.key.toLowerCase();
     if (key === "u") setAsSource(!asSource());
+    else if (key === "e" && props.edit) edit();
     else if (key === "c" && headings().length >= 2) setContentsOpen(!contentsOpen());
     else return false;
     return true;
@@ -175,15 +185,37 @@ export function MarkdownView(live: { html: string; source: string; fill: (articl
       <Show when={headings().length >= 2}>
         <Contents lines={lines()} active={active()} onPick={pick} />
       </Show>
-      <div ref={scroller} class="doc-scroll" tabindex="-1" onScroll={spy}>
+      <Show when={editing() && props.edit}>
+        {(target) => (
+          <QuickEdit
+            target={target()}
+            text={props.source}
+            language="markdown"
+            wrap
+            keys={(handler) => (editKeys = handler)}
+            onLeave={(saved) => {
+              const { refresh } = target();
+              setEditing(false);
+              if (saved) refresh();
+            }}
+          />
+        )}
+      </Show>
+      <div ref={scroller} class="doc-scroll" tabindex="-1" hidden={editing()} onScroll={spy}>
         <article ref={article} class="preview-markdown" hidden={asSource()} />
         <pre ref={written} class="preview-text md-source" hidden={!asSource()}>
           {props.source}
         </pre>
       </div>
+      <Show when={!editing()}>
       <div class="preview-tools doc-tools" role="toolbar" aria-label="Document">
         {find.bar()}
         <FindButton find={find} />
+        <Show when={props.edit}>
+          <button class="strip-icon" aria-label="Edit" aria-keyshortcuts="E" onClick={edit}>
+            {ICON_EDIT}
+          </button>
+        </Show>
         <button class="strip-icon" aria-label="Show as written" aria-keyshortcuts="U" aria-pressed={asSource()} onClick={() => setAsSource(!asSource())}>
           {ICON_SOURCE}
         </button>
@@ -191,6 +223,7 @@ export function MarkdownView(live: { html: string; source: string; fill: (articl
           <ContentsButton />
         </Show>
       </div>
+      </Show>
     </div>
   );
 }

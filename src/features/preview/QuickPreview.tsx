@@ -30,8 +30,12 @@ import {
   saveFrame,
   songAudio,
   songInfo,
+  runJob,
+  fontInstalled,
+  installFont,
   startJob,
   type ArchiveEntry,
+  type PictureFormat,
   type Preview,
   type DbTable,
   type FontFacts,
@@ -49,6 +53,8 @@ import { neighbours, previewSize, setNeighbours, setPreviewSize } from "./viewer
 import { previewWidth } from "../filelist/prefs";
 import { DockEdge } from "./DockEdge";
 import type { TextPiece, TextViewProps } from "./TextView";
+import type { EditTarget } from "./QuickEdit";
+import type { PictureTools } from "./PictureView";
 import type { BookViewProps } from "./DocView";
 import type { ComicViewProps } from "./ComicView";
 import type { ArchiveViewProps } from "./ArchiveView";
@@ -101,6 +107,8 @@ const VideoView = lazy(() => import("./VideoView").then((module) => ({ default: 
 const FILM = /\.(mp4|m4v|webm|mov|mkv|ogv)$/i;
 const AUDIO = /\.(mid|midi|mp3|m4a|aac|wav|flac|ogg|oga|opus|weba|aiff?|aifc)$/i;
 const PICTURES = /\.(jpe?g|png|gif|webp|bmp|tiff?|heic|heif|avif|ico|jxl|svg)$/i;
+/** The formats Windows writes, which a turn can be saved into, by their names. */
+const WRITABLE: Record<string, PictureFormat> = { png: "png", jpg: "jpeg", jpeg: "jpeg", jpe: "jpeg", jfif: "jpeg", tif: "tiff", tiff: "tiff", bmp: "bmp", dib: "bmp" };
 /** Pictures that can move, and what the window calls them. */
 const MOVING: Record<string, string> = { gif: "image/gif", webp: "image/webp", apng: "image/apng", png: "image/png" };
 /** A picture is read whole to learn whether it moves, so a bigger one is shown still. */
@@ -193,6 +201,8 @@ export function QuickPreview(props: {
   let ticket = 0;
   /** The keys the view shown takes first, such as the player's or the model's. */
   let viewKeys: ((event: KeyboardEvent) => boolean) | undefined;
+  /** A quick edit in progress takes a fresh read of its own file, rather than a new view. */
+  let hold: ((preview: Preview) => void) | undefined;
 
   const folderOf = (item: Row) => item.location || props.at.folder;
   const pathOf = (item: Row) => join(folderOf(item), item.name);
@@ -205,11 +215,13 @@ export function QuickPreview(props: {
     try {
       const [found] = await fetchRows(view, snapshot, at, 1);
       if (mine !== ticket) return;
+      const held = hold && found && row() && pathOf(found) === pathOf(row()!) ? hold : undefined;
       setRow(found);
-      setShown(undefined);
+      if (!held) setShown(undefined);
       if (!found) return;
       const preview = await previewRow(view, snapshot, at);
       if (mine !== ticket) return;
+      if (held) return held(preview);
       setShown(preview);
       slideIn();
     } catch (reason) {
@@ -239,11 +251,29 @@ export function QuickPreview(props: {
     }
   }
 
-  function text(item: Row, first: TextPiece): TextViewProps {
+  /** A whole file the view can edit in place, saved through a job. */
+  function editable(item: Row, seen: string | undefined): EditTarget | undefined {
+    if (!seen) return undefined;
+    const { view } = props.at;
+    const path = pathOf(item);
+    return {
+      path,
+      seen,
+      save: async (text, seen) => {
+        const end = await runJob({ kind: "save", path, text, seen }, view);
+        return !!end && !end.cancelled && end.failed.length === 0;
+      },
+      hold: (handler) => (hold = handler),
+      refresh: () => void show(index()),
+    };
+  }
+
+  function text(item: Row, first: TextPiece & { seen?: string }): TextViewProps {
     const { view } = props.at;
     const at = index();
     const shot = snapshot;
     return {
+      edit: editable(item, first.seen),
       first,
       more: async (offset) => {
         const piece = await previewRow(view, shot, at, offset);
@@ -293,6 +323,8 @@ export function QuickPreview(props: {
         return found.flatMap(({ one, item }) => (item && !item.isDir && FONTS.test(item.name) ? [{ name: item.name, load: () => fontFace(view, shot, one, 0) }] : []));
       },
       note: setNote,
+      installed: () => fontInstalled(view, shot, at),
+      install: (remove) => installFont(view, shot, at, remove),
     };
   }
 
@@ -312,6 +344,22 @@ export function QuickPreview(props: {
       size: () => pictureSize(view, shot, at),
       keys: (handler: typeof viewKeys) => (viewKeys = handler),
       note: setNote,
+      tools: pictureTools(item),
+    };
+  }
+
+  /** What can be done to a picture's file: only one on disk, not in an archive or online only. */
+  function pictureTools(item: Row): PictureTools | undefined {
+    if (item.isDir || item.isCloud || folderOf(item).split("\\").some(isArchiveName)) return undefined;
+    const { view } = props.at;
+    const path = pathOf(item);
+    const format = WRITABLE[item.name.split(".").pop()!.toLowerCase()];
+    const ran = (end: Awaited<ReturnType<typeof runJob>>) => !!end && !end.cancelled && end.failed.length === 0;
+    return {
+      canSave: !!format,
+      format,
+      run: async (edit) => ran(await runJob({ kind: "picture", paths: [path], edit }, view)),
+      wallpaper: async () => ran(await runJob({ kind: "wallpaper", path }, view)),
     };
   }
 
@@ -333,10 +381,11 @@ export function QuickPreview(props: {
   }
 
   /** Pictures beside the file draw from this PC, and links go to the browser, never in here. */
-  function markdown(item: Row, html: string, source: string) {
+  function markdown(item: Row, html: string, source: string, seen?: string) {
     return {
       html,
       source,
+      edit: editable(item, seen),
       fill: (article: HTMLElement) =>
         fillPictures(article, (name) => fetchPictureFile(resolveRelative(folderOf(item), name), MARKDOWN_PICTURE_EDGE)),
       keys: (handler: typeof viewKeys) => (viewKeys = handler),
@@ -647,7 +696,7 @@ export function QuickPreview(props: {
           {(preview) => (
             <>
               {preview.kind === "text" && <TextView {...text(row()!, preview)} />}
-              {preview.kind === "markdown" && <MarkdownView {...markdown(row()!, preview.html, preview.source)} />}
+              {preview.kind === "markdown" && <MarkdownView {...markdown(row()!, preview.html, preview.source, preview.seen)} />}
               {preview.kind === "picture" && <PictureView {...picture(row()!)} />}
               {preview.kind === "cloud" && (
                 <>

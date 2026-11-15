@@ -95,6 +95,7 @@ const KINDS = {
 } satisfies Record<string, [hue: number, drawing: string, extensions: string]>;
 
 export type Kind = keyof typeof KINDS;
+export const KIND_NAMES = Object.keys(KINDS) as Kind[];
 
 const BY_EXTENSION = new Map<string, Kind>(
   Object.entries(KINDS).flatMap(([kind, [, , extensions]]) =>
@@ -105,9 +106,16 @@ const BY_EXTENSION = new Map<string, Kind>(
 /** Kinds whose own picture says more than any icon. */
 const PICTURED: ReadonlySet<Kind> = new Set<Kind>(["picture", "video"]);
 
+const extensionOf = (name: string) => name.slice(name.lastIndexOf(".") + 1).toLowerCase();
+
 export function kindOf(name: string, isDir: boolean): Kind {
   if (isDir) return "folder";
-  return BY_EXTENSION.get(name.slice(name.lastIndexOf(".") + 1).toLowerCase()) ?? "file";
+  return BY_EXTENSION.get(extensionOf(name)) ?? "file";
+}
+
+/** The kind a file's icon shows: the one the user gave its extension, else its own. */
+export function iconKindOf(name: string, isDir: boolean, own: Readonly<Record<string, Kind>>): Kind {
+  return (!isDir && name.includes(".") && own[extensionOf(name)]) || kindOf(name, isDir);
 }
 
 export const hasPicture = (kind: Kind) => PICTURED.has(kind);
@@ -125,12 +133,13 @@ const drawingUrl = (drawing: string) =>
     `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="${drawing}"/></svg>`,
   )}")`;
 
-/** The style rules that give every kind its drawing and color. A folder takes the accent. */
-export const iconSheet = () =>
+/** The style rules that give every kind its drawing and color, with the user's own colors over
+ *  Perli's. A folder takes the accent. */
+export const iconSheet = (own: Readonly<Partial<Record<Kind, string>>> = {}) =>
   Object.entries(KINDS)
     .map(
       ([kind, [hue, drawing]]) =>
-        `[data-kind="${kind}"]{--kind-icon:${drawingUrl(drawing)};--kind-color:${kind === "folder" ? "var(--accent)" : color(hue)}}`,
+        `[data-kind="${kind}"]{--kind-icon:${drawingUrl(drawing)};--kind-color:${own[kind as Kind] ?? (kind === "folder" ? "var(--accent)" : color(hue))}}`,
     )
     .join("\n");
 

@@ -1,6 +1,7 @@
 import { createEffect, createResource, For, on, Show } from "solid-js";
 import { isFile, startDragPaths, type Task } from "../../api";
-import { kindOf } from "../filelist/fileKinds";
+import { iconKindOf } from "../filelist/fileKinds";
+import { iconTheme } from "../filelist/prefs";
 import { baseName } from "../navigation/path";
 import { dragging, pruneShelf, setShelf, setShelfOpen, SHELF, shelf, shelfOpen } from "./reach";
 import "./reach.css";
@@ -84,7 +85,7 @@ export function Shelf(props: {
             {(path, at) => (
               <li class="shelf-item">
                 <button class="shelf-file" aria-label={path} onPointerDown={(event) => hold(event, [path])} onClick={() => props.onShow(path)}>
-                  <span class="file-icon" data-kind={kindOf(baseName(path), files()?.[at()] === false)} aria-hidden="true" />
+                  <span class="file-icon" data-kind={iconKindOf(baseName(path), files()?.[at()] === false, iconTheme().extensions)} aria-hidden="true" />
                   <span class="shelf-name">{baseName(path) || path}</span>
                 </button>
                 <button class="shelf-remove" aria-label={`Take ${baseName(path)} off the shelf`} onClick={() => remove(path)}>
