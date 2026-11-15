@@ -480,9 +480,27 @@ html[data-blurred] .place-used::before {
   opacity: 0;
 }
 
+/* An ejected drive slides out while Windows lets go of its letter. */
+.place-item[data-ejected] {
+  pointer-events: none;
+  animation: place-ejected 360ms ease-in forwards;
+}
+
+@keyframes place-ejected {
+  to {
+    opacity: 0;
+    translate: 24px 0;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .place-eject {
     transition: none;
+  }
+
+  .place-item[data-ejected] {
+    animation: none;
+    opacity: 0.4;
   }
 }
 

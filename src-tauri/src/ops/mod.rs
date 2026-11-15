@@ -229,6 +229,9 @@ pub trait Host {
         false
     }
 
+    /// Windows is about to ask for admin rights, which covers the screen with UAC.
+    fn elevating(&self) {}
+
     /// Where the old content of a file written over is kept for Undo. None keeps nothing.
     fn kept_folder(&self) -> Option<PathBuf> {
         None
@@ -294,8 +297,9 @@ enum Key {
 
 /// Work put off to the end of the job, to run with admin rights.
 enum Elevated {
-    Copy { source: PathBuf, target: PathBuf },
-    Move { source: PathBuf, target: PathBuf },
+    /// `replace` is set when the user chose to write over what is at `target`.
+    Copy { source: PathBuf, target: PathBuf, replace: bool },
+    Move { source: PathBuf, target: PathBuf, replace: bool },
     New { target: PathBuf, directory: bool },
     Delete { path: PathBuf },
     Recycle { path: PathBuf },
@@ -413,6 +417,7 @@ impl<'a> Run<'a> {
         let elevated = can_elevate.then(|| Elevated::Move {
             source: path.to_path_buf(),
             target: target.to_path_buf(),
+            replace: false,
         });
         let renamed = self.attempt(path, elevated, |_| sys::rename(path, target))?.is_some();
         if renamed {

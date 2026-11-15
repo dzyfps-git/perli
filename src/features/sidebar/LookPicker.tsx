@@ -1,5 +1,6 @@
 import { createEffect, createMemo, createResource, createSignal, For, onCleanup, onMount, Show } from "solid-js";
-import { fetchPictureFile, folderPictures, pickPicture } from "../../api";
+import { fetchPictureFile, folderPictures } from "../../api";
+import { pick, PICTURE_TYPES } from "../dialogs/Picker";
 import { openSheet } from "../../ui/sheet";
 import { baseName } from "../navigation/path";
 import { draw } from "../preview/QuickPreview";
@@ -151,8 +152,8 @@ export function LookPicker(props: { path: string; onClose: () => void }) {
   }
 
   async function browse() {
-    const path = await pickPicture(props.path).catch(() => null);
-    if (path) pickCover(path);
+    const picked = await pick({ mode: "open", title: "Choose a cover", purpose: "pictures", types: PICTURE_TYPES, start: props.path, gallery: true });
+    if (picked) pickCover(picked.path);
   }
 
   onMount(() => {

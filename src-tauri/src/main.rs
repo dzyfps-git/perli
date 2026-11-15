@@ -3,6 +3,7 @@
 mod clipboard;
 mod copies;
 mod default_app;
+mod eject;
 mod explorer;
 mod filedialog;
 mod drag;
@@ -16,6 +17,7 @@ mod network;
 mod ops;
 mod packs;
 mod parts;
+mod picked;
 mod picture;
 mod places;
 mod inside;
@@ -1188,12 +1190,21 @@ async fn open_file(path: String) -> Result<(), String> {
 
 /// Ejects a card, a disc or a USB disk. Only the top of a drive can be asked for.
 #[tauri::command]
-async fn eject_drive(path: PathBuf, app: AppHandle) -> Result<(), String> {
+async fn eject_drive(path: PathBuf, app: AppHandle) -> Result<eject::Ejected, String> {
     if path.parent().is_some() {
         return Err("Only a drive can be ejected".to_string());
     }
     let main = jobs::owner(&app);
-    off_main(move || menus::eject(path, main)).await
+    let ejected = async_runtime::spawn_blocking({
+        let path = path.clone();
+        move || eject::eject(&path)
+    })
+    .await
+    .map_err(|error| error.to_string())?;
+    match ejected {
+        Some(ejected) => ejected,
+        None => off_main(move || menus::eject(path, main)).await.map(|()| eject::Ejected::Done),
+    }
 }
 
 /// Shows a phone's files in Explorer.
@@ -1240,52 +1251,16 @@ async fn open_paths_with_exe(paths: Vec<PathBuf>, exe: PathBuf) -> Result<(), St
     off_main(move || menus::open_with_exe(paths, exe)).await
 }
 
+/// Saves settings, a palette, an icon theme or keys as the .json file picked in Perli's picker.
 #[tauri::command]
-async fn pick_folder(app: AppHandle) -> Result<Option<String>, String> {
-    let main = jobs::owner(&app);
-    off_main(move || menus::pick_folder(main)).await
+async fn write_settings_file(path: PathBuf, text: String, replace: bool) -> Result<(), String> {
+    blocking(move || picked::write(&path, &text, replace)).await
 }
 
-/// Windows' file picker for a cover of `folder`. Nothing when the user backs out.
+/// The text of a .json file of settings picked in Perli's picker.
 #[tauri::command]
-async fn pick_picture(folder: PathBuf, app: AppHandle) -> Result<Option<String>, String> {
-    let main = jobs::owner(&app);
-    off_main(move || menus::pick_picture(main, folder)).await
-}
-
-/// Windows' file picker for an app. Nothing when the user backs out.
-#[tauri::command]
-async fn browse_app(app: AppHandle) -> Result<Option<String>, String> {
-    let main = jobs::owner(&app);
-    off_main(move || menus::browse_app(main)).await
-}
-
-/// The most a file of settings may hold. A real one is a few thousand bytes.
-const MOST_SETTINGS_BYTES: u64 = 4 * 1024 * 1024;
-
-/// Saves Perli's settings to a file the user picks. False when they back out. The page never
-/// names the file, so it can write nowhere else.
-#[tauri::command]
-async fn export_settings(text: String, name: Option<String>, app: AppHandle) -> Result<bool, String> {
-    let main = jobs::owner(&app);
-    let name = name.unwrap_or_else(|| "Perli settings.json".to_string());
-    off_main(move || menus::pick_settings_file(main, Some(name))).await?.map_or(Ok(false), |path| {
-        std::fs::write(path, text).map(|()| true).map_err(|error| error.to_string())
-    })
-}
-
-/// The text of a file of settings the user picks, or nothing when they back out.
-#[tauri::command]
-async fn import_settings(app: AppHandle) -> Result<Option<String>, String> {
-    let main = jobs::owner(&app);
-    let Some(path) = off_main(move || menus::pick_settings_file(main, None)).await? else {
-        return Ok(None);
-    };
-    let size = std::fs::metadata(&path).map_err(|error| error.to_string())?.len();
-    if size > MOST_SETTINGS_BYTES {
-        return Err("This file is too big to be Perli settings".to_string());
-    }
-    std::fs::read_to_string(path).map(Some).map_err(|error| error.to_string())
+async fn read_settings_file(path: PathBuf) -> Result<String, String> {
+    blocking(move || picked::read(&path)).await
 }
 
 /// Windows' own window for picking an app, which is the only thing allowed to set a default.
@@ -1960,14 +1935,30 @@ async fn check_update(app: AppHandle, pending: State<'_, PendingUpdate>) -> Resu
 /// opens the new version. Running jobs would be cut off, so they must finish first, and none
 /// may start until the install fails or Perli ends.
 #[tauri::command]
-async fn install_update(pending: State<'_, PendingUpdate>, jobs: State<'_, Jobs>) -> Result<(), String> {
+async fn install_update(app: AppHandle, pending: State<'_, PendingUpdate>, jobs: State<'_, Jobs>) -> Result<(), String> {
     if !jobs.close() {
         return Err("Jobs are still running. Let them finish, then install the update.".into());
     }
     // A copy stays, so a failed download can be tried again.
     let update = pending.0.lock().unwrap_or_else(PoisonError::into_inner).clone();
     let installed = match update {
-        Some(update) => update.download_and_install(|_, _| {}, || {}).await.map_err(|error| error.to_string()),
+        Some(update) => {
+            // The installer runs with no window of its own, so Perli's sheet shows the download.
+            let (mut done, mut said) = (0u64, u64::MAX);
+            let on_chunk = |chunk: usize, total: Option<u64>| {
+                done += chunk as u64;
+                // Once a percent, or once a megabyte when the size is unknown.
+                let step = total.map_or(done >> 20, |total| done * 100 / total.max(1));
+                if step != said {
+                    said = step;
+                    let _ = app.emit("update-progress", (done, total));
+                }
+            };
+            let finished = || {
+                let _ = app.emit("update-downloaded", ());
+            };
+            update.download_and_install(on_chunk, finished).await.map_err(|error| error.to_string())
+        }
         None => Err("No update is waiting. Check for updates first.".into()),
     };
     if installed.is_err() {
@@ -2507,14 +2498,11 @@ fn main() {
             apps_for_paths,
             open_paths_with,
             open_paths_with_exe,
-            browse_app,
-            pick_folder,
-            pick_picture,
             eject_drive,
             open_device,
             unlock_drive,
-            export_settings,
-            import_settings,
+            write_settings_file,
+            read_settings_file,
             choose_app_for,
             open_with,
             choose_app,

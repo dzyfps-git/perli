@@ -183,6 +183,8 @@ pub struct Filter {
     pub modified_to: Option<i64>,
     /// A row must carry all of these.
     pub tags: Vec<u32>,
+    /// Folders stay whatever the extensions ask, so a picker can still go through them.
+    pub folders_stay: bool,
 }
 
 fn ticks(milliseconds: i64) -> u64 {
@@ -198,7 +200,9 @@ impl Filter {
         let lowered = || String::from_utf16_lossy(entry.name()).to_lowercase();
         let sized = |within: bool| !entry.is_dir && within;
         (name.is_empty() || lowered().contains(name))
-            && (self.extensions.is_empty() || self.extensions.contains(&entry.extension_text()))
+            && (self.extensions.is_empty()
+                || (self.folders_stay && entry.is_dir)
+                || self.extensions.contains(&entry.extension_text()))
             && match self.kinds {
                 Kinds::All => true,
                 Kinds::Files => !entry.is_dir,
@@ -1468,6 +1472,21 @@ mod tests {
         let jpg = Filter { extensions: vec!["jpg".into()], ..Filter::default() };
 
         assert_eq!(listing.fitting(&jpg), [0, 2]);
+    }
+
+    #[test]
+    fn folders_can_stay_through_a_filter_of_extensions() {
+        let folder = TempFolder::new("stay");
+        fs::write(folder.0.join("a.json"), "").unwrap();
+        fs::write(folder.0.join("b.txt"), "").unwrap();
+        fs::create_dir(folder.0.join("inner")).unwrap();
+        let listing = Listing::read(folder.0.to_str().unwrap(), Order::default()).unwrap();
+        let json = Filter { extensions: vec!["json".into()], ..Filter::default() };
+        let picking = Filter { folders_stay: true, ..json.clone() };
+
+        // Folders come first.
+        assert_eq!(listing.fitting(&json), [1]);
+        assert_eq!(listing.fitting(&picking), [0, 1]);
     }
 
     #[test]

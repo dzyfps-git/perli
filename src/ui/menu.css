@@ -24,6 +24,13 @@
   animation: menu-in 420ms var(--spring);
 }
 
+/* A menu in a sheet sits in the top layer, which brings its own place and colours. */
+.menu[popover] {
+  inset: auto;
+  margin: 0;
+  color: var(--text);
+}
+
 @media (prefers-reduced-motion: reduce) {
   .menu {
     animation-name: none;

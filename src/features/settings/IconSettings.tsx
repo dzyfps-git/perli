@@ -1,5 +1,6 @@
 import { createSignal, For, Show } from "solid-js";
-import { exportSettings, fetchPictureFile, importSettings, wallpaperNow } from "../../api";
+import { fetchPictureFile, wallpaperNow } from "../../api";
+import { openSettingsFile, saveSettingsFile } from "../dialogs/Picker";
 import { cssHex } from "../../ui/color";
 import { ColorField, Switch } from "../../ui/Controls";
 import { hueOf, type Kind } from "../filelist/fileKinds";
@@ -80,7 +81,7 @@ export function IconSettings() {
 
   async function exportTheme() {
     try {
-      if (await exportSettings(themeText(iconTheme()), "Perli icons.json")) setNote("Icon theme saved.");
+      if (await saveSettingsFile(themeText(iconTheme()), "Perli icons.json", "Export icon theme")) setNote("Icon theme saved.");
     } catch (failure) {
       setNote(String(failure));
     }
@@ -88,8 +89,10 @@ export function IconSettings() {
 
   async function importTheme() {
     try {
-      const text = await importSettings();
-      if (text === null) return;
+      const text = await openSettingsFile("Import icon theme", (read) =>
+        themeFromText(read) ? { text: "An icon theme" } : { text: "This file holds no icon theme." },
+      );
+      if (text === undefined) return;
       const theme = themeFromText(text);
       if (!theme) return setNote("That file holds no icon theme.");
       replace(theme, "Icon theme loaded.");

@@ -1,7 +1,7 @@
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { Effect, getCurrentWindow } from "@tauri-apps/api/window";
 import { createEffect, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
-import { createTag, exportSettings, importSettings, isDefaultApp, listTags, restoreTagged, setDefaultApp, taggedFiles, terminals } from "../../api";
+import { createTag, fetchPictureFile, isDefaultApp, listTags, restoreTagged, setDefaultApp, taggedFiles, terminals } from "../../api";
 import type { Tag, Terminal } from "../../api";
 import { ColorField, Switch } from "../../ui/Controls";
 import { morph } from "../../ui/morph";
@@ -54,6 +54,8 @@ import {
   type DateForm,
   type Density,
 } from "../filelist/prefs";
+import { counted } from "../dialogs/parts";
+import { openSettingsFile, pick, PICTURE_TYPES, saveSettingsFile } from "../dialogs/Picker";
 import { keyText } from "../keys/keybinds";
 import { baseName } from "../navigation/path";
 import { VIEWER_SETTINGS } from "../preview/viewerPrefs";
@@ -96,7 +98,9 @@ import { fitsSearch } from "./search";
 import {
   checkOnStart,
   currentVersion,
+  downloadText,
   installNow,
+  updateDownload,
   lookForUpdate,
   setCheckOnStart,
   updateFailure,
@@ -141,6 +145,24 @@ type SectionId = (typeof SECTIONS)[number]["id"];
 const ICON_CLOSE = "";
 
 /** Changes one color, and keeps the other two. */
+/** A picture is read this small for its colours, since only its colour counts. */
+const PICTURE_EDGE = 64;
+
+/** What a file of settings holds, said in the picker before it is loaded. */
+function describeBackup(text: string) {
+  try {
+    const { prefs, tags, tagged = [] } = unpacked(text);
+    const parts = [
+      counted(Object.keys(prefs).length, "setting", "settings"),
+      tags.length > 0 && counted(tags.length, "tag", "tags"),
+      tagged.length > 0 && counted(tagged.length, "tagged file", "tagged files"),
+    ];
+    return { text: `Settings: ${parts.filter(Boolean).join(", ")}` };
+  } catch {
+    return { text: "This is not a file of Perli settings." };
+  }
+}
+
 function withColor(palette: Palette, at: number, color: string): Palette {
   const colors = [...palette.colors] as Palette["colors"];
   colors[at] = color;
@@ -176,7 +198,6 @@ export function Settings(props: {
   const [backupNote, setBackupNote] = createSignal<string>();
   /** What became of the last palette taken from a picture or a file. */
   const [paletteNote, setPaletteNote] = createSignal<string>();
-  let pictureInput: HTMLInputElement | undefined;
   const [hidden, setHidden] = createSignal<SectionId[]>([]);
   const [current, setCurrent] = createSignal<SectionId>("look");
   // Closing drops the page and its empty search box, so a search's hidden parts go with it.
@@ -282,19 +303,33 @@ export function Settings(props: {
     morph(() => setTheme(next), "theme");
   }
 
-  /** The palette shown takes its colours from a picture, read small since only its colour counts. */
-  async function paletteFromPicture(file: File) {
+  /** The colours a picture gives, read small since only its colour counts. */
+  async function pictureColors(path: string) {
+    const thumb = await fetchPictureFile(path, PICTURE_EDGE);
+    return thumb ? paletteFromPixels(thumb.pixels) : undefined;
+  }
+
+  /** The palette shown takes its colours from a picture, which the picker shows them for first. */
+  async function paletteFromPicture() {
     const palette = ownPalette();
     if (!palette) return;
     try {
-      const edge = 64;
-      const bitmap = await createImageBitmap(file, { resizeWidth: edge, resizeHeight: edge });
-      const canvas = new OffscreenCanvas(edge, edge);
-      const context = canvas.getContext("2d")!;
-      context.drawImage(bitmap, 0, 0);
-      bitmap.close();
-      changePalette({ ...palette, colors: paletteFromPixels(context.getImageData(0, 0, edge, edge).data) });
-      setPaletteNote(`Colours taken from ${file.name}.`);
+      const picked = await pick({
+        mode: "open",
+        title: "Take colours from a picture",
+        purpose: "pictures",
+        types: PICTURE_TYPES,
+        gallery: true,
+        peek: async (path) => {
+          const colors = await pictureColors(path);
+          return colors && { text: "The colours it gives", colors };
+        },
+      });
+      if (!picked) return;
+      const colors = await pictureColors(picked.path);
+      if (!colors) return setPaletteNote("That picture couldn't be read.");
+      changePalette({ ...palette, colors });
+      setPaletteNote(`Colours taken from ${baseName(picked.path)}.`);
     } catch {
       setPaletteNote("That picture couldn't be read.");
     }
@@ -302,7 +337,7 @@ export function Settings(props: {
 
   async function exportPalette(palette: Palette) {
     try {
-      if (await exportSettings(paletteText(palette), `${palette.name}.json`)) setPaletteNote(`${palette.name} saved.`);
+      if (await saveSettingsFile(paletteText(palette), `${palette.name}.json`, "Export palette")) setPaletteNote(`${palette.name} saved.`);
     } catch (failure) {
       setPaletteNote(String(failure));
     }
@@ -310,8 +345,11 @@ export function Settings(props: {
 
   async function importPalette() {
     try {
-      const text = await importSettings();
-      if (text === null) return;
+      const text = await openSettingsFile("Import palette", (read) => {
+        const found = paletteFromText(read, palettes());
+        return found ? { text: `Palette: ${found.name}`, colors: found.colors } : { text: "This file holds no palette." };
+      });
+      if (text === undefined) return;
       const palette = paletteFromText(text, palettes());
       if (!palette) return setPaletteNote("That file holds no palette.");
       setPalettes([...palettes(), palette]);
@@ -353,7 +391,7 @@ export function Settings(props: {
       const prefs = settingsOf(Object.entries(localStorage));
       const tags = (await listTags()).map(({ name, color, id }) => ({ name, color, id }));
       const tagged = (await taggedFiles()).map(([path, tags]) => ({ path, tags }));
-      if (await exportSettings(packed({ prefs, tags, tagged }))) setBackupNote("Settings saved.");
+      if (await saveSettingsFile(packed({ prefs, tags, tagged }), "Perli settings.json", "Save settings")) setBackupNote("Settings saved.");
     } catch (failure) {
       setBackupNote(String(failure));
     }
@@ -362,8 +400,8 @@ export function Settings(props: {
   /** The window starts over, because every part of Perli read its settings when it began. */
   async function loadBackup() {
     try {
-      const text = await importSettings();
-      if (text === null) return;
+      const text = await openSettingsFile("Load settings", describeBackup);
+      if (text === undefined) return;
       const { prefs: saved, tags, tagged = [] } = unpacked(text);
       for (const tag of missingTags(tags, await listTags())) await createTag(tag.name, tag.color);
       const here = await listTags();
@@ -553,18 +591,7 @@ export function Settings(props: {
                         />
                       )}
                     </For>
-                    <input
-                      ref={pictureInput}
-                      type="file"
-                      accept="image/*"
-                      hidden
-                      onChange={(event) => {
-                        const file = event.currentTarget.files?.[0];
-                        event.currentTarget.value = "";
-                        if (file) void paletteFromPicture(file);
-                      }}
-                    />
-                    <button class="settings-chip" onClick={() => pictureInput?.click()}>
+                    <button class="settings-chip" onClick={() => void paletteFromPicture()}>
                       From a picture…
                     </button>
                     <button class="settings-chip" onClick={() => void exportPalette(palette())}>
@@ -955,7 +982,7 @@ export function Settings(props: {
                   disabled={updateState() === "installing"}
                   onClick={() => installNow(props.onBeforeUpdate)}
                 >
-                  Install and restart
+                  {updateState() === "installing" ? downloadText(updateDownload()) : "Install and restart"}
                 </button>
               </Show>
             </div>

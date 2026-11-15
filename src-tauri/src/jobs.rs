@@ -84,6 +84,8 @@ enum Change {
         /// The folder the job fills, for what to do when it is done.
         target: Option<String>,
     },
+    /// Windows is about to ask for permission.
+    Elevating,
     /// The job waits for another to finish on these drives. Empty once it starts.
     Waiting {
         drives: Vec<String>,
@@ -824,6 +826,10 @@ impl Host for Bridge {
 
     fn owner(&self) -> isize {
         owner(&self.app)
+    }
+
+    fn elevating(&self) {
+        self.send(Change::Elevating);
     }
 
     fn temp_folder(&self, folder: &Path) {

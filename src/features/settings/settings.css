@@ -416,6 +416,29 @@
   background: color-mix(in srgb, var(--accent) 14%, transparent);
 }
 
+/* The download fills a thin bar, since the installer itself shows no window. */
+.update-progress {
+  height: 4px;
+  margin-top: var(--space-3);
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--surface-hover);
+}
+
+.update-progress span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  transform-origin: left;
+  transition: transform var(--motion);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .update-progress span {
+    transition: none;
+  }
+}
+
 /* Icons: a color for each kind in two columns, and extensions shown as another kind. */
 .icon-kinds {
   display: grid;

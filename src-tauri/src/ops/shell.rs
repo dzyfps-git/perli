@@ -16,7 +16,7 @@ use windows::Win32::UI::Shell::{
     IShellItem, IShellLinkW, SHCreateItemFromParsingName, ShellLink, COPYENGINE_E_USER_CANCELLED,
     COPYENGINE_S_DONT_PROCESS_CHILDREN, FILEOPERATION_FLAGS,
     FOFX_RECYCLEONDELETE, FOFX_REQUIREELEVATION, FOFX_SHOWELEVATIONPROMPT, FOF_ALLOWUNDO,
-    FOF_NOCONFIRMMKDIR, FOF_NORECURSEREPARSE, FOF_NO_UI, SIGDN_FILESYSPATH,
+    FOF_NORECURSEREPARSE, FOF_NO_UI, FOF_RENAMEONCOLLISION, SIGDN_FILESYSPATH,
     TSF_DELETE_RECYCLE_IF_POSSIBLE,
 };
 
@@ -411,29 +411,65 @@ impl Run<'_> {
             Elevated::Recycle { path } => path,
             _ => unreachable!("partitioned above"),
         });
+        // The card says so first, because UAC covers the screen.
+        self.host.elevating();
         let extra = FILEOPERATION_FLAGS(FOFX_REQUIREELEVATION.0 | FOFX_SHOWELEVATIONPROMPT.0);
         self.recycle_with(paths.collect(), extra)?;
-        if others.is_empty() {
-            return Ok(());
-        }
+        self.run_elevated(others, FILEOPERATION_FLAGS(ELEVATED_FLAGS.0 | extra.0))
+    }
 
-        let slots = Arc::new(Mutex::new(vec![Slot::Waiting; others.len()]));
-        let flags = FOF_NOCONFIRMMKDIR.0 | FOF_ALLOWUNDO.0 | FOF_NORECURSEREPARSE.0 | extra.0;
-        let performed = perform_elevated(
-            &others,
-            FILEOPERATION_FLAGS(flags),
-            self.host.owner(),
-            &slots,
-            self.control,
-        );
-        let slots = slots.lock().unwrap_or_else(|error| error.into_inner()).clone();
-        for (entry, slot) in others.into_iter().zip(slots) {
-            self.record_elevated(entry, slot);
-        }
-        if let Err(error) = performed {
-            self.refuse(Path::new(""), &error.message())?;
+    /// Runs `list` as one shell operation. A replace whose old item the bin can't take stops it
+    /// before anything goes for good. Once the user says what to do, what never ran goes again,
+    /// which costs one more UAC prompt in that rare case.
+    fn run_elevated(&mut self, mut list: Vec<Elevated>, flags: FILEOPERATION_FLAGS) -> Flow {
+        while !list.is_empty() {
+            self.check()?;
+            let slots = Arc::new(Mutex::new(vec![Slot::Waiting; list.len()]));
+            let cleared = Arc::new(Mutex::new(vec![Slot::Waiting; list.len()]));
+            let performed = perform_elevated(&list, flags, self.host.owner(), &slots, &cleared, self.control);
+            let slots = slots.lock().unwrap_or_else(|error| error.into_inner()).clone();
+            let cleared = cleared.lock().unwrap_or_else(|error| error.into_inner()).clone();
+            // The shell stops at a refusal, so nothing after it ran.
+            let refused = cleared.iter().position(|slot| *slot == Slot::Refused).filter(|_| performed.is_err());
+            let mut again = Vec::new();
+            for (index, (entry, slot)) in list.into_iter().zip(slots).enumerate() {
+                match refused {
+                    Some(at) if index == at => again.extend(self.replace_without_bin(entry)?),
+                    Some(at) if index > at => again.push(entry),
+                    _ => self.record_elevated(entry, slot),
+                }
+            }
+            match performed {
+                Err(error) if refused.is_none() => self.refuse(Path::new(""), &error.message())?,
+                _ => {}
+            }
+            list = again;
         }
         Ok(())
+    }
+
+    /// The bin can't take the old item a replace has to clear. As with any replace on a drive
+    /// with no bin, it goes for good only if the user says so.
+    fn replace_without_bin(&mut self, entry: Elevated) -> Flow<Vec<Elevated>> {
+        let (source, target, moving) = match entry {
+            Elevated::Copy { source, target, .. } => (source, target, false),
+            Elevated::Move { source, target, .. } => (source, target, true),
+            _ => unreachable!("only a copy or move clears a name"),
+        };
+        let question = Question::NoBin {
+            path: target.to_string_lossy().into_owned(),
+            choices: vec![Answer::Permanent, Answer::Skip, Answer::Cancel],
+        };
+        if self.ask(Key::NoBin, question)? != Answer::Permanent {
+            return Ok(Vec::new());
+        }
+        let gone = Elevated::Delete { path: target.clone() };
+        let placed = if moving {
+            Elevated::Move { source, target, replace: false }
+        } else {
+            Elevated::Copy { source, target, replace: false }
+        };
+        Ok(vec![gone, placed])
     }
 
     /// Only the shell's own report counts. A target that exists proves nothing, because the
@@ -455,11 +491,18 @@ impl Run<'_> {
     }
 }
 
+/// Only UAC shows: no progress window, no error box and no Replace or Skip. Perli asked about
+/// every name already, so a name taken since then keeps both, and a replace the user chose
+/// sends the old item to the Recycle Bin first.
+const ELEVATED_FLAGS: FILEOPERATION_FLAGS =
+    FILEOPERATION_FLAGS(FOF_NO_UI.0 | FOF_RENAMEONCOLLISION.0 | FOF_ALLOWUNDO.0 | FOF_NORECURSEREPARSE.0);
+
 fn perform_elevated(
     list: &[Elevated],
     flags: FILEOPERATION_FLAGS,
     owner: isize,
     slots: &Arc<Mutex<Vec<Slot>>>,
+    cleared: &Arc<Mutex<Vec<Slot>>>,
     control: &Arc<Control>,
 ) -> Result<()> {
     let operation = operation(flags, owner)?;
@@ -473,14 +516,30 @@ fn perform_elevated(
                 recycling: false,
             }
             .into();
-            match entry {
-                Elevated::Copy { source, target } => {
-                    let folder = shell_item(&sys::parent(target))?;
-                    operation.CopyItem(&shell_item(source)?, &folder, &name_of(target), &sink)?;
+            let clearing = |target: &Path, replace: bool| {
+                let sink: IFileOperationProgressSink = Sink {
+                    index,
+                    slots: cleared.clone(),
+                    control: control.clone(),
+                    recycling: true,
                 }
-                Elevated::Move { source, target } => {
-                    let folder = shell_item(&sys::parent(target))?;
-                    operation.MoveItem(&shell_item(source)?, &folder, &name_of(target), &sink)?;
+                .into();
+                if replace {
+                    clear_for_replace(&operation, target, &sink)
+                } else {
+                    Ok(())
+                }
+            };
+            match entry {
+                Elevated::Copy { source, target, replace } => {
+                    let (source, folder) = (shell_item(source)?, shell_item(&sys::parent(target))?);
+                    clearing(target, *replace)?;
+                    operation.CopyItem(&source, &folder, &name_of(target), &sink)?;
+                }
+                Elevated::Move { source, target, replace } => {
+                    let (source, folder) = (shell_item(source)?, shell_item(&sys::parent(target))?);
+                    clearing(target, *replace)?;
+                    operation.MoveItem(&source, &folder, &name_of(target), &sink)?;
                 }
                 Elevated::New { target, directory } => {
                     let attributes = if *directory {
@@ -500,15 +559,29 @@ fn perform_elevated(
     }
 }
 
+/// Queues the old item's trip to the Recycle Bin ahead of the one that takes its name. Where the
+/// bin can't take it the shell would delete it for good, so the recycling sink stops the whole
+/// operation first and marks it refused. Any other failure leaves it in place, and the new one
+/// lands beside it under another name, so nothing is lost either way.
+unsafe fn clear_for_replace(operation: &IFileOperation, target: &Path, sink: &IFileOperationProgressSink) -> Result<()> {
+    if matches!(sys::stat(target), Ok(Some(_))) {
+        unsafe { operation.DeleteItem(&shell_item(target)?, sink) }?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
 
-    use windows::Win32::UI::Shell::{COPYENGINE_S_USER_IGNORED, FOF_RENAMEONCOLLISION};
+    use windows::Win32::UI::Shell::COPYENGINE_S_USER_IGNORED;
 
-    use super::super::tests::Sandbox;
+    use super::super::tests::{Sandbox, Script};
     use super::super::Run;
     use super::*;
+
+    /// The real flags, less the Recycle Bin, which tests stay out of.
+    const NO_BIN_FLAGS: FILEOPERATION_FLAGS = FILEOPERATION_FLAGS(ELEVATED_FLAGS.0 & !FOF_ALLOWUNDO.0);
 
     #[test]
     fn only_a_plain_success_counts() {
@@ -546,19 +619,20 @@ mod tests {
         let moved = sandbox.file("b.txt", "move");
         sandbox.file(r"folder\child.txt", "child");
         let list = vec![
-            Elevated::Copy { source: file, target: old.clone() },
+            Elevated::Copy { source: file, target: old.clone(), replace: false },
             Elevated::Copy {
                 source: sandbox.path("folder"),
                 target: sandbox.path(r"to\folder"),
+                replace: false,
             },
-            Elevated::Move { source: moved.clone(), target: sandbox.path(r"to\b.txt") },
+            Elevated::Move { source: moved.clone(), target: sandbox.path(r"to\b.txt"), replace: false },
             Elevated::New { target: sandbox.path(r"to\new"), directory: true },
         ];
         let slots = Arc::new(Mutex::new(vec![Slot::Waiting; list.len()]));
+        let cleared = Arc::new(Mutex::new(vec![Slot::Waiting; list.len()]));
         let control = Arc::new(Control::default());
-        let flags = FILEOPERATION_FLAGS(FOF_NO_UI.0 | FOF_RENAMEONCOLLISION.0);
 
-        perform_elevated(&list, flags, 0, &slots, &control).unwrap();
+        perform_elevated(&list, NO_BIN_FLAGS, 0, &slots, &cleared, &control).unwrap();
 
         let script = super::super::tests::Script::default();
         let mut run = Run::new(&script, &control);
@@ -590,5 +664,31 @@ mod tests {
                 ("created", "new".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn a_replace_the_bin_cant_take_asks_before_the_old_file_goes() {
+        for (answer, left) in [(Answer::Skip, "old c"), (Answer::Permanent, "new c")] {
+            let sandbox = Sandbox::new();
+            let _com = Com::enter();
+            let replaced = sandbox.file(r"to\c.txt", "old c");
+            let newer = sandbox.file("c.txt", "new c");
+            let after = sandbox.file("d.txt", "d");
+            let list = vec![
+                Elevated::Copy { source: newer, target: replaced.clone(), replace: true },
+                Elevated::Copy { source: after, target: sandbox.path(r"to\d.txt"), replace: false },
+            ];
+            let script = Script::answering(&[answer]);
+            let control = Arc::new(Control::default());
+            let mut run = Run::new(&script, &control);
+
+            // With no bin the shell would delete the old file for good without a word.
+            assert!(run.run_elevated(list, NO_BIN_FLAGS).is_ok());
+
+            assert!(matches!(&script.questions.borrow()[..], [Question::NoBin { .. }]), "{answer:?}");
+            assert_eq!(fs::read_to_string(&replaced).unwrap(), left, "{answer:?}");
+            assert_eq!(fs::read_to_string(sandbox.path(r"to\d.txt")).unwrap(), "d", "what came after still lands");
+            assert_eq!(sandbox.names("to"), ["c.txt", "d.txt"]);
+        }
     }
 }

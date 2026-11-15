@@ -2,7 +2,6 @@ import { createEffect, createSignal, For, on, onCleanup, onMount, Show, type JSX
 import {
   binUsage,
   driveSpace,
-  ejectDrive,
   fetchPictureFile,
   forgetRecent,
   listPlaces,
@@ -21,7 +20,7 @@ import {
 import { formatSize } from "../../ui/format";
 import { draw } from "../preview/QuickPreview";
 import { rememberRecent, servers } from "../reach/reach";
-import { landed } from "../fileops/landed";
+import { ejected, landed } from "../fileops/landed";
 import { TAG_DROP, tagColor, tagQuery, tags } from "../tags/tags";
 import type { FolderView } from "../navigation/folderView";
 import { BIN_PATH, samePath } from "../navigation/path";
@@ -105,6 +104,8 @@ function Place(props: {
   wave?: boolean;
   /** Set for a drive that can be ejected. */
   onEject?: () => void;
+  /** Just ejected: it slides out before Windows takes the letter away. */
+  ejected?: boolean;
   /** How full, from 0 to 1, as a ring round the icon. */
   ring?: number;
   /** Said on hover, after the label. */
@@ -120,7 +121,12 @@ function Place(props: {
 }) {
   const used = () => (props.space ? 1 - props.space.free / props.space.total : 0);
   return (
-    <li class="place-item" data-ejects={props.onEject ? "" : undefined} data-pin={props.pin ? props.path : undefined}>
+    <li
+      class="place-item"
+      data-ejects={props.onEject ? "" : undefined}
+      data-ejected={props.ejected ? "" : undefined}
+      data-pin={props.pin ? props.path : undefined}
+    >
       <button
         class="place"
         data-drop={props.onOpen ? undefined : props.path}
@@ -217,6 +223,7 @@ export function Sidebar(props: {
   onSmartMenu: (event: MouseEvent, smart: SmartFolder) => void;
   /** The places were read again. */
   onPlaces: (places: Places) => void;
+  onEject: (root: string) => void;
   report: (failure: unknown) => void;
 }) {
   const [places, setPlaces] = createSignal<Places>();
@@ -641,7 +648,8 @@ export function Sidebar(props: {
               onMenu={props.onMenu}
               space={spaces()[drive.path]}
               wave={waving().includes(drive.path)}
-              onEject={drive.removable ? () => ejectDrive(drive.path).catch(props.report) : undefined}
+              onEject={drive.removable ? () => props.onEject(drive.path) : undefined}
+              ejected={ejected().some((root) => samePath(root, drive.path))}
             />
           )}
         </For>

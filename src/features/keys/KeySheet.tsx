@@ -1,9 +1,10 @@
 import { createSignal, For, onMount, Show } from "solid-js";
-import { exportSettings, importSettings } from "../../api";
 import { openSheet } from "../../ui/sheet";
+import { counted } from "../dialogs/parts";
+import { openSettingsFile, saveSettingsFile } from "../dialogs/Picker";
 import { fitsSearch } from "../settings/search";
 import { keysText, readKeys, rebind, resetKey, resetKeys, scopeKeys, scopeName, scopeOwn, unbind, type KeyScope } from "./keybinds";
-import { bound, comboOf, KEYS, keysOf, taken, type KeyCommand } from "./keys";
+import { bound, comboOf, KEYS, keysOf, parseKeysFile, taken, type KeyCommand } from "./keys";
 import "../settings/settings.css";
 import "../fileops/fileops.css";
 import "./keys.css";
@@ -14,6 +15,18 @@ const SCOPES: { id: KeyScope; label: string }[] = [
   { id: "workspace", label: "This workspace" },
   { id: "folder", label: "This folder" },
 ];
+
+/** What a file of keys holds, said in the picker before it is taken in. */
+function describeKeys(text: string) {
+  const file = parseKeysFile(KEYS, text);
+  if (!file) return { text: "This file holds no keys." };
+  const where = [
+    counted(Object.keys(file.keys).length, "key changed everywhere", "keys changed everywhere"),
+    Object.keys(file.workspaces).length > 0 && counted(Object.keys(file.workspaces).length, "workspace", "workspaces"),
+    Object.keys(file.folders).length > 0 && counted(Object.keys(file.folders).length, "folder", "folders"),
+  ];
+  return { text: `Keys: ${where.filter(Boolean).join(", ")}` };
+}
 
 /**
  * Every key Perli answers to, and where each one is changed: press a key's chip, then the new
@@ -66,7 +79,7 @@ export function KeySheet(props: { onClose: () => void }) {
   /** Every key set, everywhere and in each workspace and folder, to a file to take elsewhere. */
   async function exportKeys() {
     try {
-      if (await exportSettings(keysText(), "Perli keys.json")) setSaid("Keys saved.");
+      if (await saveSettingsFile(keysText(), "Perli keys.json", "Export keys")) setSaid("Keys saved.");
     } catch (failure) {
       setSaid(String(failure));
     }
@@ -74,8 +87,8 @@ export function KeySheet(props: { onClose: () => void }) {
 
   async function importKeys() {
     try {
-      const text = await importSettings();
-      if (text !== null) setSaid(readKeys(text) ? "Keys taken in." : "That file holds no keys.");
+      const text = await openSettingsFile("Import keys", describeKeys);
+      if (text !== undefined) setSaid(readKeys(text) ? "Keys taken in." : "That file holds no keys.");
     } catch (failure) {
       setSaid(String(failure));
     }

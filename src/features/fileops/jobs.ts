@@ -22,13 +22,15 @@ import type { FolderView } from "../navigation/folderView";
 import { baseName, join, samePath } from "../navigation/path";
 import { markBack, markDeleted, markUnpacking } from "../filelist/rowMotion";
 import { checkCut } from "./clipboard";
-import { setLanded } from "./landed";
+import { setEjected, setLanded } from "./landed";
 import { nextRate, nextThen, startRate, withSpeed, type Rate, type Then } from "./progress";
 
 const SHOW_AFTER_MS = 300;
 const LINGER_MS = 3000;
 /** Long enough to notice a slip and reach for Undo. */
 const UNDO_TOAST_MS = 6000;
+/** How long a drive just ejected stays slid out of the sidebar. */
+const EJECTED_MS = 2500;
 /** How long a card takes to fold away. */
 const LEAVE_MS = 280;
 const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
@@ -60,6 +62,8 @@ export interface JobCard {
   then: Then;
   /** The drives it waits for while another job uses them. */
   waiting?: string[];
+  /** Windows is asking for permission, so the card says why the screen dimmed. */
+  elevating?: boolean;
   /** Folding away, just before it goes. */
   leaving?: boolean;
   /** Set once the job is over. */
@@ -84,6 +88,8 @@ export interface JobsHost {
   open: (folder: string) => void;
   /** The root of a drive that can be ejected, if `path` is on one. */
   ejectRoot: (path: string) => string | undefined;
+  /** What the sidebar calls a drive. */
+  driveName: (root: string) => string;
 }
 
 export type Jobs = ReturnType<typeof createJobs>;
@@ -182,13 +188,29 @@ export function createJobs(views: () => FolderView[], host: JobsHost) {
     if (!target || card.then === "none") return;
     if (card.then === "open") return host.open(target);
     const root = host.ejectRoot(target);
-    if (root) ejectDrive(root).catch((failure) => notify(String(failure), "The drive is still in use"));
+    if (root) eject(root);
+  }
+
+  /** Ejects a drive, then says it is safe to remove, or what still holds it with a Try again. */
+  function eject(root: string) {
+    const name = host.driveName(root);
+    ejectDrive(root).then(
+      (ejected) => {
+        if (ejected.kind === "busy") return notify(`${name} is still in use`, ejected.reason, false, { label: "Try again", run: () => eject(root) });
+        // Windows takes the letter away within a second or two. The same letter can come back later.
+        setEjected((roots) => [...roots, root]);
+        setTimeout(() => setEjected((roots) => roots.filter((other) => other !== root)), EJECTED_MS);
+        notify("Safe to remove", `${name} can come out now`, true);
+      },
+      (failure) => notify(String(failure), "The drive is still in use"),
+    );
   }
 
   function onEvent(event: JobEvent) {
     const { id } = event;
     if (event.kind === "started") started(event);
     else if (event.kind === "asked") patch(id, { question: event.question, shown: true });
+    else if (event.kind === "elevating") patch(id, { elevating: true, shown: true });
     else if (event.kind === "finished") finished(event);
     // A job held up for its drive shows at once, so the wait is never a mystery.
     else if (event.kind === "waiting") patch(id, event.drives.length > 0 ? { waiting: event.drives, shown: true } : { waiting: undefined });
@@ -197,7 +219,7 @@ export function createJobs(views: () => FolderView[], host: JobsHost) {
       if (!card) return;
       const rate = nextRate(card.rate, event, performance.now());
       const speeds = rate === card.rate ? card.speeds : withSpeed(card.speeds, rate.speed);
-      patch(id, { progress: event, rate, speeds });
+      patch(id, { progress: event, rate, speeds, elevating: undefined });
     }
   }
 
@@ -248,6 +270,7 @@ export function createJobs(views: () => FolderView[], host: JobsHost) {
     /** A job that never started sends no events, so its reason gets a card of its own. */
     report: (failure: unknown) => notify(String(failure), "Nothing changed"),
     notify,
+    eject,
     pause(id: number) {
       patch(id, { paused: true });
       pauseJob(id).catch(console.error);

@@ -1,6 +1,22 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { contents, detailsText, isShare, matching, nameOf, parentOf, shareText, withShare } from "./parts.ts";
+import {
+  contents,
+  datedName,
+  detailsText,
+  fitsTypes,
+  isShare,
+  isTypedPath,
+  matching,
+  nameOf,
+  nameProblem,
+  parentOf,
+  shareText,
+  slideOf,
+  stemEnd,
+  withExtension,
+  withShare,
+} from "./parts.ts";
 
 test("a path gives its name and the folder it is in", () => {
   assert.equal(nameOf("C:\\Users\\me\\note.txt"), "note.txt");
@@ -50,4 +66,44 @@ test("apps are found by every word typed", () => {
   assert.deepEqual(matching(apps, "studio code"), [apps[0]]);
   assert.deepEqual(matching(apps, " "), apps);
   assert.deepEqual(matching(apps, "paint"), []);
+});
+
+test("a saved file is named for the day, in place of the day it had", () => {
+  const day = new Date(2026, 10, 5);
+  assert.equal(datedName("Perli keys.json", day), "Perli keys 2026-11-05.json");
+  assert.equal(datedName("Perli keys 2025-01-02.json", day), "Perli keys 2026-11-05.json");
+  assert.equal(datedName("notes", day), "notes 2026-11-05");
+  assert.equal(stemEnd("Perli keys.json"), 10);
+  assert.equal(stemEnd(".hidden"), 7);
+  assert.equal(withExtension("mine", "json"), "mine.json");
+  assert.equal(withExtension("mine.JSON", "json"), "mine.JSON");
+});
+
+test("names Windows refuses are caught before saving", () => {
+  assert.equal(nameProblem("Perli keys.json"), undefined);
+  assert.equal(nameProblem("  "), "Type a name");
+  assert.ok(nameProblem("a?b.json"));
+  assert.ok(nameProblem("ends with dot."));
+  assert.ok(nameProblem("CON.json"));
+  assert.equal(nameProblem("console.json"), undefined);
+});
+
+test("the list slides into a folder and back out of it", () => {
+  assert.equal(slideOf("C:\\Users", "C:\\Users\\me"), "in");
+  assert.equal(slideOf("C:\\", "C:\\Users"), "in");
+  assert.equal(slideOf("C:\\Users\\me", "C:\\users"), "out");
+  assert.equal(slideOf("C:\\Users", "D:\\"), undefined);
+  assert.equal(slideOf("C:\\Users", "C:\\Users2"), undefined);
+  assert.equal(slideOf(undefined, "C:\\"), undefined);
+});
+
+test("typed text is a place when it has a slash or a drive, and types fit by extension", () => {
+  assert.ok(isTypedPath("C:\\Users"));
+  assert.ok(isTypedPath("..\\up"));
+  assert.ok(isTypedPath("d:"));
+  assert.ok(!isTypedPath("Perli keys.json"));
+  assert.ok(fitsTypes("a.JSON", ["json"]));
+  assert.ok(!fitsTypes("a.txt", ["json"]));
+  assert.ok(!fitsTypes("json", ["json"]));
+  assert.ok(fitsTypes("a.txt", undefined));
 });
