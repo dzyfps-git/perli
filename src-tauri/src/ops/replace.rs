@@ -16,7 +16,7 @@ use windows::Win32::Storage::FileSystem::{
 
 use super::sys;
 use super::transfer::{file_name, staged_path};
-use super::{Answer, Done, Flow, Key, Question, Run};
+use super::{names, Answer, Done, Failed, Flow, Key, Question, Run};
 
 /// What Undo keeps outlives the steps that name it by this long at least, so a write another
 /// window is in the middle of never loses its old content to a sweep.
@@ -59,13 +59,23 @@ fn keep(backup: &Path, folder: &Path, name: &OsStr) -> Result<PathBuf> {
     Ok(kept)
 }
 
+/// A free name beside `path` for its old content, such as "notes (old).txt".
+fn old_beside(path: &Path) -> PathBuf {
+    let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+    let extension = path.extension().map(|extension| format!(".{}", extension.to_string_lossy())).unwrap_or_default();
+    names::free(&sys::parent(path), &format!("{stem} (old)"), &extension)
+}
+
 /// Removes what Undo kept in `folder` for steps that are gone from the log, once it is old
 /// enough that no running write can still be about to record it.
 pub fn sweep(folder: &Path, wanted: &HashSet<PathBuf>) {
     let Ok(entries) = fs::read_dir(folder) else { return };
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis();
+    // The name starts with when `keep` took it in: a move keeps the file's own times.
     let old = |entry: &fs::DirEntry| {
-        let modified = entry.metadata().and_then(|facts| facts.modified());
-        modified.is_ok_and(|at| at.elapsed().is_ok_and(|age| age > KEPT_GRACE))
+        let name = entry.file_name();
+        let kept_at = name.to_str().and_then(|name| name.split('-').next()?.parse::<u128>().ok());
+        kept_at.is_some_and(|at| now.saturating_sub(at) > KEPT_GRACE.as_millis())
     };
     for entry in entries.flatten() {
         if !wanted.contains(&entry.path()) && old(&entry) {
@@ -89,17 +99,28 @@ impl Run<'_> {
         })?;
         if swapped.is_none() {
             let _ = sys::delete_file(&temp);
+            self.failed.push(Failed { source: path.to_path_buf(), folder: sys::parent(path), moving: false });
             return Ok(false);
         }
-        // ponytail: with nowhere to keep it, the old content goes, as in any editor, and the
-        // step can't be undone.
-        match self.host.kept_folder().map(|folder| keep(&backup, &folder, file_name(path))) {
-            Some(Ok(kept)) => self.done.push(Done::Replaced { path: path.to_path_buf(), kept }),
-            _ => {
-                let _ = sys::delete_file(&backup);
+        self.touched.insert(sys::parent(path));
+        let Some(folder) = self.host.kept_folder() else {
+            // ponytail: with nowhere to keep it, the old content goes, as in any editor, and the
+            // step can't be undone.
+            let _ = sys::delete_file(&backup);
+            return Ok(true);
+        };
+        match keep(&backup, &folder, file_name(path)) {
+            Ok(kept) => self.done.push(Done::Replaced { path: path.to_path_buf(), kept }),
+            // The only copy of the old content never goes: it stays beside the file, where Undo
+            // still finds it, and the user hears why.
+            Err(error) => {
+                let beside = old_beside(path);
+                let kept = if sys::rename(&backup, &beside).is_ok() { beside } else { backup };
+                self.done.push(Done::Replaced { path: path.to_path_buf(), kept: kept.clone() });
+                let message = format!("{} The old version stays here instead of in Perli's folder.", error.message().trim_end());
+                self.tell(&kept, &message)?;
             }
         }
-        self.touched.insert(sys::parent(path));
         Ok(true)
     }
 

@@ -444,6 +444,14 @@ pub fn install(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// True if a Fonts registry value names `target`: by its whole path, or by a bare file name
+/// in `folder`.
+fn points_at(data: &str, target: &Path, folder: &Path) -> bool {
+    let named = Path::new(data.trim());
+    let full = if named.is_absolute() { named.to_path_buf() } else { folder.join(named) };
+    same_folder(&full, target)
+}
+
 /// Takes back a font installed for this user alone.
 pub fn uninstall(path: &Path) -> Result<(), String> {
     use windows::Win32::Graphics::Gdi::RemoveFontResourceW;
@@ -459,11 +467,16 @@ pub fn uninstall(path: &Path) -> Result<(), String> {
     };
     let faces = faces(&target)?;
     let _ = unsafe { RemoveFontResourceW(&windows::core::HSTRING::from(target.as_path())) };
-    // Windows' own installer may have said the other kind of outlines.
+    // Windows' own installer may have said the other kind of outlines. A .ttf and an .otf of
+    // the same name can both be installed, so only the name that points at this file goes.
     let name = registry_name(&faces);
     let base = name.trim_end_matches(" (TrueType)").trim_end_matches(" (OpenType)");
     for kind in ["TrueType", "OpenType"] {
-        crate::registry::delete_value(HKEY_CURRENT_USER, FONTS_KEY, &format!("{base} ({kind})"));
+        let value = format!("{base} ({kind})");
+        let data = crate::registry::read_text(HKEY_CURRENT_USER, FONTS_KEY, Some(&value));
+        if data.is_some_and(|data| points_at(&data, &target, &folder)) {
+            crate::registry::delete_value(HKEY_CURRENT_USER, FONTS_KEY, &value);
+        }
     }
     tell_apps();
     fs::remove_file(&target).map_err(|_| "Windows took it out, but an app still holds the file, so it stays in your font folder for now.".to_string())
@@ -508,6 +521,16 @@ mod tests {
         assert_eq!(installed_name(Path::new(r"C:\a\Inter.woff"), b"wOFF\0\x01\0\0"), "Inter.ttf");
         assert_eq!(installed_name(Path::new(r"C:\a\Inter.ttf"), b"\0\x01\0\0"), "Inter.ttf");
         assert_eq!(installed(Path::new(r"C:\Windows\Fonts\arial.ttf")), Installed::System);
+    }
+
+    #[test]
+    fn uninstall_only_takes_the_registry_name_of_its_own_file() {
+        let folder = Path::new(r"C:\Users\me\AppData\Local\Microsoft\Windows\Fonts");
+        let ttf = folder.join("Font.ttf");
+        assert!(points_at(r"C:\Users\me\AppData\Local\Microsoft\Windows\Fonts\font.TTF", &ttf, folder));
+        assert!(points_at("Font.ttf", &ttf, folder));
+        assert!(!points_at(r"C:\Users\me\AppData\Local\Microsoft\Windows\Fonts\Font.otf", &ttf, folder));
+        assert!(!points_at("Font.otf", &ttf, folder));
     }
 
     #[test]

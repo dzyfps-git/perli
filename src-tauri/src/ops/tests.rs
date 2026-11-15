@@ -2681,6 +2681,53 @@ fn a_save_over_a_file_that_changed_asks_first() {
 }
 
 #[test]
+fn a_skipped_save_says_so() {
+    let sandbox = Sandbox::new();
+    let notes = sandbox.file("notes.txt", "old");
+    let held = lock(&notes);
+    let saved = run_with(Job::Save { path: notes.clone(), bytes: b"new".to_vec(), read: None }, &keeping(&sandbox));
+    drop(held);
+    assert_eq!(read(&notes), "old");
+    assert_eq!(saved.failed, [Failed { source: notes.clone(), folder: sandbox.path(""), moving: false }]);
+    assert!(saved.done.is_empty());
+}
+
+#[test]
+fn old_content_stays_beside_the_file_when_perlis_folder_cannot_take_it() {
+    let sandbox = Sandbox::new();
+    let notes = sandbox.file(r"docs\notes.txt", "old");
+    // A file where the folder should be, so the folder can't be made.
+    let host = Script { kept: Some(sandbox.file("kept", "in the way")), ..Script::default() };
+
+    let saved = run_with(Job::Save { path: notes.clone(), bytes: b"new".to_vec(), read: None }, &host);
+    assert_eq!(read(&notes), "new");
+    let old = sandbox.path(r"docs\notes (old).txt");
+    assert_eq!(read(&old), "old");
+    assert!(matches!(&saved.done[..], [Done::Replaced { kept, .. }] if *kept == old), "{:?}", saved.done);
+    assert_eq!(host.asked(), 1, "the user hears why");
+    assert!(saved.failed.is_empty() && !saved.cancelled);
+
+    run_with(Job::Undo { records: saved.done }, &host);
+    assert_eq!(read(&notes), "old");
+}
+
+#[test]
+fn a_sweep_judges_age_by_when_the_content_was_kept() {
+    let sandbox = Sandbox::new();
+    let now = std::time::SystemTime::now();
+    let millis = |at: std::time::SystemTime| at.duration_since(std::time::UNIX_EPOCH).unwrap().as_millis();
+    let two_days = Duration::from_secs(2 * 24 * 60 * 60);
+    let fresh = sandbox.file(&format!(r"kept\{}-1-0-notes.txt", millis(now)), "fresh");
+    let stale = sandbox.file(&format!(r"kept\{}-1-1-notes.txt", millis(now - two_days)), "stale");
+    // A move keeps the file's own time, which can be years old.
+    for path in [&fresh, &stale] {
+        fs::File::options().write(true).open(path).unwrap().set_modified(now - two_days * 100).unwrap();
+    }
+    sweep_kept(&sandbox.path("kept"), &std::collections::HashSet::new());
+    assert!(exists(&fresh) && !exists(&stale));
+}
+
+#[test]
 fn pictures_turn_in_place_and_change_as_copies() {
     use crate::picture::{Edit, Format};
     let sandbox = Sandbox::new();
