@@ -186,3 +186,27 @@ export function reset(table: KeyCommand[], overrides: Overrides, id: string): Ov
   const start = table.find((command) => command.id === id)?.keys ?? [];
   return given(table, rest, id, start);
 }
+
+/** Only the overrides of commands in `table`, each a list of keys, from what was saved or read in. */
+export function cleanOverrides(table: KeyCommand[], value: unknown): Overrides {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const entries = Object.entries(value).filter(
+    ([id, keys]) => table.some((command) => command.id === id) && Array.isArray(keys) && keys.every((key) => typeof key === "string"),
+  );
+  return Object.fromEntries(entries);
+}
+
+const sameKeys = (a: string[], b: string[]) => a.length === b.length && a.every((key, index) => key === b[index]);
+
+/**
+ * What `next` changes from `below`: a scope's own overrides, laid over the keys beneath it. A key
+ * moved from another command counts too, so that command loses it in the scope alone.
+ */
+export function changedFrom(table: KeyCommand[], below: Overrides, next: Overrides): Overrides {
+  return Object.fromEntries(
+    table.flatMap((command) => {
+      const now = keysOf(command, next);
+      return sameKeys(keysOf(command, below), now) ? [] : [[command.id, now] as const];
+    }),
+  );
+}

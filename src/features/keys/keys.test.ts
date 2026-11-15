@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { bound, comboOf, KEYS, keysOf, rebound, reset, taken } from "./keys.ts";
+import { bound, changedFrom, cleanOverrides, comboOf, KEYS, keysOf, rebound, reset, taken } from "./keys.ts";
 
 const press = (key: string, code = "", held: Partial<Record<"ctrlKey" | "altKey" | "shiftKey", boolean>> = {}) =>
   comboOf({ key, code, ctrlKey: false, altKey: false, shiftKey: false, ...held });
@@ -67,4 +67,21 @@ test("keys that move through the list stay with it", () => {
     assert.equal(bound(KEYS, { delete: [combo] }).get(combo), undefined, combo);
   }
   for (const combo of ["Alt+Left", "Ctrl+PageDown", "Ctrl+D"]) assert.notEqual(taken(KEYS, combo)?.id, "move", combo);
+});
+
+test("saved or read in keys keep only known commands with lists of keys", () => {
+  const value = { copy: ["Ctrl+Q"], nope: ["Ctrl+1"], cut: "Ctrl+X", paste: [3], split: [] };
+  assert.deepEqual(cleanOverrides(KEYS, value), { copy: ["Ctrl+Q"], split: [] });
+  for (const bad of [null, "x", [["copy", ["Ctrl+Q"]]], 4]) assert.deepEqual(cleanOverrides(KEYS, bad), {});
+});
+
+test("a scope keeps only what it changes, a key moved from another command too", () => {
+  const below = { copy: ["Ctrl+Q"] };
+  const next = rebound(KEYS, below, "cut", "Ctrl+Q");
+  assert.deepEqual(changedFrom(KEYS, below, next), { copy: [], cut: ["Ctrl+Q"] });
+  // The same keys as beneath are nothing of the scope's own.
+  assert.deepEqual(changedFrom(KEYS, below, { ...below, paste: ["Ctrl+V"] }), {});
+  // Laid over what is beneath, the scope gives the keys it was made from.
+  const layered = { ...below, ...changedFrom(KEYS, below, next) };
+  assert.equal(bound(KEYS, layered).get("Ctrl+Q")?.id, "cut");
 });

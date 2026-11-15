@@ -132,3 +132,54 @@ button.key-chip:hover {
     animation: none;
   }
 }
+
+/* Where keys changed hold: everywhere, the workspace or the folder. The pill slides to a pick. */
+.key-scopes {
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(var(--of), 1fr);
+  margin: var(--space-3) 0 0;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.key-scopes button {
+  position: relative;
+  height: 26px;
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 12px;
+  white-space: nowrap;
+  transition: color var(--motion);
+}
+
+.key-scopes button[aria-checked="true"],
+.key-scopes button:hover {
+  color: var(--text);
+}
+
+.key-scopes button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  border-radius: 6px;
+}
+
+.key-scope-pill {
+  position: absolute;
+  inset: 2px auto 2px 2px;
+  width: calc((100% - 4px) / var(--of));
+  border-radius: 6px;
+  background: var(--surface-selected);
+  translate: calc(var(--at) * 100%) 0;
+  transition: translate 420ms var(--spring);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .key-scope-pill {
+    transition: none;
+  }
+}

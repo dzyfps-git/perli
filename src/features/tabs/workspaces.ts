@@ -1,6 +1,7 @@
 import { createSignal } from "solid-js";
 import { morph } from "../../ui/morph";
 import { saved, stored } from "../filelist/prefs";
+import { moveWorkspaceKeys } from "../keys/keybinds";
 import { parseSession, parseWorkspaces, put, type Workspace } from "./session";
 import { cycled } from "./tabList";
 import type { Tabs } from "./tabs";
@@ -91,12 +92,15 @@ export function createWorkspaces(tabs: Tabs) {
       const was = current();
       if (was === undefined || !free(name)) return;
       setWorkspaces(workspaces().map((one) => (one.name === was ? { ...one, name } : one)));
+      moveWorkspaceKeys(was, name);
       show(name);
     },
     /** The workspace goes, and its tabs stay on screen with no name. */
     remove() {
       const was = current();
+      if (was === undefined) return;
       setWorkspaces(workspaces().filter((one) => one.name !== was));
+      moveWorkspaceKeys(was, undefined);
       show(undefined);
     },
     /** The next or previous workspace, in the order they were made. */

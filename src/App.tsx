@@ -140,7 +140,7 @@ import { wordsFor, type Verb } from "./features/palette/words";
 import { PaneDivider } from "./features/tabs/PaneDivider";
 import { PathBar, type Suggested, type Suggestion } from "./features/pathbar/PathBar";
 import { ZipBar } from "./features/pathbar/ZipBar";
-import { commandFor, keyText } from "./features/keys/keybinds";
+import { commandFor, keysFor, keyText } from "./features/keys/keybinds";
 import { comboOf, KEYS } from "./features/keys/keys";
 import { KeySheet } from "./features/keys/KeySheet";
 import { ActivityLog } from "./features/reach/ActivityLog";
@@ -421,6 +421,8 @@ function groupItem(path: string): MenuItem {
 export function App() {
   const tabs = createTabs();
   const spaces = createWorkspaces(tabs);
+  // Keys set for a folder or a workspace hold while it is on screen.
+  createEffect(() => keysFor({ folder: tabs.activeView().path(), workspace: spaces.current() }));
   /** `from` is the path crumb whose menu this is. */
   const [menu, setMenu] = createSignal<{ x: number; y: number; above?: number; items: MenuItem[]; from?: string }>();
   /** The settings are a tab of their own: it can exist without being the one in front. */
