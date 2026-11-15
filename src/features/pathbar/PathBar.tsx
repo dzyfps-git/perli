@@ -23,6 +23,7 @@ const ICON_FILTER = "\uE71C";
 const ICON_AWAY = "\uE8CD";
 const ICON_CHEVRON = "\uE76C";
 const ICON_LINK = "\uE71B";
+const ICON_COMPARE = "";
 const ICON_MORE = "\uE712";
 const ICON_LOCK = "\uE72E";
 
@@ -85,6 +86,8 @@ export function PathBar(props: {
   onFoldedMenu: (crumbs: Crumb[], x: number, y: number) => void;
   /** With two panes in the tab, whether they follow each other. */
   linked?: { on: boolean; toggle: () => void };
+  /** With two panes in the tab, whether each marks how its rows stand against the other's. */
+  compare?: { on: boolean; toggle: () => void };
 }) {
   const [offered, setOffered] = createSignal<Suggested>({ items: [], first: false });
   /** The offer the arrow keys are on, or -1 for the text as typed. */
@@ -407,6 +410,19 @@ export function PathBar(props: {
             onClick={() => linked().toggle()}
           >
             {ICON_LINK}
+          </button>
+        )}
+      </Show>
+      <Show when={props.compare}>
+        {(compare) => (
+          <button
+            class="nav-button link-button"
+            aria-label={compare().on ? "Stop comparing" : "Compare with other pane"}
+            aria-description="Marks what is only here, newer, older or different from the other pane"
+            aria-pressed={compare().on}
+            onClick={() => compare().toggle()}
+          >
+            {ICON_COMPARE}
           </button>
         )}
       </Show>

@@ -1445,3 +1445,58 @@ html[data-blurred] :is(.empty-float, .empty-shadow) {
     scale: none;
   }
 }
+
+/* Comparing panes, in rows and in the bar's counts: a word after the name says what sets a row apart from its twin across the
+   way, and rows that match on both sides step back. */
+[data-compare="only"] {
+  --compare: var(--tag-3);
+  --compare-word: "Only here";
+}
+
+[data-compare="newer"] {
+  --compare: var(--tag-5);
+  --compare-word: "Newer";
+}
+
+[data-compare="older"] {
+  --compare: var(--tag-1);
+  --compare-word: "Older";
+}
+
+[data-compare="differs"] {
+  --compare: var(--tag-0);
+  --compare-word: "Differs";
+}
+
+.file-row[data-compare]:not([data-compare="same"]) .file-name::after {
+  content: var(--compare-word);
+  flex: none;
+  margin-left: 6px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--compare) 16%, transparent);
+  color: color-mix(in srgb, var(--compare) 80%, var(--text));
+  font: 600 10px / 1.4 var(--font);
+  animation: compare-in 360ms var(--spring) backwards;
+}
+
+.file-row[data-compare]:not([data-compare="same"]) {
+  background-image: linear-gradient(90deg, color-mix(in srgb, var(--compare) 10%, transparent), transparent 45%);
+}
+
+.file-row[data-compare="same"]:not([aria-selected="true"]) :is(.file-name, .file-icon, .file-meta) {
+  opacity: 55%;
+}
+
+@keyframes compare-in {
+  from {
+    opacity: 0;
+    scale: 0.6;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .file-row[data-compare] .file-name::after {
+    animation: none;
+  }
+}

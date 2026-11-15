@@ -838,3 +838,14 @@
     animation: none;
   }
 }
+
+/* The bar's counts take the colors of the words on the rows they count. */
+.compare-count {
+  color: color-mix(in srgb, var(--compare, var(--text-muted)) 80%, var(--text));
+}
+
+.compare-count + .compare-count::before {
+  content: "·";
+  margin: 0 6px;
+  color: var(--text-muted);
+}

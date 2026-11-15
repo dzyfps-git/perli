@@ -5,10 +5,13 @@ import {
   fetchThumb,
   findRow,
   folderPictures,
+  MARKS,
   pictureAspects,
   rowProps,
   selectionSize,
   type Group,
+  type Mark,
+  type Marks,
   type Row,
   type Selection,
   type Sort,
@@ -65,6 +68,15 @@ import { typesLearned, typeText } from "./typeNames";
 import "./filelist.css";
 
 const PAGE_SIZE = 256;
+/** What a row's compare mark tells a screen reader. */
+const COMPARE_TEXT: Record<Mark, string> = {
+  none: "",
+  only: "Only in this pane",
+  newer: "Newer than in the other pane",
+  older: "Older than in the other pane",
+  differs: "Differs from the one in the other pane",
+  same: "Same as in the other pane",
+};
 /** Pages of rows kept per list, the least lately painted going first: 8,192 rows, many screens. */
 const MAX_PAGES = 32;
 const OVERSCAN = 8;
@@ -347,6 +359,8 @@ export function FileList(props: {
   wall?: boolean;
   /** Names waiting to move, which fade. */
   cut?: Set<string>;
+  /** How each row stands against the other pane's, while the two panes are compared. */
+  marks?: Marks;
   /** Folders opened in place, by full path. */
   expanded?: string[];
   /** Opens a folder in place or closes it. Left out where rows cannot nest: a search, the Recycle Bin. */
@@ -701,7 +715,10 @@ export function FileList(props: {
     pooled.element.toggleAttribute("data-pinned", row?.isPinned ?? false);
     const synced = !!props.synced && !!row && !row.isCloud && !row.isPinned;
     pooled.element.toggleAttribute("data-synced", synced);
-    const about = [syncText(row, synced), tagNames(row?.tags ?? [])].filter(Boolean).join(". ");
+    const mark = row && props.marks?.snapshot === shown ? MARKS[props.marks.marks[index]] : undefined;
+    if (mark && mark !== "none") pooled.element.dataset.compare = mark;
+    else delete pooled.element.dataset.compare;
+    const about = [syncText(row, synced), mark && COMPARE_TEXT[mark], tagNames(row?.tags ?? [])].filter(Boolean).join(". ");
     if (about) pooled.element.setAttribute("aria-description", about);
     else pooled.element.removeAttribute("aria-description");
     const look = row?.isDir ? lookOf(join(row.location || props.folder, row.name)) : undefined;
@@ -1646,7 +1663,7 @@ export function FileList(props: {
 
   createEffect(
     on(
-      [typesLearned, () => props.cut, () => props.match, () => props.synced, tags, allLooks, windowsIcons, dateForm, nests, readProgress, sizeBars, iconTheme],
+      [typesLearned, () => props.cut, () => props.marks, () => props.match, () => props.synced, tags, allLooks, windowsIcons, dateForm, nests, readProgress, sizeBars, iconTheme],
       () => {
         for (const pooled of pool) pooled.filled = false;
         paint();

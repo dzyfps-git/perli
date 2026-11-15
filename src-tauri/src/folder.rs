@@ -521,6 +521,20 @@ pub struct Listing {
 /// The parent of an entry that sits in the folder itself.
 const TOP: u32 = u32::MAX;
 
+/// How a row stands against the other pane's row of the same name. `src/api/index.ts` reads these.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[repr(u8)]
+pub enum Mark {
+    None,
+    /// The other pane has nothing of this name.
+    Only,
+    Newer,
+    Older,
+    /// Modified at the same time but a different size, or a file where the other has a folder.
+    Differs,
+    Same,
+}
+
 /// A server's shares as rows.
 pub fn read_shares(server: &str) -> Result<Vec<Entry>> {
     Ok(network::shares(server)?.into_iter().map(Entry::from_share).collect())
@@ -1005,11 +1019,55 @@ impl Listing {
     fn key(&self, entry: usize) -> Vec<u16> {
         match &self.bin {
             Some(bin) => bin.items[entry].item.as_os_str().encode_wide().collect(),
-            None if self.parents.get(entry).is_none_or(|&parent| parent == TOP) && (self.found_in.is_empty() || !self.parents.is_empty()) => {
-                self.entries[entry].name().to_vec()
-            }
+            None if self.in_folder_itself(entry) => self.entries[entry].name().to_vec(),
             None => self.full_path(entry).as_os_str().encode_wide().collect(),
         }
+    }
+
+    /// Not opened in place under another row, and not found by a search somewhere deeper.
+    fn in_folder_itself(&self, entry: usize) -> bool {
+        self.parents.get(entry).is_none_or(|&parent| parent == TOP) && (self.found_in.is_empty() || !self.parents.is_empty())
+    }
+
+    /// How each row stands against the row of `other` with its name, in any case, one `Mark`
+    /// a row. Rows of the Recycle Bin, or opened in place, or found by a search, have no mark.
+    /// ponytail: folders with the same name count as the same, whatever they hold; a deep
+    /// compare would walk both trees.
+    pub fn compared(&self, other: &Listing) -> Vec<u8> {
+        let comparable = |listing: &Listing, entry: usize| listing.bin.is_none() && listing.in_folder_itself(entry);
+        let lower = |entry: &Entry| String::from_utf16_lossy(entry.name()).to_lowercase();
+        let theirs: HashMap<String, &Entry> = other
+            .visible
+            .iter()
+            .filter(|&&entry| comparable(other, entry as usize))
+            .map(|&entry| (lower(&other.entries[entry as usize]), &other.entries[entry as usize]))
+            .collect();
+        let mark = |entry: u32| {
+            let mine = &self.entries[entry as usize];
+            if !comparable(self, entry as usize) {
+                return Mark::None;
+            }
+            let Some(their) = theirs.get(&lower(mine)) else {
+                return Mark::Only;
+            };
+            if mine.is_dir != their.is_dir {
+                return Mark::Differs;
+            }
+            // FAT drives keep times to 2 seconds, so a copy there reads a little apart.
+            let apart = mine.modified.abs_diff(their.modified) > 2 * 1000 * FILETIME_TICKS_PER_MS;
+            if mine.is_dir {
+                Mark::Same
+            } else if apart && mine.modified > their.modified {
+                Mark::Newer
+            } else if apart {
+                Mark::Older
+            } else if mine.size != their.size {
+                Mark::Differs
+            } else {
+                Mark::Same
+            }
+        };
+        self.visible.iter().map(|&entry| mark(entry) as u8).collect()
     }
 
     pub fn keys(&self, rows: &[u32]) -> Vec<Vec<u16>> {
@@ -2008,5 +2066,61 @@ mod tests {
         assert_eq!(bytes[32], FLAG_HIDDEN);
         assert_eq!(bytes[38..40], [b'b', 0]);
         assert_eq!(listing.encode_rows(99, 10)[..4], 0u32.to_le_bytes());
+    }
+
+    #[test]
+    fn compared_rows_say_how_each_stands_against_the_other_folder() {
+        let (mine, theirs) = (TempFolder::new("compare-mine"), TempFolder::new("compare-theirs"));
+        let put = |folder: &TempFolder, name: &str, text: &str, seconds: u64| {
+            fs::write(folder.0.join(name), text).unwrap();
+            set_modified(&folder.0.join(name), seconds);
+        };
+        put(&mine, "differs.txt", "aaa", 1_000_000);
+        put(&mine, "newer.txt", "a", 3_000_000);
+        put(&mine, "older.txt", "a", 1_000_000);
+        put(&mine, "Only.txt", "a", 1_000_000);
+        put(&mine, "same.txt", "aa", 1_000_000);
+        // A file where the other side has a folder is no copy of it.
+        put(&mine, "thing", "a", 1_000_000);
+        fs::create_dir(mine.0.join("sub")).unwrap();
+        put(&theirs, "differs.txt", "a", 1_000_000);
+        put(&theirs, "newer.txt", "a", 1_000_000);
+        put(&theirs, "older.txt", "a", 3_000_000);
+        // A copy on a FAT drive reads a second apart, in any case.
+        put(&theirs, "SAME.TXT", "aa", 1_000_001);
+        put(&theirs, "theirs.txt", "a", 1_000_000);
+        fs::create_dir(theirs.0.join("sub")).unwrap();
+        fs::create_dir(theirs.0.join("thing")).unwrap();
+        let read = |folder: &TempFolder| Listing::read(folder.0.to_str().unwrap(), Order::default()).unwrap();
+        let (left, right) = (read(&mine), read(&theirs));
+        let marks = |listing: &Listing, other: &Listing| {
+            let marks = listing.compared(other);
+            names(listing).into_iter().zip(marks).collect::<Vec<_>>()
+        };
+        let mark = |mark: Mark| mark as u8;
+        assert_eq!(
+            marks(&left, &right),
+            [
+                ("sub".into(), mark(Mark::Same)),
+                ("differs.txt".into(), mark(Mark::Differs)),
+                ("newer.txt".into(), mark(Mark::Newer)),
+                ("older.txt".into(), mark(Mark::Older)),
+                ("Only.txt".into(), mark(Mark::Only)),
+                ("same.txt".into(), mark(Mark::Same)),
+                ("thing".into(), mark(Mark::Differs)),
+            ]
+        );
+        let right_marks = marks(&right, &left);
+        assert!(right_marks.contains(&("theirs.txt".into(), mark(Mark::Only))));
+        assert!(right_marks.contains(&("newer.txt".into(), mark(Mark::Older))));
+        // Rows of a search found deeper have no mark.
+        put(&mine, "sub/deep.txt", "a", 1_000_000);
+        let sub = mine.0.join("sub");
+        let mut found = Found::default();
+        for entry in read_entries(sub.to_str().unwrap()).unwrap() {
+            found.push(entry, Arc::from(null_terminated(&sub)));
+        }
+        let searched = Listing::searched(found, Order::default());
+        assert_eq!(searched.compared(&right), [mark(Mark::None)]);
     }
 }

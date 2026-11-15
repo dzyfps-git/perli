@@ -726,6 +726,20 @@ export const rowsMatching = (view: number, request: number, pattern: string) =>
 export const rowsWhere = (view: number, request: number, filter: Filter) =>
   invoke<number[]>("rows_where", { view, request, filter });
 
+/** How a row stands against the other pane's row of the same name, in the order of `folder::Mark`. */
+export const MARKS = ["none", "only", "newer", "older", "differs", "same"] as const;
+export type Mark = (typeof MARKS)[number];
+
+/** One byte a row of `snapshot`, each an index into `MARKS`. */
+export interface Marks {
+  snapshot: number;
+  marks: Uint8Array;
+}
+
+/** How each row of one pane stands against the rows of the other. */
+export const compared = (view: number, request: number, other: number, otherRequest: number) =>
+  invoke<ArrayBuffer>("compared", { view, request, other, otherRequest }).then((bytes) => new Uint8Array(bytes));
+
 /** How many rows fit `filter`, to tell a folder of songs or pictures by. */
 export const countWhere = (view: number, request: number, filter: Filter) =>
   invoke<number>("count_where", { view, request, filter });

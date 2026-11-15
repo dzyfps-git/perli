@@ -2053,6 +2053,14 @@ fn rows_where(view: u32, request: u64, filter: folder::Filter, views: State<'_, 
     views.read(&selection, |listing, _| listing.fitting(&filter))
 }
 
+/// How each row of one pane stands against the other pane's rows, one `folder::Mark` a row.
+#[tauri::command]
+fn compared(view: u32, request: u64, other: u32, other_request: u64, views: State<'_, Views>) -> Result<Response, String> {
+    let views = views.0.read().unwrap_or_else(|error| error.into_inner());
+    let listing = |id, request| views.get(&id).and_then(|view| view.listing(request)).ok_or("This folder is no longer open");
+    Ok(Response::new(listing(view, request)?.compared(listing(other, other_request)?)))
+}
+
 /// How many rows fit `filter`, to tell a folder of songs or pictures by.
 #[tauri::command]
 fn count_where(view: u32, request: u64, filter: folder::Filter, views: State<'_, Views>) -> Result<usize, String> {
@@ -2576,6 +2584,7 @@ fn main() {
             common_tags,
             rows_matching,
             rows_where,
+            compared,
             count_where,
             row_props,
             folder_pictures,
