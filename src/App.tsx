@@ -68,7 +68,10 @@ import { createJobs } from "./features/fileops/jobs";
 import { JobsPanel } from "./features/fileops/JobsPanel";
 import { NewGallery, type NewPick } from "./features/fileops/NewGallery";
 import { LookPicker } from "./features/sidebar/LookPicker";
-import { extensionsOf, kindOf } from "./features/filelist/fileKinds";
+import { extensionsOf, iconKindOf, kindOf, type Kind } from "./features/filelist/fileKinds";
+import { KIND_LABELS } from "./features/filelist/iconTheme";
+import { editWhenShown } from "./features/preview/QuickEdit";
+import { ColorField } from "./ui/Controls";
 import { createShellItems } from "./features/fileops/shellItems";
 import { AppPicker } from "./features/dialogs/AppPicker";
 import { DisconnectDrive, MapDrive } from "./features/dialogs/NetworkDrives";
@@ -119,6 +122,8 @@ import {
   terminalChoice,
   TERMINAL_NAMES,
   upOnDoubleClick,
+  iconTheme,
+  setIconTheme,
 } from "./features/filelist/prefs";
 import { SelectPattern } from "./features/filelist/SelectPattern";
 import { FLAT_QUERY, type FolderView, type RowAt } from "./features/navigation/folderView";
@@ -343,6 +348,10 @@ function undoLabel(verb: string, text: string | null) {
 
 /** The folder whose look is being chosen, in its own sheet. */
 const [lookFor, setLookFor] = createSignal<string>();
+/** The kind whose icon color is being picked from the row menu, and where the menu was. */
+const [tinting, setTinting] = createSignal<{ x: number; y: number; kind: Kind }>();
+/** Kinds Perli reads as plain text, which the preview can edit in place. */
+const WRITTEN: ReadonlySet<Kind> = new Set<Kind>(["text", "markdown", "code", "web", "config", "script", "log", "subtitle", "data"]);
 
 function lookItem(path: string): MenuItem {
   return { label: "Folder look…", action: () => setLookFor(path) };
@@ -935,9 +944,13 @@ export function App() {
       return setMenu({ x, y, items });
     }
     const [canPaste, toolItems] = await Promise.all([clipboardCanPaste(), shell.fileToolItems(view, row, { x, y })]);
+    const iconKind = iconKindOf(row.name, row.isDir, iconTheme().extensions);
     const items: MenuItem[] = [
       { label: "Open", action: () => openRow(view, row, false) },
       { label: "Quick preview", action: () => previewSelected(view) },
+      ...(!row.isDir && WRITTEN.has(kindOf(row.name, false)) && view.list()?.selection().rows.length === 1
+        ? [{ label: "Edit", action: () => (editWhenShown(path), previewSelected(view)) }]
+        : []),
       ...(row.isDir
         ? [
             { label: "Open to side", action: () => openRow(view, row, true) },
@@ -967,6 +980,7 @@ export function App() {
       ...(view.list()?.selection().rows.length === 2 && !row.isDir ? [{ label: "Compare", keys: keyText("compare"), action: () => quietly(compare(view)) }] : []),
       ...toolItems,
       shell.tagsItem(view, showTagChange, () => setNamingTag(view)),
+      ...(windowsIcons() ? [] : [{ label: `Icon color for ${KIND_LABELS[iconKind]}…`, action: () => setTinting({ x, y, kind: iconKind }) }]),
       ...(inCloud(path)
         ? [
             { label: "Always keep on this device", divider: true, checked: row.isPinned, action: () => keepHere(view, true) },
@@ -1228,8 +1242,27 @@ export function App() {
     ];
   }
 
+  /** A new text file waiting for its name, after which it opens to write in. `name` is the one typed. */
+  let writing: { view: number; until: number; name?: string } | undefined;
+  /** A file that never got made, in a folder Perli can't write to, stops waiting after this. */
+  const WRITE_WAIT_MS = 60_000;
+  const writesIn = (view: FolderView) => writing?.view === view.id && Date.now() < writing.until;
+
+  /** Opens the selected file in the preview, already editing. */
+  function writeSelected(view: FolderView) {
+    writing = undefined;
+    const name = view.list()?.left()?.names[0];
+    const folder = view.folder()?.path;
+    if (!name || !folder) return;
+    editWhenShown(join(folder, name));
+    previewSelected(view);
+  }
+
   function makeNew(view: FolderView, pick: NewPick) {
-    if (pick.kind === "folder" || pick.kind === "file") actions.newItem(view, pick.kind === "folder");
+    if (pick.kind === "write") {
+      writing = { view: view.id, until: Date.now() + WRITE_WAIT_MS };
+      actions.newFrom(view, "txt");
+    } else if (pick.kind === "folder" || pick.kind === "file") actions.newItem(view, pick.kind === "folder");
     else if (pick.kind === "clipboard") actions.newFromClipboard(view);
     else if (pick.kind === "type") actions.newFrom(view, pick.extension);
     else if (pick.kind === "own") actions.newFromOwn(view, pick.name);
@@ -2077,11 +2110,22 @@ export function App() {
                 onBackgroundMenu={(event) => showBackgroundMenu(event, view)}
                 onHeaderMenu={(event) => (ownColumns(view) ? event.preventDefault() : showHeaderMenu(event, view))}
                 onGroup={cycleGrouping}
-                onRename={(selection, name) => actions.rename(view, selection, name)}
-                onEditEnd={view.editEnded}
+                onRename={(selection, name) => {
+                  if (writesIn(view)) writing!.name = name;
+                  return actions.rename(view, selection, name);
+                }}
+                onEditEnd={() => {
+                  view.editEnded();
+                  // Kept as it was, the new file opens at once. A new name waits for the rows to show it.
+                  if (writesIn(view) && !writing!.name) writeSelected(view);
+                }}
                 onInputMenu={showInputMenu}
                 onFirstPaint={markReady}
-                onSwapped={view.swapped}
+                onSwapped={(snapshot) => {
+                  view.swapped(snapshot);
+                  const named = writesIn(view) && writing!.name;
+                  if (named && view.list()?.left()?.names[0]?.toLowerCase() === named.toLowerCase()) writeSelected(view);
+                }}
                 onEscape={() => view.search("")}
                 onPreview={(at) => preview(view, at)}
                 onCursor={view.setCursor}
@@ -2180,6 +2224,7 @@ export function App() {
                   view={tab.active()}
                   onOpen={(row) => openRow(tab.active(), row, false)}
                   onClose={() => setPreviewPane(false)}
+                  notify={jobs.notify}
                 />
               </Show>
             </div>
@@ -2202,6 +2247,19 @@ export function App() {
       </Show>
       <Show when={lookFor()} keyed>
         {(path) => <LookPicker path={path} onClose={() => setLookFor(undefined)} />}
+      </Show>
+      <Show when={tinting()} keyed>
+        {(at) => (
+          <div class="color-at" data-kind={at.kind} style={{ left: `${at.x}px`, top: `${at.y}px` }}>
+            <ColorField
+              opened
+              label={`Icon color for ${KIND_LABELS[at.kind]}`}
+              value={iconTheme().colors[at.kind] ?? "var(--kind-color)"}
+              onChange={(color) => setIconTheme({ ...iconTheme(), colors: { ...iconTheme().colors, [at.kind]: color } })}
+              onClose={() => setTinting(undefined)}
+            />
+          </div>
+        )}
       </Show>
       <Show when={making()} keyed>
         {(open) => (
@@ -2327,6 +2385,7 @@ export function App() {
             }}
             onOpenWith={(path) => setPickingApp([path])}
             onShow={(path) => showInFolder(view, path)}
+            notify={jobs.notify}
           />
         )}
       </Show>

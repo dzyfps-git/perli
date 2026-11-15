@@ -8,6 +8,7 @@ import "./fileops.css";
 export type NewPick =
   | { kind: "folder" }
   | { kind: "file" }
+  | { kind: "write" }
   | { kind: "clipboard" }
   | { kind: "type"; extension: string }
   | { kind: "own"; name: string }
@@ -37,6 +38,7 @@ export function NewGallery(props: { x: number; y: number; onPick: (pick: NewPick
   const starts = (): Tile[] => [
     { label: "Folder", icon: kindOf("Folder", true), pick: { kind: "folder" } },
     { label: "File", note: "Name it as you like", icon: kindOf("File", false), pick: { kind: "file" } },
+    { label: "Text to write", note: "Name it, then write", icon: kindOf("x.txt", false), pick: { kind: "write" } },
     {
       label: "From clipboard",
       note: found()?.[2] ? "Text or picture" : "Nothing to use",
@@ -126,13 +128,13 @@ export function NewGallery(props: { x: number; y: number; onPick: (pick: NewPick
       <Show when={types().length > 0}>
         <section class="new-section" aria-label="Types">
           <h3>Types</h3>
-          <Tiles tiles={types()} first={3} />
+          <Tiles tiles={types()} first={4} />
         </section>
       </Show>
       <section class="new-section" aria-label="Your templates">
         <h3>Your templates</h3>
         <Show when={own().length > 0} fallback={<p class="new-empty">Save any file as a template from its menu, and it shows here.</p>}>
-          <Tiles tiles={own()} first={3 + types().length} />
+          <Tiles tiles={own()} first={4 + types().length} />
         </Show>
         <button class="new-open" onClick={() => pick({ label: "", icon: "", pick: { kind: "templates" } })}>
           <span class="new-open-icon" aria-hidden="true">

@@ -24,6 +24,9 @@ test("an icon shows the kind the user gave the extension", () => {
   assert.equal(iconKindOf("x.log", true, own), "folder");
   assert.equal(iconKindOf("a.png", false, own), "picture");
   assert.match(iconSheet({ pdf: "#123456" }), /\[data-kind="pdf"\]\{[^}]*--kind-color:#123456\}/);
+  const following = iconSheet({ pdf: "#123456" }, true);
+  assert.match(following, /\[data-kind="code"\]\{[^}]*--kind-color:oklch\(from var\(--accent\) l c calc\(h \+ -?\d+\)\)\}/);
+  assert.match(following, /\[data-kind="pdf"\]\{[^}]*--kind-color:#123456\}/, "the user's own color still wins");
 });
 
 test("only what has a picture of its own asks for one", () => {

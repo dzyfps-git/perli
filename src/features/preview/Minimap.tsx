@@ -13,6 +13,8 @@ export interface MinimapProps {
   aspect: () => number;
   /** Quarter turns the picture shows at. */
   turn?: () => number;
+  /** Mirrored left to right on screen, after the turn. */
+  flip?: () => boolean;
   view: () => ViewRect;
   /** Puts this point, from 0 to 1 on each side, in the middle of what shows. */
   onMove: (center: { x: number; y: number }) => void;
@@ -41,6 +43,7 @@ export function Minimap(props: MinimapProps) {
     const turn = props.turn?.() ?? 0;
     const [across, down] = turn % 2 ? [canvas.height, canvas.width] : [canvas.width, canvas.height];
     context.setTransform(1, 0, 0, 1, canvas.width / 2, canvas.height / 2);
+    if (props.flip?.()) context.scale(-1, 1);
     context.rotate((turn * Math.PI) / 2);
     try {
       context.drawImage(source, -across / 2, -down / 2, across, down);
@@ -52,6 +55,7 @@ export function Minimap(props: MinimapProps) {
   createEffect(() => {
     size();
     props.turn?.();
+    props.flip?.();
     draw();
   });
 

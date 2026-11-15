@@ -240,6 +240,15 @@ function Card(props: { card: JobCard; jobs: Jobs }) {
                 </div>
               </Show>
             </Show>
+            <Show when={ended().action}>
+              {(action) => (
+                <div class="job-choices">
+                  <button class="job-choice" onClick={() => (jobs.close(card.id), action().run())}>
+                    {action().label}
+                  </button>
+                </div>
+              )}
+            </Show>
             <Show when={jobs.canUndo(card)}>
               <div class="job-choices">
                 <button class="job-choice" aria-label={jobs.undoText() ? `Undo: ${jobs.undoText()}` : "Undo"} onClick={() => jobs.undo(card)}>

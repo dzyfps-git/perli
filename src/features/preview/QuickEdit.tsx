@@ -1,6 +1,7 @@
 import { createSignal, onCleanup, onMount, Show } from "solid-js";
-import type { Preview } from "../../api";
+import { fileSeen, type Preview } from "../../api";
 import { coloredLines } from "./highlight";
+import { createFind, findPattern, matchesOf } from "./FindBar";
 
 export const ICON_EDIT = "";
 const ICON_SAVE = "";
@@ -12,6 +13,7 @@ const SAVED_MS = 1400;
 const UNKNOWN_STAMP = "0:0";
 /** A text box holds plain line ends, and Perli writes the file's own back when it saves. */
 const plain = (text: string) => text.replace(/\r\n?/g, "\n");
+const asHtml = (text: string) => text.replace(/&/g, "&amp;").replace(/</g, "&lt;");
 
 /** A whole file that a quick edit may write over. */
 export interface EditTarget {
@@ -35,7 +37,17 @@ interface Draft {
 
 /** Unsaved text outlives its view, which a step to another file takes down. */
 const drafts = new Map<string, Draft>();
-export const hasDraft = (path: string) => drafts.has(path);
+/** A menu's "Edit" asks the next view of the file to open in the box, if it opens soon. */
+let asked: { path: string; at: number } | undefined;
+const ASK_MS = 5000;
+export const editWhenShown = (path: string) => void (asked = { path: path.toLowerCase(), at: Date.now() });
+
+/** A view opens editing when unsaved text waits for it, or a menu just asked. The ask is used up. */
+export function startsEditing(path: string) {
+  const wanted = asked?.path === path.toLowerCase() && Date.now() - asked.at < ASK_MS;
+  if (wanted) asked = undefined;
+  return drafts.has(path) || wanted;
+}
 
 /** The text and stamp a fresh read of the file gives, if it is still a whole text. */
 function freshOf(preview: Preview) {
@@ -65,6 +77,8 @@ export function QuickEdit(props: {
   drafts.delete(path);
   let box!: HTMLTextAreaElement;
   let scroller!: HTMLDivElement;
+  /** The text again, under the box, for colors and for find to mark. */
+  let mirror: HTMLPreElement | undefined;
   /** The stamp a save checks. Unset after a save, until the file is read again. */
   let stamp: string | undefined = draft ? draft.seen : target.seen;
   let savedOnce = false;
@@ -79,13 +93,49 @@ export function QuickEdit(props: {
   const dirty = () => value() !== base();
   const colors = () => !!props.language && value().length <= MOST_COLORED;
 
+  // Replacing goes through the box's own typing, so Ctrl+Z takes a replace back like a key.
+  const find = createFind(
+    () => mirror,
+    () => scroller,
+    undefined,
+    {
+      chose(at, query) {
+        const match = matchesOf(box.value, query)[at];
+        if (match) box.setSelectionRange(...match);
+      },
+      replace(at, query, by) {
+        const match = matchesOf(box.value, query)[at];
+        if (!match) return at;
+        box.focus({ preventScroll: true });
+        box.setSelectionRange(...match);
+        document.execCommand("insertText", false, by);
+        const next = matchesOf(box.value, query).findIndex(([start]) => start >= match[0] + by.length);
+        return Math.max(0, next);
+      },
+      replaceAll(query, by) {
+        let count = 0;
+        const text = box.value.replace(findPattern(query), () => (count++, by));
+        if (!count) return 0;
+        const top = scroller.scrollTop;
+        box.focus({ preventScroll: true });
+        box.select();
+        document.execCommand("insertText", false, text);
+        scroller.scrollTop = top;
+        return count;
+      },
+    },
+  );
+
   let painting = 0;
   /** A language already loaded colors at once, so the colors and the caret move together. */
   function paint(text: string) {
     const mine = ++painting;
-    if (!colors()) return setColored(undefined);
+    if (!colors()) {
+      setColored(undefined);
+      return queueMicrotask(find.refresh);
+    }
     coloredLines(props.language!, text).then(
-      (lines) => mine === painting && setColored(lines.join("\n") + "\n"),
+      (lines) => mine === painting && (setColored(lines.join("\n") + "\n"), find.refresh()),
       () => mine === painting && setColored(undefined),
     );
   }
@@ -97,9 +147,9 @@ export function QuickEdit(props: {
     setProblem(undefined);
     try {
       if (!(await target.save(text, stamp))) return;
-      // ponytail: until the folder is read again a second save skips the check, which a
-      // reload a moment later puts back.
-      stamp = undefined;
+      // The file as this save left it, so the next save still checks. Unread, the folder's next
+      // read stands in for it.
+      stamp = (await fileSeen(path).catch(() => null)) ?? undefined;
       savedOnce = true;
       setBase(text);
       setSaved(true);
@@ -119,6 +169,10 @@ export function QuickEdit(props: {
   props.keys((event) => {
     const key = event.key.toLowerCase();
     if (event.ctrlKey && !event.altKey && key === "s") void save();
+    else if (key === "escape" && find.open()) {
+      find.close();
+      box.focus({ preventScroll: true });
+    } else if (!asking() && find.keys(event)) event.preventDefault();
     else if (key === "escape") {
       if (asking()) setAsking(false);
       else if (dirty()) setAsking(true);
@@ -146,6 +200,7 @@ export function QuickEdit(props: {
   });
 
   onCleanup(() => {
+    find.close();
     props.keys(undefined);
     target.hold(undefined);
     if (!left && dirty()) drafts.set(path, { text: value(), seen: stamp ?? UNKNOWN_STAMP, caret: box.selectionStart, scroll: scroller.scrollTop });
@@ -157,8 +212,14 @@ export function QuickEdit(props: {
     <div class="quick-edit">
       <div ref={scroller} class="quick-edit-scroll" data-wrap={props.wrap || undefined}>
         <div class="quick-edit-sheet" data-colored={colored() !== undefined || undefined}>
-          <Show when={colored() !== undefined}>
-            <pre class="preview-text quick-edit-colors hljs" aria-hidden="true" innerHTML={colored()} />
+          <Show when={colored() !== undefined || find.open()}>
+            <pre
+              ref={mirror}
+              class="preview-text quick-edit-colors hljs"
+              data-plain={colored() === undefined || undefined}
+              aria-hidden="true"
+              innerHTML={colored() ?? asHtml(value()) + "\n"}
+            />
           </Show>
           <textarea
             ref={box}
@@ -179,6 +240,7 @@ export function QuickEdit(props: {
           when={asking()}
           fallback={
             <>
+              {find.bar()}
               <span class="zoom-chip quick-edit-status" data-dirty={dirty() || undefined} role="status">
                 {problem() ?? status()}
               </span>

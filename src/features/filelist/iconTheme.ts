@@ -13,9 +13,11 @@ export interface IconTheme {
   colors: Partial<Record<Kind, string>>;
   /** Extensions, lower case and without the dot, and the kind each shows as. */
   extensions: Record<string, Kind>;
+  /** Kinds take hues around the accent, and change with it. Colors of the user's own still win. */
+  accent: boolean;
 }
 
-export const PLAIN_THEME: IconTheme = { style: "tile", colors: {}, extensions: {} };
+export const PLAIN_THEME: IconTheme = { style: "tile", colors: {}, extensions: {}, accent: false };
 
 const COLOR = /^#[0-9a-f]{6}$/i;
 const EXTENSION = /^[a-z0-9_+~-]{1,24}$/;
@@ -35,6 +37,7 @@ export function cleanTheme(value: unknown): IconTheme {
     style: STYLES.includes(theme.style as IconStyle) ? (theme.style as IconStyle) : "tile",
     colors: Object.fromEntries(entries(theme.colors).filter(([kind, color]) => isKind(kind) && typeof color === "string" && COLOR.test(color))),
     extensions: Object.fromEntries(entries(theme.extensions).filter(([extension, kind]) => extensionKey(extension) === extension && isKind(kind))),
+    accent: theme.accent === true,
   };
 }
 

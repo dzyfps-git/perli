@@ -126,7 +126,7 @@ document.head.append(kindStyles);
 createRoot(() =>
   createEffect(() => {
     const theme = iconTheme();
-    kindStyles.textContent = iconSheet(theme.colors);
+    kindStyles.textContent = iconSheet(theme.colors, theme.accent);
     document.documentElement.dataset.iconStyle = theme.style;
   }),
 );

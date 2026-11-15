@@ -495,6 +495,12 @@ html[data-blurred] .logo {
   view-transition-name: var(--tab-name);
 }
 
+/* Reading and editing a text trade places in a quick blend, the rest of the window still. */
+[data-morph="edit"]::view-transition-old(root),
+[data-morph="edit"]::view-transition-new(root) {
+  animation-duration: 180ms;
+}
+
 /* A pane's picture keeps its size while its box slides, instead of being stretched. */
 [data-morph="panes"]::view-transition-old(*),
 [data-morph="panes"]::view-transition-new(*) {

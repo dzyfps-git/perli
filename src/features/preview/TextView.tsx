@@ -1,12 +1,13 @@
 import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { ToolCog } from "../../ui/Controls";
+import { morph } from "../../ui/morph";
 import { formatSize } from "../../ui/format";
 import { createFind, lineIn, scrollToRange } from "./FindBar";
 import { asTable, asTree, numbers, setAsTable, setAsTree, setNumbers, setWrap, VIEWER_SETTINGS, wrap } from "./viewerPrefs";
 import { pieceColorer } from "./highlight";
 import { DataGrid } from "./DataGrid";
 import { guessDelimiter, lineEnding, parseTable } from "./table";
-import { hasDraft, ICON_EDIT, QuickEdit, type EditTarget } from "./QuickEdit";
+import { ICON_EDIT, QuickEdit, startsEditing, type EditTarget } from "./QuickEdit";
 
 const ICON_FIND = "";
 const ICON_WRAP = "";
@@ -84,14 +85,14 @@ export function TextView(live: TextViewProps) {
   const [text, setText] = createSignal(props.first.text);
   const [going, setGoing] = createSignal(false);
   const [missing, setMissing] = createSignal(false);
-  /** Unsaved text left behind earlier opens the box again. */
-  const [editing, setEditing] = createSignal(!!props.edit && hasDraft(props.edit.path));
+  /** Unsaved text left behind earlier, or a menu's "Edit", opens the box at once. */
+  const [editing, setEditing] = createSignal(!!props.edit && startsEditing(props.edit.path));
   let editKeys: ((event: KeyboardEvent) => boolean) | undefined;
   function edit() {
     find.close();
     setGoing(false);
     setFollowing(false);
-    setEditing(true);
+    morph(() => setEditing(true), "edit");
   }
   const table = () => props.table !== undefined && asTable();
   const delimiter = createMemo(() => props.table ?? guessDelimiter(props.first.text));
@@ -274,7 +275,7 @@ export function TextView(live: TextViewProps) {
             keys={(handler) => (editKeys = handler)}
             onLeave={(saved) => {
               const { refresh } = target();
-              setEditing(false);
+              morph(() => setEditing(false), "edit");
               if (saved) refresh();
             }}
           />
