@@ -73,6 +73,7 @@ function cleanTab(tab: SavedTab): SavedTab | undefined {
     ...(typeof tab.split === "number" && tab.split > 0 && tab.split < 1 ? { split: tab.split } : {}),
     ...(tab.stacked === true ? { stacked: true } : {}),
     ...(tab.linked === true ? { linked: true } : {}),
+    ...(tab.home === true ? { home: true } : {}),
   };
 }
 

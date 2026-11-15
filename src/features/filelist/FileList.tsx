@@ -949,8 +949,8 @@ export function FileList(props: {
         : undefined;
     places = gallery ?? placesOf(props.groups, props.count, perRow, itemHeight, HEADER_HEIGHT);
     spacer.style.height = `${places.height}px`;
-    // New sizes keep the picture at the top where it was.
-    const anchor = before && gallery && galleryMotion === "spring" ? before.firstAt(scrolled) : -1;
+    // New sizes and a new width keep the picture at the top where it was.
+    const anchor = before && gallery ? before.firstAt(scrolled) : -1;
     if (anchor >= 0 && anchor < props.count) grid.scrollTop = gallery!.top(anchor) + Math.max(0, scrolled - before!.top(anchor));
 
     const span = grid.clientHeight + OVERSCAN * 2 * itemHeight;

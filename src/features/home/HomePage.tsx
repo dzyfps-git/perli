@@ -158,6 +158,8 @@ export function HomePage(props: {
   function onGripKey(event: KeyboardEvent, id: HomeSectionId) {
     if (!event.altKey || (event.key !== "ArrowUp" && event.key !== "ArrowDown")) return;
     event.preventDefault();
+    // Alt+Up is also "up a folder" for the window, which would leave the home page.
+    event.stopPropagation();
     const list = sections();
     const at = list.findIndex((section) => section.id === id);
     const before = event.key === "ArrowUp" ? list[at - 1]?.id : list[at + 2]?.id;

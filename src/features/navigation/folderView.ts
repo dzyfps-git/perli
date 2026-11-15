@@ -138,10 +138,12 @@ export function createFolderView(id: number, saved?: SavedPane) {
   const [trail, setTrail] = createSignal("");
   const [backStack, setBackStack] = createSignal<string[]>(saved?.back ?? []);
   const [forwardStack, setForwardStack] = createSignal<string[]>(saved?.forward ?? []);
-  const [sort, setSortValue] = createSignal(saved?.sort ?? lastSort());
-  const [layout, setLayoutValue] = createSignal(saved?.layout ?? lastLayout());
+  /** A pane restored in a locked folder shows the lock's look, not the passing changes it saved. */
+  const savedLock = saved && lockOf(saved.path)?.value;
+  const [sort, setSortValue] = createSignal(savedLock?.sort ?? saved?.sort ?? lastSort());
+  const [layout, setLayoutValue] = createSignal(savedLock?.layout ?? saved?.layout ?? lastLayout());
   /** The pane's layout from before it went into a locked folder, which it takes back on leaving. */
-  let layoutBeforeLock: Layout | undefined;
+  let layoutBeforeLock: Layout | undefined = savedLock ? lastLayout() : undefined;
   /** The lock on the shown folder, if any. Changes made there show but don't stick. */
   const lock = () => {
     const shown = folder()?.path;
@@ -166,7 +168,7 @@ export function createFolderView(id: number, saved?: SavedPane) {
   /** The folders opened in place in each folder this pane left, by lowercase path. */
   const openedIn = new Map<string, string[]>();
   /** What the folder's rows gather under headers by, and a search's, which the folder keeps apart. */
-  const [groupBy, setGroupByValue] = createSignal<GroupBy>(saved ? rememberedGroup(saved.path) : "none");
+  const [groupBy, setGroupByValue] = createSignal<GroupBy>(saved ? (savedLock?.groupBy ?? rememberedGroup(saved.path)) : "none");
   const [searchGroupBy, setSearchGroupBy] = createSignal<GroupBy>("none");
   /** Groups whose rows are out of sight, by key. They open again when the view goes elsewhere. */
   const [folded, setFolded] = createSignal<string[]>([]);
