@@ -78,7 +78,7 @@ impl Sandbox {
         path
     }
 
-    fn names(&self, relative: &str) -> Vec<String> {
+    pub(super) fn names(&self, relative: &str) -> Vec<String> {
         let mut names: Vec<String> = fs::read_dir(self.path(relative))
             .unwrap()
             .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
@@ -101,14 +101,14 @@ type During = Box<dyn Fn(&Progress)>;
 #[derive(Default)]
 pub(super) struct Script {
     replies: RefCell<VecDeque<Reply>>,
-    questions: RefCell<Vec<Question>>,
+    pub(super) questions: RefCell<Vec<Question>>,
     during: Option<During>,
     verify: bool,
     kept: Option<PathBuf>,
 }
 
 impl Script {
-    fn answering(answers: &[Answer]) -> Self {
+    pub(super) fn answering(answers: &[Answer]) -> Self {
         let replies = answers.iter().map(|&answer| Reply { answer, all: false });
         Self {
             replies: RefCell::new(replies.collect()),

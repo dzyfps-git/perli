@@ -4,6 +4,7 @@ use std::{
     fs,
     io::Write,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 /// The most a file of settings may hold. A real one is a few thousand bytes.
@@ -28,10 +29,20 @@ pub fn read(path: &Path) -> Result<String, String> {
     fs::read_to_string(path).map_err(|error| error.to_string())
 }
 
-/// Where a file waits while it is written, beside the one it will become.
-fn staged(path: &Path) -> Option<PathBuf> {
-    let name = path.file_name()?.to_string_lossy();
-    Some(path.with_file_name(format!(".{name}.perli-saving")))
+static SAVING: AtomicU64 = AtomicU64::new(0);
+
+/// A file of this save's own beside `path`, where the text waits until it is whole. It is made
+/// new, so a file already there, another save's included, is never written over.
+fn staged(path: &Path) -> std::io::Result<(PathBuf, fs::File)> {
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    loop {
+        let number = SAVING.fetch_add(1, Ordering::Relaxed);
+        let waiting = path.with_file_name(format!(".{name}.{}-{number}.perli-saving", std::process::id()));
+        match fs::OpenOptions::new().write(true).create_new(true).open(&waiting) {
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            opened => return opened.map(|file| (waiting, file)),
+        }
+    }
 }
 
 /// Saves `text` as `path`. A file already there is kept unless `replace` says the user agreed,
@@ -57,10 +68,11 @@ pub fn write(path: &Path, text: &str, replace: bool) -> Result<(), String> {
         })?;
         return file.write_all(text.as_bytes()).and_then(|()| file.sync_all()).map_err(|error| error.to_string());
     }
-    let waiting = staged(path).ok_or("That name can't be used")?;
-    let written = fs::File::create(&waiting)
-        .and_then(|mut file| file.write_all(text.as_bytes()).and_then(|()| file.sync_all()))
-        .and_then(|()| fs::rename(&waiting, path));
+    let (waiting, mut file) = staged(path).map_err(|error| error.to_string())?;
+    let written = file.write_all(text.as_bytes()).and_then(|()| file.sync_all());
+    // Windows renames only a closed file.
+    drop(file);
+    let written = written.and_then(|()| fs::rename(&waiting, path));
     if written.is_err() {
         let _ = fs::remove_file(&waiting);
     }
@@ -107,6 +119,23 @@ mod tests {
         assert_eq!(fs::read_to_string(&path).unwrap(), "new");
         // Nothing is left waiting beside it.
         assert_eq!(fs::read_dir(&folder.0).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn a_save_writes_over_no_file_but_its_own() {
+        let folder = TempFolder::new("beside");
+        let path = folder.0.join("backup.json");
+        fs::write(&path, "old").unwrap();
+        let other = folder.0.join(".backup.json.perli-saving");
+        fs::write(&other, "someone else's").unwrap();
+        write(&path, "new", true).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "new");
+        assert_eq!(fs::read_to_string(&other).unwrap(), "someone else's");
+        assert_eq!(fs::read_dir(&folder.0).unwrap().count(), 2);
+        // Two saves at once wait in files of their own.
+        let (one, _one) = staged(&path).unwrap();
+        let (two, _two) = staged(&path).unwrap();
+        assert_ne!(one, two);
     }
 
     #[test]
