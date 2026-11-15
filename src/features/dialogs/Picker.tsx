@@ -177,6 +177,7 @@ function Picker(props: { ask: Asked; panes: PickerPanes; report: (failure: unkno
   let dialog!: HTMLDialogElement;
   let input!: HTMLInputElement;
   let listBox!: HTMLDivElement;
+  let crumbsBox!: HTMLDivElement;
   let keep!: HTMLButtonElement;
   let close!: ReturnType<typeof openSheet>;
   let chosen = false;
@@ -345,6 +346,8 @@ function Picker(props: { ask: Asked; panes: PickerPanes; report: (failure: unkno
   // The list slides the way the user went: in from the right going into a folder, from the left coming out.
   createEffect(
     on(shown, (now, before) => {
+      // A long path keeps the folder on show in sight, with the start scrolled away.
+      queueMicrotask(() => (crumbsBox.scrollLeft = crumbsBox.scrollWidth));
       const way = now && !reducedMotion.matches ? slideOf(before, now) : undefined;
       if (!way) return;
       const from = way === "in" ? SLIDE_PX : -SLIDE_PX;
@@ -409,7 +412,7 @@ function Picker(props: { ask: Asked; panes: PickerPanes; report: (failure: unkno
           </For>
         </nav>
         <div class="picker-main">
-          <div class="picker-crumbs">
+          <div class="picker-crumbs" ref={crumbsBox}>
             <button class="picker-up" aria-label="Up a folder" disabled={!view.canGoUp()} onClick={() => void view.up()}>
               {ICON_UP}
             </button>
