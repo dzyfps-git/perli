@@ -1531,7 +1531,7 @@ html[data-blurred] :is(.empty-float, .empty-shadow) {
   content: var(--git-letter);
   position: absolute;
   top: 50%;
-  right: 4px;
+  right: 2px;
   color: var(--git);
   font: 700 9px / 1 var(--font);
   transform: translateY(-50%);
