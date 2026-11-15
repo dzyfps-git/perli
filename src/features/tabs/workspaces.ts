@@ -33,6 +33,8 @@ export function createWorkspaces(tabs: Tabs) {
   };
   const free = (name: string) => name !== "" && !workspaces().some((one) => one.name === name);
   /** Puts the tabs on screen into `name`. */
+  // ponytail: two windows on one workspace each keep their own tabs on leaving it, and the last
+  // to leave wins. Telling each window's tabs apart would need a workspace per window.
   const keepAs = (name: string) => {
     const now = parseSession(JSON.stringify(tabs.snapshot()));
     if (now) setWorkspaces(put(workspaces(), { name, ...now }));
