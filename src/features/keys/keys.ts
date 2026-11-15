@@ -94,6 +94,10 @@ export const KEYS: KeyCommand[] = [
   { id: "linkPanes", label: "Link or unlink panes", group: "Tabs and panes", keys: [] },
   { id: "mirrorPane", label: "Same folder in other pane", group: "Tabs and panes", keys: [] },
   { id: "tabSearch", label: "Search tabs", group: "Tabs and panes", keys: ["Ctrl+Shift+L"] },
+  // Ctrl+Alt is AltGr on some keyboards, which types into a text box.
+  { id: "workspaces", label: "Switch workspace", group: "Tabs and panes", keys: ["Ctrl+Alt+W"], where: "free" },
+  { id: "nextWorkspace", label: "Next workspace", group: "Tabs and panes", keys: [] },
+  { id: "previousWorkspace", label: "Previous workspace", group: "Tabs and panes", keys: [] },
   { id: "nextTab", label: "Next tab", group: "Tabs and panes", keys: ["Ctrl+Tab", "Ctrl+PageDown"] },
   { id: "previousTab", label: "Previous tab", group: "Tabs and panes", keys: ["Ctrl+Shift+Tab", "Ctrl+PageUp"] },
   ...nine.map(
@@ -176,9 +180,102 @@ export function rebound(table: KeyCommand[], overrides: Overrides, id: string, c
   return { ...given(table, overrides, id, [combo]), [id]: [combo] };
 }
 
+/** `keys` become `id`'s own, and are taken from whatever else had them. */
+export function withKeys(table: KeyCommand[], overrides: Overrides, id: string, keys: string[]): Overrides {
+  return { ...given(table, overrides, id, keys), [id]: keys };
+}
+
+/**
+ * A scope's keys laid over the keys beneath it. A key the scope gives a command is taken from
+ * whatever had it beneath, so the nearer scope always wins.
+ */
+export function layered(table: KeyCommand[], below: Overrides, top: Overrides): Overrides {
+  const claimed = new Set(Object.values(top).flat());
+  const next: Overrides = { ...below, ...top };
+  for (const command of table) {
+    if (command.id in top || command.fixed) continue;
+    const had = keysOf(command, below);
+    if (had.some((key) => claimed.has(key))) next[command.id] = had.filter((key) => !claimed.has(key));
+  }
+  return next;
+}
+
 /** `id` gets the keys it started with back, taking them from whatever had them since. */
 export function reset(table: KeyCommand[], overrides: Overrides, id: string): Overrides {
   const { [id]: _gone, ...rest } = overrides;
   const start = table.find((command) => command.id === id)?.keys ?? [];
   return given(table, rest, id, start);
+}
+
+/** Only the overrides of commands in `table`, each a list of keys, from what was saved or read in. */
+export function cleanOverrides(table: KeyCommand[], value: unknown): Overrides {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const entries = Object.entries(value).filter(
+    ([id, keys]) => table.some((command) => command.id === id) && Array.isArray(keys) && keys.every((key) => typeof key === "string"),
+  );
+  return Object.fromEntries(entries);
+}
+
+const sameKeys = (a: string[], b: string[]) => a.length === b.length && a.every((key, index) => key === b[index]);
+
+/**
+ * What `next` changes from `below`: a scope's own overrides, laid over the keys beneath it. A key
+ * moved from another command counts too, so that command loses it in the scope alone.
+ */
+export function changedFrom(table: KeyCommand[], below: Overrides, next: Overrides): Overrides {
+  return Object.fromEntries(
+    table.flatMap((command) => {
+      const now = keysOf(command, next);
+      return sameKeys(keysOf(command, below), now) ? [] : [[command.id, now] as const];
+    }),
+  );
+}
+
+/** A folder's own keys, which hold in the folders inside it too. `path` is as it was shown. */
+export interface FolderKeys {
+  keys: Overrides;
+  below: true;
+  path: string;
+}
+
+/** Each usable entry of a saved map of scopes. */
+function cleanMap<T>(value: unknown, clean: (one: unknown) => T | undefined): Record<string, T> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return Object.fromEntries(
+    Object.entries(value).flatMap(([key, one]) => {
+      const kept = clean(one);
+      return kept === undefined ? [] : [[key, kept] as const];
+    }),
+  );
+}
+
+export const cleanFolderKeys = (table: KeyCommand[], value: unknown) =>
+  cleanMap(value, (one): FolderKeys | undefined => {
+    const entry = one as Partial<FolderKeys> | null;
+    return typeof entry?.path === "string" ? { keys: cleanOverrides(table, entry.keys), below: true, path: entry.path } : undefined;
+  });
+export const cleanWorkspaceKeys = (table: KeyCommand[], value: unknown) => cleanMap(value, (one) => cleanOverrides(table, one));
+
+/** Keys written to a file: the ones set everywhere, each workspace's and each folder's. */
+export interface KeysFile {
+  perli: "keys";
+  keys: Overrides;
+  workspaces: Record<string, Overrides>;
+  folders: Record<string, FolderKeys>;
+}
+
+/** A keys file as far as usable, or nothing when it is no keys file. */
+export function parseKeysFile(table: KeyCommand[], text: string): KeysFile | undefined {
+  try {
+    const value = JSON.parse(text);
+    if (value?.perli !== "keys") return undefined;
+    return {
+      perli: "keys",
+      keys: cleanOverrides(table, value.keys),
+      workspaces: cleanWorkspaceKeys(table, value.workspaces),
+      folders: cleanFolderKeys(table, value.folders),
+    };
+  } catch {
+    return undefined;
+  }
 }

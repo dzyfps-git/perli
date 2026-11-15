@@ -1,4 +1,4 @@
-import { dropChoices, onFileDrag, setDropTarget, shelveDrop, startJob, type DropAction } from "../../api";
+import { dropChoices, onFileDrag, setDropTarget, shelveDrop, spaceDown, startJob, type DropAction } from "../../api";
 import { setDragging, SHELF, shelve } from "../reach/reach";
 import type { MenuItem } from "../../ui/Menu";
 import { iconKindOf } from "../filelist/fileKinds";
@@ -11,6 +11,8 @@ interface Spot {
   element: HTMLElement;
   folder: string;
   view?: FolderView;
+  /** The pane a place inside it, such as a folder in column view, opens in when a drag rests there. */
+  pane?: FolderView;
 }
 
 const OVER = "data-drop-over";
@@ -22,6 +24,17 @@ const LAND_MS = 220;
 /** How long a drag rests on a folder row or a tab before it opens. */
 export const OPEN_MS = 700;
 const OPENING = "data-drop-opening";
+/**
+ * What a drag resting on it opens: folder rows, tabs, and the places that stand for a folder.
+ * Crumbs in the path bar wait for the user's word.
+ */
+const SPRINGS = ".file-row, .tab:not(.tab-active), .place, .bookmark, .home-page [data-drop], .folder-column-list [data-drop]";
+/** How often Space is asked about while a drag rests on something that opens. */
+const SPACE_POLL_MS = 60;
+/** How near an edge, in page pixels, a drag starts to scroll what it is over. */
+const EDGE = 48;
+/** The most a list scrolls in a frame, right at its edge. */
+const MOST_STEP = 22;
 const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
 
 /**
@@ -105,6 +118,47 @@ function createDeck() {
   return { show, move, hide, effect };
 }
 
+/** Scrolls the list, strip or panel a drag is over while the pointer is near its edge, faster nearer. */
+function createEdgeScroll() {
+  let at: { x: number; y: number } | undefined;
+  let frame = 0;
+  const speed = (into: number) => Math.round(MOST_STEP * Math.max(0, Math.min(1, (EDGE - into) / EDGE)) ** 2);
+  const scrolls = (overflow: string, size: number, room: number) => /auto|scroll/.test(overflow) && size > room + 1;
+
+  function step() {
+    frame = 0;
+    if (!at) return;
+    // The nearest thing that scrolls, from what is under the pointer outward.
+    for (let box = document.elementFromPoint(at.x, at.y); box; box = box.parentElement) {
+      const style = getComputedStyle(box);
+      const down = scrolls(style.overflowY, box.scrollHeight, box.clientHeight);
+      const across = scrolls(style.overflowX, box.scrollWidth, box.clientWidth);
+      if (!down && !across) continue;
+      const edge = box.getBoundingClientRect();
+      const dy = down ? speed(edge.bottom - at.y) - speed(at.y - edge.top) : 0;
+      const dx = across ? speed(edge.right - at.x) - speed(at.x - edge.left) : 0;
+      const before = [box.scrollLeft, box.scrollTop];
+      box.scrollBy(dx, dy);
+      // It goes on by itself, since a pointer resting by the edge sends nothing new.
+      if (box.scrollLeft !== before[0] || box.scrollTop !== before[1]) frame = requestAnimationFrame(step);
+      return;
+    }
+  }
+
+  return {
+    /** `x` and `y` are in the page's own units. */
+    aim(x: number, y: number) {
+      at = { x, y };
+      if (!frame) frame = requestAnimationFrame(step);
+    },
+    stop() {
+      at = undefined;
+      cancelAnimationFrame(frame);
+      frame = 0;
+    },
+  };
+}
+
 const EFFECT_LABELS: Record<DropAction | "bin", string> = {
   move: "Move",
   copy: "Copy",
@@ -122,11 +176,11 @@ const ACTION_LABELS: Record<DropAction, string> = {
 function spotAt(x: number, y: number, views: FolderView[]): Spot | undefined {
   const scale = window.devicePixelRatio;
   const under = document.elementFromPoint(x / scale, y / scale);
-  const place = under?.closest<HTMLElement>("[data-drop]");
-  if (place) return { element: place, folder: place.dataset.drop! };
-
   const pane = under?.closest<HTMLElement>(".pane");
   const view = views.find((item) => String(item.id) === pane?.dataset.view);
+  const place = under?.closest<HTMLElement>("[data-drop]");
+  if (place) return { element: place, folder: place.dataset.drop!, pane: pane?.contains(place) ? view : undefined };
+
   const path = view?.folder()?.path;
   // A search's rows are from all over, so nothing there says where a drop would land.
   if (!pane || !view || !path || view.query() || view.isZip()) return undefined;
@@ -147,10 +201,15 @@ export function followFileDrag(
   showMenu: (x: number, y: number, items: MenuItem[]) => void,
   /** Files landed on `place`, one of Perli's own that is no folder. Nothing moved. */
   noted: (place: string, paths: string[]) => void,
+  /** A drag rested on a place that stands for `folder`, such as one in the sidebar. */
+  openPlace: (folder: string) => void,
 ) {
   let shown: Spot | undefined;
-  let opening: { element: HTMLElement; folder: string; timer: number } | undefined;
+  let opening: { element: HTMLElement; folder: string; timer: number; poll: number } | undefined;
+  /** Space opens at once, and must be let go before it opens the next one. */
+  let spaceHeld = false;
   const deck = createDeck();
+  const edges = createEdgeScroll();
 
   const run = (spot: Spot, action?: DropAction) =>
     startJob({ kind: "drop", folder: spot.folder, action }, spot.view?.id).catch(report);
@@ -176,26 +235,41 @@ export function followFileDrag(
     rest(spot);
   }
 
-  /** A drag that rests on a folder row opens it, and on a tab shows that tab, as Explorer does. */
+  function stopOpening() {
+    if (!opening) return;
+    clearTimeout(opening.timer);
+    clearInterval(opening.poll);
+    opening.element.removeAttribute(OPENING);
+    opening = undefined;
+  }
+
+  /**
+   * A drag that rests on a folder row or a place opens it, and on a tab shows that tab, as
+   * Explorer does. A ring fills while it waits, and Space opens it at once.
+   */
   function rest(spot: Spot | undefined) {
     if (opening && opening.element === spot?.element && opening.folder === spot.folder) return;
-    if (opening) {
-      clearTimeout(opening.timer);
-      opening.element.removeAttribute(OPENING);
-      opening = undefined;
-    }
+    stopOpening();
     const element = spot?.element;
-    const row = element?.matches(".file-row") && spot?.view;
-    const tab = element?.matches(".tab:not(.tab-active)");
-    if (!element || !(row || tab)) return;
+    if (!spot || !element || spot.folder.startsWith("perli:") || !element.matches(SPRINGS)) return;
+    if (element.matches(".file-row") && !spot.view) return;
+    const open = () => {
+      stopOpening();
+      if (element.matches(".tab")) element.click();
+      else if (spot.view && element.matches(".file-row")) spot.view.open(spot.folder);
+      else if (spot.pane) spot.pane.open(spot.folder);
+      else openPlace(spot.folder);
+    };
     element.setAttribute(OPENING, "");
-    const timer = window.setTimeout(() => {
-      element.removeAttribute(OPENING);
-      opening = undefined;
-      if (tab) element.click();
-      else if (spot?.view) spot.view.open(spot.folder);
-    }, OPEN_MS);
-    opening = { element, folder: spot.folder, timer };
+    const poll = window.setInterval(() => {
+      spaceDown()
+        .then((down) => {
+          if (down && !spaceHeld && opening?.element === element) open();
+          spaceHeld = down;
+        })
+        .catch(() => undefined);
+    }, SPACE_POLL_MS);
+    opening = { element, folder: spot.folder, timer: window.setTimeout(open, OPEN_MS), poll };
   }
 
   /** The shelf and its like keep the files where they are, and only remember them. */
@@ -211,11 +285,14 @@ export function followFileDrag(
     if (event.kind === "enter") return deck.show(event.count, event.name, event.folder);
     if (event.kind === "over") {
       deck.move(event.x / window.devicePixelRatio, event.y / window.devicePixelRatio);
+      edges.aim(event.x / window.devicePixelRatio, event.y / window.devicePixelRatio);
       const spot = spotAt(event.x, event.y, views());
       aim(spot);
       return deck.effect(event.effect, spot?.folder);
     }
     aim(undefined);
+    edges.stop();
+    spaceHeld = false;
     deck.hide(event.kind === "drop");
     if (event.kind === "leave") return;
     const spot = landed;

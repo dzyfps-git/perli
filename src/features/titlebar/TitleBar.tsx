@@ -19,6 +19,7 @@ const ICON_SETTINGS = "";
 
 const ICON_PIN = "\uE718";
 const ICON_TAB_LIST = "\uE721";
+const ICON_WORKSPACE = "\uE8A9";
 
 /** Resting on a tab this long shows a look at its folder. */
 const PEEK_MS = 600;
@@ -49,7 +50,15 @@ function tabTitle(tab: Tab) {
   return titles.join(" | ");
 }
 
-export function TitleBar(props: { tabs: Tabs; onNewTab: () => void; onTabSearch: () => void; settings?: SettingsTab }) {
+export function TitleBar(props: {
+  tabs: Tabs;
+  onNewTab: () => void;
+  onTabSearch: () => void;
+  /** The workspace on screen, if the tabs are one. */
+  workspace?: string;
+  onWorkspaces: () => void;
+  settings?: SettingsTab;
+}) {
   const appWindow = getCurrentWindow();
   const [maximized, setMaximized] = createSignal(false);
   const [menu, setMenu] = createSignal<{ x: number; y: number; tab: Tab }>();
@@ -158,6 +167,7 @@ export function TitleBar(props: { tabs: Tabs; onNewTab: () => void; onTabSearch:
         items: closed.map((paths, back) => ({ label: closedTitle(paths), action: () => tabs.reopenClosed(back) })),
       },
       { label: "Search tabs", action: props.onTabSearch, disabled: alone },
+      { label: "Workspaces…", action: props.onWorkspaces },
       { label: "Duplicate", action: () => tabs.duplicate(tab) },
       { label: tab.pinned() ? "Unpin tab" : "Pin tab", action: () => tabs.togglePinned(tab) },
       { label: "Move to new window", action: () => tabs.toWindow(tab).catch(console.error), disabled: alone || !path },
@@ -178,6 +188,22 @@ export function TitleBar(props: { tabs: Tabs; onNewTab: () => void; onTabSearch:
   return (
     <header class="titlebar" data-tauri-drag-region>
       <div class="tab-strip">
+        <Show when={props.workspace} keyed>
+          {(name) => (
+            <button
+              class="workspace-chip"
+              aria-label={`Workspace ${name}`}
+              data-tip="Switch workspace"
+              aria-keyshortcuts="Control+Alt+W"
+              onClick={props.onWorkspaces}
+            >
+              <span class="workspace-glyph" aria-hidden="true">
+                {ICON_WORKSPACE}
+              </span>
+              <span class="workspace-name">{name}</span>
+            </button>
+          )}
+        </Show>
         <div ref={strip} class="tabs" role="tablist" aria-label="Open folders" onWheel={onWheel} onScroll={markEdges}>
           <For each={props.tabs.tabs()}>
             {(tab) => (

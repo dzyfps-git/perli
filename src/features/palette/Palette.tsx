@@ -44,8 +44,12 @@ export function Palette(props: {
   focusList: () => void;
   /** Commands made from what is typed, like "sort by size", which come first. */
   words?: (text: string) => Command[];
-  /** Asks for one kind of thing, such as a tab, instead of any command. Nothing run is kept as recent. */
-  scope?: { label: string; placeholder: string };
+  /**
+   * Asks for one kind of thing, such as a tab, instead of any command. Nothing run is kept as
+   * recent, and what is typed finds the things before `words` makes new ones of it. `empty` says
+   * what to do when there is nothing to pick.
+   */
+  scope?: { label: string; placeholder: string; empty?: string };
 }) {
   const [text, setText] = createSignal("");
   const [shown, setShown] = createSignal<Command[]>([]);
@@ -77,7 +81,10 @@ export function Palette(props: {
     const said = props.words?.(query) ?? [];
     const names = commands.map((command) => command.label);
     rankNames(query, names)
-      .then((order) => show([...said, ...order.map((index) => commands[index])]))
+      .then((order) => {
+        const found = order.map((index) => commands[index]);
+        show(props.scope ? [...found, ...said] : [...said, ...found]);
+      })
       .catch(console.error);
   });
 
@@ -177,7 +184,7 @@ export function Palette(props: {
       />
       <ul ref={list} id="palette-list" class="palette-list" role="listbox" aria-label="Commands">
         <li ref={marker} class="palette-marker" role="presentation" hidden />
-        <For each={shown()} fallback={<li class="palette-empty">No matches.</li>}>
+        <For each={shown()} fallback={<li class="palette-empty">{(!text() && props.scope?.empty) || "No matches."}</li>}>
           {(command, index) => (
             <>
             <Show when={heading(index())}>

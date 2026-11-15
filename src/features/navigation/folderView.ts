@@ -666,6 +666,8 @@ export function createFolderView(id: number, saved?: SavedPane) {
     },
     /** All a pane is, for a tab moving to another window: a search leaves its folder plain. */
     handover(): SavedPane | undefined {
+      // A pane not looked at yet holds what it was handed, selection and scroll too.
+      if (saved && !savedOpened) return saved;
       const shown = path();
       if (!shown) return undefined;
       const left = query() ? undefined : (list?.left() ?? kept.get(shown.toLowerCase()));

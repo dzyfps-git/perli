@@ -407,3 +407,54 @@ html[data-blurred] .tab-active::before {
     animation: none;
   }
 }
+
+/* The workspace on screen, ahead of its tabs. A new name springs in. */
+.workspace-chip {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+  align-self: center;
+  max-width: 160px;
+  height: 26px;
+  margin: 0 var(--space-1) 0 var(--space-2);
+  padding: 0 10px 0 8px;
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border));
+  border-radius: 13px;
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  animation: workspace-in var(--motion-spring);
+  transition: background var(--motion), border-color var(--motion);
+}
+
+.workspace-chip:hover {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+.workspace-glyph {
+  color: var(--accent);
+  font-family: var(--font-icons);
+  font-size: 11px;
+}
+
+.workspace-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@keyframes workspace-in {
+  from {
+    opacity: 0;
+    scale: 0.8;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .workspace-chip {
+    animation: none;
+  }
+}

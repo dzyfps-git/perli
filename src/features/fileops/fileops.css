@@ -696,15 +696,54 @@
   content: "\E74D";
 }
 
-/* A folder row or tab that the drag rests on fills with the accent, and opens once full. */
+/* A folder row, tab or place that the drag rests on tints with the accent while a small ring
+   at its end fills, and opens once the ring is full. Space opens it at once. */
+@property --drop-fill {
+  syntax: "<percentage>";
+  inherits: false;
+  initial-value: 0%;
+}
+
 [data-drop-opening] {
   animation: drop-opening 700ms ease-in forwards;
+}
+
+.place[data-drop-opening],
+.bookmark[data-drop-opening],
+.home-page [data-drop-opening],
+.folder-column-list [data-drop-opening],
+.tab[data-drop-opening] {
+  position: relative;
+}
+
+.file-row[data-drop-opening][data-drop-opening]::after,
+[data-drop-opening]::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  right: var(--space-2);
+  left: auto;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  color: transparent;
+  font: inherit;
+  background: conic-gradient(var(--accent) var(--drop-fill), color-mix(in srgb, var(--accent) 22%, transparent) 0);
+  mask: radial-gradient(circle, transparent 4px, #000 4.5px);
+  transform: translateY(-50%);
+  animation: drop-fill 700ms linear forwards;
+  pointer-events: none;
 }
 
 @keyframes drop-opening {
   to {
     background-color: color-mix(in srgb, var(--accent) 22%, transparent);
-    box-shadow: 0 0 14px color-mix(in srgb, var(--accent) 35%, transparent);
+  }
+}
+
+@keyframes drop-fill {
+  to {
+    --drop-fill: 100%;
   }
 }
 

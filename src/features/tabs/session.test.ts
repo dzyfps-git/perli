@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { parseMoved, parseSession } from "./session.ts";
+import { parseMoved, parseSession, parseWorkspaces, put } from "./session.ts";
 
 const pane = { path: "C:\\a", sort: { key: "size", descending: true }, layout: "grid" };
 
@@ -101,4 +101,31 @@ test("parseMoved drops a place that makes no sense, and a tab with no folder", (
   const moved = parseMoved(JSON.stringify({ tab: { panes: [{ ...pane, scrollTop: -5 }] }, place: { x: 1, y: 2, width: 0, height: 9 } }));
   assert.deepEqual(moved, { tab: { panes: [pane], active: 0, swapped: false } });
   for (const text of [null, "", "nope", "{}", '{"tab":{"panes":[{"path":4}]}}']) assert.equal(parseMoved(text), undefined);
+});
+
+test("parseWorkspaces keeps named sets of usable tabs, each name once", () => {
+  const tab = { panes: [pane], active: 0, swapped: false };
+  const list = parseWorkspaces([
+    { name: " Work ", tabs: [tab], active: 0 },
+    { name: "Work", tabs: [tab, tab], active: 1 },
+    { name: "  ", tabs: [tab] },
+    { name: "Empty", tabs: [{ panes: [] }] },
+    { name: "Broken" },
+    null,
+    { name: 4, tabs: [tab] },
+    { name: "Play", tabs: [tab, tab], active: 9 },
+  ]);
+  assert.deepEqual(list, [
+    { name: "Work", tabs: [tab], active: 0 },
+    { name: "Play", tabs: [tab, tab], active: 0 },
+  ]);
+  for (const value of [null, "x", {}, 3]) assert.deepEqual(parseWorkspaces(value), []);
+});
+
+test("put replaces the workspace of the same name, or adds it at the end", () => {
+  const a = { name: "a", tabs: [], active: 0 };
+  const b = { name: "b", tabs: [], active: 0 };
+  const newA = { name: "a", tabs: [], active: 1 };
+  assert.deepEqual(put([a, b], newA), [newA, b]);
+  assert.deepEqual(put([a], b), [a, b]);
 });

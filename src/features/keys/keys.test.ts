@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { bound, comboOf, KEYS, keysOf, rebound, reset, taken } from "./keys.ts";
+import { bound, changedFrom, cleanOverrides, comboOf, KEYS, keysOf, layered, parseKeysFile, rebound, reset, taken, withKeys } from "./keys.ts";
 
 const press = (key: string, code = "", held: Partial<Record<"ctrlKey" | "altKey" | "shiftKey", boolean>> = {}) =>
   comboOf({ key, code, ctrlKey: false, altKey: false, shiftKey: false, ...held });
@@ -67,4 +67,54 @@ test("keys that move through the list stay with it", () => {
     assert.equal(bound(KEYS, { delete: [combo] }).get(combo), undefined, combo);
   }
   for (const combo of ["Alt+Left", "Ctrl+PageDown", "Ctrl+D"]) assert.notEqual(taken(KEYS, combo)?.id, "move", combo);
+});
+
+test("saved or read in keys keep only known commands with lists of keys", () => {
+  const value = { copy: ["Ctrl+Q"], nope: ["Ctrl+1"], cut: "Ctrl+X", paste: [3], split: [] };
+  assert.deepEqual(cleanOverrides(KEYS, value), { copy: ["Ctrl+Q"], split: [] });
+  for (const bad of [null, "x", [["copy", ["Ctrl+Q"]]], 4]) assert.deepEqual(cleanOverrides(KEYS, bad), {});
+});
+
+test("a scope keeps only what it changes, a key moved from another command too", () => {
+  const below = { copy: ["Ctrl+Q"] };
+  const next = rebound(KEYS, below, "cut", "Ctrl+Q");
+  assert.deepEqual(changedFrom(KEYS, below, next), { copy: [], cut: ["Ctrl+Q"] });
+  // The same keys as beneath are nothing of the scope's own.
+  assert.deepEqual(changedFrom(KEYS, below, { ...below, paste: ["Ctrl+V"] }), {});
+  // Laid over what is beneath, the scope gives the keys it was made from.
+  const layered = { ...below, ...changedFrom(KEYS, below, next) };
+  assert.equal(bound(KEYS, layered).get("Ctrl+Q")?.id, "cut");
+});
+
+test("a keys file comes back as written, keeping only what is usable", () => {
+  const file = {
+    perli: "keys",
+    keys: { copy: ["Ctrl+Q"] },
+    workspaces: { Work: { cut: ["Ctrl+J"] }, Bad: "x" },
+    folders: { "c:\\code": { keys: { paste: ["Ctrl+B"], nope: ["F2"] }, below: true, path: "C:\\Code" }, "c:\\x": { keys: {} } },
+  };
+  assert.deepEqual(parseKeysFile(KEYS, JSON.stringify(file)), {
+    perli: "keys",
+    keys: { copy: ["Ctrl+Q"] },
+    workspaces: { Work: { cut: ["Ctrl+J"] }, Bad: {} },
+    folders: { "c:\\code": { keys: { paste: ["Ctrl+B"] }, below: true, path: "C:\\Code" } },
+  });
+  for (const text of ["", "nope", "{}", '{"perli":"palette"}']) assert.equal(parseKeysFile(KEYS, text), undefined);
+});
+
+test("a nearer scope's key wins over the same key set beneath it", () => {
+  // The workspace gives Paste Ctrl+Q, then Copy gets Ctrl+Q everywhere.
+  const everywhere = rebound(KEYS, {}, "copy", "Ctrl+Q");
+  const workspace = { paste: ["Ctrl+Q"] };
+  const keys = layered(KEYS, everywhere, workspace);
+  assert.equal(bound(KEYS, keys).get("Ctrl+Q")?.id, "paste");
+  assert.deepEqual(keysOf(KEYS.find((one) => one.id === "copy")!, keys), []);
+});
+
+test("a key given back in a scope is taken from what had it there", () => {
+  // The workspace gave Cut Ctrl+C, so Copy had none there. Copy gets its keys back.
+  const workspace = layered(KEYS, {}, { cut: ["Ctrl+C"], copy: [] });
+  const next = withKeys(KEYS, workspace, "copy", ["Ctrl+C"]);
+  const of = (id: string) => keysOf(KEYS.find((one) => one.id === id)!, next);
+  assert.deepEqual([of("copy"), of("cut")], [["Ctrl+C"], []]);
 });
