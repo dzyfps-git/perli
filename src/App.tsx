@@ -5,7 +5,6 @@ import {
   cancelJobsAndClose,
   clipboardCanPaste,
   clipboardHasFiles,
-  pickFolder,
   setJobOptions,
   takeSweepReport,
   clipboardText,
@@ -216,6 +215,7 @@ import { refreshTags, TAG_DROP, tagQuery, tags as allTags } from "./features/tag
 import { TitleBar } from "./features/titlebar/TitleBar";
 import { Menu, type MenuItem } from "./ui/Menu";
 import { NameSheet, type NameAsk } from "./ui/NameSheet";
+import { dropOnPicker, pick, PICKER_PLACE, PickerHost, pickerViews, type PickerPanes } from "./features/dialogs/Picker";
 import { renamedSmart, withoutSmart, withSmart, type SmartFolder } from "./features/smart/smartList";
 import { iconFor } from "./ui/menuLook";
 import { Tooltip } from "./ui/Tooltip";
@@ -494,7 +494,9 @@ export function App() {
   createEffect(
     on([tabs.active, () => tabs.activeView().arrival()], () => setSettingsShown(false), { defer: true }),
   );
-  const jobs = createJobs(tabs.allViews, {
+  /** The panes and the picker's list, which jobs and outside changes reload alike. */
+  const everyView = () => [...tabs.allViews(), ...pickerViews()];
+  const jobs = createJobs(everyView, {
     open: (folder) => void tabs.activeView().open(folder),
     // A drive Windows can eject is one the sidebar shows with its eject button.
     ejectRoot: (path) =>
@@ -508,6 +510,12 @@ export function App() {
     pickApp: setPickingApp,
   });
   const refreshPlaces = () => listPlaces().then(setPlaces).catch(console.error);
+  /** The picker offers the folders on show first. The Recycle Bin and archives are no place to save. */
+  const pickerPanes = (): PickerPanes => {
+    const real = (view: FolderView | undefined) => (view && !view.isBin() && !view.isZip() ? view.folder()?.path : undefined);
+    const here = tabs.activeView();
+    return { here: real(here), there: real(tabs.active().panes().find((other) => other !== here)), home: homePath };
+  };
   // A run started on one folder is a detour, so it must not replace the saved tabs.
   const [keepSession, setKeepSession] = createSignal(false);
   let saveTimer: number | undefined;
@@ -562,11 +570,11 @@ export function App() {
     void tabs.active().active().open(folder),
   );
   // Other apps and Windows' own commands change folders without Perli running a job.
-  const folderListener = onFolderChanged((id) => tabs.allViews().find((view) => view.id === id)?.reload());
+  const folderListener = onFolderChanged((id) => everyView().find((view) => view.id === id)?.reload());
   const searchListener = onSearchGrew((id, walk) =>
     tabs.allViews().find((view) => view.id === id)?.searchGrew(walk),
   );
-  const sizesListener = onSizesGrew((id) => tabs.allViews().find((view) => view.id === id)?.sizesGrew());
+  const sizesListener = onSizesGrew((id) => everyView().find((view) => view.id === id)?.sizesGrew());
 
   let windowTimer: number | undefined;
   let windowWaiting: string | undefined;
@@ -754,7 +762,8 @@ export function App() {
 
   /** Files were dropped on a place of Perli's own, which only takes note of them. */
   async function dropNoted(place: string, paths: string[]) {
-    if (place === BOOKMARKS) {
+    if (place === PICKER_PLACE) dropOnPicker(paths);
+    else if (place === BOOKMARKS) {
       const files = await Promise.all(paths.map(isFile));
       addBookmarks(paths.filter((_, at) => !files[at]));
     } else if (place.startsWith(TAG_DROP)) {
@@ -1825,8 +1834,8 @@ export function App() {
       return [{ label: baseName(path) || path, divider, action: () => actions.restoreTo(view, path) }];
     };
     const choose = () =>
-      pickFolder()
-        .then((folder) => folder && actions.restoreTo(view, folder))
+      pick({ mode: "folder", title: "Restore to", purpose: "folders" })
+        .then((picked) => picked && actions.restoreTo(view, picked.path))
         .catch(jobs.report);
     return [
       { label: "Choose a folder…", action: choose },
@@ -2524,6 +2533,7 @@ export function App() {
       <Show when={naming()} keyed>
         {(ask) => <NameSheet ask={ask} onClose={() => setNaming(undefined)} />}
       </Show>
+      <PickerHost panes={pickerPanes} report={jobs.report} />
       <Show when={namingTag()} keyed>
         {(view) => (
           <NewTag

@@ -6,6 +6,7 @@ import {
   openFolder,
   reloadView,
   scanSizes,
+  type Filter,
   type GroupBy,
   type Opened,
   type Order,
@@ -130,9 +131,10 @@ export interface Kept {
 
 /**
  * One browsing location: its open folder, history and path bar trail. A `saved` pane waits
- * for `openSaved`, so tabs restored behind the active one cost nothing at startup.
+ * for `openSaved`, so tabs restored behind the active one cost nothing at startup. A `fixed`
+ * filter, such as a picker's, holds for every folder the view goes to.
  */
-export function createFolderView(id: number, saved?: SavedPane) {
+export function createFolderView(id: number, saved?: SavedPane, fixed?: Filter) {
   const [folder, setFolder] = createSignal<ShownFolder>();
   /** Changes when the list should start over. A reload keeps it, so nothing blinks. */
   const [arrival, setArrival] = createSignal(0);
@@ -223,7 +225,7 @@ export function createFolderView(id: number, saved?: SavedPane) {
     showHidden: showHidden(),
     showSystem: showSystem(),
     // Rows of a search carry no tags, so a tag would leave none of them.
-    filter: { ...toFilter(filterForm()), tags: query() ? [] : filterForm().tags },
+    filter: fixed ?? { ...toFilter(filterForm()), tags: query() ? [] : filterForm().tags },
     // Grouped rows don't nest, so the folders opened in place close.
     expanded: query() || isBin(target) || shownGroupBy() !== "none" || !nests() ? [] : expanded(),
     ...grouped(shownGroupBy(), folded()),
@@ -234,7 +236,7 @@ export function createFolderView(id: number, saved?: SavedPane) {
     group: isBin(target) ? "mixed" : grouping(),
     showHidden: showHidden(),
     showSystem: showSystem(),
-    filter: toFilter(form),
+    filter: fixed ?? toFilter(form),
     expanded: isBin(target) || by !== "none" || !nests() ? [] : samePath(path(), target) ? expanded() : (openedIn.get(target.toLowerCase()) ?? []),
     ...grouped(by, samePath(path(), target) ? folded() : []),
   });

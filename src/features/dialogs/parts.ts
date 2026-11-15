@@ -55,3 +55,57 @@ export function matching<T extends { name: string }>(apps: T[], query: string) {
   const words = query.toLowerCase().split(/\s+/).filter(Boolean);
   return apps.filter((app) => words.every((word) => app.name.toLowerCase().includes(word)));
 }
+
+/* The picker: Perli's own way to open and save files and choose folders. */
+
+const two = (value: number) => String(value).padStart(2, "0");
+
+/** `name` with the day before its extension, in place of a day it had: `Perli keys 2026-11-15.json`. */
+export function datedName(name: string, now = new Date()) {
+  const dot = name.lastIndexOf(".");
+  const stem = (dot > 0 ? name.slice(0, dot) : name).replace(/\s+\d{4}-\d{2}-\d{2}$/, "");
+  const day = `${now.getFullYear()}-${two(now.getMonth() + 1)}-${two(now.getDate())}`;
+  return `${stem} ${day}${dot > 0 ? name.slice(dot) : ""}`;
+}
+
+/** Where the name stops and its extension starts, to select only the name. */
+export function stemEnd(name: string) {
+  const dot = name.lastIndexOf(".");
+  return dot > 0 ? dot : name.length;
+}
+
+/** `name` ending in `.extension`, which is added when it is missing. */
+export const withExtension = (name: string, extension: string) =>
+  name.toLowerCase().endsWith(`.${extension.toLowerCase()}`) ? name : `${name}.${extension}`;
+
+/** Why Windows would refuse `name` for a file, or nothing when it would take it. */
+export function nameProblem(name: string) {
+  if (!name.trim()) return "Type a name";
+  // eslint-disable-next-line no-control-regex
+  if (/[<>:"/\\|?*\u0000-\u001f]/.test(name)) return 'A name can\'t hold < > : " / \\ | ? or *';
+  if (/[. ]$/.test(name)) return "A name can't end with a dot or a space";
+  if (/^(con|prn|aux|nul|com\d|lpt\d)(\..*)?$/i.test(name)) return "Windows keeps that name for itself";
+  return undefined;
+}
+
+/** True when what was typed is a place to go, not only a name. */
+export const isTypedPath = (text: string) => /[\\/]|^[a-z]:/i.test(text.trim());
+
+/** Which way the list slides, going from `from` to `to`: into a folder, back out of one, or neither. */
+export function slideOf(from: string | undefined, to: string): "in" | "out" | undefined {
+  if (!from) return undefined;
+  const inside = (path: string, folder: string) => {
+    const below = folder.toLowerCase().endsWith("\\") ? folder.toLowerCase() : `${folder.toLowerCase()}\\`;
+    return path.toLowerCase().startsWith(below) && path.length > below.length;
+  };
+  if (inside(to, from)) return "in";
+  if (inside(from, to)) return "out";
+  return undefined;
+}
+
+/** True when `name`'s extension is one of `types`, lowercase with no dots. No types takes any. */
+export function fitsTypes(name: string, types: string[] | undefined) {
+  if (!types?.length) return true;
+  const dot = name.lastIndexOf(".");
+  return dot > 0 && types.includes(name.slice(dot + 1).toLowerCase());
+}

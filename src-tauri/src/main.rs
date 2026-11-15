@@ -16,6 +16,7 @@ mod network;
 mod ops;
 mod packs;
 mod parts;
+mod picked;
 mod picture;
 mod places;
 mod inside;
@@ -1240,52 +1241,16 @@ async fn open_paths_with_exe(paths: Vec<PathBuf>, exe: PathBuf) -> Result<(), St
     off_main(move || menus::open_with_exe(paths, exe)).await
 }
 
+/// Saves settings, a palette, an icon theme or keys as the .json file picked in Perli's picker.
 #[tauri::command]
-async fn pick_folder(app: AppHandle) -> Result<Option<String>, String> {
-    let main = jobs::owner(&app);
-    off_main(move || menus::pick_folder(main)).await
+async fn write_settings_file(path: PathBuf, text: String, replace: bool) -> Result<(), String> {
+    blocking(move || picked::write(&path, &text, replace)).await
 }
 
-/// Windows' file picker for a cover of `folder`. Nothing when the user backs out.
+/// The text of a .json file of settings picked in Perli's picker.
 #[tauri::command]
-async fn pick_picture(folder: PathBuf, app: AppHandle) -> Result<Option<String>, String> {
-    let main = jobs::owner(&app);
-    off_main(move || menus::pick_picture(main, folder)).await
-}
-
-/// Windows' file picker for an app. Nothing when the user backs out.
-#[tauri::command]
-async fn browse_app(app: AppHandle) -> Result<Option<String>, String> {
-    let main = jobs::owner(&app);
-    off_main(move || menus::browse_app(main)).await
-}
-
-/// The most a file of settings may hold. A real one is a few thousand bytes.
-const MOST_SETTINGS_BYTES: u64 = 4 * 1024 * 1024;
-
-/// Saves Perli's settings to a file the user picks. False when they back out. The page never
-/// names the file, so it can write nowhere else.
-#[tauri::command]
-async fn export_settings(text: String, name: Option<String>, app: AppHandle) -> Result<bool, String> {
-    let main = jobs::owner(&app);
-    let name = name.unwrap_or_else(|| "Perli settings.json".to_string());
-    off_main(move || menus::pick_settings_file(main, Some(name))).await?.map_or(Ok(false), |path| {
-        std::fs::write(path, text).map(|()| true).map_err(|error| error.to_string())
-    })
-}
-
-/// The text of a file of settings the user picks, or nothing when they back out.
-#[tauri::command]
-async fn import_settings(app: AppHandle) -> Result<Option<String>, String> {
-    let main = jobs::owner(&app);
-    let Some(path) = off_main(move || menus::pick_settings_file(main, None)).await? else {
-        return Ok(None);
-    };
-    let size = std::fs::metadata(&path).map_err(|error| error.to_string())?.len();
-    if size > MOST_SETTINGS_BYTES {
-        return Err("This file is too big to be Perli settings".to_string());
-    }
-    std::fs::read_to_string(path).map(Some).map_err(|error| error.to_string())
+async fn read_settings_file(path: PathBuf) -> Result<String, String> {
+    blocking(move || picked::read(&path)).await
 }
 
 /// Windows' own window for picking an app, which is the only thing allowed to set a default.
@@ -2507,14 +2472,11 @@ fn main() {
             apps_for_paths,
             open_paths_with,
             open_paths_with_exe,
-            browse_app,
-            pick_folder,
-            pick_picture,
             eject_drive,
             open_device,
             unlock_drive,
-            export_settings,
-            import_settings,
+            write_settings_file,
+            read_settings_file,
             choose_app_for,
             open_with,
             choose_app,

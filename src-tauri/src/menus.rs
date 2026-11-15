@@ -12,26 +12,26 @@ use std::thread;
 use serde::Serialize;
 use windows::core::{s, w, Error, Interface, Result, HSTRING, PCSTR, PCWSTR, PSTR, PWSTR};
 use windows::Win32::Foundation::{
-    ERROR_CANCELLED, E_FAIL, HWND, LPARAM, LRESULT, POINT, POINTL, S_OK, WPARAM,
+    E_FAIL, HWND, LPARAM, LRESULT, POINT, POINTL, S_OK, WPARAM,
 };
 use windows::Win32::Graphics::Gdi::ClientToScreen;
-use windows::Win32::System::Com::{CoCreateInstance, CoTaskMemFree, IDataObject, CLSCTX_INPROC_SERVER};
+use windows::Win32::System::Com::{CoTaskMemFree, IDataObject};
 use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryW};
 use windows::Win32::System::Ole::{
     IDropTarget, OleInitialize, OleUninitialize, DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_LINK,
     DROPEFFECT_NONE,
 };
 use windows::Win32::System::SystemServices::MK_LBUTTON;
-use windows::Win32::UI::Shell::Common::{COMDLG_FILTERSPEC, ITEMIDLIST};
+use windows::Win32::UI::Shell::Common::ITEMIDLIST;
 use windows::Win32::UI::Shell::{
-    FileOpenDialog, FOLDERID_SendTo, IAssocHandler, IContextMenu, IContextMenu2, IContextMenu3,
-    FileSaveDialog, IFileDialog, IFileOpenDialog, IShellFolder, IShellItem, IShellItemArray, ILFree, SHAssocEnumHandlers,
-    SHCreateItemFromParsingName, SHCreateShellItemArrayFromIDLists, SHGetIDListFromObject, SHOpenWithDialog, ShellExecuteW,
-    ASSOC_FILTER, ASSOC_FILTER_NONE, ASSOC_FILTER_RECOMMENDED, SIGDN_FILESYSPATH,
+    FOLDERID_SendTo, IAssocHandler, IContextMenu, IContextMenu2, IContextMenu3,
+    IShellFolder, IShellItem, IShellItemArray, ILFree, SHAssocEnumHandlers,
+    SHCreateShellItemArrayFromIDLists, SHGetIDListFromObject, SHOpenWithDialog, ShellExecuteW,
+    ASSOC_FILTER, ASSOC_FILTER_NONE, ASSOC_FILTER_RECOMMENDED,
     BHID_DataObject, BHID_SFObject, BHID_SFUIObject, CMF_CANRENAME, CMF_EXPLORE, CMF_NORMAL,
     CMINVOKECOMMANDINFO,
     CMINVOKECOMMANDINFOEX, CMIC_MASK_PTINVOKE, GCS_VERBW, OAIF_ALLOW_REGISTRATION, OAIF_EXEC,
-    OPENASINFO, SEE_MASK_UNICODE, FOS_PICKFOLDERS,
+    OPENASINFO, SEE_MASK_UNICODE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DispatchMessageW, GetMenuItemCount,
@@ -384,74 +384,6 @@ pub fn open_with_exe(paths: Vec<PathBuf>, exe: PathBuf) -> Result<()> {
             }
         }
         Ok(())
-    })
-}
-
-/// Windows' file picker, for an app that no list has. Nothing when the user backs out.
-pub fn browse_app(main: isize) -> Result<Option<String>> {
-    on_worker(move |_| unsafe {
-        let dialog: IFileOpenDialog = CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER)?;
-        dialog.SetFileTypes(&[COMDLG_FILTERSPEC { pszName: w!("Apps"), pszSpec: w!("*.exe") }])?;
-        dialog.SetTitle(w!("Choose an app"))?;
-        match dialog.Show(Some(HWND(main as _))) {
-            Ok(()) => Ok(Some(take_text(dialog.GetResult()?.GetDisplayName(SIGDN_FILESYSPATH)?))),
-            Err(closed) if closed.code() == ERROR_CANCELLED.to_hresult() => Ok(None),
-            Err(failure) => Err(failure),
-        }
-    })
-}
-
-/// Windows' file picker for a folder's cover, opened in `start`. Nothing when the user backs out.
-pub fn pick_picture(main: isize, start: PathBuf) -> Result<Option<String>> {
-    on_worker(move |_| unsafe {
-        let dialog: IFileOpenDialog = CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER)?;
-        dialog.SetFileTypes(&[COMDLG_FILTERSPEC {
-            pszName: w!("Pictures"),
-            pszSpec: w!("*.jpg;*.jpeg;*.png;*.gif;*.webp;*.bmp;*.heic;*.avif;*.tif;*.tiff"),
-        }])?;
-        dialog.SetTitle(w!("Choose a cover"))?;
-        // A folder that is gone just leaves Windows' own choice of where to start.
-        if let Ok(folder) = SHCreateItemFromParsingName::<_, _, IShellItem>(&HSTRING::from(start.as_os_str()), None) {
-            dialog.SetFolder(&folder)?;
-        }
-        match dialog.Show(Some(HWND(main as _))) {
-            Ok(()) => Ok(Some(take_text(dialog.GetResult()?.GetDisplayName(SIGDN_FILESYSPATH)?))),
-            Err(closed) if closed.code() == ERROR_CANCELLED.to_hresult() => Ok(None),
-            Err(failure) => Err(failure),
-        }
-    })
-}
-
-/// Windows' folder picker, such as for where restored items go. Nothing when the user backs out.
-pub fn pick_folder(main: isize) -> Result<Option<String>> {
-    on_worker(move |_| unsafe {
-        let dialog: IFileOpenDialog = CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER)?;
-        dialog.SetOptions(dialog.GetOptions()? | FOS_PICKFOLDERS)?;
-        dialog.SetTitle(w!("Choose a folder"))?;
-        match dialog.Show(Some(HWND(main as _))) {
-            Ok(()) => Ok(Some(take_text(dialog.GetResult()?.GetDisplayName(SIGDN_FILESYSPATH)?))),
-            Err(closed) if closed.code() == ERROR_CANCELLED.to_hresult() => Ok(None),
-            Err(failure) => Err(failure),
-        }
-    })
-}
-
-/// Windows' file picker for a file of Perli's settings or a palette: to save one as `save_as`, or,
-/// with no name, to open one. Nothing when the user backs out.
-pub fn pick_settings_file(main: isize, save_as: Option<String>) -> Result<Option<String>> {
-    on_worker(move |_| unsafe {
-        let class = if save_as.is_some() { &FileSaveDialog } else { &FileOpenDialog };
-        let dialog: IFileDialog = CoCreateInstance(class, None, CLSCTX_INPROC_SERVER)?;
-        dialog.SetFileTypes(&[COMDLG_FILTERSPEC { pszName: w!("Perli settings and palettes"), pszSpec: w!("*.json") }])?;
-        dialog.SetDefaultExtension(w!("json"))?;
-        if let Some(name) = &save_as {
-            dialog.SetFileName(&HSTRING::from(name.as_str()))?;
-        }
-        match dialog.Show(Some(HWND(main as _))) {
-            Ok(()) => Ok(Some(take_text(dialog.GetResult()?.GetDisplayName(SIGDN_FILESYSPATH)?))),
-            Err(closed) if closed.code() == ERROR_CANCELLED.to_hresult() => Ok(None),
-            Err(failure) => Err(failure),
-        }
     })
 }
 

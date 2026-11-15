@@ -111,6 +111,8 @@ export interface Filter {
   modifiedTo: number | null;
   /** A row must carry all of these. */
   tags: number[];
+  /** Folders stay whatever `extensions` asks, so a picker can still go through them. */
+  foldersStay?: boolean;
 }
 
 /** Which rows a view shows and in what order. */
@@ -823,17 +825,12 @@ export const openPathsWith = (paths: string[], app: string) => invoke<void>("ope
 export const openPathsWithExe = (paths: string[], exe: string) =>
   invoke<void>("open_paths_with_exe", { paths, exe });
 
-/** Windows' file picker for an app. `null` when the user backs out. */
-export const browseApp = () => invoke<string | null>("browse_app");
-export const pickFolder = () => invoke<string | null>("pick_folder");
-/** Windows' file picker for a cover of `folder`, opened there. `null` when the user backs out. */
-export const pickPicture = (folder: string) => invoke<string | null>("pick_picture", { folder });
+/** Saves `text` as a .json file picked in Perli's picker. One already there needs `replace`. */
+export const writeSettingsFile = (path: string, text: string, replace: boolean) =>
+  invoke<void>("write_settings_file", { path, text, replace });
 
-/** Saves `text` to a file the user picks. False when they back out. */
-export const exportSettings = (text: string, name?: string) => invoke<boolean>("export_settings", { text, name: name ?? null });
-
-/** The text of a settings file the user picks, or null when they back out. */
-export const importSettings = () => invoke<string | null>("import_settings");
+/** The text of a .json file of settings picked in Perli's picker. */
+export const readSettingsFile = (path: string) => invoke<string>("read_settings_file", { path });
 
 /** Windows' own window for picking an app, the only thing that may set a default. */
 export const chooseAppFor = (path: string) => invoke<void>("choose_app_for", { path });

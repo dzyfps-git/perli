@@ -1,7 +1,6 @@
 import { createMemo, createResource, createSignal, For, onMount, Show } from "solid-js";
 import {
   appsForPaths,
-  browseApp,
   chooseAppFor,
   fetchPictureFile,
   openPathsWith,
@@ -12,6 +11,7 @@ import { saved } from "../filelist/prefs";
 import { openSheet } from "../../ui/sheet";
 import { draw } from "../preview/QuickPreview";
 import { counted, matching, nameOf } from "./parts";
+import { pick } from "./Picker";
 import "../settings/settings.css";
 import "../fileops/fileops.css";
 import "./dialogs.css";
@@ -73,10 +73,10 @@ export function AppPicker(props: { paths: string[]; onClose: () => void }) {
 
   async function browse() {
     try {
-      const picked = await browseApp();
+      const picked = await pick({ mode: "open", title: "Choose an app", purpose: "apps", types: ["exe"], fallback: "C:\\Program Files" });
       if (!picked) return;
-      setExe(picked);
-      run(openPathsWithExe(props.paths, picked));
+      setExe(picked.path);
+      run(openPathsWithExe(props.paths, picked.path));
     } catch (reason) {
       setFailure(String(reason));
     }
