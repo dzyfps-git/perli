@@ -9,6 +9,7 @@ import {
   pictureAspects,
   rowProps,
   selectionSize,
+  type GitMark,
   type Group,
   type Mark,
   type Marks,
@@ -68,6 +69,14 @@ import { typesLearned, typeText } from "./typeNames";
 import "./filelist.css";
 
 const PAGE_SIZE = 256;
+/** What a row's git mark tells a screen reader. */
+const GIT_TEXT: Record<GitMark, string> = {
+  ignored: "Ignored by git",
+  new: "Not in git yet",
+  added: "Added to git",
+  modified: "Changed since the last commit",
+  conflict: "In conflict",
+};
 /** What a row's compare mark tells a screen reader. */
 const COMPARE_TEXT: Record<Mark, string> = {
   none: "",
@@ -361,6 +370,8 @@ export function FileList(props: {
   cut?: Set<string>;
   /** How each row stands against the other pane's, while the two panes are compared. */
   marks?: Marks;
+  /** What git says of the rows in this folder, by lowercase name. */
+  git?: Map<string, GitMark>;
   /** Folders opened in place, by full path. */
   expanded?: string[];
   /** Opens a folder in place or closes it. Left out where rows cannot nest: a search, the Recycle Bin. */
@@ -718,7 +729,12 @@ export function FileList(props: {
     const mark = row && props.marks?.snapshot === shown ? MARKS[props.marks.marks[index]] : undefined;
     if (mark && mark !== "none") pooled.element.dataset.compare = mark;
     else delete pooled.element.dataset.compare;
-    const about = [syncText(row, synced), mark && COMPARE_TEXT[mark], tagNames(row?.tags ?? [])].filter(Boolean).join(". ");
+    const gitMark = row && !row.location ? props.git?.get(row.name.toLowerCase()) : undefined;
+    if (gitMark) pooled.element.dataset.git = gitMark;
+    else delete pooled.element.dataset.git;
+    const about = [syncText(row, synced), mark && COMPARE_TEXT[mark], gitMark && GIT_TEXT[gitMark], tagNames(row?.tags ?? [])]
+      .filter(Boolean)
+      .join(". ");
     if (about) pooled.element.setAttribute("aria-description", about);
     else pooled.element.removeAttribute("aria-description");
     const look = row?.isDir ? lookOf(join(row.location || props.folder, row.name)) : undefined;
@@ -1663,7 +1679,7 @@ export function FileList(props: {
 
   createEffect(
     on(
-      [typesLearned, () => props.cut, () => props.marks, () => props.match, () => props.synced, tags, allLooks, windowsIcons, dateForm, nests, readProgress, sizeBars, iconTheme],
+      [typesLearned, () => props.cut, () => props.marks, () => props.git, () => props.match, () => props.synced, tags, allLooks, windowsIcons, dateForm, nests, readProgress, sizeBars, iconTheme],
       () => {
         for (const pooled of pool) pooled.filled = false;
         paint();

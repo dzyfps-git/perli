@@ -726,6 +726,20 @@ export const rowsMatching = (view: number, request: number, pattern: string) =>
 export const rowsWhere = (view: number, request: number, filter: Filter) =>
   invoke<number[]>("rows_where", { view, request, filter });
 
+/** What git says of a row, weakest first, as `git::Mark` in Rust. */
+export type GitMark = "ignored" | "new" | "added" | "modified" | "conflict";
+
+export interface GitStatus {
+  branch: string;
+  ahead: number;
+  behind: number;
+  /** The rows git has something to say of, by lowercase name. */
+  marks: [string, GitMark][];
+}
+
+/** What git says of `folder`'s rows and its branch, or null outside a repository or without git. */
+export const gitStatus = (folder: string) => invoke<GitStatus | null>("git_status", { folder });
+
 /** How a row stands against the other pane's row of the same name, in the order of `folder::Mark`. */
 export const MARKS = ["none", "only", "newer", "older", "differs", "same"] as const;
 export type Mark = (typeof MARKS)[number];

@@ -1,7 +1,8 @@
-import { batch, createSignal, untrack } from "solid-js";
+import { batch, createMemo, createResource, createSignal, untrack } from "solid-js";
 import {
   arrangeView,
   countWhere,
+  gitStatus,
   openFolder,
   reloadView,
   scanSizes,
@@ -21,6 +22,7 @@ import { extensionsOf, type Kind } from "../filelist/fileKinds";
 import { dateGroups, KIND_GROUPS } from "../filelist/groups";
 import {
   folderSizes,
+  gitBadges,
   grouping,
   inlineFolders,
   lastLayout,
@@ -619,9 +621,29 @@ export function createFolderView(id: number, saved?: SavedPane) {
     }
   }
 
+  // Each read asks git again, so a save or a commit shows on the next reload.
+  const [gitRead] = createResource(
+    () => {
+      const shown = folder();
+      return gitBadges() && shown && !query() && !shown.archive && !isBin(shown.path) ? shown : undefined;
+    },
+    async (shown) => ({ path: shown.path, status: await gitStatus(shown.path).catch(() => null) }),
+  );
+  /** What git says of the folder on show, kept through a reload so the marks don't blink. */
+  const git = createMemo(() => {
+    const read = gitRead.latest;
+    return gitBadges() && !query() && read && read.path === folder()?.path ? (read.status ?? undefined) : undefined;
+  });
+  const gitMarks = createMemo(() => {
+    const status = git();
+    return status && new Map(status.marks);
+  });
+
   return {
     id,
     folder,
+    git,
+    gitMarks,
     arrival,
     path,
     isBin: () => isBin(folder()?.path),

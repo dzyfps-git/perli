@@ -8,6 +8,7 @@ mod filedialog;
 mod drag;
 mod folder;
 mod fonts;
+mod git;
 mod jobs;
 mod launch;
 mod menus;
@@ -2053,6 +2054,12 @@ fn rows_where(view: u32, request: u64, filter: folder::Filter, views: State<'_, 
     views.read(&selection, |listing, _| listing.fitting(&filter))
 }
 
+/// What git says of `folder`'s rows and its branch, or nothing outside a repository.
+#[tauri::command]
+async fn git_status(folder: String) -> Result<Option<git::Status>, String> {
+    blocking(move || Ok(git::status(Path::new(&folder)))).await
+}
+
 /// How each row of one pane stands against the other pane's rows, one `folder::Mark` a row.
 #[tauri::command]
 fn compared(view: u32, request: u64, other: u32, other_request: u64, views: State<'_, Views>) -> Result<Response, String> {
@@ -2585,6 +2592,7 @@ fn main() {
             rows_matching,
             rows_where,
             compared,
+            git_status,
             count_where,
             row_props,
             folder_pictures,

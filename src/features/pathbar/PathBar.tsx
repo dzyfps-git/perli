@@ -653,6 +653,34 @@ export function PathBar(props: {
           </For>
         </div>
       </Show>
+      <Show when={props.view.git()}>
+        {(git) => {
+          const [copied, setCopied] = createSignal(false);
+          const counts = () =>
+            [git().ahead && `${git().ahead} ahead`, git().behind && `${git().behind} behind`].filter(Boolean).join(", ");
+          return (
+            <button
+              class="branch-chip"
+              aria-label={`On branch ${git().branch}${counts() ? `, ${counts()}` : ""}. Press to copy its name`}
+              onClick={() =>
+                void navigator.clipboard.writeText(git().branch).then(() => {
+                  setCopied(true);
+                  setTimeout(() => setCopied(false), 1200);
+                })
+              }
+            >
+              <span class="branch-chip-dot" aria-hidden="true" />
+              <span class="branch-chip-name">{copied() ? "Copied" : git().branch}</span>
+              <Show when={git().ahead}>
+                <span class="branch-chip-count">↑{git().ahead}</span>
+              </Show>
+              <Show when={git().behind}>
+                <span class="branch-chip-count">↓{git().behind}</span>
+              </Show>
+            </button>
+          );
+        }}
+      </Show>
       <Show when={props.view.lock()} keyed>
         {(lock) => (
           <button

@@ -2179,6 +2179,7 @@ export function App() {
                 wall={pictureWall() && view.columnSet() === "pictures"}
                 cut={view.query() ? undefined : cutNames(view.folder()!.path)}
                 marks={tab.marksOf(view)}
+                git={view.gitMarks()}
                 expanded={view.expanded()}
                 // Rows gathered under headers can't also nest under their folders.
                 onExpand={
