@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { ageShare, hasPicture, iconSheet, kindOf } from "./fileKinds.ts";
+import { ageShare, hasPicture, iconKindOf, iconSheet, kindOf } from "./fileKinds.ts";
 
 const DAY_MS = 86_400_000;
 
@@ -15,6 +15,15 @@ test("a file's kind comes from its extension, whatever its case", () => {
 
 test("a folder is a folder, even when its name ends like a file", () => {
   assert.equal(kindOf("photos.zip", true), "folder");
+});
+
+test("an icon shows the kind the user gave the extension", () => {
+  const own = { nfo: "code", log: "text" } as const;
+  assert.equal(iconKindOf("readme.NFO", false, own), "code");
+  assert.equal(iconKindOf("log", false, own), "log", "a name with no dot has no extension of its own to map");
+  assert.equal(iconKindOf("x.log", true, own), "folder");
+  assert.equal(iconKindOf("a.png", false, own), "picture");
+  assert.match(iconSheet({ pdf: "#123456" }), /\[data-kind="pdf"\]\{[^}]*--kind-color:#123456\}/);
 });
 
 test("only what has a picture of its own asks for one", () => {

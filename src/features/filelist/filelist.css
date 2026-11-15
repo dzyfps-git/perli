@@ -474,6 +474,29 @@ html[data-blurred] .file-row[data-cut] {
   mask: var(--kind-icon) center / contain no-repeat;
 }
 
+/* The icon style from Settings: the drawing alone, or on a full tile of the kind's color.
+   The :is() lifts these past the hover and selected rules above. */
+html[data-icon-style="line"] :is(.file-icon, .file-row .file-icon) {
+  background: transparent;
+}
+
+html[data-icon-style="line"] .file-icon::before {
+  scale: 1.2;
+}
+
+html[data-icon-style="solid"] :is(.file-icon, .file-row .file-icon) {
+  background: var(--kind-color, var(--text-muted));
+  color: var(--surface);
+}
+
+html[data-icon-style="solid"] :is(.file-row:hover, .file-row[aria-selected="true"]) .file-icon {
+  background: color-mix(in oklch, var(--kind-color, var(--text-muted)) 85%, var(--text));
+}
+
+html[data-icon-style] .file-row[data-thumb] .file-icon {
+  background: none;
+}
+
 /* A folder's own look, from its row menu. */
 .file-icon[data-glyph]::before {
   content: attr(data-glyph);

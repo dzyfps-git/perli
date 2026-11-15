@@ -3,13 +3,16 @@
 
 mod archive;
 mod bin;
+mod edits;
 mod incoming;
 mod names;
 mod rename;
+mod replace;
 mod shell;
 pub mod sys;
 mod transfer;
 mod tree;
+mod wallpaper;
 
 #[cfg(test)]
 mod tests;
@@ -27,11 +30,13 @@ pub use archive::{safe as safe_relative, ticks_of as zip_ticks};
 pub use bin::{limit as bin_limit, read as read_bin, BinItem};
 pub use incoming::{offers_files, Incoming};
 pub use names::{check_rename, check_renames};
+pub use replace::{seen, sweep as sweep_kept, Seen};
 pub use shell::{shell_item, Com};
 #[cfg(test)]
 pub use shell::write_shortcut;
 pub use transfer::{is_temp_name, put_back, remove_leftovers};
 pub use tree::measure;
+pub use wallpaper::Screens;
 
 /// One unit of work, run to the end by `run`.
 pub enum Job {
@@ -61,6 +66,11 @@ pub enum Job {
     Purge { items: Vec<BinItem> },
     Empty,
     Undo { records: Vec<Done> },
+    /// Text the user edited, written over the file it came from. `read` is how the file stood
+    /// when they read it, which a change since is asked about.
+    Save { path: PathBuf, bytes: Vec<u8>, read: Option<Seen> },
+    Picture { paths: Vec<PathBuf>, edit: crate::picture::Edit },
+    Wallpaper { picture: PathBuf },
 }
 
 /// How hard a new archive squeezes its files.
@@ -114,6 +124,10 @@ pub enum Done {
     Created { path: PathBuf },
     Moved { from: PathBuf, to: PathBuf },
     Recycled { original: PathBuf, item: PathBuf },
+    /// A file written over, whose old content is kept at `kept`.
+    Replaced { path: PathBuf, kept: PathBuf },
+    /// The desktop picture changed to `after`. `before` is each screen's picture until then.
+    Wallpaper { before: Screens, after: PathBuf },
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -213,6 +227,11 @@ pub trait Host {
     fn verify_copies(&self) -> bool {
         false
     }
+
+    /// Where the old content of a file written over is kept for Undo. None keeps nothing.
+    fn kept_folder(&self) -> Option<PathBuf> {
+        None
+    }
 }
 
 /// Pauses or cancels a running job from another thread.
@@ -268,6 +287,7 @@ enum Key {
     Mixed,
     NoBin,
     Refused,
+    Changed,
     Problem(i32),
 }
 
@@ -373,6 +393,9 @@ impl<'a> Run<'a> {
                 Ok(())
             }
             Job::Undo { records } => self.undo(records),
+            Job::Save { path, bytes, read } => self.save(&path, &bytes, read),
+            Job::Picture { paths, edit } => self.edit_pictures(&paths, edit),
+            Job::Wallpaper { picture } => self.set_wallpaper(&picture),
         }
     }
 
@@ -517,6 +540,15 @@ impl<'a> Run<'a> {
                         _ => None,
                     }).collect())?;
                 }
+                Done::Replaced { .. } | Done::Wallpaper { .. } => {
+                    for record in group {
+                        match record {
+                            Done::Replaced { path, kept } => self.put_back_kept(path, kept)?,
+                            Done::Wallpaper { before, .. } => self.put_back_wallpaper(before)?,
+                            _ => {}
+                        }
+                    }
+                }
             }
         }
         Ok(())
@@ -641,7 +673,8 @@ impl<'a> Run<'a> {
                     self.touched.insert(sys::parent(from));
                     self.touched.insert(sys::parent(to))
                 }
-                Done::Recycled { original, .. } => self.touched.insert(sys::parent(original)),
+                Done::Recycled { original, .. } | Done::Replaced { path: original, .. } => self.touched.insert(sys::parent(original)),
+                Done::Wallpaper { .. } => false,
             };
         }
         Outcome {

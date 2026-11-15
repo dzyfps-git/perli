@@ -6,6 +6,7 @@ import { asTable, asTree, numbers, setAsTable, setAsTree, setNumbers, setWrap, V
 import { pieceColorer } from "./highlight";
 import { DataGrid } from "./DataGrid";
 import { guessDelimiter, lineEnding, parseTable } from "./table";
+import { hasDraft, ICON_EDIT, QuickEdit, type EditTarget } from "./QuickEdit";
 
 const ICON_FIND = "";
 const ICON_WRAP = "";
@@ -53,6 +54,8 @@ export interface TextViewProps {
   table?: string | null;
   keys: (handler: ((event: KeyboardEvent) => boolean) | undefined) => void;
   onFailure: (reason: string) => void;
+  /** Set for a whole file, which can be edited in place. */
+  edit?: EditTarget;
 }
 
 /**
@@ -81,6 +84,15 @@ export function TextView(live: TextViewProps) {
   const [text, setText] = createSignal(props.first.text);
   const [going, setGoing] = createSignal(false);
   const [missing, setMissing] = createSignal(false);
+  /** Unsaved text left behind earlier opens the box again. */
+  const [editing, setEditing] = createSignal(!!props.edit && hasDraft(props.edit.path));
+  let editKeys: ((event: KeyboardEvent) => boolean) | undefined;
+  function edit() {
+    find.close();
+    setGoing(false);
+    setFollowing(false);
+    setEditing(true);
+  }
   const table = () => props.table !== undefined && asTable();
   const delimiter = createMemo(() => props.table ?? guessDelimiter(props.first.text));
   const rows = createMemo(() => (props.table === undefined ? [] : parseTable(text(), delimiter(), MOST_ROWS + 1, next === null)));
@@ -220,6 +232,7 @@ export function TextView(live: TextViewProps) {
   }
 
   props.keys((event) => {
+    if (editing()) return editKeys?.(event) ?? false;
     const key = event.key.toLowerCase();
     if (event.altKey) return false;
     if (event.ctrlKey && key === "g") showGoTo();
@@ -227,6 +240,7 @@ export function TextView(live: TextViewProps) {
     else if (find.keys(event)) setGoing(false);
     else if (event.ctrlKey || event.target instanceof HTMLInputElement) return false;
     else if (key === "w") setWrap(!wrap());
+    else if (key === "e" && props.edit) edit();
     else if (key === "n" && !table() && !wrap()) setNumbers(!numbers());
     else if (key === "t" && props.table !== undefined) setAsTable(!asTable());
     else if (key === "j" && canTree()) setAsTree(!asTree());
@@ -250,6 +264,23 @@ export function TextView(live: TextViewProps) {
 
   return (
     <div class="text-view">
+      <Show when={editing() && props.edit}>
+        {(target) => (
+          <QuickEdit
+            target={target()}
+            text={text()}
+            language={props.language}
+            wrap={wrap()}
+            keys={(handler) => (editKeys = handler)}
+            onLeave={(saved) => {
+              const { refresh } = target();
+              setEditing(false);
+              if (saved) refresh();
+            }}
+          />
+        )}
+      </Show>
+      <Show when={!editing()}>
       <div class="preview-tools text-tools" role="toolbar" aria-label="Text">
         {find.bar()}
         <Show when={going()}>
@@ -305,6 +336,11 @@ export function TextView(live: TextViewProps) {
         <button class="strip-icon" aria-label={copied() ?? "Copy all"} data-done={copied() === "Copied" || undefined} onClick={() => void copyAll().catch(console.error)}>
           {ICON_COPY}
         </button>
+        <Show when={props.edit}>
+          <button class="strip-icon" aria-label="Edit" aria-keyshortcuts="E" onClick={edit}>
+            {ICON_EDIT}
+          </button>
+        </Show>
         <span class="zoom-chip text-kind">{kind()}</span>
         <Show when={!table() && !tree()}>
           <button class="strip-icon" aria-label="Wrap lines" aria-keyshortcuts="W" aria-pressed={wrap()} onClick={() => setWrap(!wrap())}>
@@ -323,7 +359,8 @@ export function TextView(live: TextViewProps) {
         </Show>
         <ToolCog label="Text settings" items={VIEWER_SETTINGS.Text} />
       </div>
-      <div ref={scroller} class="text-scroll" tabindex="-1" data-wrap={wrap() || undefined} onScroll={() => void fill()}>
+      </Show>
+      <div ref={scroller} class="text-scroll" tabindex="-1" hidden={editing()} data-wrap={wrap() || undefined} onScroll={() => void fill()}>
         <div class="text-sheet" hidden={table() || tree()}>
           <Show when={numbers()}>
             <pre class="text-gutter" aria-hidden="true">

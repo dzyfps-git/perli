@@ -1,4 +1,4 @@
-import { createEffect, createMemo, createSignal, For, Index, on, onCleanup, onMount, Show } from "solid-js";
+import { createEffect, createMemo, createRoot, createSignal, For, Index, on, onCleanup, onMount, Show } from "solid-js";
 import {
   fetchRows,
   fetchPictureFile,
@@ -37,10 +37,11 @@ import {
   type PropColumn,
 } from "./columns";
 import { clampTile, groupedMove, moveTarget, placesOf, TILE_STEP, type Layout } from "./layout";
-import { ageShare, hasPicture, iconSheet, kindOf } from "./fileKinds";
+import { ageShare, hasPicture, iconKindOf, iconSheet, kindOf } from "./fileKinds";
 import {
   dateForm,
   hoverCards,
+  iconTheme,
   ROW_HEIGHTS,
   rowDensity,
   selectionBar,
@@ -119,9 +120,16 @@ const grewFrom = new Map<number, { folder: string; top: number; bottom: number }
 
 const counted = (count: number, one: string, many: string) => `${count.toLocaleString()} ${count === 1 ? one : many}`;
 
+// Every icon in the window takes its drawing and color from here, and its style from the page.
 const kindStyles = document.createElement("style");
-kindStyles.textContent = iconSheet();
 document.head.append(kindStyles);
+createRoot(() =>
+  createEffect(() => {
+    const theme = iconTheme();
+    kindStyles.textContent = iconSheet(theme.colors);
+    document.documentElement.dataset.iconStyle = theme.style;
+  }),
+);
 let lastFolderOpen = 0;
 
 interface PooledRow {
@@ -354,7 +362,7 @@ export function FileList(props: {
   onHeaderMenu: (event: MouseEvent) => void;
   onGroup: () => void;
   /** Rejects with the reason a name can't be used, which keeps the editor open. */
-  onRename: (selection: Selection, name: string) => Promise<void>;
+  onRename: (selection: Selection, name: string) => Promise<unknown>;
   onEditEnd: () => void;
   onInputMenu: (event: MouseEvent) => void;
   /** The rows are a new order of the folder already shown. */
@@ -662,7 +670,7 @@ export function FileList(props: {
     if (about) pooled.element.setAttribute("aria-description", about);
     else pooled.element.removeAttribute("aria-description");
     const look = row?.isDir ? lookOf(join(row.location || props.folder, row.name)) : undefined;
-    const kind = row && kindOf(row.name, row.isDir);
+    const kind = row && iconKindOf(row.name, row.isDir, iconTheme().extensions);
     if (kind) pooled.icon.dataset.kind = kind;
     else delete pooled.icon.dataset.kind;
     if (look?.icon) pooled.icon.dataset.glyph = look.icon;
@@ -707,7 +715,7 @@ export function FileList(props: {
     lightMatch(pooled, row);
     // Windows' picture of a folder would hide the look it was given. Other files show Perli's
     // own icon, unless a picture says more or Windows gave the folder an icon of its own.
-    const pictured = row && !look && (windowsIcons() || row.isCustom || hasPicture(kind!) || COVERED.test(row.name));
+    const pictured = row && !look && (windowsIcons() || row.isCustom || hasPicture(kindOf(row.name, row.isDir)) || COVERED.test(row.name));
     // A plain folder's tile shows a few of the pictures inside, if it has any.
     const stacked = !!row?.isDir && !inList && !look && !row.isCustom;
     pooled.element.toggleAttribute("data-stack", stacked);
@@ -1505,7 +1513,7 @@ export function FileList(props: {
 
   createEffect(
     on(
-      [typesLearned, () => props.cut, () => props.match, () => props.synced, tags, allLooks, windowsIcons, dateForm, nests, readProgress, sizeBars],
+      [typesLearned, () => props.cut, () => props.match, () => props.synced, tags, allLooks, windowsIcons, dateForm, nests, readProgress, sizeBars, iconTheme],
       () => {
         for (const pooled of pool) pooled.filled = false;
         paint();

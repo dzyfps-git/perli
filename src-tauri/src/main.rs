@@ -14,6 +14,7 @@ mod network;
 mod ops;
 mod packs;
 mod parts;
+mod picture;
 mod places;
 mod inside;
 mod midi;
@@ -267,6 +268,16 @@ enum Task {
     RestoreTo { selection: Selection, folder: String },
     Purge { selection: Selection },
     Empty,
+    /// A quick edit's text saved over `path`. `seen` is how the file stood when it was read.
+    Save { path: PathBuf, text: String, seen: Option<String> },
+    /// Pictures by path, from a preview, or the selected rows.
+    Picture {
+        #[serde(default)]
+        paths: Vec<PathBuf>,
+        selection: Option<Selection>,
+        edit: picture::Edit,
+    },
+    Wallpaper { path: PathBuf },
 }
 
 impl Task {
@@ -388,6 +399,25 @@ impl Task {
                 items: items(&selection)?,
             },
             Self::Empty => Job::Empty,
+            Self::Save { path, text, seen } => {
+                refuse_zipped(std::slice::from_ref(&path))?;
+                let bytes = preview::encoded(&path, &text)?;
+                Job::Save { path, bytes, read: seen.as_deref().and_then(preview::parse_seen) }
+            }
+            Self::Picture { mut paths, selection, edit } => {
+                if let Some(selection) = &selection {
+                    paths.extend(views.read(selection, folder::Listing::paths)?);
+                }
+                refuse_zipped(&paths)?;
+                if let Some(problem) = paths.iter().find_map(|path| picture::refusal(path, edit)) {
+                    return Err(problem);
+                }
+                Job::Picture { paths, edit }
+            }
+            Self::Wallpaper { path } => {
+                refuse_zipped(std::slice::from_ref(&path))?;
+                Job::Wallpaper { picture: path }
+            }
         };
         Ok(Some(job.into()))
     }
@@ -794,10 +824,10 @@ async fn start_job(
     app: AppHandle,
     views: State<'_, Views>,
     drags: State<'_, Arc<Drags>>,
-) -> Result<(), String> {
+) -> Result<Option<u64>, String> {
     match task.plan(&views, &drags)? {
-        Some(plan) => jobs::start(&app, Plan { origin, ..plan }),
-        None => Ok(()),
+        Some(plan) => jobs::start(&app, Plan { origin, ..plan }).map(Some),
+        None => Ok(None),
     }
 }
 
@@ -1658,6 +1688,20 @@ async fn font_face(view: u32, request: u64, row: u32, index: u32, views: State<'
     Ok(Response::new(bytes))
 }
 
+/// Whether a row's font is installed, and for whom.
+#[tauri::command]
+async fn font_installed(view: u32, request: u64, row: u32, views: State<'_, Views>) -> Result<fonts::Installed, String> {
+    let path = row_file(&views, view, request, row).await?;
+    blocking(move || Ok(fonts::installed(&path))).await
+}
+
+/// Installs a row's font for this user, or takes it out again, with no administrator asked.
+#[tauri::command]
+async fn install_font(view: u32, request: u64, row: u32, remove: bool, views: State<'_, Views>) -> Result<(), String> {
+    let path = row_file(&views, view, request, row).await?;
+    blocking(move || if remove { fonts::uninstall(&path) } else { fonts::install(&path) }).await
+}
+
 /// A row's file, opened to the window's asset protocol so a viewer reads only the parts it needs.
 #[tauri::command]
 async fn open_streamed(view: u32, request: u64, row: u32, app: AppHandle, views: State<'_, Views>) -> Result<String, String> {
@@ -2460,6 +2504,8 @@ fn main() {
             model_file,
             open_streamed,
             font_face,
+            font_installed,
+            install_font,
             db_count,
             db_rows,
             db_query,

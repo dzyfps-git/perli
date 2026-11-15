@@ -13,7 +13,8 @@ use serde::Serialize;
 use windows::core::{Interface, HSTRING, PCWSTR, PWSTR};
 use windows::Win32::Foundation::PROPERTYKEY;
 use windows::Win32::Globalization::{
-    GetACP, GetLocaleInfoEx, MultiByteToWideChar, LOCALE_IDEFAULTANSICODEPAGE, LOCALE_RETURN_NUMBER, MULTI_BYTE_TO_WIDE_CHAR_FLAGS,
+    GetACP, GetLocaleInfoEx, MultiByteToWideChar, WideCharToMultiByte, LOCALE_IDEFAULTANSICODEPAGE, LOCALE_RETURN_NUMBER,
+    MULTI_BYTE_TO_WIDE_CHAR_FLAGS, WC_NO_BEST_FIT_CHARS,
 };
 use windows::Win32::Security::Cryptography::{
     BCryptCreateHash, BCryptDestroyHash, BCryptFinishHash, BCryptHashData, BCRYPT_HASH_HANDLE,
@@ -46,8 +47,17 @@ const MODEL_BYTES: u64 = 256 * 1024 * 1024;
 pub enum Preview {
     /// `next` is where the following piece starts, if there is one.
     #[serde(rename_all = "camelCase")]
-    Text { text: String, next: Option<u64>, end: u64, encoding: String },
-    Markdown { html: String, source: String },
+    /// `seen` says how the file stood when it was read, for a quick edit to save over it. Only a
+    /// whole file has it: one that comes in pieces is too big to edit here.
+    Text {
+        text: String,
+        next: Option<u64>,
+        end: u64,
+        encoding: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        seen: Option<String>,
+    },
+    Markdown { html: String, source: String, seen: Option<String> },
     /// What an archive holds.
     Archive(inside::Contents),
     /// A comic's pages, by their names inside it.
@@ -152,6 +162,30 @@ impl Encoding {
         }
     }
 
+    /// `text` as this encoding writes it, with a byte order mark when `mark` says the file had one.
+    /// `None` when a letter has no place in the ANSI code page.
+    pub fn encode(self, text: &str, mark: usize) -> Option<Vec<u8>> {
+        match self {
+            Self::Utf8 => Some([if mark > 0 { &b"\xEF\xBB\xBF"[..] } else { &[] }, text.as_bytes()].concat()),
+            Self::Utf16 { big } => {
+                let units = std::iter::once(0xFEFF).chain(text.encode_utf16());
+                Some(units.flat_map(|unit| if big { unit.to_be_bytes() } else { unit.to_le_bytes() }).collect())
+            }
+            Self::Ansi => {
+                let wide: Vec<u16> = text.encode_utf16().collect();
+                if wide.is_empty() {
+                    return Some(Vec::new());
+                }
+                let mut missing = windows::core::BOOL(0);
+                let flags = WC_NO_BEST_FIT_CHARS;
+                let length = unsafe { WideCharToMultiByte(ansi_page(), flags, &wide, None, None, Some(&raw mut missing)) };
+                let mut bytes = vec![0; usize::try_from(length).ok().filter(|&length| length > 0)?];
+                unsafe { WideCharToMultiByte(ansi_page(), flags, &wide, Some(&mut bytes), None, Some(&raw mut missing)) };
+                (!missing.as_bool()).then_some(bytes)
+            }
+        }
+    }
+
     /// How many of `bytes` run up to and through their last line end, if they have one.
     fn line_end(self, bytes: &[u8]) -> Option<usize> {
         match self {
@@ -177,6 +211,32 @@ fn ansi_page() -> u32 {
         },
         page => page,
     }
+}
+
+/// How a file stands now, as a quick edit hands it back to say what it read.
+fn seen_text(path: &Path) -> Option<String> {
+    crate::ops::seen(path).map(|(modified, size)| format!("{modified}:{size}"))
+}
+
+/// What `seen_text` said, read back.
+pub fn parse_seen(text: &str) -> Option<crate::ops::Seen> {
+    let (modified, size) = text.split_once(':')?;
+    Some((modified.parse().ok()?, size.parse().ok()?))
+}
+
+/// Edited text as the bytes of the file it came from: in its encoding, with its byte order
+/// mark, and with Windows line ends if it had them.
+pub fn encoded(path: &Path, text: &str) -> Result<Vec<u8>, String> {
+    let mut head = Vec::new();
+    let file = File::open(path).map_err(|error| error.to_string())?;
+    file.take(PIECE_BYTES as u64).read_to_end(&mut head).map_err(|error| error.to_string())?;
+    let (encoding, mark) = Encoding::of(&head);
+    let windows_ends = encoding.decode(&head[mark..], true).is_some_and(|(text, _)| text.contains("\r\n"));
+    let text = text.replace("\r\n", "\n");
+    let text = if windows_ends { text.replace('\n', "\r\n") } else { text };
+    encoding
+        .encode(&text, mark)
+        .ok_or_else(|| format!("Some of its letters have no place in {}, so nothing was saved.", encoding.label(mark)))
 }
 
 /// Whether text has only letters and the control characters text files use.
@@ -246,9 +306,11 @@ pub fn read(path: &Path, offset: u64) -> Preview {
     }
     let size = path.metadata().map_or(0, |data| data.len());
     if offset == 0 && is_markdown(path) && size <= MARKDOWN_BYTES {
+        // Before the read, so a change during it shows as a change.
+        let seen = seen_text(path);
         let read = std::fs::read(path).ok();
         if let Some(source) = read.as_deref().and_then(|bytes| as_text(bytes, false)) {
-            return Preview::Markdown { html: markdown(&source), source };
+            return Preview::Markdown { html: markdown(&source), source, seen };
         }
     }
     piece(path, offset).unwrap_or(Preview::Picture)
@@ -348,6 +410,7 @@ pub fn save_frame(film: &Path, seconds: u64, png: &[u8]) -> Result<String, Strin
 }
 
 fn piece(path: &Path, offset: u64) -> Option<Preview> {
+    let seen = if offset == 0 { seen_text(path) } else { None };
     let mut file = File::open(path).ok()?;
     let (encoding, mark) = if offset == 0 {
         (Encoding::Utf8, 0)
@@ -377,7 +440,8 @@ fn piece(path: &Path, offset: u64) -> Option<Preview> {
     }
     // Where this piece stops, which is where a file that is still growing is read on from.
     let end = offset + (skipped + used) as u64;
-    Some(Preview::Text { text, next: more.then_some(end), end, encoding: encoding.label(mark) })
+    let seen = seen.filter(|_| !more);
+    Some(Preview::Text { text, next: more.then_some(end), end, encoding: encoding.label(mark), seen })
 }
 
 /// HTML for Markdown, with no HTML of its own: tags in the text show as text, links that are not
@@ -744,6 +808,29 @@ mod tests {
     }
 
     #[test]
+    fn an_edit_saves_in_the_files_own_encoding_and_line_ends() {
+        let folder = folder("encoded");
+        let wide = folder.join("wide.txt");
+        let mut bytes = vec![0xFF, 0xFE];
+        bytes.extend("a\r\nb".encode_utf16().flat_map(u16::to_le_bytes));
+        fs::write(&wide, &bytes).unwrap();
+        let mut expected = vec![0xFF, 0xFE];
+        expected.extend("a\r\nb\r\nc".encode_utf16().flat_map(u16::to_le_bytes));
+        assert_eq!(encoded(&wide, "a\nb\nc").unwrap(), expected);
+
+        let unix = folder.join("unix.txt");
+        fs::write(&unix, "\u{FEFF}one\ntwo").unwrap();
+        assert_eq!(encoded(&unix, "one\r\nthree").unwrap(), "\u{FEFF}one\nthree".as_bytes());
+
+        let ansi = folder.join("ansi.txt");
+        fs::write(&ansi, b"caf\xE9\n").unwrap();
+        assert!(encoded(&ansi, "café 日本").unwrap_err().contains("no place"));
+        assert_eq!(parse_seen("133:12"), Some((133, 12)));
+        assert_eq!(parse_seen("12"), None);
+        fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
     fn big_text_comes_in_whole_lines_that_join_up() {
         let folder = folder("pieces");
         let file = folder.join("big.log");
@@ -859,14 +946,14 @@ mod tests {
         fs::write(folder.join("a.bin"), b"MZ\0\0").unwrap();
         fs::write(folder.join("empty.txt"), "").unwrap();
 
-        assert_eq!(read(&folder.join("read.md"), 0), Preview::Markdown { html: "<p><em>hi</em></p>\n".into(), source: "*hi*".into() });
+        assert_eq!(read(&folder.join("read.md"), 0), Preview::Markdown { html: "<p><em>hi</em></p>\n".into(), source: "*hi*".into(), seen: seen_text(&folder.join("read.md")) });
         // A text that is still being written is read on from where the last piece stopped.
         std::fs::write(folder.join("grow.log"), "one\n").unwrap();
         let Preview::Text { end, next, encoding, .. } = read(&folder.join("grow.log"), 0) else { panic!("not text") };
         assert_eq!((end, next, encoding.as_str()), (4, None, "UTF-8"));
         std::fs::write(folder.join("grow.log"), "one\ntwo\n").unwrap();
-        assert_eq!(read(&folder.join("grow.log"), end), Preview::Text { text: "two\n".into(), next: None, end: 8, encoding: "UTF-8".into() });
-        assert_eq!(read(&folder.join("grow.log"), 8), Preview::Text { text: String::new(), next: None, end: 8, encoding: "UTF-8".into() });
+        assert_eq!(read(&folder.join("grow.log"), end), Preview::Text { text: "two\n".into(), next: None, end: 8, encoding: "UTF-8".into(), seen: None });
+        assert_eq!(read(&folder.join("grow.log"), 8), Preview::Text { text: String::new(), next: None, end: 8, encoding: "UTF-8".into(), seen: None });
         assert_eq!(read(&folder.join("a.bin"), 0), Preview::Picture);
         assert_eq!(read(&folder.join("empty.txt"), 0), Preview::Picture);
         assert_eq!(read(&folder, 0), Preview::Picture);

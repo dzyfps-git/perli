@@ -218,7 +218,23 @@ export type Task =
   | { kind: "restoreTo"; selection: Selection; folder: string }
   | { kind: "empty" }
   /** Everything in a ZIP, into a folder of its own beside it. */
-  | { kind: "extractZip"; path: string };
+  | { kind: "extractZip"; path: string }
+  /** A quick edit's text saved over its file. `seen` is what the preview said of it when read. */
+  | { kind: "save"; path: string; text: string; seen?: string }
+  /** Pictures by path, from a preview, or the selected rows. */
+  | { kind: "picture"; paths?: string[]; selection?: Selection; edit: PictureEdit }
+  | { kind: "wallpaper"; path: string };
+
+export type PictureFormat = "png" | "jpeg" | "tiff" | "bmp";
+/** A turn saves into the file. The rest make a new picture beside it. */
+export type PictureEdit =
+  /** Quarter turns clockwise, after a mirror left to right with `flip`. */
+  | { kind: "turn"; quarters: number; flip: boolean }
+  /** Never bigger than the picture already is. */
+  | { kind: "resize"; longest: number }
+  | { kind: "convert"; format: PictureFormat }
+  /** A smaller JPEG with no place or camera in it. */
+  | { kind: "share" };
 
 export interface Progress {
   bytes: number;
@@ -547,7 +563,8 @@ export const onSearchGrew = (handler: (view: number, walk: SearchWalk) => void) 
   );
 
 /** `origin` is the view that asked, which selects what the job makes. */
-export const startJob = (task: Task, origin?: number) => invoke<void>("start_job", { task, origin });
+/** The job's id, or null when there was nothing to do. */
+export const startJob = (task: Task, origin?: number) => invoke<number | null>("start_job", { task, origin });
 
 /** With `step`, this only undoes that step, and only while it is the newest. */
 /** With `back`, undoes every step from the newest down to `step`, as one. */
@@ -603,6 +620,31 @@ export const answerJob = (id: number, answer: Answer, all: boolean) =>
 
 export const onJobEvent = (handler: (event: JobEvent) => void) =>
   listen<JobEvent>("job", (event) => handler(event.payload));
+
+/** Starts a job and waits for it to end: null when there was nothing to do. The job's card,
+ *  questions and undo step are the same as any other job's. */
+export async function runJob(task: Task, origin?: number) {
+  type Finished = Extract<JobEvent, { kind: "finished" }>;
+  // A quick job can end before `startJob` comes back, so ends are heard from the start.
+  const ends = new Map<number, Finished>();
+  let wanted: { id: number; done: (event: Finished) => void } | undefined;
+  const stop = await onJobEvent((event) => {
+    if (event.kind !== "finished") return;
+    if (event.id === wanted?.id) wanted.done(event);
+    else ends.set(event.id, event);
+  });
+  try {
+    const id = await startJob(task, origin);
+    if (id === null) return null;
+    return await new Promise<Finished>((done) => {
+      const early = ends.get(id);
+      if (early) done(early);
+      else wanted = { id, done };
+    });
+  } finally {
+    stop();
+  }
+}
 
 /** What is wrong with each of `names`, which line up with the selected rows. */
 export const checkRenames = (selection: Selection, names: string[]) =>
@@ -901,8 +943,9 @@ export async function fetchRows(
 
 /** What the quick preview shows. `next` is where the following piece of a text starts. */
 export type Preview =
-  | { kind: "text"; text: string; next: number | null; end: number; encoding: string }
-  | { kind: "markdown"; html: string; source: string }
+  /** `seen` comes with a whole file, which a quick edit can save over. */
+  | { kind: "text"; text: string; next: number | null; end: number; encoding: string; seen?: string }
+  | { kind: "markdown"; html: string; source: string; seen?: string }
   /** `hidden` when even the names are locked. `lock` says how locked files are locked, such as
    *  "AES-256" or "ZipCrypto", and is null when none are. */
   | { kind: "archive"; entries: ArchiveEntry[]; more: boolean; hidden: boolean; lock: string | null }
@@ -1074,6 +1117,14 @@ export interface FontFacts {
 /** One face of a row's font to draw with; a face of a collection comes on its own. */
 export const fontFace = (view: number, request: number, row: number, index: number) =>
   invoke<ArrayBuffer>("font_face", { view, request, row, index });
+
+/** Who a row's font is installed for. Only "user" can be taken back without an admin. */
+export type FontInstalled = "no" | "user" | "system";
+export const fontInstalled = (view: number, request: number, row: number) =>
+  invoke<FontInstalled>("font_installed", { view, request, row });
+/** Installs a row's font for this user, or with `remove` takes it out again. */
+export const installFont = (view: number, request: number, row: number, remove: boolean) =>
+  invoke<void>("install_font", { view, request, row, remove });
 
 /** A row's file as a path the window may stream, reading only the parts it needs. */
 export const openStreamed = (view: number, request: number, row: number) => invoke<string>("open_streamed", { view, request, row });

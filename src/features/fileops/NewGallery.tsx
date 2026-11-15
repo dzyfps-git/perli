@@ -1,6 +1,7 @@
 import { createEffect, createResource, For, on, onMount, Show } from "solid-js";
 import { clipboardHasContent, newTypes, ownTemplates } from "../../api";
-import { kindOf } from "../filelist/fileKinds";
+import { iconKindOf, kindOf } from "../filelist/fileKinds";
+import { iconTheme } from "../filelist/prefs";
 import "./fileops.css";
 
 /** What the user picked from the gallery. */
@@ -48,11 +49,11 @@ export function NewGallery(props: { x: number; y: number; onPick: (pick: NewPick
     (found()?.[0] ?? []).map(({ extension, name }) => ({
       label: name,
       note: `.${extension}`,
-      icon: kindOf(`x.${extension}`, false),
+      icon: iconKindOf(`x.${extension}`, false, iconTheme().extensions),
       pick: { kind: "type", extension },
     }));
   const own = (): Tile[] =>
-    (found()?.[1] ?? []).map((name) => ({ label: name, icon: kindOf(name, false), pick: { kind: "own", name } }));
+    (found()?.[1] ?? []).map((name) => ({ label: name, icon: iconKindOf(name, false, iconTheme().extensions), pick: { kind: "own", name } }));
 
   function pick(tile: Tile) {
     box.hidePopover();

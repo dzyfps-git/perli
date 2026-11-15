@@ -9,6 +9,8 @@ import {
   dateForm,
   folderSizes,
   hoverCards,
+  iconTheme,
+  setIconTheme,
   onePerDrive,
   setOnePerDrive,
   setVerifyCopies,
@@ -42,7 +44,10 @@ import {
   type DateForm,
   type Density,
 } from "../filelist/prefs";
+import type { Kind } from "../filelist/fileKinds";
+import { extensionKey, KIND_LABELS, PLAIN_THEME, themeFromText, themeText, type IconStyle, type IconTheme } from "../filelist/iconTheme";
 import { keyText } from "../keys/keybinds";
+import { hexAt } from "../preview/pictureFacts";
 import { VIEWER_SETTINGS } from "../preview/viewerPrefs";
 import { bookmarksCompact, setBookmarksCompact, setSidebarOpen, sidebarOpen } from "../sidebar/saved";
 import { rememberRecent, setRememberRecent } from "../reach/reach";
@@ -117,6 +122,7 @@ const SECTIONS = [
   { id: "sidebar", label: "Sidebar", icon: "" },
   { id: "tags", label: "Tags", icon: "" },
   { id: "viewers", label: "Viewers", icon: "" },
+  { id: "icons", label: "Icons", icon: "" },
   { id: "default", label: "Default file manager", icon: "" },
   { id: "backup", label: "Backup", icon: "" },
   { id: "updates", label: "Updates", icon: "" },
@@ -124,6 +130,14 @@ const SECTIONS = [
 type SectionId = (typeof SECTIONS)[number]["id"];
 
 const ICON_CLOSE = "";
+
+const ICON_RESET = "";
+const ICON_STYLES: { id: IconStyle; label: string }[] = [
+  { id: "tile", label: "Soft tile" },
+  { id: "line", label: "Drawing only" },
+  { id: "solid", label: "Full tile" },
+];
+const KINDS = Object.keys(KIND_LABELS) as Kind[];
 
 /** Changes one color, and keeps the other two. */
 function withColor(palette: Palette, at: number, color: string): Palette {
@@ -304,6 +318,73 @@ export function Settings(props: {
       setPaletteNote(`${palette.name} added.`);
     } catch (failure) {
       setPaletteNote(String(failure));
+    }
+  }
+
+  const [iconNote, setIconNote] = createSignal("");
+  const [iconsBefore, setIconsBefore] = createSignal<IconTheme>();
+  let kindProbe!: HTMLSpanElement;
+  // The page is made again on each open, and put in the window after that: a frame later, its
+  // styles resolve.
+  const [placed, setPlaced] = createSignal(0);
+  createEffect(on(() => props.open, (open) => open && requestAnimationFrame(() => setPlaced((n) => n + 1))));
+  const pixel = new OffscreenCanvas(1, 1).getContext("2d", { willReadFrequently: true })!;
+  const changeIcons = (part: Partial<IconTheme>) => {
+    setIconsBefore(undefined);
+    setIconTheme({ ...iconTheme(), ...part });
+  };
+
+  /** Perli's own color for a kind, as hex, read off a hidden icon since it is made in CSS. */
+  function perliColor(kind: Kind) {
+    // Read again once the page is in the window, and when light and dark swap.
+    void (placed(), drawnTheme());
+    kindProbe.dataset.kind = kind;
+    pixel.clearRect(0, 0, 1, 1);
+    pixel.fillStyle = getComputedStyle(kindProbe).color;
+    pixel.fillRect(0, 0, 1, 1);
+    return hexAt(pixel.getImageData(0, 0, 1, 1).data);
+  }
+
+  function addExtension(form: HTMLFormElement) {
+    const typed = form.elements.namedItem("extension") as HTMLInputElement;
+    const kind = (form.elements.namedItem("kind") as HTMLSelectElement).value as Kind;
+    const extension = extensionKey(typed.value);
+    if (!extension) return setIconNote("Type an extension, such as .nfo.");
+    changeIcons({ extensions: { ...iconTheme().extensions, [extension]: kind } });
+    setIconNote(`.${extension} files now show as ${KIND_LABELS[kind].toLowerCase()}.`);
+    typed.value = "";
+  }
+
+  function dropExtension(extension: string) {
+    const { [extension]: _gone, ...rest } = iconTheme().extensions;
+    changeIcons({ extensions: rest });
+  }
+
+  function plainIcons() {
+    setIconsBefore(iconTheme());
+    setIconTheme(PLAIN_THEME);
+    setIconNote("Back to Perli's icons.");
+  }
+
+  async function exportIcons() {
+    try {
+      if (await exportSettings(themeText(iconTheme()), "Perli icons.json")) setIconNote("Icon theme saved.");
+    } catch (failure) {
+      setIconNote(String(failure));
+    }
+  }
+
+  async function importIcons() {
+    try {
+      const text = await importSettings();
+      if (text === null) return;
+      const theme = themeFromText(text);
+      if (!theme) return setIconNote("That file holds no icon theme.");
+      setIconsBefore(iconTheme());
+      setIconTheme(theme);
+      setIconNote("Icon theme loaded.");
+    } catch (failure) {
+      setIconNote(String(failure));
     }
   }
 
@@ -785,6 +866,123 @@ export function Settings(props: {
                 </>
               )}
             </For>
+          </section>
+
+          <section
+            class="settings-section"
+            data-section="icons"
+            data-words="icon icons kind color colour extension theme style tile line solid drawing"
+          >
+            <h3>Icons</h3>
+            <span ref={kindProbe} hidden style={{ color: "var(--kind-color)" }} />
+            <h4 id="settings-icon-style">Style</h4>
+            <div class="settings-chips" role="radiogroup" aria-labelledby="settings-icon-style">
+              <For each={ICON_STYLES}>
+                {(choice) => (
+                  <button
+                    class="settings-chip"
+                    role="radio"
+                    aria-checked={iconTheme().style === choice.id}
+                    onClick={() => changeIcons({ style: choice.id })}
+                  >
+                    {choice.label}
+                  </button>
+                )}
+              </For>
+            </div>
+
+            <h4>Colors</h4>
+            <div class="icon-kinds">
+              <For each={KINDS}>
+                {(kind) => (
+                  <div class="icon-kind">
+                    <span class="file-icon" data-kind={kind} />
+                    <span class="icon-kind-name">{KIND_LABELS[kind]}</span>
+                    <ColorField
+                      label={`Color of ${KIND_LABELS[kind].toLowerCase()}`}
+                      value={iconTheme().colors[kind] ?? perliColor(kind)}
+                      onChange={(color) => changeIcons({ colors: { ...iconTheme().colors, [kind]: color } })}
+                    />
+                    <button
+                      class="tag-delete"
+                      aria-label={`Perli's color for ${KIND_LABELS[kind].toLowerCase()}`}
+                      disabled={!iconTheme().colors[kind]}
+                      onClick={() => {
+                        const { [kind]: _gone, ...rest } = iconTheme().colors;
+                        changeIcons({ colors: rest });
+                      }}
+                    >
+                      {ICON_RESET}
+                    </button>
+                  </div>
+                )}
+              </For>
+            </div>
+
+            <h4 id="settings-icon-extensions">Shown as another kind</h4>
+            <For
+              each={Object.entries(iconTheme().extensions)}
+              fallback={<p class="settings-note">Give an extension Perli doesn't know, or knows differently, the icon of a kind.</p>}
+            >
+              {([extension, kind]) => (
+                <div class="icon-kind">
+                  <span class="file-icon" data-kind={kind} />
+                  <span class="icon-kind-name">.{extension}</span>
+                  <span class="settings-note">{KIND_LABELS[kind]}</span>
+                  <button class="tag-delete" aria-label={`Stop showing .${extension} files as ${KIND_LABELS[kind].toLowerCase()}`} onClick={() => dropExtension(extension)}>
+                    {ICON_CLOSE}
+                  </button>
+                </div>
+              )}
+            </For>
+            <form
+              class="icon-extension-add"
+              onSubmit={(event) => {
+                event.preventDefault();
+                addExtension(event.currentTarget);
+              }}
+            >
+              <label class="rename-field">
+                <input name="extension" aria-label="Extension" placeholder=".nfo" spellcheck={false} />
+              </label>
+              <select name="kind" aria-label="Show as">
+                <For each={KINDS}>{(kind) => <option value={kind}>{KIND_LABELS[kind]}</option>}</For>
+              </select>
+              <button class="settings-chip" type="submit">
+                Add
+              </button>
+            </form>
+
+            <div class="settings-chips">
+              <button class="settings-chip" onClick={() => void importIcons()}>
+                Import theme…
+              </button>
+              <button class="settings-chip" onClick={() => void exportIcons()}>
+                Export theme…
+              </button>
+              <button class="settings-chip" disabled={themeText(iconTheme()) === themeText(PLAIN_THEME)} onClick={plainIcons}>
+                Back to Perli's icons
+              </button>
+            </div>
+            <Show when={iconNote()}>
+              <p class="settings-note" role="status">
+                {iconNote()}
+                <Show when={iconsBefore()}>
+                  {(before) => (
+                    <button
+                      class="settings-chip"
+                      onClick={() => {
+                        setIconTheme(before());
+                        setIconsBefore(undefined);
+                        setIconNote("Your icons are back.");
+                      }}
+                    >
+                      Undo
+                    </button>
+                  )}
+                </Show>
+              </p>
+            </Show>
           </section>
 
           <section

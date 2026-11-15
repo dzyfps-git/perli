@@ -4,6 +4,7 @@ import { movedColumn, restoreColumns, startColumns, type Column, type ColumnId, 
 import type { Layout } from "./layout";
 import { NO_FILTER, type FilterForm } from "./filter";
 import { folderKey, remembered, type SortMemory } from "./sortMemory";
+import { cleanTheme } from "./iconTheme";
 
 export function saved(key: string): unknown {
   try {
@@ -62,6 +63,8 @@ export const [grouping, setGrouping] = stored<Grouping>(
 export const [sizeBars, setSizeBars] = stored("size-bars", saved("size-bars") !== false);
 /** Picture folders in the grid show an even wall of pictures, edge to edge, with no names. */
 export const [pictureWall, setPictureWall] = stored("picture-wall", saved("picture-wall") === true);
+/** The user's own look for file icons, over Perli's. */
+export const [iconTheme, setIconTheme] = stored("icon-theme", cleanTheme(saved("icon-theme")));
 /** Costs a walk of every folder opened, so it waits to be asked for. */
 export const [folderSizes, setFolderSizes] = stored("folder-sizes", saved("folder-sizes") === true);
 /** Read each copied file back and compare it with its original. Slower, so off at first. */

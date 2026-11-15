@@ -1,5 +1,5 @@
 import { createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
-import type { Thumb } from "../../api";
+import type { PictureEdit, PictureFormat, Thumb } from "../../api";
 import { ToolCog } from "../../ui/Controls";
 import { draw } from "./QuickPreview";
 import { cameraFacts, hexAt, tintOf } from "./pictureFacts";
@@ -19,6 +19,10 @@ const ICON_ON = "\uE893";
 const ICON_SHOW = "\uE786";
 const ICON_PICK = "\uEF3C";
 const ICON_COPY = "\uE8C8";
+const ICON_TOOLS = "\uE70F";
+/** Sizes a smaller copy can take, by its longer side. */
+const COPY_EDGES = [3840, 2560, 1920, 1280, 800];
+const FORMATS: [PictureFormat, string][] = [["png", "PNG"], ["jpeg", "JPEG"], ["tiff", "TIFF"], ["bmp", "BMP"]];
 /** A frame that names no time of its own stays this long, as browsers do. */
 const FRAME_MS = 100;
 const SAID_MS = 1600;
@@ -44,6 +48,18 @@ export interface PictureViewProps {
   /** The slideshow, which outlives one picture. */
   slideshow?: () => boolean;
   onSlideshow?: (on: boolean) => void;
+  /** Changes to the file, for a picture on disk. */
+  tools?: PictureTools;
+}
+
+export interface PictureTools {
+  /** Its format is one Windows writes, so a turn can be saved into the file. */
+  canSave: boolean;
+  /** The file's own format, which Convert leaves out. */
+  format?: PictureFormat;
+  /** Runs an edit as a job. True once it is done. */
+  run: (edit: PictureEdit) => Promise<boolean>;
+  wallpaper: () => Promise<boolean>;
 }
 
 /**
@@ -62,6 +78,13 @@ export function PictureView(live: PictureViewProps) {
   const [pan, setPan] = createSignal({ x: 0, y: 0 });
   /** Quarter turns. It only grows or shrinks, so a turn always spins the short way. */
   const [turn, setTurn] = createSignal(0);
+  /** Mirrored left to right, before the turn, as a saved turn writes it. */
+  const [flip, setFlip] = createSignal(false);
+  /** The turn as the file would take it: quarter turns clockwise, 0 to 3. */
+  const quarters = () => ((turn() % 4) + 4) % 4;
+  const [working, setWorking] = createSignal(false);
+  let toolsButton: HTMLButtonElement | undefined;
+  let toolsPanel: HTMLDivElement | undefined;
   const [box, setBox] = createSignal({ width: 0, height: 0 });
   const [dragging, setDragging] = createSignal(false);
   let drawnEdge = 0;
@@ -230,7 +253,41 @@ export function PictureView(live: PictureViewProps) {
       setTurn(turn() + by);
       zoomTo(null);
     },
+    /** A mirror on screen, left to right, whichever way the picture stands now. */
+    flip: () => {
+      setTurn(-turn());
+      setFlip(!flip());
+    },
   };
+
+  /** Runs one of the file tools, and says how it went. */
+  async function work(job: () => Promise<boolean>, done: string) {
+    toolsPanel?.hidePopover();
+    if (working()) return;
+    setWorking(true);
+    try {
+      if (await job()) say(done);
+    } catch (reason) {
+      say(String(reason));
+    } finally {
+      if (!gone) setWorking(false);
+    }
+  }
+  const edit = (change: PictureEdit, done: string) => work(() => props.tools!.run(change), done);
+  // The saved file comes back as a new view, standing as it was turned here.
+  const saveTurn = () => edit({ kind: "turn", quarters: quarters(), flip: flip() }, "Turn saved");
+  const turned = () => quarters() !== 0 || flip();
+  const smaller = () => COPY_EDGES.filter((edge) => edge < Math.max(...(natural() ?? [0])));
+
+  function toggleTools() {
+    if (!toolsButton || !toolsPanel) return;
+    if (toolsPanel.matches(":popover-open")) return toolsPanel.hidePopover();
+    toolsPanel.showPopover();
+    const { right, bottom } = toolsButton.getBoundingClientRect();
+    const { width, height } = toolsPanel.getBoundingClientRect();
+    toolsPanel.style.left = `${Math.max(4, right - width)}px`;
+    toolsPanel.style.top = `${bottom + 6 + height > innerHeight ? Math.max(4, bottom - 34 - height) : bottom + 6}px`;
+  }
 
   props.keys((event) => {
     const key = event.key.toLowerCase();
@@ -241,6 +298,7 @@ export function PictureView(live: PictureViewProps) {
     else if (key === "1") zoomTo(1);
     else if (key === "0") tools.fit();
     else if (key === "r") tools.turn(event.shiftKey ? -1 : 1);
+    else if (key === "h") tools.flip();
     else if (key === "i") setPicking(!picking());
     else if (key === "m") setMinimapShown(!minimapShown());
     else if (key === "s" && props.onSlideshow) props.onSlideshow(!props.slideshow?.());
@@ -287,7 +345,7 @@ export function PictureView(live: PictureViewProps) {
       visibility: own ? undefined : ("hidden" as const),
       width: own ? `${own[0] / devicePixelRatio}px` : undefined,
       height: own ? `${own[1] / devicePixelRatio}px` : undefined,
-      transform: `translate(-50%, -50%) translate(${x}px, ${y}px) rotate(${turn() * 90}deg) scale(${scale()})`,
+      transform: `translate(-50%, -50%) translate(${x}px, ${y}px) rotate(${turn() * 90}deg) scaleX(${flip() ? -1 : 1}) scale(${scale()})`,
     };
   };
 
@@ -364,6 +422,11 @@ export function PictureView(live: PictureViewProps) {
         <button class="strip-icon" aria-label="Turn right" aria-keyshortcuts="R" onClick={() => tools.turn(1)}>
           {ICON_TURN}
         </button>
+        <Show when={props.tools?.canSave && turned() && !frames()}>
+          <button class="preview-chip picture-save-turn" disabled={working()} onClick={() => void saveTurn()}>
+            Save turn
+          </button>
+        </Show>
         <button class="strip-icon" aria-label="Pick a colour and copy it" aria-keyshortcuts="I" aria-pressed={picking()} onClick={() => setPicking(!picking())}>
           {ICON_PICK}
         </button>
@@ -380,6 +443,65 @@ export function PictureView(live: PictureViewProps) {
           >
             {ICON_SHOW}
           </button>
+        </Show>
+        <Show when={props.tools}>
+          {(own) => (
+            <>
+              <button ref={toolsButton} class="strip-icon" aria-label="Picture tools" aria-haspopup="dialog" disabled={working()} onClick={toggleTools}>
+                {ICON_TOOLS}
+              </button>
+              <div
+                ref={toolsPanel}
+                class="cog-panel picture-tools-panel"
+                popover="auto"
+                role="dialog"
+                aria-label="Picture tools"
+                onClick={(event) => event.stopPropagation()}
+                onKeyDown={(event) => event.stopPropagation()}
+              >
+                <p class="picture-tools-head">This picture</p>
+                <div class="picture-tools-row">
+                  <button class="preview-chip" onClick={() => (toolsPanel?.hidePopover(), tools.flip())}>
+                    Mirror <kbd>H</kbd>
+                  </button>
+                  <Show when={own().canSave && !frames()}>
+                    <button class="preview-chip" disabled={!turned()} onClick={() => void saveTurn()}>
+                      Save turn
+                    </button>
+                  </Show>
+                  <button class="preview-chip" onClick={() => void work(own().wallpaper, "Set as the wallpaper. Ctrl+Z puts the old one back.")}>
+                    Set as wallpaper
+                  </button>
+                </div>
+                <Show when={smaller().length > 0}>
+                  <p class="picture-tools-head">Smaller copy</p>
+                  <div class="picture-tools-row">
+                    <For each={smaller()}>
+                      {(edge) => (
+                        <button class="preview-chip" onClick={() => void edit({ kind: "resize", longest: edge }, "Smaller copy made beside it")}>
+                          {edge.toLocaleString()} px
+                        </button>
+                      )}
+                    </For>
+                  </div>
+                </Show>
+                <p class="picture-tools-head">Copy as</p>
+                <div class="picture-tools-row">
+                  <For each={FORMATS.filter(([format]) => format !== own().format)}>
+                    {([format, name]) => (
+                      <button class="preview-chip" onClick={() => void edit({ kind: "convert", format }, `${name} copy made beside it`)}>
+                        {name}
+                      </button>
+                    )}
+                  </For>
+                  <button class="preview-chip" onClick={() => void edit({ kind: "share" }, "Copy to share made beside it")}>
+                    To share
+                  </button>
+                </div>
+                <p class="cog-note">A copy to share is a smaller JPEG with no place or camera in it. Copies go beside the picture.</p>
+              </div>
+            </>
+          )}
         </Show>
         <ToolCog label="Picture settings" items={VIEWER_SETTINGS.Pictures} />
       </div>
