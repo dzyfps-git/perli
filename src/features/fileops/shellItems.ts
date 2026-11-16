@@ -30,6 +30,7 @@ import type { MenuItem } from "../../ui/Menu";
 import { kindOf, type Kind } from "../filelist/fileKinds";
 import { setTerminalChoice, terminalChoice, TERMINAL_NAMES } from "../filelist/prefs";
 import type { FolderView } from "../navigation/folderView";
+import { pictureKeep } from "../preview/viewerPrefs";
 import { archiveStem, isArchiveName } from "../navigation/path";
 import { refreshTags, tags } from "../tags/tags";
 import type { FileActions } from "./actions";
@@ -64,7 +65,7 @@ export function createShellItems(
 
   /** Turns and copies for every selected picture at once, as one job with one Undo. */
   function pictureMenu(view: FolderView, count: number): MenuItem {
-    const edit = (change: PictureEdit) => withRows(view, (selection) => startJob({ kind: "picture", selection, edit: change }, view.id));
+    const edit = (change: PictureEdit) => withRows(view, (selection) => startJob({ kind: "picture", selection, edit: change, keep: pictureKeep() }, view.id));
     return {
       label: count === 1 ? "Picture" : `${count} pictures`,
       items: [

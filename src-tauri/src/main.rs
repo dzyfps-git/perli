@@ -280,6 +280,9 @@ enum Task {
         paths: Vec<PathBuf>,
         selection: Option<Selection>,
         edit: picture::Edit,
+        /// What copies keep of the facts a photo carries.
+        #[serde(default)]
+        keep: picture::Keep,
     },
     Wallpaper { path: PathBuf },
 }
@@ -408,7 +411,7 @@ impl Task {
                 let bytes = preview::encoded(&path, &text)?;
                 Job::Save { path, bytes, read: seen.as_deref().and_then(preview::parse_seen) }
             }
-            Self::Picture { mut paths, selection, edit } => {
+            Self::Picture { mut paths, selection, edit, keep } => {
                 if let Some(selection) = &selection {
                     paths.extend(views.read(selection, folder::Listing::paths)?);
                 }
@@ -416,7 +419,7 @@ impl Task {
                 if let Some(problem) = paths.iter().find_map(|path| picture::refusal(path, edit)) {
                     return Err(problem);
                 }
-                Job::Picture { paths, edit }
+                Job::Picture { paths, edit, keep }
             }
             Self::Wallpaper { path } => {
                 refuse_zipped(std::slice::from_ref(&path))?;

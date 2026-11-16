@@ -49,7 +49,7 @@ import type { FolderView } from "../navigation/folderView";
 import { archiveKind, isArchiveName, join, parentOf, resolveRelative } from "../navigation/path";
 import { languageOf } from "./highlight";
 import { tableDelimiter } from "./table";
-import { neighbours, previewSize, setNeighbours, setPreviewSize } from "./viewerPrefs";
+import { neighbours, pictureKeep, previewSize, setNeighbours, setPreviewSize } from "./viewerPrefs";
 import { previewWidth } from "../filelist/prefs";
 import { DockEdge } from "./DockEdge";
 import type { TextPiece, TextViewProps } from "./TextView";
@@ -363,7 +363,7 @@ export function QuickPreview(props: {
     return {
       canSave: !!format,
       format,
-      run: async (edit) => ran(await runJob({ kind: "picture", paths: [path], edit }, view)),
+      run: async (edit) => ran(await runJob({ kind: "picture", paths: [path], edit, keep: pictureKeep() }, view)),
       wallpaper: async () => ran(await runJob({ kind: "wallpaper", path }, view)),
       offerTurn: (edit) =>
         props.notify?.(`Keep the turn of ${item.name}?`, "It was only turned on screen.", true, {

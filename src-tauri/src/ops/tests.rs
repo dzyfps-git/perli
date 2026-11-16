@@ -2761,7 +2761,7 @@ fn pictures_turn_in_place_and_change_as_copies() {
     let original = crate::inside::tests::turned_jpeg(1);
     fs::write(&photo, &original).unwrap();
     let host = keeping(&sandbox);
-    let edit = |edit: Edit, path: &Path| run_with(Job::Picture { paths: vec![path.to_path_buf()], edit }, &host);
+    let edit = |edit: Edit, path: &Path| run_with(Job::Picture { paths: vec![path.to_path_buf()], edit, keep: crate::picture::Keep::default() }, &host);
 
     // A JPEG's turn changes one number, so it is as long as before.
     let turned = edit(Edit::Turn { quarters: 1, flip: false }, &photo);

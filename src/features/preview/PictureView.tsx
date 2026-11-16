@@ -1,11 +1,11 @@
 import { createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { COPY_EDGES, PICTURE_FORMATS, type PictureEdit, type PictureFormat, type Thumb } from "../../api";
-import { ToolCog } from "../../ui/Controls";
+import { Switch, ToolCog } from "../../ui/Controls";
 import { formatSize } from "../../ui/format";
 import { draw } from "./QuickPreview";
 import { cameraFacts, hexAt, tintOf } from "./pictureFacts";
 import { Minimap } from "./Minimap";
-import { minimapShown, setMinimapShown, sharpPixels, VIEWER_SETTINGS } from "./viewerPrefs";
+import { copyFacts, copyNoPlace, minimapShown, setCopyFacts, setCopyNoPlace, setMinimapShown, sharpPixels, VIEWER_SETTINGS } from "./viewerPrefs";
 import { panFor, viewWindow } from "./zoomView";
 
 const ICON_ZOOM_IN = "";
@@ -684,8 +684,15 @@ export function PictureView(live: PictureViewProps) {
                     <Show when={guess("share", SHARE_EDGE)}>{(about) => <small class="chip-guess">{about()}</small>}</Show>
                   </button>
                 </div>
+                <div class="picture-tools-switches">
+                  <Switch label="Keep camera facts in copies" checked={copyFacts()} onChange={setCopyFacts} />
+                  <Switch label="Remove location from copies" checked={copyNoPlace() || !copyFacts()} disabled={!copyFacts()} onChange={setCopyNoPlace} />
+                </div>
                 <p class="cog-note">
-                  A copy to share is a smaller JPEG with no place or camera in it. Copies go beside the picture, and sizes are a guess.
+                  {copyFacts()
+                    ? `Copies keep the camera, date and colour profile${copyNoPlace() ? ", without the place it was taken" : " and the place it was taken"}.`
+                    : "Copies keep only the colour profile."}{" "}
+                  A copy to share is a smaller JPEG. Copies go beside the picture, and sizes are a guess.
                   <Show when={turned() && !frames()}>
                     <span id="picture-crop-why"> Save the turn first to crop it.</span>
                   </Show>

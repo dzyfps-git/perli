@@ -70,7 +70,7 @@ pub enum Job {
     /// Text the user edited, written over the file it came from. `read` is how the file stood
     /// when they read it, which a change since is asked about.
     Save { path: PathBuf, bytes: Vec<u8>, read: Option<Seen> },
-    Picture { paths: Vec<PathBuf>, edit: crate::picture::Edit },
+    Picture { paths: Vec<PathBuf>, edit: crate::picture::Edit, keep: crate::picture::Keep },
     Wallpaper { picture: PathBuf },
 }
 
@@ -399,7 +399,7 @@ impl<'a> Run<'a> {
             }
             Job::Undo { records } => self.undo(records),
             Job::Save { path, bytes, read } => self.save(&path, &bytes, read),
-            Job::Picture { paths, edit } => self.edit_pictures(&paths, edit),
+            Job::Picture { paths, edit, keep } => self.edit_pictures(&paths, edit, keep),
             Job::Wallpaper { picture } => self.set_wallpaper(&picture),
         }
     }

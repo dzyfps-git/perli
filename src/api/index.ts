@@ -224,8 +224,14 @@ export type Task =
   /** A quick edit's text saved over its file. `seen` is what the preview said of it when read. */
   | { kind: "save"; path: string; text: string; seen?: string }
   /** Pictures by path, from a preview, or the selected rows. */
-  | { kind: "picture"; paths?: string[]; selection?: Selection; edit: PictureEdit }
+  | { kind: "picture"; paths?: string[]; selection?: Selection; edit: PictureEdit; keep?: PictureKeep }
   | { kind: "wallpaper"; path: string };
+
+/** What a copy keeps of a photo's facts. A turn saved into the file keeps them all. */
+export interface PictureKeep {
+  camera: boolean;
+  place: boolean;
+}
 
 export type PictureFormat = "png" | "jpeg" | "tiff" | "bmp";
 /** The formats a picture can be copied as, and their names. */
@@ -239,7 +245,7 @@ export type PictureEdit =
   /** Never bigger than the picture already is. */
   | { kind: "resize"; longest: number }
   | { kind: "convert"; format: PictureFormat }
-  /** A smaller JPEG with no place or camera in it. */
+  /** A smaller JPEG, keeping what `keep` says of the photo's facts. */
   | { kind: "share" }
   /** A copy of part of it. Each side is a share of the whole picture as it shows, from 0 to 1. */
   | { kind: "crop"; left: number; top: number; width: number; height: number };

@@ -903,7 +903,7 @@ fn title(job: &Job) -> String {
         Job::Empty => "Emptying the Recycle Bin".to_string(),
         Job::Undo { .. } => "Undoing".to_string(),
         Job::Save { path, .. } => named("Saving", &[path.as_path()]),
-        Job::Picture { paths, edit } => listed(
+        Job::Picture { paths, edit, .. } => listed(
             match edit {
                 crate::picture::Edit::Turn { .. } => "Turning",
                 crate::picture::Edit::Resize { .. } => "Resizing",

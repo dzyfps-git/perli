@@ -3904,6 +3904,11 @@ th[aria-sort="descending"] .table-sort::after {
   padding: 0 var(--space-1);
 }
 
+.picture-tools-switches {
+  display: grid;
+  margin-top: var(--space-2);
+}
+
 .picture-tools-row kbd {
   margin-left: 4px;
   color: var(--text-muted);

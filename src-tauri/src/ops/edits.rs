@@ -6,18 +6,18 @@ use std::path::{Path, PathBuf};
 use windows::core::Error;
 use windows::Win32::Foundation::E_FAIL;
 
-use crate::picture::{self, Edit, Format};
+use crate::picture::{self, Edit, Format, Keep};
 
 use super::{names, sys, Done, Flow, Run};
 
 impl Run<'_> {
-    pub(super) fn edit_pictures(&mut self, paths: &[PathBuf], edit: Edit) -> Flow {
+    pub(super) fn edit_pictures(&mut self, paths: &[PathBuf], edit: Edit, keep: Keep) -> Flow {
         self.add_total(paths.len() as u64, 0);
         for path in paths {
             self.check()?;
             match edit {
                 Edit::Turn { quarters, flip } => drop(self.turn_picture(path, (quarters, flip))?),
-                _ => self.picture_copy(path, edit)?,
+                _ => self.picture_copy(path, edit, keep)?,
             }
             self.step(1, 0);
         }
@@ -29,7 +29,7 @@ impl Run<'_> {
     fn turn_picture(&mut self, path: &Path, turn: picture::Turn) -> Flow<bool> {
         if picture::format_of(path) != Some(Format::Jpeg) {
             let edit = Edit::Turn { quarters: turn.0, flip: turn.1 };
-            return self.replace(path, |temp| picture::write(path, temp, edit).map(drop));
+            return self.replace(path, |temp| picture::write(path, temp, edit, Keep::ALL).map(drop));
         }
         self.replace(path, |temp| {
             let bytes = fs::read(path).map_err(|error| Error::new(E_FAIL, error.to_string()))?;
@@ -40,12 +40,12 @@ impl Run<'_> {
     }
 
     /// A new picture beside `path`, named for what it is once its size is known.
-    fn picture_copy(&mut self, path: &Path, edit: Edit) -> Flow {
+    fn picture_copy(&mut self, path: &Path, edit: Edit, keep: Keep) -> Flow {
         let folder = sys::parent(path);
         let temp = self.temp_beside(path);
         let made = self.attempt(path, None, |_| {
             let _ = sys::delete_file(&temp);
-            picture::write(path, &temp, edit)
+            picture::write(path, &temp, edit, keep)
         })?;
         let Some(size) = made else {
             let _ = sys::delete_file(&temp);
