@@ -19,7 +19,7 @@ use crate::packs;
 use super::sys::{self, Stat};
 use super::transfer::{file_name, Plan};
 use super::tree::Node;
-use super::{names, ArchiveFormat, Done, Flow, Run, Stopped, ZipLevel};
+use super::{names, Answer, ArchiveFormat, Done, Flow, Run, Stopped, ZipLevel};
 
 const CHUNK: usize = 256 * 1024;
 const NO_PASSWORDS: &str = "This file is protected by a password. Preview the archive to unlock it and take it out.";
@@ -183,6 +183,34 @@ impl<R: Read> Read for Counting<'_, '_, R> {
     }
 }
 
+/// A file that failed partway into a 7z, and why.
+#[derive(Debug)]
+struct SevenSource(PathBuf, io::Error);
+
+impl std::fmt::Display for SevenSource {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.1.fmt(formatter)
+    }
+}
+
+impl std::error::Error for SevenSource {}
+
+/// A source that keeps what went wrong reading it, which the 7z writer's own error hides.
+struct Noted<'f, R> {
+    from: R,
+    failed: &'f mut Option<io::Error>,
+}
+
+impl<R: Read> Read for Noted<'_, R> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        self.from.read(buffer).map_err(|error| {
+            let told = error.raw_os_error().map_or_else(|| io::Error::new(error.kind(), error.to_string()), io::Error::from_raw_os_error);
+            *self.failed = Some(error);
+            told
+        })
+    }
+}
+
 fn interrupted(_: Stopped) -> io::Error {
     io::ErrorKind::Interrupted.into()
 }
@@ -274,10 +302,28 @@ impl Run<'_> {
         Ok(opened)
     }
 
-    /// A 7z of `nodes`, each file packed on its own, so one can be read without the others.
-    // ponytail: a file that fails partway gives up the whole archive, where a ZIP leaves that
-    // file out; 7z's writer can't take back what it wrote.
+    /// A 7z of `nodes`, each file packed on its own, so one can be read without the others. 7z's
+    /// writer can't take back what it wrote, so a file that fails partway starts the archive
+    /// again: without it for a skip, as a ZIP leaves it out, or with it once more for a retry.
     fn write_seven(&mut self, file: &mut File, nodes: &[Node], level: ZipLevel, password: Option<&str>) -> io::Result<()> {
+        let (items, bytes) = (self.progress.items, self.progress.bytes);
+        let mut left_out = HashSet::new();
+        loop {
+            (self.progress.items, self.progress.bytes) = (items, bytes);
+            file.rewind()?;
+            file.set_len(0)?;
+            let Err(error) = self.write_seven_once(file, nodes, level, password, &left_out) else { return Ok(()) };
+            if !error.get_ref().is_some_and(|inner| inner.is::<SevenSource>()) {
+                return Err(error);
+            }
+            let SevenSource(path, cause) = *error.into_inner().and_then(|inner| inner.downcast().ok()).expect("checked above");
+            if self.problem(&path, &from_io(cause), false).map_err(interrupted)? != Answer::Retry {
+                left_out.insert(path);
+            }
+        }
+    }
+
+    fn write_seven_once(&mut self, file: &mut File, nodes: &[Node], level: ZipLevel, password: Option<&str>, left_out: &HashSet<PathBuf>) -> io::Result<()> {
         use sevenz_rust2::encoder_options::{AesEncoderOptions, Lzma2Options};
         use sevenz_rust2::{ArchiveWriter, EncoderMethod};
         let mut seven = ArchiveWriter::new(BufWriter::with_capacity(CHUNK, &mut *file)).map_err(io::Error::other)?;
@@ -294,12 +340,12 @@ impl Run<'_> {
         seven.set_content_methods(methods);
         seven.set_encrypt_header(password.is_some());
         for (node, name) in self.tops_of(nodes).map_err(interrupted)? {
-            self.add_seven(&mut seven, node, name)?;
+            self.add_seven(&mut seven, node, name, left_out)?;
         }
         seven.finish()?.flush()
     }
 
-    fn add_seven(&mut self, seven: &mut sevenz_rust2::ArchiveWriter<BufWriter<&mut File>>, node: &Node, name: String) -> io::Result<()> {
+    fn add_seven(&mut self, seven: &mut sevenz_rust2::ArchiveWriter<BufWriter<&mut File>>, node: &Node, name: String, left_out: &HashSet<PathBuf>) -> io::Result<()> {
         use sevenz_rust2::ArchiveEntry;
         self.check().map_err(interrupted)?;
         if node.stat.is_link() {
@@ -311,10 +357,21 @@ impl Run<'_> {
         entry.has_last_modified_date = node.stat.modified > 0;
         self.progress.current = node.path.to_string_lossy().into_owned();
         let Some(children) = &node.children else {
+            if left_out.contains(&node.path) {
+                self.progress.bytes += node.bytes;
+                self.step(1, 0);
+                return Ok(());
+            }
             let Some(source) = self.source(node)? else { return Ok(()) };
             let base = self.progress.bytes;
-            let counted = BufReader::with_capacity(CHUNK, Counting { run: self, from: source, base, read: 0 });
-            seven.push_archive_entry(entry, Some(counted)).map_err(io::Error::other)?;
+            let mut failed = None;
+            let noted = Noted { from: source, failed: &mut failed };
+            let counted = BufReader::with_capacity(CHUNK, Counting { run: self, from: noted, base, read: 0 });
+            let pushed = seven.push_archive_entry(entry, Some(counted)).map_err(io::Error::other);
+            if let Some(cause) = failed {
+                return Err(io::Error::other(SevenSource(node.path.clone(), cause)));
+            }
+            pushed?;
             self.progress.bytes = base + node.bytes;
             self.step(1, 0);
             return Ok(());
@@ -322,7 +379,7 @@ impl Run<'_> {
         seven.push_archive_entry::<File>(entry, None).map_err(io::Error::other)?;
         self.step(1, 0);
         for child in children {
-            self.add_seven(seven, child, format!("{name}/{}", name_of(child)))?;
+            self.add_seven(seven, child, format!("{name}/{}", name_of(child)), left_out)?;
         }
         Ok(())
     }

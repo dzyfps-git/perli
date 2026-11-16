@@ -13,7 +13,7 @@ use serde::Serialize;
 use windows::core::{Interface, HSTRING, PCWSTR, PWSTR};
 use windows::Win32::Foundation::PROPERTYKEY;
 use windows::Win32::Globalization::{
-    GetACP, GetLocaleInfoEx, MultiByteToWideChar, WideCharToMultiByte, LOCALE_IDEFAULTANSICODEPAGE, LOCALE_RETURN_NUMBER,
+    GetACP, GetLocaleInfoEx, IsDBCSLeadByteEx, MultiByteToWideChar, WideCharToMultiByte, LOCALE_IDEFAULTANSICODEPAGE, LOCALE_RETURN_NUMBER,
     MULTI_BYTE_TO_WIDE_CHAR_FLAGS, WC_NO_BEST_FIT_CHARS,
 };
 use windows::Win32::Security::Cryptography::{
@@ -147,9 +147,10 @@ impl Encoding {
                 }
                 Some((String::from_utf16(&units).ok()?, units.len() * 2))
             }
-            // ponytail: a line over a whole piece in a two-byte code page (Shift-JIS) can split a
-            // character at the cut. Pieces otherwise end after a line, which never splits one.
             Self::Ansi => {
+                // A two-byte code page such as Shift-JIS can have a letter cut at the end of a
+                // piece whose line runs past it. It waits for the next piece.
+                let bytes = if more { &bytes[..whole_letters(bytes, ansi_page())] } else { bytes };
                 if bytes.is_empty() {
                     return Some((String::new(), 0));
                 }
@@ -194,6 +195,16 @@ impl Encoding {
             _ => bytes.iter().rposition(|&byte| byte == b'\n').map(|at| at + 1),
         }
     }
+}
+
+/// How many of `bytes` hold whole letters of code `page`: all, unless the last is the first byte
+/// of a two-byte letter.
+fn whole_letters(bytes: &[u8], page: u32) -> usize {
+    let mut at = 0;
+    while at < bytes.len() {
+        at += if unsafe { IsDBCSLeadByteEx(page, bytes[at]) }.is_ok() { 2 } else { 1 };
+    }
+    if at > bytes.len() { bytes.len() - 1 } else { at }
 }
 
 /// The code page Notepad calls ANSI: the user's language's own, even when Windows is set to use
@@ -793,6 +804,17 @@ pub fn hash(path: &Path, algorithm: &str, lane: u32) -> std::io::Result<Option<S
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_shift_jis_piece_never_ends_halfway_through_a_letter() {
+        // "日本" in Shift-JIS is 93 FA 96 7B, each letter two bytes.
+        let text = [0x93, 0xFA, 0x96, 0x7B];
+        assert_eq!(super::whole_letters(&text, 932), 4);
+        assert_eq!(super::whole_letters(&text[..3], 932), 2, "the cut letter waits");
+        assert_eq!(super::whole_letters(b"ab", 932), 2);
+        // A one-byte page has no letters to cut.
+        assert_eq!(super::whole_letters(&text[..3], 1252), 3);
+    }
+
     #[test]
     fn file_times_turn_into_unix_milliseconds() {
         assert_eq!(super::unix_ms(116_444_736_000_000_000 + 10_000), Some(1));

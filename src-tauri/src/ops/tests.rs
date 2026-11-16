@@ -1324,6 +1324,31 @@ fn a_new_7z_tar_or_aes_zip_reads_back_as_it_went_in() {
 }
 
 #[test]
+fn a_file_that_fails_partway_into_a_7z_is_left_out_and_the_rest_goes_in() {
+    let sandbox = Sandbox::new();
+    sandbox.file(r"here\tree\a.txt", "alpha");
+    let stuck = sandbox.file(r"here\tree\b.txt", "beta");
+    sandbox.file(r"here\tree\c.txt", "gamma");
+    // Opens fine, and then every read fails, as a file locked by another app does.
+    let holder = fs::OpenOptions::new().read(true).write(true).open(&stuck).unwrap();
+    holder.lock().unwrap();
+    let script = Script::answering(&[Answer::Retry, Answer::Skip]);
+    let job = Job::Zip { sources: vec![sandbox.path(r"here\tree")], level: ZipLevel::Fast, password: None, format: ArchiveFormat::SevenZ, aes: false };
+
+    run_with(job, &script);
+    drop(holder);
+
+    let questions = script.questions.borrow();
+    assert_eq!(questions.len(), 2, "asked again after a retry: {questions:?}");
+    assert!(questions.iter().all(|question| matches!(question, Question::Problem { path, .. } if Path::new(path) == stuck)), "{questions:?}");
+    let seven = sandbox.path(r"here\tree.7z");
+    let mut names: Vec<_> = crate::packs::list(&seven, None).unwrap().items.iter().filter(|item| !item.folder).map(|item| item.name.clone()).collect();
+    names.sort();
+    assert_eq!(names, ["tree/a.txt", "tree/c.txt"]);
+    assert_eq!(crate::packs::read(&seven, "tree/c.txt", 100, true, None).unwrap(), b"gamma");
+}
+
+#[test]
 fn a_new_zip_gets_its_name_from_what_went_in() {
     let sandbox = Sandbox::new();
     let (a, b) = (sandbox.file(r"here\a.tar.txt", "a"), sandbox.file(r"here\b.txt", "b"));
