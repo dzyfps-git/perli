@@ -16,10 +16,12 @@ const MOST_ROWS = 2000;
 const LOOK_EDGE = 1600;
 /** A press that moves this far is a drag out of the archive. */
 const DRAG_PX = 6;
+/** Methods every unzip app reads. Others are marked, as some apps can't open them. */
+const COMMON_METHODS = new Set(["Stored", "Deflate"]);
 /** Rust adds this when the file tried is damaged but the password opened another one. */
 const PASSWORD_RIGHT = "The password is right.";
 
-type Column = "name" | "size" | "modified";
+type Column = "name" | "size" | "modified" | "method";
 
 interface Node {
   /** The entry's own name inside the archive, the way the job asks for it. */
@@ -29,6 +31,8 @@ interface Node {
   size: number;
   modified: string | null;
   locked: boolean;
+  /** How a ZIP squeezes it. */
+  method?: string | null;
   children: Node[];
 }
 
@@ -157,11 +161,14 @@ export function ArchiveView(live: ArchiveViewProps) {
   const unpacked = files.reduce((sum, entry) => sum + entry.size, 0);
   // The smallest, so the password check reads it to the end, where its checksum is.
   const firstLocked = files.filter((entry) => entry.locked).sort((a, b) => a.size - b.size)[0];
+  /** The ways a ZIP squeezes its files, so a rare one shows before anything is read. */
+  const methods = [...new Set(files.map((entry) => entry.method).filter((method): method is string => !!method))];
   const summary = [
     count(files.length, "file"),
     count(props.entries.length - files.length, "folder"),
     `${formatSize(unpacked)} unpacked`,
     ...(firstLocked ? ["some under a password"] : []),
+    ...(methods.length ? [methods.join(", ")] : []),
   ].join("  ·  ");
 
   function order(nodes: Node[]) {
@@ -170,7 +177,13 @@ export function ArchiveView(live: ArchiveViewProps) {
     return [...nodes].sort((a, b) => {
       if (a.folder !== b.folder) return a.folder ? -1 : 1;
       const compared =
-        by === "size" ? a.size - b.size : by === "modified" ? (a.modified ?? "").localeCompare(b.modified ?? "") : 0;
+        by === "size"
+          ? a.size - b.size
+          : by === "modified"
+            ? (a.modified ?? "").localeCompare(b.modified ?? "")
+            : by === "method"
+              ? (a.method ?? "").localeCompare(b.method ?? "")
+              : 0;
       return sign * (compared || collator.compare(a.name, b.name));
     });
   }
@@ -366,6 +379,11 @@ export function ArchiveView(live: ArchiveViewProps) {
               <th aria-sort={sort().by === "modified" ? (sort().down ? "descending" : "ascending") : undefined}>
                 <button onClick={() => sortBy("modified")}>Modified{arrow("modified")}</button>
               </th>
+              <Show when={methods.length}>
+                <th aria-sort={sort().by === "method" ? (sort().down ? "descending" : "ascending") : undefined}>
+                  <button onClick={() => sortBy("method")}>Method{arrow("method")}</button>
+                </th>
+              </Show>
               <th aria-label="Actions" />
             </tr>
           </thead>
@@ -396,6 +414,11 @@ export function ArchiveView(live: ArchiveViewProps) {
                     {formatSize(row.node.size)}
                   </td>
                   <td>{row.node.modified ?? ""}</td>
+                  <Show when={methods.length}>
+                    <td class="archive-method" data-rare={(row.node.method && !COMMON_METHODS.has(row.node.method)) || undefined}>
+                      {row.node.method ?? ""}
+                    </td>
+                  </Show>
                   <td class="archive-actions">
                     <Show when={!row.node.folder}>
                       <button

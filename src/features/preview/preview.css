@@ -2864,6 +2864,16 @@ th[aria-sort="descending"] .table-sort::after {
   font-variant-numeric: tabular-nums;
 }
 
+/* A rare way of squeezing reads in the accent, since Windows' own unzip can't open it. */
+.preview-archive td.archive-method {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.preview-archive td.archive-method[data-rare] {
+  color: var(--accent);
+}
+
 .archive-locked {
   margin-left: 6px;
   color: var(--text-muted);

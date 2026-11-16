@@ -312,11 +312,7 @@ fn take_out(archive: &Path, inner: &str, target: &Path) -> Result<(), String> {
         if locked && key.is_none() {
             return Err(NEEDS_PASSWORD.into());
         }
-        let mut entry = match key {
-            Some(key) => zip.by_index_decrypt(index, key.as_bytes()),
-            None => zip.by_index(index),
-        }
-        .map_err(inside::reason)?;
+        let mut entry = inside::data(&mut zip, index, key).map_err(inside::reason)?;
         let mut file = fs::File::create(&path).map_err(|error| error.to_string())?;
         std::io::copy(&mut entry, &mut file).map_err(|error| inside::read_failed(error, archive, &name, key))?;
         finish(file, &path, ticks, zone.as_deref());

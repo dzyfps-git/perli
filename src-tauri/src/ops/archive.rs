@@ -517,11 +517,7 @@ impl Run<'_> {
                 self.step(1, 0);
             } else {
                 self.land_file(&mut landing, &relative, stat, |run, file, base| {
-                    let mut entry = match password.filter(|_| encrypted) {
-                        Some(password) => zip.by_index_decrypt(index, password.as_bytes()),
-                        None => zip.by_index(index),
-                    }
-                    .map_err(io::Error::other)?;
+                    let mut entry = crate::inside::data(&mut zip, index, password.filter(|_| encrypted)).map_err(io::Error::other)?;
                     run.pour(&mut entry, file, base)
                 })?;
             }

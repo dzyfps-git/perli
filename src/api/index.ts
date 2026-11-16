@@ -1023,6 +1023,8 @@ export interface ArchiveEntry {
   modified: string | null;
   /** Protected by a password. */
   locked: boolean;
+  /** How a ZIP's file is squeezed, such as "Deflate" or "Zstandard". Null for other kinds. */
+  method?: string | null;
 }
 
 export const previewRow = (view: number, request: number, row: number, offset = 0) =>
