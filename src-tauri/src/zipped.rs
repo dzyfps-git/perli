@@ -47,8 +47,77 @@ fn is_pack(archive: &Path) -> bool {
 }
 
 /// The archive and the path inside it, with `/` between parts and `""` for its top. `None`
-/// outside an archive. Only a name an archive has costs a look at the disk.
+/// outside an archive. A path that goes into an archive inside it gets that one, taken out to
+/// the cache. A row that is such an archive stays a row of the one it is in, so copying it
+/// copies the file.
 pub fn split(path: &Path) -> Option<(PathBuf, String)> {
+    resolve(path, false).map(|opened| (opened.archive, opened.inner))
+}
+
+/// An archive path opened as a folder: like `split`, and an archive inside one opens too.
+pub struct Opened {
+    /// The archive to read, a file in the cache for one inside another.
+    pub archive: PathBuf,
+    pub inner: String,
+    /// The shown path of each archive on the way, the outermost first, a real file.
+    pub levels: Vec<PathBuf>,
+    /// Why an archive on the way couldn't come out.
+    pub failed: Option<String>,
+}
+
+pub fn opened(path: &Path) -> Option<Opened> {
+    resolve(path, true)
+}
+
+/// Goes into each archive inside an archive that `path` goes into, and with `last` into one it
+/// ends on too. A folder with an archive's name stays a folder.
+fn resolve(path: &Path, last: bool) -> Option<Opened> {
+    let (mut archive, inner) = first_split(path)?;
+    let parts: Vec<&str> = inner.split('/').filter(|part| !part.is_empty()).collect();
+    let (mut levels, mut start, mut failed) = (vec![archive.clone()], 0, None);
+    for (index, name) in parts.iter().enumerate() {
+        if !is_archive(OsStr::new(name)) || index + 1 == parts.len() && !last {
+            continue;
+        }
+        match nested(&archive, &parts[start..index], name) {
+            Ok(Some(cached)) => archive = cached,
+            Ok(None) => continue,
+            Err(error) => {
+                failed = Some(error);
+                break;
+            }
+        }
+        levels.push(parts[..=index].iter().fold(levels[0].clone(), |path, part| path.join(part)));
+        start = index + 1;
+    }
+    Some(Opened { archive, inner: parts[start..].join("/"), levels, failed })
+}
+
+/// The archive `name` in `parent` of `archive` as a file in the cache. `None` for a folder.
+fn nested(archive: &Path, parent: &[&str], name: &str) -> Result<Option<PathBuf>, String> {
+    let parent = parent.join("/");
+    let inner = if parent.is_empty() { name.to_string() } else { format!("{parent}/{name}") };
+    // One already taken out costs no read of the archive.
+    let done = slot(archive, &inner, password(archive).as_deref()).0.join(name);
+    if done.is_file() {
+        return Ok(Some(done));
+    }
+    let (nodes, _) = list(archive, &parent, false)?;
+    let wanted = name.to_lowercase();
+    if !nodes.iter().any(|node| !node.folder && node.name.to_lowercase() == wanted) {
+        return Ok(None);
+    }
+    real_in(archive, &inner).map(Some)
+}
+
+/// The outermost archive a path is in, a real file.
+pub fn outer(path: &Path) -> Option<PathBuf> {
+    first_split(path).map(|(archive, _)| archive)
+}
+
+/// `split` with no archive inside an archive gone into. Only a name an archive has costs a look
+/// at the disk.
+fn first_split(path: &Path) -> Option<(PathBuf, String)> {
     let mut archive = PathBuf::new();
     let mut parts = path.components();
     while let Some(part) = parts.next() {
@@ -268,25 +337,30 @@ pub fn whole(archive: &Path) -> Option<PathBuf> {
 /// A file or folder of an archive as a real one on disk, taken out to a cache once for each
 /// version of the archive. Paths outside an archive come back as they are, and so does its top.
 pub fn real(path: &Path) -> Result<PathBuf, String> {
-    let Some((archive, inner)) = split(path) else {
-        return Ok(path.to_path_buf());
-    };
+    match split(path) {
+        Some((archive, inner)) => real_in(&archive, &inner),
+        None => Ok(path.to_path_buf()),
+    }
+}
+
+/// `real` for `inner` of `archive`.
+fn real_in(archive: &Path, inner: &str) -> Result<PathBuf, String> {
     let Some(name) = inner.rsplit('/').next().filter(|name| !name.is_empty()) else {
-        return Ok(archive);
+        return Ok(archive.to_path_buf());
     };
     let relative = ops::safe_relative(inner.split('/').collect());
     // A move may have taken it away from there.
-    if let Some(found) = whole(&archive).zip(relative).map(|(whole, relative)| whole.join(relative)).filter(|found| found.exists()) {
+    if let Some(found) = whole(archive).zip(relative).map(|(whole, relative)| whole.join(relative)).filter(|found| found.exists()) {
         return Ok(found);
     }
-    let (slot, part) = slot(&archive, &inner, password(&archive).as_deref());
+    let (slot, part) = slot(archive, inner, password(archive).as_deref());
     let target = slot.join(name);
     if target.exists() {
         return Ok(target);
     }
     // A move took what was here away.
     let _ = fs::remove_dir_all(&slot);
-    settle(&part, &slot, &target, || take_out(&archive, &inner, &part.join(name)))?;
+    settle(&part, &slot, &target, || take_out(archive, inner, &part.join(name)))?;
     Ok(target)
 }
 
@@ -506,6 +580,45 @@ mod tests {
         fs::create_dir_all(fixture.0.join("plain.zip")).unwrap();
         assert_eq!(split(&fixture.0.join("plain.zip").join("x")), None);
         assert_eq!(split(&fixture.0), None);
+    }
+
+    fn zip_of(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut zip = ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for (name, bytes) in entries {
+            zip.start_file(*name, SimpleFileOptions::default()).unwrap();
+            zip.write_all(bytes).unwrap();
+        }
+        zip.finish().unwrap().into_inner()
+    }
+
+    #[test]
+    fn an_archive_inside_an_archive_opens_as_a_folder_and_stays_a_file_as_a_row() {
+        let fixture = Fixture::new("nested", &[]);
+        let outer = fixture.0.join("outer.zip");
+        let inner = zip_of(&[("docs/a.txt", b"alpha")]);
+        fs::write(&outer, zip_of(&[("in/b.zip", &inner), ("x.zip/y.txt", b"why")])).unwrap();
+        let nested = outer.join("in").join("b.zip");
+
+        let (cached, inside) = split(&nested.join("docs")).unwrap();
+        assert_eq!(inside, "docs");
+        assert!(cached.is_file() && cached != outer);
+        assert_eq!(list(&cached, "", false).unwrap().0[0].name, "docs");
+        // The row itself is the outer archive's, so copying it copies the file.
+        assert_eq!(split(&nested), Some((outer.clone(), "in/b.zip".into())));
+        assert!(is_inside(&nested) && is_inside(&nested.join("docs")));
+        let top = opened(&nested).unwrap();
+        assert_eq!((&top.archive, top.inner.as_str()), (&cached, ""));
+        assert_eq!(top.levels, [outer.clone(), nested.clone()]);
+        assert_eq!(fs::read_to_string(real(&nested.join("docs").join("a.txt")).unwrap()).unwrap(), "alpha");
+        // A folder with an archive's name stays a folder.
+        assert_eq!(split(&outer.join("x.zip").join("y.txt")), Some((outer.clone(), "x.zip/y.txt".into())));
+        assert_eq!(opened(&outer.join("X.ZIP")).unwrap().levels.len(), 1);
+
+        let listing = crate::folder::Listing::read(&nested.to_string_lossy(), crate::folder::Order::default()).unwrap();
+        assert_eq!(listing.names(&[0]), ["docs"]);
+        assert_eq!(listing.zipped().unwrap().levels, [outer.clone(), nested.clone()]);
+        let _ = fs::remove_dir_all(real(&nested.join("docs").join("a.txt")).unwrap().parent().unwrap());
+        let _ = fs::remove_dir_all(cached.parent().unwrap());
     }
 
     #[test]

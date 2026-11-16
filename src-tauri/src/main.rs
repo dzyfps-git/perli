@@ -396,9 +396,14 @@ impl Task {
                 Job::Unzip { archives, own_folder, smart, only, password, into: None }
             }
             Self::ExtractZip { path } => {
-                let (archive, _) = zipped::split(Path::new(&path)).ok_or("This isn't an archive")?;
-                let password = zipped::password(&archive);
-                Job::Unzip { archives: vec![archive], own_folder: false, smart: true, only: Vec::new(), password, into: None }
+                let zip = zipped::opened(Path::new(&path)).ok_or("This isn't an archive")?;
+                if let Some(reason) = zip.failed {
+                    return Err(reason);
+                }
+                let password = zipped::password(&zip.archive);
+                // One inside another comes out beside the outermost, not in the cache.
+                let into = (zip.levels.len() > 1).then(|| ops::sys::parent(&zip.levels[0]));
+                Job::Unzip { archives: vec![zip.archive], own_folder: false, smart: true, only: Vec::new(), password, into }
             }
             Self::Paste { folder } => return paste(target(folder)?),
             Self::PasteShortcut { folder } => {
@@ -543,8 +548,10 @@ struct Opened {
     #[serde(flatten)]
     shape: folder::Shape,
     load_ms: f64,
-    /// The ZIP this folder is in, when it is one opened as a folder.
+    /// The archive this folder is in, when it is one opened as a folder: the innermost as shown.
     archive: Option<String>,
+    /// The shown path of each archive on the way, the outermost first.
+    archives: Vec<String>,
     /// Something in that ZIP needs a password Perli doesn't have yet.
     locked: bool,
 }
@@ -745,7 +752,8 @@ async fn open_folder(
         path: resolved,
         shape: listing.shape(),
         load_ms: started.elapsed().as_secs_f64() * 1000.0,
-        archive: listing.zipped().map(|zip| zip.archive.to_string_lossy().into_owned()),
+        archive: listing.zipped().and_then(|zip| zip.levels.last()).map(|level| level.to_string_lossy().into_owned()),
+        archives: listing.zipped().map_or_else(Vec::new, |zip| zip.levels.iter().map(|level| level.to_string_lossy().into_owned()).collect()),
         locked: listing.zipped().is_some_and(|zip| zip.locked && zipped::password(&zip.archive).is_none()),
     };
     let mut views = views.0.write().unwrap_or_else(|error| error.into_inner());
@@ -765,7 +773,7 @@ async fn open_folder(
 fn watch_of(path: &str, expanded: &[String]) -> Option<Watch> {
     let resolved = PathBuf::from(folder::resolve(path).ok().filter(|_| path != folder::BIN_PATH)?);
     // A ZIP changes as one file, in the folder it sits in.
-    let watched = zipped::split(&resolved).map_or(resolved, |(archive, _)| ops::sys::parent(&archive));
+    let watched = zipped::outer(&resolved).map_or(resolved, |archive| ops::sys::parent(&archive));
     Some(Watch::new(std::iter::once(watched).chain(expanded.iter().map(PathBuf::from))))
 }
 
@@ -1367,8 +1375,9 @@ impl ShellTarget {
             Self::Rows { selection } => {
                 menus::Target::Items(on_disk(views.read(&selection, folder::Listing::paths)?).await?)
             }
-            Self::Folder { path } => match zipped::split(Path::new(&path)) {
-                Some((archive, _)) => menus::Target::Items(vec![archive]),
+            // ponytail: one inside another stands for the outermost, a menu of its own when asked for.
+            Self::Folder { path } => match zipped::outer(Path::new(&path)) {
+                Some(archive) => menus::Target::Items(vec![archive]),
                 None => menus::Target::Folder(path.into()),
             },
             Self::Paths { paths } => menus::Target::Items(on_disk(paths).await?),
@@ -1542,8 +1551,8 @@ async fn big_picture(view: u32, request: u64, row: u32, edge: u32, views: State<
 #[tauri::command]
 async fn unlock_zip(path: PathBuf, password: String) -> Result<(), String> {
     blocking(move || {
-        let (archive, _) = zipped::split(&path).ok_or("This isn't an archive")?;
-        zipped::unlock(&archive, &password)
+        let zip = zipped::opened(&path).ok_or("This isn't an archive")?;
+        zipped::unlock(&zip.archive, &password)
     })
     .await
 }

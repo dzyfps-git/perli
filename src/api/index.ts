@@ -23,8 +23,10 @@ export interface Opened {
   loadMs: number;
   /** Rows to select straight away, when this is a new order of the same folder. */
   selected?: number[];
-  /** The ZIP file this folder is in, when it is one inside a ZIP. */
+  /** The archive this folder is in, when it is one inside an archive: the innermost as shown. */
   archive: string | null;
+  /** The shown path of each archive on the way, the outermost first. */
+  archives: string[];
   /** Something in that ZIP needs a password Perli doesn't have yet. */
   locked: boolean;
 }

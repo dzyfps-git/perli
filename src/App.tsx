@@ -634,7 +634,7 @@ export function App() {
   function openRow(view: FolderView, row: Row, toSide: boolean) {
     if (view.isBin()) return;
     const path = rowPath(view, row);
-    const asFolder = row.isDir || (isArchiveName(row.name) && !view.isZip());
+    const asFolder = row.isDir || isArchiveName(row.name);
     if (!asFolder) openFile(path).catch(jobs.report);
     else if (toSide) tabs.openToSide(path);
     else view.open(path);

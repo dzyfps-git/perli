@@ -93,9 +93,9 @@ export function PathBar(props: {
   const [chosen, setChosen] = createSignal(-1);
   let asked = 0;
   const crumbs = () => toCrumbs(props.view.trail());
-  /** A ZIP and the folders in it take no drops. */
+  /** An archive and the folders in it take no drops. */
   const inZip = (path: string) => {
-    const archive = props.view.archive();
+    const archive = props.view.archives()[0];
     return !!archive && relativeTo(archive, path) !== path;
   };
   const depth = () => toCrumbs(props.view.folder()?.path ?? "").length;
@@ -500,7 +500,7 @@ export function PathBar(props: {
                 }}
               >
                 {crumb().label}
-                <Show when={samePath(props.view.archive(), crumb().path)}>
+                <Show when={props.view.archives().some((level) => samePath(level, crumb().path))}>
                   <span class="crumb-zip" aria-hidden="true">
                     {archiveKind(crumb().label)}
                   </span>

@@ -538,8 +538,8 @@ impl Searches {
             });
             return Ok(Listing::searched(shown, order));
         }
-        if let Some((archive, inner)) = zipped::split(&shown_folder) {
-            let found = in_zip(&archive, &inner, &shown_folder, &asked)?;
+        if let Some(zip) = zipped::opened(&shown_folder) {
+            let found = in_zip(&zip.archive, &zip.inner, &shown_folder, &asked)?;
             self.stop(view);
             self.all().insert(view, Arc::new(Search::new(found.clone(), usize::MAX)));
             report(Walk::Done);
