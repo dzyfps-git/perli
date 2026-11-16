@@ -10,10 +10,12 @@ use windows::core::{Error, Interface, Result, HRESULT, PCWSTR};
 use windows::Win32::Foundation::{E_ABORT, E_FAIL, S_OK};
 use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_DIRECTORY;
 use windows::Win32::System::Com::Marshal::CoMarshalInterThreadInterfaceInStream;
-use windows::Win32::System::Com::StructuredStorage::CoGetInterfaceAndReleaseStream;
+use windows::Win32::System::Com::StructuredStorage::{
+    CoGetInterfaceAndReleaseStream, CreateILockBytesOnHGlobal, ILockBytes, IStorage, StgCreateDocfileOnILockBytes,
+};
 use windows::Win32::System::Com::{
-    IBindCtx, IDataObject, IStream, DVASPECT_CONTENT, FORMATETC, STREAM_SEEK_SET, TYMED, TYMED_HGLOBAL,
-    TYMED_ISTREAM,
+    IBindCtx, IDataObject, IStream, DVASPECT_CONTENT, FORMATETC, STATFLAG_NONAME, STATSTG, STGC_DEFAULT, STGM_CREATE,
+    STGM_READWRITE, STGM_SHARE_EXCLUSIVE, STREAM_SEEK_SET, TYMED, TYMED_HGLOBAL, TYMED_ISTORAGE, TYMED_ISTREAM,
 };
 use windows::Win32::System::DataExchange::RegisterClipboardFormatW;
 use windows::Win32::System::Ole::{ReleaseStgMedium, DROPEFFECT_COPY};
@@ -147,28 +149,66 @@ impl Read for Stream {
     }
 }
 
-/// What a source hands over for one file. A mail stored as a whole storage comes as neither.
+/// A storage written out as a compound file, the way a `.msg` sits on disk, read back in pieces.
+struct Docfile {
+    bytes: ILockBytes,
+    at: u64,
+    size: u64,
+}
+
+impl Read for Docfile {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let size = (buffer.len() as u64).min(self.size.saturating_sub(self.at)).min(u64::from(u32::MAX)) as u32;
+        if size == 0 {
+            return Ok(0);
+        }
+        let mut count = 0;
+        let read = unsafe { self.bytes.ReadAt(self.at, buffer.as_mut_ptr().cast(), size, Some(&raw mut count)) };
+        read.map_err(|error| io::Error::other(error.message()))?;
+        self.at += u64::from(count);
+        Ok(count as usize)
+    }
+}
+
+/// Copies a whole storage, such as a mail classic Outlook drags, into a compound file of its own.
+// ponytail: the copy sits in memory until it lands; a temp docfile if mails with huge attachments strain it.
+fn docfile(storage: &IStorage) -> Result<Docfile> {
+    unsafe {
+        let bytes = CreateILockBytesOnHGlobal(None, true)?;
+        let copy = StgCreateDocfileOnILockBytes(&bytes, STGM_CREATE | STGM_READWRITE | STGM_SHARE_EXCLUSIVE, 0)?;
+        storage.CopyTo(None, None, &copy)?;
+        copy.Commit(STGC_DEFAULT.0 as u32)?;
+        drop(copy);
+        let mut stat = STATSTG::default();
+        bytes.Stat(&raw mut stat, STATFLAG_NONAME.0 as u32)?;
+        Ok(Docfile { bytes, at: 0, size: stat.cbSize })
+    }
+}
+
+/// What a source hands over for one file: bytes, a stream, or a mail stored as a whole storage.
 enum Contents {
     Bytes(Vec<u8>),
     Stream(Stream),
+    Docfile(Docfile),
 }
 
 fn contents(data: &IDataObject, index: usize) -> Result<Contents> {
-    let wanted = format(CFSTR_FILECONTENTS, index as i32, TYMED(TYMED_ISTREAM.0 | TYMED_HGLOBAL.0));
+    let wanted = format(CFSTR_FILECONTENTS, index as i32, TYMED(TYMED_ISTREAM.0 | TYMED_HGLOBAL.0 | TYMED_ISTORAGE.0));
     let mut medium = unsafe { data.GetData(&raw const wanted) }?;
     let found = unsafe {
         match TYMED(medium.tymed as i32) {
-            TYMED_HGLOBAL => clipboard::copy_memory(medium.u.hGlobal).map(Contents::Bytes),
+            TYMED_HGLOBAL => clipboard::copy_memory(medium.u.hGlobal).map(|bytes| Ok(Contents::Bytes(bytes))),
             TYMED_ISTREAM => (*medium.u.pstm).clone().map(|stream| {
                 // A retry reads the same stream, and some sources start it anywhere.
                 let _ = stream.Seek(0, STREAM_SEEK_SET, None);
-                Contents::Stream(Stream(stream))
+                Ok(Contents::Stream(Stream(stream)))
             }),
+            TYMED_ISTORAGE => (*medium.u.pstg).as_ref().map(|storage| docfile(storage).map(Contents::Docfile)),
             _ => None,
         }
     };
     unsafe { ReleaseStgMedium(&raw mut medium) };
-    found.ok_or_else(|| Error::new(E_FAIL, UNREADABLE))
+    found.unwrap_or_else(|| Err(Error::new(E_FAIL, UNREADABLE)))
 }
 
 impl Run<'_> {
@@ -180,6 +220,28 @@ impl Run<'_> {
         let received = self.receive_items(&data, folder);
         incoming.finish(&data, if received.is_ok() { S_OK } else { E_ABORT });
         received
+    }
+
+    /// A mail's attachments, each under its own name with no folders, marked as from elsewhere.
+    pub(super) fn save_attachments(&mut self, mail: &Path, folder: &Path) -> Flow {
+        let read = |_: &mut Self| crate::mail::attachments(mail).map_err(|message| Error::new(E_FAIL, message.as_str()));
+        let Some(parts) = self.attempt(mail, None, read)? else {
+            return Ok(());
+        };
+        self.add_total(parts.len() as u64, parts.iter().map(|(_, bytes)| bytes.len() as u64).sum());
+        let mut landing = Landing::new(folder.to_path_buf(), None, Some(FROM_ELSEWHERE.to_vec()));
+        for (name, bytes) in parts {
+            self.check()?;
+            // A name may carry a sender's folders, which go: only the file's own name is kept.
+            let own = name.rsplit(['/', '\\']).next().unwrap_or_default().to_string();
+            let Some(relative) = safe(PathBuf::from(&own)).filter(|_| !own.is_empty()) else {
+                self.refuse(&folder.join(name.replace(['/', '\\'], " ")), UNSAFE_NAME)?;
+                continue;
+            };
+            let stat = Stat::of_file(bytes.len() as u64, 0);
+            self.land_file(&mut landing, &relative, stat, |run, file, base| run.pour(&mut bytes.as_slice(), file, base))?;
+        }
+        Ok(())
     }
 
     fn receive_items(&mut self, data: &IDataObject, folder: &Path) -> Flow {
@@ -203,6 +265,7 @@ impl Run<'_> {
                 match contents(data, index).map_err(|error| io::Error::other(error.message()))? {
                     Contents::Bytes(bytes) => run.pour(&mut bytes.as_slice(), file, base),
                     Contents::Stream(mut stream) => run.pour(&mut stream, file, base),
+                    Contents::Docfile(mut docfile) => run.pour(&mut docfile, file, base),
                 }
             })?;
         }

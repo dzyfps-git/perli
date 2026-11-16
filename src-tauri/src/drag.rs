@@ -647,7 +647,7 @@ mod tests {
         let heard = heard.borrow();
         assert!(heard.contains(&Event::Over { x: 1, y: 1, effect: Some(DropAction::Delete) }), "{heard:?}");
         assert_eq!(heard.last(), Some(&Event::Drop { x: 1, y: 1, right: false, for_good: true }));
-        assert_eq!(drags.waiting(), [scene.file.clone()], "the ask counts what waits");
+        assert_eq!(drags.waiting(), std::slice::from_ref(&scene.file), "the ask counts what waits");
         assert!(matches!(drags.job(Path::new(BIN_PATH), Some(DropAction::Delete)), Some(Job::Delete { .. })));
 
         let elsewhere = dropped(on_c());

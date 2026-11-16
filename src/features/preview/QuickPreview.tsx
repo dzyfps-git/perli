@@ -39,6 +39,7 @@ import {
   type Preview,
   type DbTable,
   type FontFacts,
+  type Mail,
   type Row,
   type Thumb,
 } from "../../api";
@@ -65,6 +66,7 @@ import type { PlayerProps } from "./Player";
 import type { VideoViewProps } from "./VideoView";
 import type { DatabaseViewProps } from "./DatabaseView";
 import type { FontViewProps } from "./FontView";
+import type { MailViewProps } from "./MailView";
 import { song, wav, type Track } from "./nowPlaying";
 import type { Film } from "../mini/handover";
 import "./preview.css";
@@ -102,6 +104,7 @@ const PictureView = lazy(() => import("./PictureView").then((module) => ({ defau
 const DatabaseView = lazy(() => import("./DatabaseView").then((module) => ({ default: module.DatabaseView })));
 const ParquetView = lazy(() => import("./ParquetView").then((module) => ({ default: module.ParquetView })));
 const FontView = lazy(() => import("./FontView").then((module) => ({ default: module.FontView })));
+const MailView = lazy(() => import("./MailView").then((module) => ({ default: module.MailView })));
 const PdfView = lazy(() => import("./PdfView").then((module) => ({ default: module.PdfView })));
 const VideoView = lazy(() => import("./VideoView").then((module) => ({ default: module.VideoView })));
 
@@ -310,6 +313,24 @@ export function QuickPreview(props: {
     const at = index();
     const shot = snapshot;
     return { open: () => openStreamed(view, shot, at), size: item.size, keys: (handler: typeof viewKeys) => (viewKeys = handler) };
+  }
+
+  /** Attachments land beside the mail, or in a folder picked for them, as one job with an Undo. */
+  function mail(item: Row, preview: Mail): MailViewProps {
+    const { view } = props.at;
+    const path = pathOf(item);
+    const folder = folderOf(item);
+    return {
+      mail: preview,
+      save: async (choose) => {
+        // Loaded when asked for, since the picker's sidebar draws with this file's own helpers.
+        const picker = choose ? await import("../dialogs/Picker") : undefined;
+        const into = picker ? (await picker.pick({ mode: "folder", title: "Save attachments to", purpose: "folders", start: folder }))?.path : folder;
+        if (!into) return false;
+        const end = await runJob({ kind: "saveAttachments", path, folder: into }, view);
+        return !!end && !end.cancelled && end.failed.length === 0;
+      },
+    };
   }
 
   function font(faces: FontFacts[]): FontViewProps {
@@ -740,6 +761,7 @@ export function QuickPreview(props: {
               {preview.kind === "database" && <DatabaseView {...database(preview)} />}
               {preview.kind === "parquet" && <ParquetView {...streamed(row()!)} />}
               {preview.kind === "font" && <FontView {...font(preview.faces)} />}
+              {preview.kind === "mail" && <MailView {...mail(row()!, preview)} />}
               {preview.kind === "pdf" && <PdfView path={pathOf(row()!)} {...streamed(row()!)} note={setNote} />}
             </>
           )}

@@ -12,6 +12,7 @@ mod fonts;
 mod git;
 mod jobs;
 mod launch;
+mod mail;
 mod menus;
 mod network;
 mod ops;
@@ -229,6 +230,8 @@ enum Task {
     NewFolderFrom { selection: Selection, folder: String, move_in: bool },
     /// Files that wait on the shelf, by path, since their folder may not be on show.
     CopyPaths { paths: Vec<PathBuf>, folder: String },
+    /// Every attachment of a mail file, into `folder`.
+    SaveAttachments { path: PathBuf, folder: String },
     MovePaths { paths: Vec<PathBuf>, folder: String },
     Template { folder: String, extension: String },
     /// `date` is today as the user writes it, for a `{date}` in the template's name.
@@ -340,6 +343,7 @@ impl Task {
                 }
             }
             Self::CopyPaths { paths, folder } => copy_job(paths, target(folder)?),
+            Self::SaveAttachments { path, folder } => Job::Attachments { mail: path, folder: target(folder)? },
             Self::MovePaths { paths, folder } => {
                 refuse_zipped(&paths)?;
                 Job::Move { sources: paths, folder: target(folder)? }

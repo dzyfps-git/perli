@@ -1659,9 +1659,33 @@ fn something_that_is_no_archive_is_a_plain_problem() {
 
 struct Virtual {
     name: &'static str,
-    /// `None` for a folder.
+    /// `None` for a folder. For a storage, the text of its one stream.
     bytes: Option<&'static [u8]>,
-    as_stream: bool,
+    medium: Medium,
+}
+
+/// How a source hands over a file's contents.
+#[derive(Clone, Copy, PartialEq)]
+enum Medium {
+    Memory,
+    Stream,
+    /// A whole storage, as classic Outlook drags a mail.
+    Storage,
+}
+
+/// A storage holding one stream called `subject`, as a mail's parts sit in one.
+fn storage_with(text: &[u8]) -> windows::Win32::System::Com::StructuredStorage::IStorage {
+    use windows::Win32::System::Com::StructuredStorage::{CreateILockBytesOnHGlobal, StgCreateDocfileOnILockBytes};
+    use windows::Win32::System::Com::{STGC_DEFAULT, STGM_CREATE, STGM_READWRITE, STGM_SHARE_EXCLUSIVE};
+    unsafe {
+        let bytes = CreateILockBytesOnHGlobal(None, true).unwrap();
+        let mode = STGM_CREATE | STGM_READWRITE | STGM_SHARE_EXCLUSIVE;
+        let storage = StgCreateDocfileOnILockBytes(&bytes, mode, 0).unwrap();
+        let stream = storage.CreateStream(windows::core::w!("subject"), mode, 0, 0).unwrap();
+        stream.Write(text.as_ptr().cast(), text.len() as u32, None).ok().unwrap();
+        storage.Commit(STGC_DEFAULT.0 as u32).unwrap();
+        storage
+    }
 }
 
 #[implement(IDataObject, IDataObjectAsyncCapability)]
@@ -1750,11 +1774,16 @@ impl IDataObject_Impl for Source_Impl {
             return Err(DV_E_FORMATETC.into());
         };
         let bytes = item.bytes.ok_or(DV_E_FORMATETC)?;
-        Ok(if item.as_stream {
-            let stream = std::mem::ManuallyDrop::new(unsafe { SHCreateMemStream(Some(bytes)) });
-            medium(TYMED_ISTREAM.0, STGMEDIUM_0 { pstm: stream })
-        } else {
-            medium(TYMED_HGLOBAL.0, STGMEDIUM_0 { hGlobal: global(bytes) })
+        Ok(match item.medium {
+            Medium::Stream => {
+                let stream = std::mem::ManuallyDrop::new(unsafe { SHCreateMemStream(Some(bytes)) });
+                medium(TYMED_ISTREAM.0, STGMEDIUM_0 { pstm: stream })
+            }
+            Medium::Storage => {
+                let storage = std::mem::ManuallyDrop::new(Some(storage_with(bytes)));
+                medium(windows::Win32::System::Com::TYMED_ISTORAGE.0, STGMEDIUM_0 { pstg: storage })
+            }
+            Medium::Memory => medium(TYMED_HGLOBAL.0, STGMEDIUM_0 { hGlobal: global(bytes) }),
         })
     }
 
@@ -1806,9 +1835,9 @@ fn receive(sandbox: &Sandbox, items: Vec<Virtual>, script: &Script) -> Outcome {
 fn dragged_files_land_with_their_folders_and_a_warning() {
     let sandbox = Sandbox::new();
     let items = vec![
-        Virtual { name: "sub", bytes: None, as_stream: false },
-        Virtual { name: r"sub\in stream.txt", bytes: Some(b"from a stream"), as_stream: true },
-        Virtual { name: "from memory.txt", bytes: Some(b"from memory"), as_stream: false },
+        Virtual { name: "sub", bytes: None, medium: Medium::Memory },
+        Virtual { name: r"sub\in stream.txt", bytes: Some(b"from a stream"), medium: Medium::Stream },
+        Virtual { name: "from memory.txt", bytes: Some(b"from memory"), medium: Medium::Memory },
     ];
 
     let outcome = receive(&sandbox, items, &Script::default());
@@ -1821,6 +1850,41 @@ fn dragged_files_land_with_their_folders_and_a_warning() {
         outcome.done,
         [Done::Created { path: sandbox.path(r"into\sub") }, Done::Created { path: file }]
     );
+}
+
+#[test]
+fn a_mail_dragged_as_a_whole_storage_lands_as_a_msg_file() {
+    let sandbox = Sandbox::new();
+    let items = vec![Virtual { name: "Lunch on Friday.msg", bytes: Some(b"Lunch on Friday"), medium: Medium::Storage }];
+
+    let outcome = receive(&sandbox, items, &Script::default());
+
+    assert!(outcome.failed.is_empty());
+    let landed = fs::read(sandbox.path(r"into\Lunch on Friday.msg")).unwrap();
+    assert_eq!(landed[..8], [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1], "a compound file, as Outlook saves one");
+    assert!(landed.windows(15).any(|bytes| bytes == b"Lunch on Friday"), "its stream came along");
+}
+
+#[test]
+fn a_mails_attachments_land_by_their_own_names_and_undo_takes_them_away() {
+    let sandbox = Sandbox::new();
+    let mail = sandbox.file(
+        "note.eml",
+        "Subject: Files\r\nContent-Type: multipart/mixed; boundary=b\r\n\r\n--b\r\nContent-Type: text/plain\r\n\r\nHi\r\n--b\r\n\
+Content-Disposition: attachment; filename=\"..\\\\evil\\\\a.txt\"\r\n\r\nalpha\r\n--b\r\n\
+Content-Disposition: attachment; filename=\"b.txt\"\r\nContent-Transfer-Encoding: base64\r\n\r\nYmV0YQ==\r\n--b--\r\n",
+    );
+    let into = sandbox.path("into");
+    fs::create_dir_all(&into).unwrap();
+
+    let outcome = go(Job::Attachments { mail, folder: into.clone() });
+
+    assert!(outcome.failed.is_empty());
+    assert_eq!(sandbox.names("into"), ["a.txt", "b.txt"], "a sender's folders never come along");
+    assert_eq!(read(&into.join("b.txt")), "beta");
+    assert_eq!(sys::read_zone(&into.join("a.txt")).as_deref(), Some(b"[ZoneTransfer]\r\nZoneId=3\r\n".as_slice()));
+    undo(outcome);
+    assert!(sandbox.names("into").is_empty());
 }
 
 #[test]
@@ -1838,7 +1902,7 @@ fn a_drop_that_never_runs_still_frees_its_source() {
 fn a_finished_drop_tells_its_source_once() {
     let sandbox = Sandbox::new();
     ENDED.with_borrow_mut(Vec::clear);
-    let items = vec![Virtual { name: "a.txt", bytes: Some(b"a"), as_stream: false }];
+    let items = vec![Virtual { name: "a.txt", bytes: Some(b"a"), medium: Medium::Memory }];
 
     receive(&sandbox, items, &Script::default());
 
@@ -1850,8 +1914,8 @@ fn dragged_names_cannot_land_outside_and_conflicts_ask() {
     let sandbox = Sandbox::new();
     sandbox.file(r"into\taken.txt", "old");
     let items = vec![
-        Virtual { name: r"..\evil.txt", bytes: Some(b"x"), as_stream: false },
-        Virtual { name: "taken.txt", bytes: Some(b"new"), as_stream: false },
+        Virtual { name: r"..\evil.txt", bytes: Some(b"x"), medium: Medium::Memory },
+        Virtual { name: "taken.txt", bytes: Some(b"new"), medium: Medium::Memory },
     ];
     let script = Script::answering(&[Answer::Skip, Answer::KeepBoth]);
 

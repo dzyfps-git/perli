@@ -654,7 +654,7 @@ fn drives_of(job: &Job) -> Vec<String> {
         Job::Move { sources, folder } => sources.iter().map(PathBuf::as_path).chain([folder.as_path()]).collect(),
         Job::Unzip { archives, into: Some(into), .. } => archives.iter().map(PathBuf::as_path).chain([into.as_path()]).collect(),
         Job::Zip { sources: paths, .. } | Job::Unzip { archives: paths, .. } => paths.iter().map(PathBuf::as_path).collect(),
-        Job::Receive { folder, .. } => vec![folder.as_path()],
+        Job::Receive { folder, .. } | Job::Attachments { folder, .. } => vec![folder.as_path()],
         _ => Vec::new(),
     };
     let mut drives: Vec<String> = paths.into_iter().filter_map(drive).collect();
@@ -666,7 +666,9 @@ fn drives_of(job: &Job) -> Vec<String> {
 /// The folder a job fills, for "open it when done".
 fn target_of(job: &Job) -> Option<String> {
     match job {
-        Job::Copy { folder, .. } | Job::Move { folder, .. } | Job::Receive { folder, .. } => Some(text(folder)),
+        Job::Copy { folder, .. } | Job::Move { folder, .. } | Job::Receive { folder, .. } | Job::Attachments { folder, .. } => {
+            Some(text(folder))
+        }
         Job::Unzip { into: Some(into), .. } => Some(text(into)),
         Job::Several { jobs } => jobs.first().and_then(target_of),
         Job::Zip { sources: paths, .. } | Job::Unzip { archives: paths, .. } => {
@@ -922,6 +924,7 @@ fn title(job: &Job) -> String {
         Job::Zip { sources, .. } => listed("Compressing", sources),
         Job::Unzip { archives, .. } => listed("Extracting", archives),
         Job::Receive { .. } => "Copying dragged files".to_string(),
+        Job::Attachments { mail, .. } => named("Saving the attachments of", &[mail.as_path()]),
         Job::Recycle { paths } => listed("Recycling", paths),
         Job::Delete { paths } => listed("Deleting", paths),
         Job::Restore { items } => deleted("Restoring", items),

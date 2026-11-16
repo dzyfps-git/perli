@@ -3296,6 +3296,138 @@ th[aria-sort="descending"] .table-sort::after {
 }
 
 /* A font: its sample at sizes, its characters, and what it says about itself. */
+.preview-body:has(.mail-view) {
+  padding: 0;
+}
+
+/* A mail: who and when on top, the attachments as a row of chips, then the text. */
+.mail-view {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
+  padding: var(--space-4);
+  overflow: auto;
+  animation: details-in var(--motion-slide);
+}
+
+.mail-subject {
+  margin: 0 0 var(--space-2);
+  font-size: 18px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.mail-who {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 2px var(--space-3);
+  margin: 0;
+  font-size: 12px;
+}
+
+.mail-who dt {
+  color: var(--text-muted);
+}
+
+.mail-who dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.mail-attachments {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-large);
+  background: var(--surface);
+}
+
+.mail-attachments-head {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.mail-attachment-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.mail-attachment {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 3px 8px 3px 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 12px;
+  animation: details-in var(--motion-slide) both;
+  animation-delay: calc(min(var(--at), 8) * 30ms);
+}
+
+.mail-attachment-type {
+  min-width: 28px;
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--accent);
+  font-size: 9px;
+  font-weight: 700;
+  text-align: center;
+}
+
+.mail-attachment-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mail-attachment-size {
+  color: var(--text-muted);
+}
+
+.mail-attachment-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.mail-saved {
+  color: var(--text-muted);
+  font-size: 12px;
+  animation: details-in var(--motion-slide);
+}
+
+.mail-body {
+  font-size: 13px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.mail-empty {
+  color: var(--text-muted);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mail-view,
+  .mail-attachment,
+  .mail-saved {
+    animation: none;
+  }
+}
+
 .preview-body:has(.font-view) {
   padding: 0;
 }

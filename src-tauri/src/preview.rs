@@ -70,6 +70,8 @@ pub enum Preview {
     Database { tables: Vec<crate::tables::Table>, failure: Option<String> },
     /// A Parquet file, which the window reads the parts of that it shows.
     Parquet,
+    /// A mail saved as a file: who, when, its text and its attachments.
+    Mail(crate::mail::Mail),
     /// A font's faces, each with what it says about itself. The window loads a face to draw with.
     Font { faces: Vec<crate::fonts::Facts> },
     /// A PDF, which the window reads the parts of that it shows.
@@ -368,6 +370,8 @@ fn inside_of(path: &Path) -> Option<Preview> {
         "mid" | "midi" => Some(Preview::Song),
         "parquet" | "parq" => Some(Preview::Parquet),
         "pdf" => Some(Preview::Pdf),
+        // A mail that can't be read shows as its text, as an .eml is.
+        "eml" | "msg" => crate::mail::read(path).ok().map(Preview::Mail),
         // A font that can't be read still shows Windows' own picture of it.
         "ttf" | "otf" | "woff" | "woff2" | "ttc" | "otc" => crate::fonts::faces(path).ok().map(|faces| Preview::Font { faces }),
         "mp3" | "m4a" | "aac" | "wav" | "flac" | "ogg" | "oga" | "opus" | "weba" | "aif" | "aiff" | "aifc" => Some(Preview::Audio),

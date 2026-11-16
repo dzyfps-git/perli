@@ -215,6 +215,8 @@ export type Task =
   | { kind: "unzip"; selection: Selection; ownFolder: boolean; smart?: boolean; only?: string[]; password?: string }
   | { kind: "paste"; folder: string }
   | { kind: "pasteShortcut"; folder: string }
+  /** Every attachment of a mail file, into `folder`. */
+  | { kind: "saveAttachments"; path: string; folder: string }
   | { kind: "drop"; folder: string; action?: DropAction }
   | { kind: "recycle" | "delete" | "restore" | "purge"; selection: Selection }
   | { kind: "restoreTo"; selection: Selection; folder: string }
@@ -1013,6 +1015,7 @@ export type Preview =
   | { kind: "database"; tables: DbTable[]; failure: string | null }
   | { kind: "parquet" }
   | { kind: "font"; faces: FontFacts[] }
+  | ({ kind: "mail" } & Mail)
   | { kind: "pdf" }
   | { kind: "song" }
   | { kind: "audio" }
@@ -1020,6 +1023,17 @@ export type Preview =
   | { kind: "picture" }
   /** Only in the cloud, so nothing was read. Windows' picture of it shows, if it has one. */
   | { kind: "cloud" };
+
+/** A mail saved as a file. `date` is FILETIME ticks, or 0 when the mail doesn't say. */
+export interface Mail {
+  subject: string;
+  from: string;
+  to: string;
+  cc: string;
+  date: number;
+  body: string;
+  attachments: { name: string; size: number }[];
+}
 
 /** A line of a book's own table of contents, and which chapter it opens. */
 export interface BookHeading {

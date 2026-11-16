@@ -72,6 +72,8 @@ pub enum Job {
     Save { path: PathBuf, bytes: Vec<u8>, read: Option<Seen> },
     Picture { paths: Vec<PathBuf>, edit: crate::picture::Edit, keep: crate::picture::Keep },
     Wallpaper { picture: PathBuf },
+    /// Every attachment of a mail file, landed in `folder` as dragged files land.
+    Attachments { mail: PathBuf, folder: PathBuf },
     /// One after another under one card, such as rows of two archives and a folder copied at once.
     Several { jobs: Vec<Job> },
 }
@@ -386,6 +388,7 @@ impl<'a> Run<'a> {
                 self.unzip(archives, own_folder, smart, &only, password.as_deref(), into.as_deref())
             }
             Job::Receive { incoming, folder } => self.receive(incoming, &folder),
+            Job::Attachments { mail, folder } => self.save_attachments(&mail, &folder),
             Job::Recycle { paths } => {
                 self.add_total(paths.len() as u64, 0);
                 self.recycle(paths)
