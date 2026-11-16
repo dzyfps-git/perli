@@ -30,7 +30,7 @@ use windows::Win32::Foundation::E_FAIL;
 pub use archive::{safe as safe_relative, ticks_of as zip_ticks};
 pub use bin::{limit as bin_limit, read as read_bin, BinItem};
 pub use incoming::{offers_files, Incoming};
-pub use names::{check_rename, check_renames};
+pub use names::{check as check_name, check_rename, check_renames};
 pub use replace::{seen, sweep as sweep_kept, Seen};
 pub use shell::{shell_item, Com};
 pub use wallpaper::shown as wallpaper_shown;
@@ -50,7 +50,8 @@ pub enum Job {
     New { folder: PathBuf, directory: bool },
     /// A new folder in `folder`, called `name` if that works, with `sources` moved into it.
     Gather { sources: Vec<PathBuf>, folder: PathBuf, name: Option<String> },
-    Template { folder: PathBuf, template: Template },
+    /// `named` means the user already named it, so nothing asks them to rename it.
+    Template { folder: PathBuf, template: Template, named: bool },
     Shortcut { sources: Vec<PathBuf>, folder: PathBuf },
     /// A new archive beside the first source, its files locked with `password` if there is one
     /// and the format can lock. With `aes`, a ZIP's lock is AES-256 rather than ZipCrypto.
@@ -125,6 +126,8 @@ pub enum Content {
     Bytes(Vec<u8>),
     /// A blank document of that type, to copy.
     Copy(PathBuf),
+    /// A folder to copy whole. Each `(token, text)` pair is filled in on the names inside it.
+    Tree { folder: PathBuf, tokens: Vec<(String, String)> },
 }
 
 /// One change a job made, in a form that can be undone.
@@ -360,6 +363,8 @@ struct Run<'a> {
     temp_folders: HashSet<PathBuf>,
     /// Names taken and names free where this job's picks are going.
     tally: (u64, u64),
+    /// Filled in on the names a folder template copies, such as `{date}`. Empty for any other copy.
+    tokens: Vec<(String, String)>,
 }
 
 impl<'a> Run<'a> {
@@ -379,6 +384,7 @@ impl<'a> Run<'a> {
             undoing: false,
             temp_folders: HashSet::new(),
             tally: (0, 0),
+            tokens: Vec::new(),
         }
     }
 
@@ -390,7 +396,7 @@ impl<'a> Run<'a> {
             Job::RenameAll { renames } => self.rename_all(renames),
             Job::New { folder, directory } => self.new_item(&folder, directory),
             Job::Gather { sources, folder, name } => self.gather(sources, &folder, name.as_deref()),
-            Job::Template { folder, template } => self.new_from(&folder, &template),
+            Job::Template { folder, template, .. } => self.new_from(&folder, &template),
             Job::Shortcut { sources, folder } => self.shortcuts(&sources, &folder),
             Job::Zip { sources, level, password, format, aes } => self.zip(sources, level, password.as_deref(), format, aes),
             Job::Unzip { archives, own_folder, smart, only, password, into } => {
@@ -501,12 +507,16 @@ impl<'a> Run<'a> {
 
     // ponytail: no admin route for templates, as the shell's new item can't carry their content.
     fn new_from(&mut self, folder: &Path, template: &Template) -> Flow {
-        self.add_total(1, 0);
         let target = names::free(folder, &template.stem, &template.extension);
+        if let Content::Tree { folder: source, tokens } = &template.content {
+            return self.new_tree(source, target, tokens.clone());
+        }
+        self.add_total(1, 0);
         let made = self.attempt(folder, None, |_| match &template.content {
             Content::Empty => sys::create_file(&target),
             Content::Bytes(bytes) => sys::write_new(&target, bytes),
             Content::Copy(file) => sys::copy_file(file, &target, false, |_| true),
+            Content::Tree { .. } => unreachable!("a folder template is copied as a tree"),
         })?;
         if made.is_some() {
             self.done.push(Done::Created { path: target });

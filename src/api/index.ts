@@ -207,7 +207,10 @@ export type Task =
   | { kind: "newFolderFrom"; selection: Selection; folder: string; moveIn: boolean }
   | { kind: "copyPaths" | "movePaths"; paths: string[]; folder: string }
   | { kind: "template"; folder: string; extension: string }
-  | { kind: "ownTemplate"; folder: string; name: string; date?: string }
+  /** `called` is what the user named it, for a `{name}` in the template's names. */
+  | { kind: "ownTemplate"; folder: string; name: string; date?: string; called?: string }
+  | { kind: "renameTemplate"; name: string; to: string }
+  | { kind: "removeTemplate"; name: string }
   | { kind: "fromClipboard"; folder: string }
   | { kind: "saveTemplate"; selection: Selection }
   | { kind: "zip"; selection: Selection; level?: ZipLevel; password?: string; format?: ArchiveFormat; aes?: boolean }
@@ -916,7 +919,14 @@ export const terminals = () => invoke<Terminal[]>("terminals");
 export const newTypes = () => invoke<NewType[]>("new_types");
 
 /** The names of the user's own templates, A to Z. */
-export const ownTemplates = () => invoke<string[]>("own_templates");
+/** One of the user's own templates. `asks` means a `{name}` is in it, so the user names it first. */
+export interface OwnTemplate {
+  name: string;
+  folder: boolean;
+  asks: boolean;
+}
+
+export const ownTemplates = () => invoke<OwnTemplate[]>("own_templates");
 
 export const templatesFolder = () => invoke<string>("templates_folder");
 

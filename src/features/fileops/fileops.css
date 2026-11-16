@@ -939,6 +939,15 @@
   font-family: var(--font-icons);
 }
 
+.new-naming .rename-field {
+  display: grid;
+  gap: var(--space-1);
+}
+
+.new-naming .new-note {
+  white-space: normal;
+}
+
 @keyframes new-tile-in {
   from {
     opacity: 0;

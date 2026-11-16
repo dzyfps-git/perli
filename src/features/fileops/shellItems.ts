@@ -260,7 +260,7 @@ export function createShellItems(
               },
             ]
           : []),
-        ...(selection?.rows.length === 1 && !row.isDir
+        ...(selection?.rows.length === 1
           ? [{ label: "Save as template", action: () => actions.saveTemplate(view) }]
           : []),
         ...(facts && every("picture") ? [pictureMenu(view, facts.length)] : []),

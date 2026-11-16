@@ -1361,7 +1361,7 @@ export function App() {
     } else if (pick.kind === "folder" || pick.kind === "file") actions.newItem(view, pick.kind === "folder");
     else if (pick.kind === "clipboard") actions.newFromClipboard(view);
     else if (pick.kind === "type") actions.newFrom(view, pick.extension);
-    else if (pick.kind === "own") actions.newFromOwn(view, pick.name);
+    else if (pick.kind === "own") actions.newFromOwn(view, pick.name, pick.called);
     else actions.openTemplates(view);
   }
 
@@ -2490,6 +2490,11 @@ export function App() {
           onDeleteTag={askDeleteTag}
           onBeforeUpdate={flushSession}
           onKeys={() => setKeysOpen(true)}
+          onRevealTemplates={() => {
+            closeSettings();
+            actions.openTemplates(tabs.activeView());
+          }}
+          onFailure={jobs.report}
         />
       </main>
       <Show when={menu()} keyed>

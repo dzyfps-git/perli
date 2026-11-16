@@ -234,8 +234,17 @@ enum Task {
     SaveAttachments { path: PathBuf, folder: String },
     MovePaths { paths: Vec<PathBuf>, folder: String },
     Template { folder: String, extension: String },
-    /// `date` is today as the user writes it, for a `{date}` in the template's name.
-    OwnTemplate { folder: String, name: String, date: Option<String> },
+    /// `date` is today as the user writes it, for a `{date}` in the template's names. `called` is
+    /// what the user named it, for a `{name}`.
+    OwnTemplate {
+        folder: String,
+        name: String,
+        date: Option<String>,
+        #[serde(default)]
+        called: Option<String>,
+    },
+    RenameTemplate { name: String, to: String },
+    RemoveTemplate { name: String },
     /// A new file from the text or picture on the clipboard, never its files.
     FromClipboard { folder: String },
     SaveTemplate { selection: Selection },
@@ -354,15 +363,23 @@ impl Task {
             Self::Template { folder, extension } => Job::Template {
                 folder: target(folder)?,
                 template: templates::template(&extension)?,
+                named: false,
             },
-            Self::OwnTemplate { folder, name, date } => Job::Template {
+            Self::OwnTemplate { folder, name, date, called } => Job::Template {
                 folder: target(folder)?,
-                template: templates::own_template(&name, date.as_deref())?,
+                template: templates::own_template(&name, date.as_deref(), called.as_deref())?,
+                named: called.is_some(),
             },
+            Self::RenameTemplate { name, to } => {
+                let path = templates::own_item(&name)?;
+                ops::check_rename(&path, &to)?;
+                Job::Rename { path, name: to }
+            }
+            Self::RemoveTemplate { name } => Job::Recycle { paths: vec![templates::own_item(&name)?] },
             Self::FromClipboard { folder } => {
                 let content = clipboard::content().map_err(|error| error.message())?;
                 let template = content.ok_or("The clipboard holds no text or picture")?;
-                Job::Template { folder: target(folder)?, template }
+                Job::Template { folder: target(folder)?, template, named: false }
             }
             Self::SaveTemplate { selection } => copy_job(sources(&selection)?, templates::own_folder()?),
             Self::Zip { selection, level, password, format, aes } => Job::Zip {
@@ -495,7 +512,7 @@ fn paste(folder: PathBuf) -> Result<Option<Plan>, String> {
     let sequence = clipboard::sequence();
     let Some(files) = clipboard::read().map_err(|error| error.message())? else {
         let content = clipboard::content().map_err(|error| error.message())?;
-        return Ok(content.map(|template| Job::Template { folder, template }.into()));
+        return Ok(content.map(|template| Job::Template { folder, template, named: false }.into()));
     };
     let sources = files.paths;
     let job = if files.cut {
@@ -2178,7 +2195,7 @@ fn drop_choices(folder: PathBuf, drags: State<'_, Arc<Drags>>) -> Vec<DropAction
 }
 
 #[tauri::command]
-async fn own_templates() -> Vec<String> {
+async fn own_templates() -> Vec<templates::Own> {
     templates::own_names()
 }
 

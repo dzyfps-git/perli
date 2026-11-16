@@ -160,36 +160,105 @@ pub fn own_folder() -> Result<PathBuf, String> {
     Ok(folder)
 }
 
-/// The names of the user's own templates, A to Z.
-pub fn own_names() -> Vec<String> {
-    let Some(entries) = session::data_file(OWN_FOLDER).and_then(|folder| fs::read_dir(folder).ok()) else {
+/// One of the user's own templates, for the New gallery and Settings.
+#[derive(Debug, PartialEq, Serialize)]
+pub struct Own {
+    name: String,
+    folder: bool,
+    /// A `{name}` sits in its name or in a name inside it, so the user names it first.
+    asks: bool,
+}
+
+/// Names a folder template checks for `{name}`, so a huge one can't hold up the New gallery.
+const MOST_INNER_NAMES: usize = 2000;
+
+fn mentions_name(folder: &Path, left: &mut usize) -> bool {
+    let Ok(entries) = fs::read_dir(folder) else { return false };
+    for entry in entries.flatten() {
+        if *left == 0 {
+            return false;
+        }
+        *left -= 1;
+        if entry.file_name().to_string_lossy().contains(NAME_TOKEN) {
+            return true;
+        }
+        if entry.file_type().is_ok_and(|kind| kind.is_dir()) && mentions_name(&entry.path(), left) {
+            return true;
+        }
+    }
+    false
+}
+
+fn own_in(folder: &Path) -> Vec<Own> {
+    let Ok(entries) = fs::read_dir(folder) else {
         return Vec::new();
     };
-    let files = entries.flatten().filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()));
-    let mut names: Vec<String> = files.filter_map(|entry| entry.file_name().into_string().ok()).collect();
-    names.sort_by_key(|name| name.to_lowercase());
-    names
+    let mut own: Vec<Own> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            let kind = entry.file_type().ok()?;
+            let folder = kind.is_dir();
+            let asks = name.contains(NAME_TOKEN) || (folder && mentions_name(&entry.path(), &mut { MOST_INNER_NAMES }));
+            (kind.is_file() || folder).then_some(Own { name, folder, asks })
+        })
+        .collect();
+    own.sort_by_key(|one| one.name.to_lowercase());
+    own
 }
 
-/// A `{date}` in a template's name stands for `date`, so "Notes {date}.md" starts "Notes 2026-03-05.md".
-fn own_from(folder: &Path, name: &str, date: Option<&str>) -> Result<Template, String> {
+/// The user's own templates, files and folders, A to Z.
+pub fn own_names() -> Vec<Own> {
+    session::data_file(OWN_FOLDER).map_or_else(Vec::new, |folder| own_in(&folder))
+}
+
+const DATE_TOKEN: &str = "{date}";
+const NAME_TOKEN: &str = "{name}";
+
+/// The template called `name`, which must be a plain name in `folder`.
+fn own_path(folder: &Path, name: &str) -> Result<PathBuf, String> {
     let only_a_name = Path::new(name).file_name() == Some(OsStr::new(name));
-    let file = folder.join(name);
-    if !only_a_name || !file.is_file() {
+    let path = folder.join(name);
+    if !only_a_name || !path.exists() {
         return Err(format!("There is no template called {name}"));
     }
-    let stem = file.file_stem().unwrap_or_default().to_string_lossy().into_owned();
-    let stem = match date {
-        Some(date) => stem.replace("{date}", date),
-        None => stem,
-    };
-    let extension = file.extension().map_or(String::new(), |extension| format!(".{}", extension.to_string_lossy()));
-    Ok(Template { stem, extension, content: Content::Copy(file) })
+    Ok(path)
 }
 
-/// A new file that starts as a copy of the user's template `name`.
-pub fn own_template(name: &str, date: Option<&str>) -> Result<Template, String> {
-    own_from(&own_folder()?, name, date)
+/// Each token stands for its text in a template's names, so "Notes {date}.md" starts
+/// "Notes 2026-03-05.md". A folder fills them in on every name inside it too.
+fn own_from(folder: &Path, name: &str, tokens: Vec<(String, String)>) -> Result<Template, String> {
+    let path = own_path(folder, name)?;
+    let fill = |text: &str| tokens.iter().fold(text.to_string(), |text, (token, value)| text.replace(token, value));
+    if path.is_dir() {
+        // A folder's dots are part of its name.
+        return Ok(Template { stem: fill(name), extension: String::new(), content: Content::Tree { folder: path, tokens } });
+    }
+    let stem = fill(&path.file_stem().unwrap_or_default().to_string_lossy());
+    let extension = path.extension().map_or(String::new(), |extension| format!(".{}", extension.to_string_lossy()));
+    Ok(Template { stem, extension, content: Content::Copy(path) })
+}
+
+/// `date` fills `{date}` and `called`, which the user typed, fills `{name}`. Either must make a
+/// legal name on its own, so neither can reach outside the new item.
+fn tokens_of(date: Option<&str>, called: Option<&str>) -> Result<Vec<(String, String)>, String> {
+    let mut tokens = Vec::new();
+    for (token, value) in [(DATE_TOKEN, date), (NAME_TOKEN, called)] {
+        let Some(value) = value.map(str::trim) else { continue };
+        crate::ops::check_name(value)?;
+        tokens.push((token.to_string(), value.to_string()));
+    }
+    Ok(tokens)
+}
+
+/// A new file or folder that starts as a copy of the user's template `name`.
+pub fn own_template(name: &str, date: Option<&str>, called: Option<&str>) -> Result<Template, String> {
+    own_from(&own_folder()?, name, tokens_of(date, called)?)
+}
+
+/// The template called `name`, to rename or remove.
+pub fn own_item(name: &str) -> Result<PathBuf, String> {
+    own_path(&own_folder()?, name)
 }
 
 #[cfg(test)]
@@ -294,17 +363,46 @@ mod tests {
         fs::write(folder.join("Letter.final.docx"), "letter").unwrap();
         fs::write(folder.join("Notes"), "notes").unwrap();
 
-        let letter = own_from(&folder, "Letter.final.docx", None).unwrap();
+        let letter = own_from(&folder, "Letter.final.docx", Vec::new()).unwrap();
         assert_eq!((letter.stem.as_str(), letter.extension.as_str()), ("Letter.final", ".docx"));
         assert_eq!(letter.content, Content::Copy(folder.join("Letter.final.docx")));
-        assert_eq!(own_from(&folder, "Notes", None).unwrap().extension, "");
-        assert!(own_from(&folder, r"inner\..\Notes", None).is_err());
-        assert!(own_from(&folder, "inner", None).is_err());
-        assert!(own_from(&folder, "gone.txt", None).is_err());
+        assert_eq!(own_from(&folder, "Notes", Vec::new()).unwrap().extension, "");
+        assert!(own_from(&folder, r"inner\..\Notes", Vec::new()).is_err());
+        assert!(own_from(&folder, "gone.txt", Vec::new()).is_err());
         fs::write(folder.join("Day {date}.md"), "day").unwrap();
-        assert_eq!(own_from(&folder, "Day {date}.md", Some("2026-03-05")).unwrap().stem, "Day 2026-03-05");
-        assert_eq!(own_from(&folder, "Day {date}.md", None).unwrap().stem, "Day {date}");
+        let day = tokens_of(Some("2026-03-05"), None).unwrap();
+        assert_eq!(own_from(&folder, "Day {date}.md", day).unwrap().stem, "Day 2026-03-05");
+        assert_eq!(own_from(&folder, "Day {date}.md", Vec::new()).unwrap().stem, "Day {date}");
 
+        fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
+    fn a_folder_template_is_copied_whole_and_asks_a_name_only_when_one_is_in_it() {
+        let folder = std::env::temp_dir().join(format!("perli-own-folders-{}", std::process::id()));
+        fs::create_dir_all(folder.join("Project.v2").join("docs")).unwrap();
+        fs::create_dir_all(folder.join("Trip {date}").join("{name} photos")).unwrap();
+        fs::write(folder.join("Note {name}.txt"), "").unwrap();
+
+        let project = own_from(&folder, "Project.v2", Vec::new()).unwrap();
+        assert_eq!((project.stem.as_str(), project.extension.as_str()), ("Project.v2", ""));
+        assert_eq!(project.content, Content::Tree { folder: folder.join("Project.v2"), tokens: Vec::new() });
+        let tokens = tokens_of(Some("2026-03-05"), Some(" Rome ")).unwrap();
+        let trip = own_from(&folder, "Trip {date}", tokens.clone()).unwrap();
+        assert_eq!(trip.stem, "Trip 2026-03-05");
+        assert_eq!(trip.content, Content::Tree { folder: folder.join("Trip {date}"), tokens });
+        assert!(tokens_of(None, Some(r"..\out")).is_err(), "a typed name can't reach outside");
+        assert!(tokens_of(None, Some("")).is_err());
+
+        let listed: Vec<(String, bool, bool)> = own_in(&folder).into_iter().map(|own| (own.name, own.folder, own.asks)).collect();
+        assert_eq!(
+            listed,
+            [
+                ("Note {name}.txt".to_string(), false, true),
+                ("Project.v2".to_string(), true, false),
+                ("Trip {date}".to_string(), true, true),
+            ]
+        );
         fs::remove_dir_all(folder).unwrap();
     }
 

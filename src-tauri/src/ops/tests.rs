@@ -211,11 +211,18 @@ fn purge_item(item: &Path) {
     let info = item.with_file_name(format!("$I{}", &name[2..]));
     test_guard::allow(item);
     test_guard::allow(&info);
-    if item.is_dir() {
-        // Only this item's own tree, by exact path.
-        for entry in fs::read_dir(item).unwrap() {
-            test_guard::allow(&entry.unwrap().path());
+    // Only this item's own tree, by exact path.
+    fn allow_tree(folder: &Path) {
+        for entry in fs::read_dir(folder).unwrap() {
+            let path = entry.unwrap().path();
+            test_guard::allow(&path);
+            if path.is_dir() {
+                allow_tree(&path);
+            }
         }
+    }
+    if item.is_dir() {
+        allow_tree(item);
     }
     go(Job::Purge {
         items: vec![BinItem {
@@ -2149,6 +2156,7 @@ fn a_template_fills_the_new_file_and_undo_recycles_it() {
         go(Job::Template {
             folder: folder.clone(),
             template,
+            named: false,
         })
     };
 
@@ -2161,6 +2169,33 @@ fn a_template_fills_the_new_file_and_undo_recycles_it() {
     assert_eq!(read(&folder.join("New Note (3).note")), "from a file");
     let undone = undo(outcome);
     assert!(!folder.join("New Note (3).note").exists());
+    purge(&undone);
+}
+
+#[test]
+fn a_folder_template_lands_whole_with_its_names_filled_in_and_undo_takes_it_all() {
+    let sandbox = Sandbox::new();
+    let folder = sandbox.folder("here");
+    let source = sandbox.folder("Trip {date}");
+    fs::create_dir_all(source.join("{name} photos")).unwrap();
+    fs::write(source.join("{name} photos").join("plan {date}.txt"), "plan").unwrap();
+    fs::write(source.join("list.txt"), "list").unwrap();
+    let tokens = vec![("{date}".to_string(), "2026-03-05".to_string()), ("{name}".to_string(), "Rome".to_string())];
+    let template = Template {
+        stem: "Trip 2026-03-05".to_string(),
+        extension: String::new(),
+        content: Content::Tree { folder: source.clone(), tokens },
+    };
+
+    let outcome = go(Job::Template { folder: folder.clone(), template, named: true });
+
+    let made = folder.join("Trip 2026-03-05");
+    assert_eq!(read(&made.join("Rome photos").join("plan 2026-03-05.txt")), "plan");
+    assert_eq!(read(&made.join("list.txt")), "list");
+    assert_eq!(outcome.done, [Done::Created { path: made.clone() }], "one step for the whole folder");
+    assert!(source.join("{name} photos").exists(), "the template stays as it is");
+    let undone = undo(outcome);
+    assert!(!made.exists());
     purge(&undone);
 }
 

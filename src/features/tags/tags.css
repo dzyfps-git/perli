@@ -38,6 +38,38 @@
   margin-top: var(--space-2);
 }
 
+.template-row {
+  grid-template-columns: auto 1fr auto;
+}
+
+.template-row .file-icon {
+  width: 22px;
+  height: 22px;
+}
+
+.template-name {
+  overflow: hidden;
+  padding: 2px var(--space-2);
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: start;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition:
+    background var(--motion),
+    border-color var(--motion);
+}
+
+.template-name:hover,
+.template-name:focus-visible {
+  background: var(--surface-hover);
+  border-color: var(--border);
+  outline: none;
+}
+
 .tag-delete {
   width: 24px;
   height: 24px;

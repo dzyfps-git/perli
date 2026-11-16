@@ -779,7 +779,7 @@ impl Bridge {
                 _ => title(&plan.job),
             },
             origin: plan.origin,
-            new_item: matches!(plan.job, Job::New { .. } | Job::Gather { .. } | Job::Template { .. } | Job::Zip { .. }),
+            new_item: matches!(plan.job, Job::New { .. } | Job::Gather { .. } | Job::Template { named: false, .. } | Job::Zip { .. }),
             recycle: matches!(plan.job, Job::Recycle { .. }),
             back: matches!(plan.history, History::Undo),
             unpack: match &plan.job {
@@ -938,6 +938,7 @@ fn title(job: &Job) -> String {
         Job::New { directory: true, .. } => "Creating a folder".to_string(),
         Job::Gather { sources, .. } if sources.is_empty() => "Creating a folder".to_string(),
         Job::Gather { sources, .. } => listed("Moving into a new folder", sources),
+        Job::Template { template, .. } if matches!(template.content, ops::Content::Tree { .. }) => "Creating a folder".to_string(),
         Job::New { .. } | Job::Template { .. } => "Creating a file".to_string(),
         Job::Shortcut { sources, .. } => listed("Linking to", sources),
         Job::Zip { sources, .. } => listed("Compressing", sources),

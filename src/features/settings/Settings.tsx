@@ -58,6 +58,7 @@ import {
 import { counted } from "../dialogs/parts";
 import { openSettingsFile, pick, PICTURE_TYPES, saveSettingsFile } from "../dialogs/Picker";
 import { keyText } from "../keys/keybinds";
+import { TemplateSettings } from "./TemplateSettings";
 import { baseName } from "../navigation/path";
 import { VIEWER_SETTINGS } from "../preview/viewerPrefs";
 import { bookmarksCompact, setBookmarksCompact, setSidebarOpen, sidebarOpen } from "../sidebar/saved";
@@ -138,6 +139,7 @@ const SECTIONS = [
   { id: "viewers", label: "Viewers", icon: "" },
   { id: "icons", label: "Icons", icon: "" },
   { id: "archives", label: "Archives", icon: "" },
+  { id: "templates", label: "Templates", icon: "" },
   { id: "default", label: "Default file manager", icon: "" },
   { id: "backup", label: "Backup", icon: "" },
   { id: "updates", label: "Updates", icon: "" },
@@ -194,6 +196,9 @@ export function Settings(props: {
   onBeforeUpdate: () => Promise<unknown>;
   /** Opens the sheet of keyboard shortcuts. */
   onKeys: () => void;
+  /** Shows the templates folder in the file list. */
+  onRevealTemplates: () => void;
+  onFailure: (failure: unknown) => void;
 }) {
   const [isDefault, setIsDefault] = createSignal(false);
   const [defaultFailure, setDefaultFailure] = createSignal<string>();
@@ -939,6 +944,15 @@ export function Settings(props: {
                 {cacheNote()}
               </p>
             </Show>
+          </section>
+
+          <section
+            class="settings-section"
+            data-section="templates"
+            data-words="new template templates make start from date name folder"
+          >
+            <h3>Templates</h3>
+            <TemplateSettings onReveal={props.onRevealTemplates} onFailure={props.onFailure} />
           </section>
 
           <section
