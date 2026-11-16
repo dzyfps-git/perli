@@ -1,8 +1,12 @@
-import { createEffect, createMemo, onCleanup } from "solid-js";
-import type { Notes } from "../../api";
+import { createEffect, createMemo, on, onCleanup } from "solid-js";
+import type { Notes, SongInfo } from "../../api";
 
 /** How many seconds of the song the stage shows at once. */
 const SPAN = 6;
+/** How many seconds of notes come at once, from a little before where the song is. */
+const AHEAD = 60;
+const BEHIND = 2;
+const NO_NOTES: Notes = { start: new Float32Array(), long: new Float32Array(), key: new Uint8Array(), channel: new Uint8Array() };
 const KEYS_WIDE = 46;
 const KEYS_TALL = 52;
 const RULER = 16;
@@ -30,10 +34,8 @@ function firstFrom(notes: Notes, seconds: number) {
  * in their channel's color while they sound.
  */
 export function MidiStage(props: {
-  notes: Notes;
-  beats: number[];
-  /** When each bar starts, in seconds. */
-  bars: number[];
+  /** Its notes come a minute at a time, as a big song has millions. */
+  song: SongInfo;
   /** Silent channels, one bit each. */
   muted: number;
   falling: boolean;
@@ -44,19 +46,34 @@ export function MidiStage(props: {
   let canvas!: HTMLCanvasElement;
   let frame = 0;
 
-  // The keys from the C under the lowest note to the B over the highest, worked out once a song,
-  // as a big one has millions of notes.
+  // The keys from the C under the lowest note to the B over the highest.
   const reach = createMemo(() => {
-    const { long: longs, key: keys } = props.notes;
-    let [low, high, longest] = [127, 0, 0];
-    for (let at = 0; at < keys.length; at++) {
-      low = Math.min(low, keys[at]);
-      high = Math.max(high, keys[at]);
-      longest = Math.max(longest, longs[at]);
-    }
-    if (low > high) [low, high] = [60, 71];
+    const { low, high, longest } = props.song;
     return { low: low - (low % 12), high: high + 11 - (high % 12), longest };
   });
+
+  /** The notes from `from` to `to` seconds, and the stretch being asked for, if any. */
+  let held = { from: 0, to: 0, notes: NO_NOTES };
+  let asking: { from: number; to: number } | undefined;
+  createEffect(on(() => props.song, () => ((held = { from: 0, to: 0, notes: NO_NOTES }), (asking = undefined))));
+
+  /** Asks for more notes once the stage would show past what it has. Drawn again when they come. */
+  function follow(now: number) {
+    const song = props.song;
+    const covered = held.from <= now && (now + SPAN <= held.to || held.to >= song.end);
+    if (covered || (asking && asking.from <= now && now + SPAN <= asking.to)) return;
+    const stretch = { from: Math.max(0, now - BEHIND), to: now + AHEAD };
+    asking = stretch;
+    song
+      .notesBetween(stretch.from, stretch.to)
+      .then((notes) => {
+        if (asking !== stretch || props.song !== song) return;
+        held = { ...stretch, notes };
+        asking = undefined;
+        if (!props.playing) draw();
+      })
+      .catch(() => asking === stretch && (asking = undefined));
+  }
 
   function draw() {
     const box = canvas.getBoundingClientRect();
@@ -73,8 +90,11 @@ export function MidiStage(props: {
     pen.font = `${10 * scale}px ${style.fontFamily}`;
     pen.textBaseline = "middle";
 
-    const { notes, beats, bars, muted, falling } = props;
+    const { muted, falling } = props;
+    const { beats, bars } = props.song;
     const now = props.time();
+    follow(now);
+    const notes = held.notes;
     const { low, high, longest } = reach();
     const keys = high - low + 1;
     const lit = new Map<number, number>();
@@ -169,7 +189,7 @@ export function MidiStage(props: {
 
   // Any change draws at once, and playing keeps it moving.
   createEffect(() => {
-    void [props.notes, props.beats, props.bars, props.muted, props.falling];
+    void [props.song, props.muted, props.falling];
     cancelAnimationFrame(frame);
     if (props.playing) run();
     else draw();

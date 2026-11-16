@@ -1235,6 +1235,14 @@ export interface Notes {
   channel: Uint8Array;
 }
 
+/** Where a MIDI song's notes sound across it, in `columns` slices: each key and channel once a slice. */
+export interface Overview {
+  columns: number;
+  column: Uint16Array;
+  key: Uint8Array;
+  channel: Uint8Array;
+}
+
 /** A MIDI file's name, instruments and notes. */
 export interface SongInfo {
   title: string | null;
@@ -1242,12 +1250,25 @@ export interface SongInfo {
   instruments: number[];
   /** Each channel that plays and the instrument it starts with. */
   channels: [channel: number, instrument: number][];
-  notes: Notes;
   /** When each beat falls, in seconds. */
   beats: number[];
   /** When each bar starts, in seconds, following the time signatures. */
   bars: number[];
+  /** The lowest and highest key played. */
+  low: number;
+  high: number;
+  /** The longest note, in seconds. */
+  longest: number;
+  /** When the last note ends, in seconds. 0 for a song with no notes. */
+  end: number;
+  overview: Overview;
+  /** The notes that may sound from `from` to `to` seconds, in order of start. A big song has
+   *  millions, so they come a stretch at a time. */
+  notesBetween: (from: number, to: number) => Promise<Notes>;
 }
+
+/** Slices of a song the player's strip shows, about one a pixel. */
+const OVERVIEW_COLUMNS = 1200;
 
 /** How a MIDI file is played: silent channels as bits, keys up or down, and how fast. */
 export interface Playing {
@@ -1258,10 +1279,18 @@ export interface Playing {
 
 export async function songInfo(view: number, request: number, row: number): Promise<SongInfo> {
   const [info, packed] = await Promise.all([
-    invoke<Omit<SongInfo, "notes">>("song_info", { view, request, row }),
-    invoke<ArrayBuffer>("song_notes", { view, request, row }),
+    invoke<Omit<SongInfo, "overview" | "notesBetween">>("song_info", { view, request, row }),
+    invoke<ArrayBuffer>("song_overview", { view, request, row, columns: OVERVIEW_COLUMNS }),
   ]);
-  return { ...info, notes: unpackNotes(packed) };
+  const count = Math.floor(packed.byteLength / 4);
+  const overview = {
+    columns: OVERVIEW_COLUMNS,
+    column: new Uint16Array(packed, 0, count),
+    key: new Uint8Array(packed, 2 * count, count),
+    channel: new Uint8Array(packed, 3 * count, count),
+  };
+  const notesBetween = (from: number, to: number) => invoke<ArrayBuffer>("song_notes", { view, request, row, from, to }).then(unpackNotes);
+  return { ...info, overview, notesBetween };
 }
 
 /** Notes packed by Rust as columns: every start, every length, every key, every channel. */

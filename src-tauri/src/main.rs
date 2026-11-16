@@ -1853,16 +1853,48 @@ fn forget_song(number: u64, streams: State<'_, midi::Streams>) {
 
 /// A MIDI file's name, instruments and notes, for the piano roll.
 #[tauri::command]
-async fn song_info(view: u32, request: u64, row: u32, views: State<'_, Views>) -> Result<midi::SongInfo, String> {
+async fn song_info(
+    view: u32,
+    request: u64,
+    row: u32,
+    views: State<'_, Views>,
+    songs: State<'_, midi::Songs>,
+) -> Result<serde_json::Value, String> {
     let path = row_file(&views, view, request, row).await?;
-    blocking(move || midi::info(&path)).await
+    let songs = songs.inner().clone();
+    blocking(move || serde_json::to_value(&*songs.song(&path)?).map_err(|error| error.to_string())).await
 }
 
-/// A MIDI file's notes, packed, for the piano roll. See `SongInfo::packed_notes`.
+/// The notes of a MIDI file that may sound from `from` to `to` seconds, packed, for the piano
+/// roll. See `SongInfo::notes_between`.
 #[tauri::command]
-async fn song_notes(view: u32, request: u64, row: u32, views: State<'_, Views>) -> Result<Response, String> {
+async fn song_notes(
+    view: u32,
+    request: u64,
+    row: u32,
+    from: f32,
+    to: f32,
+    views: State<'_, Views>,
+    songs: State<'_, midi::Songs>,
+) -> Result<Response, String> {
     let path = row_file(&views, view, request, row).await?;
-    blocking(move || midi::info(&path).map(|info| Response::new(info.packed_notes()))).await
+    let songs = songs.inner().clone();
+    blocking(move || songs.song(&path).map(|song| Response::new(song.notes_between(from, to)))).await
+}
+
+/// Where a MIDI file's notes sound across it, for the player's strip. See `SongInfo::overview`.
+#[tauri::command]
+async fn song_overview(
+    view: u32,
+    request: u64,
+    row: u32,
+    columns: usize,
+    views: State<'_, Views>,
+    songs: State<'_, midi::Songs>,
+) -> Result<Response, String> {
+    let path = row_file(&views, view, request, row).await?;
+    let songs = songs.inner().clone();
+    blocking(move || songs.song(&path).map(|song| Response::new(song.overview(columns)))).await
 }
 
 /// A sound file's tags, and its path for the window to stream it. Only this file opens to the
@@ -2457,6 +2489,7 @@ fn main() {
         .manage(Searches::default())
         .manage(Scans::default())
         .manage(midi::Streams::default())
+        .manage(midi::Songs::default())
         .manage(mini::Handed::default())
         // A MIDI song as it is made, which the window streams by number from `song://`.
         .register_asynchronous_uri_scheme_protocol("song", |context, request, responder| {
@@ -2616,6 +2649,7 @@ fn main() {
             song_audio,
             song_info,
             song_notes,
+            song_overview,
             forget_song,
             open_audio,
             aiff_audio,
