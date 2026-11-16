@@ -12,7 +12,7 @@ use std::slice;
 use std::sync::{Mutex, PoisonError};
 
 use rusqlite::{params, Connection, ErrorCode};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use windows::core::{Owned, HSTRING};
 use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_INVALID_PARAMETER, ERROR_NO_MORE_FILES, HANDLE};
 use windows::Win32::Storage::FileSystem::{
@@ -65,12 +65,19 @@ struct Key {
     file: FileId,
 }
 
-#[derive(Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct Tag {
     pub id: u32,
     pub name: String,
     /// Which of the UI's tag colors.
     pub color: u8,
+}
+
+/// A tag taken away, with every file that had it, here or not, so an undo puts all of it back.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct Removed {
+    pub tag: Tag,
+    files: Vec<(u64, FileId)>,
 }
 
 /// The tags of each entry that has any, by its position in the entries given.
@@ -290,6 +297,44 @@ impl Store {
         all_at_once.commit()
     }
 
+    /// Puts `tag` on or off the files of `keys` that don't stand that way yet, and says which
+    /// those were, by their place in `keys`.
+    fn change(&self, keys: &[Key], tag: u32, on: bool) -> rusqlite::Result<Vec<usize>> {
+        let mut has = self.0.prepare_cached("SELECT 1 FROM tagged WHERE volume = ? AND file = ? AND tag = ?")?;
+        let mut changing = Vec::new();
+        for (at, key) in keys.iter().enumerate() {
+            if has.exists(params![key.volume as i64, key.file, tag])? != on {
+                changing.push(at);
+            }
+        }
+        let keys: Vec<Key> = changing.iter().map(|&at| keys[at]).collect();
+        self.set(&keys, tag, on)?;
+        Ok(changing)
+    }
+
+    /// Deletes a tag, and keeps what it was and which files had it.
+    fn remove(&self, id: u32) -> rusqlite::Result<Removed> {
+        let tag = self.all()?.into_iter().find(|tag| tag.id == id).ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+        let mut rows = self.0.prepare_cached("SELECT volume, file FROM tagged WHERE tag = ?")?;
+        let files = rows.query_map([id], |row| Ok((row.get::<_, i64>(0)? as u64, row.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
+        drop(rows);
+        self.delete(id)?;
+        Ok(Removed { tag, files })
+    }
+
+    /// A deleted tag back under its own id, on every file it was on.
+    fn revive(&self, removed: &Removed) -> rusqlite::Result<()> {
+        let all_at_once = self.0.unchecked_transaction()?;
+        let Tag { id, name, color } = &removed.tag;
+        all_at_once.execute("INSERT INTO tags(id, name, color) VALUES(?, ?, ?)", params![id, name, color])?;
+        let mut statement = all_at_once.prepare("INSERT OR IGNORE INTO tagged(volume, file, tag) VALUES(?, ?, ?)")?;
+        for (volume, file) in &removed.files {
+            statement.execute(params![*volume as i64, file, id])?;
+        }
+        drop(statement);
+        all_at_once.commit()
+    }
+
     /// The tags all of `keys` have.
     fn common(&self, keys: &[Key]) -> rusqlite::Result<Vec<u32>> {
         let mut rows = self.0.prepare_cached("SELECT tag FROM tagged WHERE volume = ? AND file = ?")?;
@@ -424,18 +469,32 @@ pub fn edit(id: u32, name: &str, color: u8) -> Result<(), String> {
     opened(|store| store.edit(id, name, color))
 }
 
-pub fn delete(id: u32) -> Result<(), String> {
-    opened(|store| store.delete(id))
+/// Deletes a tag, giving back what an undo needs to bring it back.
+pub fn remove(id: u32) -> Result<Removed, String> {
+    opened(|store| store.remove(id))
 }
 
-/// Nothing changes unless every file can take it.
-pub fn set(paths: &[PathBuf], tag: u32, on: bool) -> Result<(), String> {
+pub fn revive(removed: &Removed) -> Result<(), String> {
+    opened(|store| store.revive(removed))
+}
+
+/// Puts `tag` on or off `paths`, and gives back the ones that changed, for undo. Nothing changes
+/// unless every file can take it.
+pub fn change(paths: &[PathBuf], tag: u32, on: bool) -> Result<Vec<PathBuf>, String> {
     let keys = file_keys(paths)?;
     opened(|store| {
-        store.set(&keys, tag, on)?;
-        let places: Vec<(Key, &Path)> = keys.iter().copied().zip(paths.iter().map(PathBuf::as_path)).collect();
-        if on { store.remember(&places) } else { Ok(()) }
+        let changed = store.change(&keys, tag, on)?;
+        let places: Vec<(Key, &Path)> = changed.iter().map(|&at| (keys[at], paths[at].as_path())).collect();
+        if on {
+            store.remember(&places)?;
+        }
+        Ok(places.into_iter().map(|(_, path)| path.to_path_buf()).collect())
     })
+}
+
+/// A tag's name, for what an undo step says.
+pub fn name_of(id: u32) -> String {
+    all().ok().and_then(|tags| tags.into_iter().find(|tag| tag.id == id)).map(|tag| tag.name).unwrap_or_default()
 }
 
 /// The tags all of `paths` have.
@@ -688,6 +747,25 @@ mod tests {
 
         let seen = store.seen_with(work.id).unwrap();
         assert_eq!(seen.into_values().collect::<Vec<_>>(), [moved], "only files with the tag, at their newest place");
+    }
+
+    #[test]
+    fn a_change_says_which_files_it_changed_and_a_deleted_tag_comes_back_whole() {
+        let store = store();
+        let folder = Folder::new("change");
+        let (a, b) = (folder.file("a.txt"), folder.file("b.txt"));
+        let red = store.create("Red", 1).unwrap();
+        store.set(&[key(&a)], red.id, true).unwrap();
+
+        assert_eq!(store.change(&[key(&a), key(&b)], red.id, true).unwrap(), [1], "a had it already");
+        assert_eq!(store.change(&[key(&a), key(&b)], red.id, true).unwrap(), Vec::<usize>::new());
+
+        let removed = store.remove(red.id).unwrap();
+        assert!(store.all().unwrap().is_empty());
+        assert_eq!(folder.read(&store), Vec::<(String, Vec<u32>)>::new());
+        store.revive(&removed).unwrap();
+        assert_eq!(store.all().unwrap(), [red.clone()], "under its own id");
+        assert_eq!(folder.read(&store), [("a.txt".to_string(), vec![red.id]), ("b.txt".to_string(), vec![red.id])]);
     }
 
     #[test]

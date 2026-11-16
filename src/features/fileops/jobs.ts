@@ -90,6 +90,8 @@ export interface JobsHost {
   ejectRoot: (path: string) => string | undefined;
   /** What the sidebar calls a drive. */
   driveName: (root: string) => string;
+  /** A job, its undo or its redo changed tags. */
+  tagsChanged: () => void;
 }
 
 export type Jobs = ReturnType<typeof createJobs>;
@@ -158,6 +160,7 @@ export function createJobs(views: () => FolderView[], host: JobsHost) {
   }
 
   function finished(event: Finished) {
+    if (event.tags) host.tagsChanged();
     const card = find(event.id);
     if (!card) return;
     undoable(event);

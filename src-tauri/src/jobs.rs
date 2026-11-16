@@ -102,6 +102,8 @@ enum Change {
         /// False for a restore or an undo, whose skips are only listed.
         retries: bool,
         cancelled: bool,
+        /// Tags changed, so the tag list and the tag dots need reading again.
+        tags: bool,
         /// The undo step this job added.
         step: Option<u64>,
         #[serde(flatten)]
@@ -233,15 +235,27 @@ fn describe(records: &[Done]) -> (String, PathBuf) {
             (counted("Changed", path), path.clone())
         }
         [Done::Wallpaper { after, .. }] => (format!("Set {} as the wallpaper", name_of(after)), after.clone()),
+        [Done::Tagged { paths, name, on, .. }] => {
+            let files = match &paths[..] {
+                [one] => name_of(one),
+                many => format!("{} items", many.len()),
+            };
+            let text = if *on { format!("Tagged {files} {name}") } else { format!("Took {name} off {files}") };
+            (text, paths.first().cloned().unwrap_or_default())
+        }
+        [Done::TagDeleted { removed }] => (format!("Deleted the tag {}", removed.tag.name), PathBuf::new()),
+        [Done::TagRevived { tag }] => (format!("Brought back the tag {}", tag.name), PathBuf::new()),
         [first, ..] => {
             let path = match first {
                 Done::Created { path }
                 | Done::Moved { to: path, .. }
                 | Done::Recycled { original: path, .. }
                 | Done::Replaced { path, .. }
-                | Done::Wallpaper { after: path, .. } => path,
+                | Done::Wallpaper { after: path, .. } => path.clone(),
+                Done::Tagged { paths, .. } => paths.first().cloned().unwrap_or_default(),
+                Done::TagDeleted { .. } | Done::TagRevived { .. } => PathBuf::new(),
             };
-            (format!("Changed {} items", records.len()), path.clone())
+            (format!("Changed {} items", records.len()), path)
         }
     }
 }
@@ -801,6 +815,9 @@ impl Bridge {
             retries,
             cancelled,
         } = outcome;
+        let tags = done
+            .iter()
+            .any(|one| matches!(one, Done::Tagged { .. } | Done::TagDeleted { .. } | Done::TagRevived { .. }));
         let mut log = jobs.log();
         let step = log.record(plan.history, done);
         let undoable = log.undoable();
@@ -814,6 +831,7 @@ impl Bridge {
             failed: failed.iter().take(SELECT_LIMIT).map(Retry::from).collect(),
             retries,
             cancelled,
+            tags,
             step,
             undoable,
         });
@@ -885,6 +903,7 @@ fn created(done: &[Done]) -> Vec<String> {
     let made = done.iter().filter_map(|record| match record {
         Done::Created { path } | Done::Moved { to: path, .. } => Some(text(path)),
         Done::Recycled { .. } | Done::Replaced { .. } | Done::Wallpaper { .. } => None,
+        Done::Tagged { .. } | Done::TagDeleted { .. } | Done::TagRevived { .. } => None,
     });
     made.take(SELECT_LIMIT).collect()
 }
@@ -925,6 +944,9 @@ fn title(job: &Job) -> String {
         Job::Unzip { archives, .. } => listed("Extracting", archives),
         Job::Receive { .. } => "Copying dragged files".to_string(),
         Job::Attachments { mail, .. } => named("Saving the attachments of", &[mail.as_path()]),
+        Job::Tag { paths, on: true, .. } => listed("Tagging", paths),
+        Job::Tag { paths, on: false, .. } => listed("Untagging", paths),
+        Job::DeleteTag { .. } => "Deleting a tag".to_string(),
         Job::Recycle { paths } => listed("Recycling", paths),
         Job::Delete { paths } => listed("Deleting", paths),
         Job::Restore { items } => deleted("Restoring", items),
@@ -1005,6 +1027,9 @@ mod tests {
         let saved = Done::Replaced { path: path(r"C:\a\notes.txt"), kept: path(r"C:\k\1-notes.txt") };
         assert_eq!(told(std::slice::from_ref(&saved)), "Changed notes.txt");
         let wallpaper = Done::Wallpaper { before: Vec::new(), after: path(r"C:\a\sea.jpg") };
+        let tagged = |on: bool, paths: &[&str]| Done::Tagged { paths: paths.iter().map(|one| path(one)).collect(), tag: 1, name: "Red".into(), on };
+        assert_eq!(told(&[tagged(true, &[r"C:\a\1", r"C:\a\2", r"C:\a\3"])]), "Tagged 3 items Red");
+        assert_eq!(told(&[tagged(false, &[r"C:\a\plan.txt"])]), "Took Red off plan.txt");
         assert_eq!(told(&[wallpaper]), "Set sea.jpg as the wallpaper");
         // What Undo keeps is known for every step, so a sweep leaves it alone.
         let mut log = UndoLog::default();
@@ -1250,6 +1275,7 @@ mod tests {
                 failed: Vec::new(),
                 retries: true,
                 cancelled: false,
+                tags: false,
                 step: None,
                 undoable: Undoable {
                     latest_step: Some(3),

@@ -268,6 +268,9 @@ enum Task {
     PasteShortcut { folder: String },
     /// The last files dropped on the window landed on `folder`.
     Drop { folder: String, action: Option<DropAction> },
+    /// A tag put on or taken off the rows, a folder, or files by path. Undo takes it back.
+    Tag { target: ShellTarget, tag: u32, on: bool },
+    DeleteTag { id: u32 },
     Recycle { selection: Selection },
     Delete { selection: Selection },
     Restore { selection: Selection },
@@ -389,6 +392,15 @@ impl Task {
             Self::Drop { folder, action } => {
                 return Ok(drags.job(Path::new(&target(folder)?), action).map(Plan::from));
             }
+            Self::Tag { target, tag, on } => {
+                let paths = match target {
+                    ShellTarget::Rows { selection } => sources(&selection)?,
+                    ShellTarget::Folder { path } => vec![PathBuf::from(path)],
+                    ShellTarget::Paths { paths } => paths,
+                };
+                Job::Tag { paths, tag, on }
+            }
+            Self::DeleteTag { id } => Job::DeleteTag { id },
             Self::Recycle { selection } => Job::Recycle {
                 paths: paths(&selection)?,
             },
@@ -2023,23 +2035,6 @@ async fn edit_tag(id: u32, name: String, color: u8) -> Result<(), String> {
     with_tags(move || tags::edit(id, &name, color)).await
 }
 
-#[tauri::command]
-async fn delete_tag(id: u32) -> Result<(), String> {
-    with_tags(move || tags::delete(id)).await
-}
-
-#[tauri::command]
-async fn set_tag(target: ShellTarget, tag: u32, on: bool, views: State<'_, Views>) -> Result<(), String> {
-    let paths = target.paths(&views).await?;
-    with_tags(move || tags::set(&paths, tag, on)).await
-}
-
-/// Puts `tag` on files by their paths, for a drop on a tag.
-#[tauri::command]
-async fn set_tag_paths(paths: Vec<PathBuf>, tag: u32, on: bool) -> Result<(), String> {
-    with_tags(move || tags::set(&paths, tag, on)).await
-}
-
 /// Every tagged file here by path, with its tags, for a backup.
 #[tauri::command]
 async fn tagged_files() -> Result<Vec<(String, Box<[u32]>)>, String> {
@@ -2624,9 +2619,6 @@ fn main() {
             list_tags,
             create_tag,
             edit_tag,
-            delete_tag,
-            set_tag,
-            set_tag_paths,
             tagged_files,
             restore_tagged,
             keep_on_device,

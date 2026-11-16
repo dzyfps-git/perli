@@ -217,6 +217,8 @@ export type Task =
   | { kind: "pasteShortcut"; folder: string }
   /** Every attachment of a mail file, into `folder`. */
   | { kind: "saveAttachments"; path: string; folder: string }
+  | { kind: "tag"; target: ShellTarget; tag: number; on: boolean }
+  | { kind: "deleteTag"; id: number }
   | { kind: "drop"; folder: string; action?: DropAction }
   | { kind: "recycle" | "delete" | "restore" | "purge"; selection: Selection }
   | { kind: "restoreTo"; selection: Selection; folder: string }
@@ -318,6 +320,8 @@ export type JobEvent = { id: number } & (
       /** False for a restore or an undo, whose skips are only listed. */
       retries: boolean;
       cancelled: boolean;
+      /** Tags changed, so the tag list and the tag dots need reading again. */
+      tags: boolean;
       /** The undo step this job added. */
       step: number | null;
     } & Undoable)
@@ -720,15 +724,14 @@ export const createTag = (name: string, color: number) => invoke<Tag>("create_ta
 
 export const editTag = (id: number, name: string, color: number) => invoke<void>("edit_tag", { id, name, color });
 
-export const deleteTag = (id: number) => invoke<void>("delete_tag", { id });
+/** Undo brings the tag back, on every file that had it. */
+export const deleteTag = (id: number) => runJob({ kind: "deleteTag", id });
 
-/** Puts `tag` on the selected rows, or takes it off. */
-export const setTag = (target: ShellTarget, tag: number, on: boolean) =>
-  invoke<void>("set_tag", { target, tag, on });
+/** Puts `tag` on the selected rows, or takes it off, as a job Undo can take back. */
+export const setTag = (target: ShellTarget, tag: number, on: boolean) => runJob({ kind: "tag", target, tag, on });
 
 /** Puts `tag` on files by their paths, or takes it off. */
-export const setTagPaths = (paths: string[], tag: number, on: boolean) =>
-  invoke<void>("set_tag_paths", { paths, tag, on });
+export const setTagPaths = (paths: string[], tag: number, on: boolean) => setTag({ kind: "paths", paths }, tag, on);
 
 /** Every tagged file here, by path, with its tags, for a backup. */
 export const taggedFiles = () => invoke<[string, number[]][]>("tagged_files");

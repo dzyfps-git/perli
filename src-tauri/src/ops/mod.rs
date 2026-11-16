@@ -25,6 +25,7 @@ use std::sync::{Arc, Condvar, Mutex};
 
 use serde::{Deserialize, Serialize};
 use windows::core::{Error, Result};
+use windows::Win32::Foundation::E_FAIL;
 
 pub use archive::{safe as safe_relative, ticks_of as zip_ticks};
 pub use bin::{limit as bin_limit, read as read_bin, BinItem};
@@ -72,6 +73,9 @@ pub enum Job {
     Save { path: PathBuf, bytes: Vec<u8>, read: Option<Seen> },
     Picture { paths: Vec<PathBuf>, edit: crate::picture::Edit, keep: crate::picture::Keep },
     Wallpaper { picture: PathBuf },
+    /// A tag put on or taken off files. Only the files that change are undone.
+    Tag { paths: Vec<PathBuf>, tag: u32, on: bool },
+    DeleteTag { id: u32 },
     /// Every attachment of a mail file, landed in `folder` as dragged files land.
     Attachments { mail: PathBuf, folder: PathBuf },
     /// One after another under one card, such as rows of two archives and a folder copied at once.
@@ -133,6 +137,11 @@ pub enum Done {
     Replaced { path: PathBuf, kept: PathBuf },
     /// The desktop picture changed to `after`. `before` is each screen's picture until then.
     Wallpaper { before: Screens, after: PathBuf },
+    /// `tag`, called `name` then, put on or taken off just these files.
+    Tagged { paths: Vec<PathBuf>, tag: u32, name: String, on: bool },
+    TagDeleted { removed: crate::tags::Removed },
+    /// A deleted tag brought back, which deleting it again undoes.
+    TagRevived { tag: crate::tags::Tag },
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -389,6 +398,8 @@ impl<'a> Run<'a> {
             }
             Job::Receive { incoming, folder } => self.receive(incoming, &folder),
             Job::Attachments { mail, folder } => self.save_attachments(&mail, &folder),
+            Job::Tag { paths, tag, on } => self.tag(&paths, tag, on),
+            Job::DeleteTag { id } => self.delete_tag(id),
             Job::Recycle { paths } => {
                 self.add_total(paths.len() as u64, 0);
                 self.recycle(paths)
@@ -554,16 +565,50 @@ impl<'a> Run<'a> {
                         _ => None,
                     }).collect())?;
                 }
-                Done::Replaced { .. } | Done::Wallpaper { .. } => {
+                Done::Replaced { .. } | Done::Wallpaper { .. } | Done::Tagged { .. } | Done::TagDeleted { .. } | Done::TagRevived { .. } => {
                     for record in group {
                         match record {
                             Done::Replaced { path, kept } => self.put_back_kept(path, kept)?,
                             Done::Wallpaper { before, .. } => self.put_back_wallpaper(before)?,
+                            Done::Tagged { paths, tag, on, .. } => self.tag(paths, *tag, !on)?,
+                            Done::TagDeleted { removed } => self.revive_tag(removed)?,
+                            Done::TagRevived { tag } => self.delete_tag(tag.id)?,
                             _ => {}
                         }
                     }
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// Only the files whose tags change go in the undo step, so an undo leaves alone what had the
+    /// tag before.
+    fn tag(&mut self, paths: &[PathBuf], tag: u32, on: bool) -> Flow {
+        let place = paths.first().map_or(Path::new(""), PathBuf::as_path);
+        let change = |_: &mut Self| crate::tags::change(paths, tag, on).map_err(|message| Error::new(E_FAIL, message.as_str()));
+        let Some(changed) = self.attempt(place, None, change)? else {
+            return Ok(());
+        };
+        self.touched.extend(changed.iter().map(|path| sys::parent(path)));
+        if !changed.is_empty() {
+            self.done.push(Done::Tagged { paths: changed, tag, name: crate::tags::name_of(tag), on });
+        }
+        Ok(())
+    }
+
+    fn delete_tag(&mut self, id: u32) -> Flow {
+        let remove = |_: &mut Self| crate::tags::remove(id).map_err(|message| Error::new(E_FAIL, message.as_str()));
+        if let Some(removed) = self.attempt(Path::new("Tags"), None, remove)? {
+            self.done.push(Done::TagDeleted { removed });
+        }
+        Ok(())
+    }
+
+    fn revive_tag(&mut self, removed: &crate::tags::Removed) -> Flow {
+        let revive = |_: &mut Self| crate::tags::revive(removed).map_err(|message| Error::new(E_FAIL, message.as_str()));
+        if self.attempt(Path::new("Tags"), None, revive)?.is_some() {
+            self.done.push(Done::TagRevived { tag: removed.tag.clone() });
         }
         Ok(())
     }
@@ -688,7 +733,11 @@ impl<'a> Run<'a> {
                     self.touched.insert(sys::parent(to))
                 }
                 Done::Recycled { original, .. } | Done::Replaced { path: original, .. } => self.touched.insert(sys::parent(original)),
-                Done::Wallpaper { .. } => false,
+                Done::Wallpaper { .. } | Done::TagDeleted { .. } | Done::TagRevived { .. } => false,
+                Done::Tagged { paths, .. } => {
+                    self.touched.extend(paths.iter().map(|path| sys::parent(path)));
+                    false
+                }
             };
         }
         Outcome {
