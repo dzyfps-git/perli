@@ -1495,6 +1495,18 @@ async fn unlock_zip(path: PathBuf, password: String) -> Result<(), String> {
     .await
 }
 
+/// What files taken out of archives take up in the cache, in bytes.
+#[tauri::command]
+async fn archive_cache_size() -> Result<u64, String> {
+    blocking(|| Ok(zipped::cache_size())).await
+}
+
+/// Empties the cache of files taken out of archives, and says what is left: files still open.
+#[tauri::command]
+async fn clear_archive_cache() -> Result<u64, String> {
+    blocking(|| Ok(zipped::clear_cache())).await
+}
+
 /// A picture's own width and height in pixels, if Windows' imaging can read them.
 #[tauri::command]
 async fn picture_size(view: u32, request: u64, row: u32, views: State<'_, Views>) -> Result<Option<(u32, u32)>, String> {
@@ -2523,6 +2535,8 @@ fn main() {
             thumbnail,
             big_picture,
             unlock_zip,
+            archive_cache_size,
+            clear_archive_cache,
             picture_size,
             picture_aspects,
             archive_text,

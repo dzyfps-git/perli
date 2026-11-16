@@ -8,8 +8,8 @@ use std::ffi::OsStr;
 use std::fs;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Component, Path, PathBuf};
-use std::sync::{Arc, LazyLock, Mutex, Once, PoisonError};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, LazyLock, Mutex, PoisonError};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::packs::{self, Item, Listed};
 use crate::{inside, ops};
@@ -25,6 +25,8 @@ const MOST_WHOLE: u64 = 4 << 30;
 const CACHE_FOLDER: &str = "perli-zip";
 /// What was taken out stays this long, as the app it opened in may still be using it.
 const CACHE_KEEP: Duration = Duration::from_secs(24 * 60 * 60);
+/// How often a run that lasts days looks for what has outstayed `CACHE_KEEP`.
+const SWEEP_EVERY: Duration = Duration::from_secs(60 * 60);
 
 /// Passwords the user gave this session, by archive in lowercase. Never saved.
 static PASSWORDS: LazyLock<Mutex<HashMap<String, String>>> = LazyLock::new(Mutex::default);
@@ -202,13 +204,15 @@ fn entry_name(archive: &Path, inner: &str) -> Option<String> {
 }
 
 /// The cache folder for `inner` of this version of the archive, and a fresh folder to write it
-/// in before it moves there.
-fn slot(archive: &Path, inner: &str) -> (PathBuf, PathBuf) {
+/// in before it moves there. What a password opened gets a folder of its own for that password.
+fn slot(archive: &Path, inner: &str, password: Option<&str>) -> (PathBuf, PathBuf) {
     let root = cache_root();
     let version = fs::metadata(archive).ok().map(|metadata| (metadata.len(), metadata.modified().ok()));
     let mut hasher = DefaultHasher::new();
     // The mark of the web is part of the version, so a copy taken out unmarked is never reused.
     (key(archive), version, inner.to_lowercase(), ops::sys::read_zone(archive)).hash(&mut hasher);
+    // Salted for this run alone, so a folder's name is no quick way to try passwords.
+    password.map(|password| (password, *RUN_SALT)).hash(&mut hasher);
     let hash = hasher.finish();
     (root.join(format!("{hash:016x}")), root.join(format!("{hash:016x}-{}.part", crate::since_1970().as_nanos())))
 }
@@ -226,29 +230,37 @@ fn settle(part: &Path, slot: &Path, done: &Path, write: impl FnOnce() -> Result<
     }
 }
 
-/// One whole take-out at a time, so the thumbnails of a folder wait for one rather than each
-/// start their own.
-// ponytail: one lock for all archives; a lock for each if two big ones open at once.
-static WHOLE: Mutex<()> = Mutex::new(());
+static RUN_SALT: LazyLock<u128> = LazyLock::new(|| crate::since_1970().as_nanos() ^ u128::from(std::process::id()));
+
+/// One whole take-out of each archive at a time, so the thumbnails of a folder wait for one rather
+/// than each start their own. Two archives come out side by side.
+static WHOLE: LazyLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> = LazyLock::new(Mutex::default);
+
+fn whole_lock(archive: &Path) -> Arc<Mutex<()>> {
+    WHOLE.lock().unwrap_or_else(PoisonError::into_inner).entry(key(archive)).or_default().clone()
+}
 
 /// Where all of a solid archive is taken out, once for each version of it. Reading a file of one
 /// unpacks all before it, so the pictures of a folder read one by one would unpack it again for
-/// each. `None` for an archive that reads each file as fast on its own, and one too big.
-// ponytail: a solid archive with locked files reads each file on its own; take its unlocked ones
-// out whole too if such archives turn out slow.
+/// each. A locked one comes out once its password is given. `None` for an archive that reads each
+/// file as fast on its own, one still locked, and one too big.
 pub fn whole(archive: &Path) -> Option<PathBuf> {
     if !is_pack(archive) {
         return None;
     }
-    let listed = packs::list(archive, None).ok()?;
+    let password = password(archive);
+    let listed = packs::list(archive, password.as_deref()).ok()?;
     let size: u64 = listed.items.iter().map(|item| item.size).sum();
-    if !listed.solid || listed.locked() || size > MOST_WHOLE {
+    let locked = listed.locked();
+    if !listed.solid || listed.hidden || locked && password.is_none() || size > MOST_WHOLE {
         return None;
     }
-    let (slot, part) = slot(archive, "");
-    let _one = WHOLE.lock().unwrap_or_else(PoisonError::into_inner);
+    let password = password.filter(|_| locked);
+    let (slot, part) = slot(archive, "", password.as_deref());
+    let one = whole_lock(archive);
+    let _one = one.lock().unwrap_or_else(PoisonError::into_inner);
     if !slot.exists() {
-        settle(&part, &slot, &slot, || take_out_pack(archive, "", &part, None)).ok()?;
+        settle(&part, &slot, &slot, || take_out_pack(archive, "", &part, password.as_deref())).ok()?;
     }
     Some(slot)
 }
@@ -267,7 +279,7 @@ pub fn real(path: &Path) -> Result<PathBuf, String> {
     if let Some(found) = whole(&archive).zip(relative).map(|(whole, relative)| whole.join(relative)).filter(|found| found.exists()) {
         return Ok(found);
     }
-    let (slot, part) = slot(&archive, &inner);
+    let (slot, part) = slot(&archive, &inner, password(&archive).as_deref());
     let target = slot.join(name);
     if target.exists() {
         return Ok(target);
@@ -394,11 +406,34 @@ fn time_of(ticks: u64) -> Option<SystemTime> {
 }
 
 fn cache_root() -> PathBuf {
-    static SWEPT: Once = Once::new();
+    static SWEPT: Mutex<Option<Instant>> = Mutex::new(None);
     let root = std::env::temp_dir().join(CACHE_FOLDER);
-    // ponytail: swept once a run; sweep on a timer if runs that last days fill the disk.
-    SWEPT.call_once(|| sweep(&root, CACHE_KEEP));
+    let mut swept = SWEPT.lock().unwrap_or_else(PoisonError::into_inner);
+    if swept.is_none_or(|at| at.elapsed() > SWEEP_EVERY) {
+        *swept = Some(Instant::now());
+        sweep(&root, CACHE_KEEP);
+    }
     root
+}
+
+/// What everything taken out of archives takes up, in bytes.
+pub fn cache_size() -> u64 {
+    tree_size(&std::env::temp_dir().join(CACHE_FOLDER))
+}
+
+fn tree_size(path: &Path) -> u64 {
+    let size = |entry: fs::DirEntry| match entry.file_type() {
+        Ok(kind) if kind.is_dir() => tree_size(&entry.path()),
+        _ => entry.metadata().map_or(0, |metadata| metadata.len()),
+    };
+    fs::read_dir(path).into_iter().flatten().flatten().map(size).sum()
+}
+
+/// Removes all that was taken out of archives. What an app still has open stays, and its bytes
+/// come back.
+pub fn clear_cache() -> u64 {
+    sweep(&std::env::temp_dir().join(CACHE_FOLDER), Duration::ZERO);
+    cache_size()
 }
 
 /// Removes what was taken out longer than `keep` ago.
@@ -580,6 +615,46 @@ mod tests {
         assert_eq!(modified.duration_since(UNIX_EPOCH).unwrap().as_secs(), 1_700_000_000);
         assert_eq!(real(&archive.join("gone.txt")), Err(GONE.into()));
         let _ = fs::remove_dir_all(whole);
+    }
+
+    #[test]
+    fn a_locked_solid_7z_comes_out_whole_once_its_password_is_given() {
+        let fixture = Fixture::new("locked-whole", &[]);
+        let archive = fixture.0.join("pack.7z");
+        packs::tests::seven(&archive, Some("sesame"), true, false);
+
+        assert_eq!(whole(&archive), None);
+        unlock(&archive, "sesame").unwrap();
+        let whole = whole(&archive).unwrap();
+        assert_eq!(fs::read_to_string(whole.join("docs").join("a.txt")).unwrap(), "alpha");
+        assert_eq!(real(&archive.join("top.txt")).unwrap(), whole.join("top.txt"));
+        PASSWORDS.lock().unwrap().remove(&key(&archive));
+        let _ = fs::remove_dir_all(whole);
+    }
+
+    #[test]
+    fn each_archive_has_its_own_lock() {
+        let (a, b) = (Path::new(r"C:\a.7z"), Path::new(r"C:\b.7z"));
+        assert!(Arc::ptr_eq(&whole_lock(a), &whole_lock(Path::new(r"C:\A.7Z"))));
+        assert!(!Arc::ptr_eq(&whole_lock(a), &whole_lock(b)));
+        // One coming out doesn't hold up another.
+        let held = whole_lock(a);
+        let _held = held.lock().unwrap();
+        assert!(whole_lock(b).try_lock().is_ok());
+    }
+
+    #[test]
+    fn the_cache_adds_up_and_clears() {
+        let fixture = Fixture::new("cache", &[]);
+        let root = fixture.0.join("cache");
+        fs::create_dir_all(root.join("one").join("deeper")).unwrap();
+        fs::write(root.join("one").join("a.bin"), [0; 300]).unwrap();
+        fs::write(root.join("one").join("deeper").join("b.bin"), [0; 200]).unwrap();
+        assert_eq!(tree_size(&root), 500);
+        sweep(&root, CACHE_KEEP);
+        assert_eq!(tree_size(&root), 500, "what is new stays");
+        sweep(&root, Duration::ZERO);
+        assert_eq!(tree_size(&root), 0);
     }
 
     #[test]

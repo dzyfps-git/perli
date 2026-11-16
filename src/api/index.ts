@@ -531,6 +531,10 @@ export const isFile = (path: string) => invoke<boolean>("is_file", { path });
 /** Keeps the password of a ZIP opened as a folder for this session. Fails with the
  *  wrong-password message unless it opens the ZIP's locked files. */
 export const unlockZip = (path: string, password: string) => invoke<void>("unlock_zip", { path, password });
+/** What files taken out of archives take up in Perli's cache, in bytes. */
+export const archiveCacheSize = () => invoke<number>("archive_cache_size");
+/** Empties that cache. Gives back the bytes left, which apps still have open. */
+export const clearArchiveCache = () => invoke<number>("clear_archive_cache");
 
 /** `shown` is the request of the folder on screen, whose rows must outlive this open. */
 export const openFolder = (view: number, request: number, shown: number, path: string, order: Order) =>

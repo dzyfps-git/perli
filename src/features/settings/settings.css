@@ -217,6 +217,34 @@
   padding: 0 var(--space-2);
 }
 
+.settings-cache {
+  align-items: center;
+}
+
+/* The size of the archive cache, which settles in place when a clear changes it. */
+.settings-cache-size {
+  padding-right: var(--space-2);
+  font-variant-numeric: tabular-nums;
+  animation: settings-cache-in var(--motion-spring);
+}
+
+.settings-cache-size[data-empty] {
+  color: var(--text-muted);
+}
+
+@keyframes settings-cache-in {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .settings-cache-size {
+    animation: none;
+  }
+}
+
 .settings-chip {
   display: flex;
   align-items: center;
