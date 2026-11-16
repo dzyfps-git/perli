@@ -810,7 +810,7 @@ mod tests {
         let text = [0x93, 0xFA, 0x96, 0x7B];
         assert_eq!(super::whole_letters(&text, 932), 4);
         assert_eq!(super::whole_letters(&text[..3], 932), 2, "the cut letter waits");
-        assert_eq!(super::whole_letters(b"ab", 932), 2);
+        assert_eq!(super::whole_letters(b"ab\x93", 932), 2);
         // A one-byte page has no letters to cut.
         assert_eq!(super::whole_letters(&text[..3], 1252), 3);
     }
