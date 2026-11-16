@@ -764,7 +764,7 @@ mod tests {
         assert!(store.all().unwrap().is_empty());
         assert_eq!(folder.read(&store), Vec::<(String, Vec<u32>)>::new());
         store.revive(&removed).unwrap();
-        assert_eq!(store.all().unwrap(), [red.clone()], "under its own id");
+        assert_eq!(store.all().unwrap(), std::slice::from_ref(&red), "under its own id");
         assert_eq!(folder.read(&store), [("a.txt".to_string(), vec![red.id]), ("b.txt".to_string(), vec![red.id])]);
     }
 
