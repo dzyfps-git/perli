@@ -696,6 +696,17 @@
   content: "\E74D";
 }
 
+/* Shift on the bin: nothing to undo, so it reads in the danger colour. */
+.drag-effect[data-effect="delete"] {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.drag-effect[data-effect="delete"]::before {
+  content: "\E74D";
+  color: var(--danger);
+}
+
 /* A folder row, tab or place that the drag rests on tints with the accent while a small ring
    at its end fills, and opens once the ring is full. Space opens it at once. */
 @property --drop-fill {

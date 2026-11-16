@@ -72,6 +72,8 @@ pub enum Job {
     Save { path: PathBuf, bytes: Vec<u8>, read: Option<Seen> },
     Picture { paths: Vec<PathBuf>, edit: crate::picture::Edit, keep: crate::picture::Keep },
     Wallpaper { picture: PathBuf },
+    /// One after another under one card, such as rows of two archives and a folder copied at once.
+    Several { jobs: Vec<Job> },
 }
 
 /// How hard a new archive squeezes its files.
@@ -401,6 +403,9 @@ impl<'a> Run<'a> {
             Job::Save { path, bytes, read } => self.save(&path, &bytes, read),
             Job::Picture { paths, edit, keep } => self.edit_pictures(&paths, edit, keep),
             Job::Wallpaper { picture } => self.set_wallpaper(&picture),
+            // ponytail: each part adds its total as it starts, so the bar steps back once per part;
+            // count all parts first if that reads as wrong.
+            Job::Several { jobs } => jobs.into_iter().try_for_each(|job| self.job(job)),
         }
     }
 

@@ -307,7 +307,7 @@ impl Task {
         let sources = |selection: &Selection| views.read(selection, folder::Listing::paths);
         let items = |selection: &Selection| views.read(selection, folder::Listing::bin_items);
         let job = match self {
-            Self::Copy { selection, folder } => copy_job(sources(&selection)?, target(folder)?)?,
+            Self::Copy { selection, folder } => copy_job(sources(&selection)?, target(folder)?),
             Self::Move { selection, folder } => Job::Move {
                 sources: paths(&selection)?,
                 folder: target(folder)?,
@@ -339,7 +339,7 @@ impl Task {
                     folder: target(folder)?,
                 }
             }
-            Self::CopyPaths { paths, folder } => copy_job(paths, target(folder)?)?,
+            Self::CopyPaths { paths, folder } => copy_job(paths, target(folder)?),
             Self::MovePaths { paths, folder } => {
                 refuse_zipped(&paths)?;
                 Job::Move { sources: paths, folder: target(folder)? }
@@ -357,7 +357,7 @@ impl Task {
                 let template = content.ok_or("The clipboard holds no text or picture")?;
                 Job::Template { folder: target(folder)?, template }
             }
-            Self::SaveTemplate { selection } => copy_job(sources(&selection)?, templates::own_folder()?)?,
+            Self::SaveTemplate { selection } => copy_job(sources(&selection)?, templates::own_folder()?),
             Self::Zip { selection, level, password, format, aes } => Job::Zip {
                 sources: paths(&selection)?,
                 level,
@@ -439,20 +439,37 @@ fn refuse_zipped(paths: &[PathBuf]) -> Result<(), String> {
 
 /// A copy of `sources` into `folder`. Rows of one ZIP opened as a folder come out of it the
 /// way Extract takes them, with its progress, questions and undo.
-fn copy_job(sources: Vec<PathBuf>, folder: PathBuf) -> Result<Job, String> {
-    let inside: Option<Vec<(PathBuf, String)>> =
-        sources.iter().map(|path| zipped::split(path).filter(|(_, inner)| !inner.is_empty())).collect();
-    match inside {
-        Some(inside) if inside.first().is_some_and(|(first, _)| inside.iter().all(|(archive, _)| archive == first)) => {
-            let archive = inside[0].0.clone();
-            let password = zipped::password(&archive);
-            let only = inside.into_iter().map(|(_, inner)| inner).collect();
-            Ok(Job::Unzip { archives: vec![archive], own_folder: false, smart: false, only, password, into: Some(folder) })
+fn copy_job(sources: Vec<PathBuf>, folder: PathBuf) -> Job {
+    let mut plain = Vec::new();
+    let mut archives: Vec<(PathBuf, Vec<String>)> = Vec::new();
+    for path in sources {
+        match zipped::split(&path).filter(|(_, inner)| !inner.is_empty()) {
+            Some((archive, inner)) => match archives.iter_mut().find(|(known, _)| *known == archive) {
+                Some((_, only)) => only.push(inner),
+                None => archives.push((archive, vec![inner])),
+            },
+            None => plain.push(path),
         }
-        // ponytail: rows of two ZIPs, or of a ZIP and a folder, are taken out before the copy
-        // with no progress; an extract per ZIP would show it.
-        _ if sources.iter().any(|path| zipped::is_inside(path)) => Ok(Job::Copy { sources: zipped::real_all(&sources)?, folder }),
-        _ => Ok(Job::Copy { sources, folder }),
+    }
+    // Each archive is an extract of its own rows, with its own password, so all of it shows progress.
+    let mut jobs: Vec<Job> = archives
+        .into_iter()
+        .map(|(archive, only)| Job::Unzip {
+            password: zipped::password(&archive),
+            archives: vec![archive],
+            own_folder: false,
+            smart: false,
+            only,
+            into: Some(folder.clone()),
+        })
+        .collect();
+    if !plain.is_empty() || jobs.is_empty() {
+        jobs.push(Job::Copy { sources: plain, folder });
+    }
+    if jobs.len() == 1 {
+        jobs.remove(0)
+    } else {
+        Job::Several { jobs }
     }
 }
 
@@ -2178,6 +2195,12 @@ fn templates_folder() -> Result<PathBuf, String> {
     templates::own_folder()
 }
 
+/// How many items, and how big, the drop waiting for an answer holds, for the ask before a delete.
+#[tauri::command]
+async fn measure_drop(drags: State<'_, Arc<Drags>>) -> Result<Measured, String> {
+    measure(drags.waiting()).await
+}
+
 /// Whether Space is held, for a drag resting on a folder to open it at once. A drag holds the
 /// mouse and keys while it runs, so the page hears no key of its own.
 #[tauri::command]
@@ -2619,6 +2642,7 @@ fn main() {
             send_to_file_dialog,
             stop_map,
             drop_choices,
+            measure_drop,
             own_templates,
             templates_folder,
             subfolders,
@@ -2657,10 +2681,23 @@ mod tests {
         zip.finish().unwrap();
         let row = archive.join("docs").join("a.txt");
 
-        let job = copy_job(vec![row.clone()], folder.clone()).unwrap();
+        let job = copy_job(vec![row.clone()], folder.clone());
         assert!(matches!(&job, Job::Unzip { archives, only, into: Some(into), .. }
             if archives == std::slice::from_ref(&archive) && only == &["docs/a.txt"] && into == &folder));
-        assert!(matches!(copy_job(vec![archive.clone()], folder.clone()).unwrap(), Job::Copy { .. }));
+        assert!(matches!(copy_job(vec![archive.clone()], folder.clone()), Job::Copy { .. }));
+        let other = folder.join("other.zip");
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(&other).unwrap());
+        zip.start_file("b.txt", zip::write::SimpleFileOptions::default()).unwrap();
+        zip.write_all(b"beta").unwrap();
+        zip.finish().unwrap();
+        let several = copy_job(vec![row.clone(), other.join("b.txt"), archive.clone(), archive.join("docs")], folder.clone());
+        let Job::Several { jobs } = &several else { panic!("one job per archive, then the copy") };
+        assert!(matches!(&jobs[..], [
+            Job::Unzip { archives: a, only: first, .. },
+            Job::Unzip { archives: b, only: second, .. },
+            Job::Copy { sources, .. },
+        ] if a == std::slice::from_ref(&archive) && first == &["docs/a.txt", "docs"] && b == std::slice::from_ref(&other)
+            && second == &["b.txt"] && sources == std::slice::from_ref(&archive)));
         assert_eq!(refuse_zipped(&[row]), Err(zipped::READ_ONLY.to_string()));
         assert_eq!(refuse_zipped(&[archive]), Ok(()));
         let _ = std::fs::remove_dir_all(&folder);

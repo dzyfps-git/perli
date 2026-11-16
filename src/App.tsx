@@ -572,8 +572,13 @@ export function App() {
 
   // Covers every way to close, including Alt+F4 and the taskbar.
   const closeListener = onCloseAsked(onClose);
-  const dragListener = followFileDrag(tabs.allViews, jobs.report, (x, y, items) => setMenu({ x, y, items }), dropNoted, (folder) =>
-    void tabs.active().active().open(folder),
+  const dragListener = followFileDrag(
+    tabs.allViews,
+    jobs.report,
+    (x, y, items) => setMenu({ x, y, items }),
+    dropNoted,
+    (folder) => void tabs.active().active().open(folder),
+    setDeleting,
   );
   // Other apps and Windows' own commands change folders without Perli running a job.
   const folderListener = onFolderChanged((id) => everyView().find((view) => view.id === id)?.reload());

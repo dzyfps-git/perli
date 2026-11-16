@@ -228,7 +228,7 @@ fn purge_item(item: &Path) {
     });
 }
 
-fn allow_bin_copy(outcome: &Outcome) {
+pub(super) fn allow_bin_copy(outcome: &Outcome) {
     for record in &outcome.done {
         if let Done::Recycled { item, .. } = record {
             let name = item.file_name().unwrap().to_string_lossy();
@@ -238,7 +238,7 @@ fn allow_bin_copy(outcome: &Outcome) {
     }
 }
 
-fn undo(outcome: Outcome) -> Outcome {
+pub(super) fn undo(outcome: Outcome) -> Outcome {
     allow_bin_copy(&outcome);
     go(Job::Undo {
         records: outcome.done,
@@ -1122,6 +1122,36 @@ fn zip_of(path: &Path, entries: &[(&str, &[u8])]) {
         std::io::Write::write_all(&mut zip, bytes).unwrap();
     }
     zip.finish().unwrap();
+}
+
+#[test]
+fn rows_of_two_archives_and_a_file_copy_as_one_job_with_one_undo() {
+    let sandbox = Sandbox::new();
+    let first = sandbox.path("one.zip");
+    let second = sandbox.path("two.zip");
+    zip_of(&first, &[("a.txt", b"a"), ("skip.txt", b"no")]);
+    zip_of(&second, &[("docs/b.txt", b"b")]);
+    let plain = sandbox.file("c.txt", "c");
+    let into = sandbox.path("to");
+    fs::create_dir_all(&into).unwrap();
+    let from = |archive: &Path, inner: &str| Job::Unzip {
+        archives: vec![archive.to_path_buf()],
+        own_folder: false,
+        smart: false,
+        only: vec![inner.into()],
+        password: None,
+        into: Some(into.clone()),
+    };
+
+    let outcome = go(Job::Several {
+        jobs: vec![from(&first, "a.txt"), from(&second, "docs"), copy(&plain, &into)],
+    });
+
+    assert!(outcome.failed.is_empty());
+    assert_eq!(sandbox.names("to"), ["a.txt", "c.txt", "docs"]);
+    assert_eq!(read(&sandbox.path(r"to\docs\b.txt")), "b");
+    undo(outcome);
+    assert!(sandbox.names("to").is_empty());
 }
 
 fn unzip(archive: &Path, own_folder: bool) -> Job {

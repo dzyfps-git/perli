@@ -643,6 +643,12 @@ fn drives_of(job: &Job) -> Vec<String> {
         _ => None,
     };
     let paths: Vec<&Path> = match job {
+        Job::Several { jobs } => {
+            let mut drives: Vec<String> = jobs.iter().flat_map(drives_of).collect();
+            drives.sort();
+            drives.dedup();
+            return drives;
+        }
         Job::Copy { sources, folder } => sources.iter().map(PathBuf::as_path).chain([folder.as_path()]).collect(),
         Job::Move { sources, folder } if sources.iter().all(|source| drive(source) == drive(folder)) => Vec::new(),
         Job::Move { sources, folder } => sources.iter().map(PathBuf::as_path).chain([folder.as_path()]).collect(),
@@ -662,6 +668,7 @@ fn target_of(job: &Job) -> Option<String> {
     match job {
         Job::Copy { folder, .. } | Job::Move { folder, .. } | Job::Receive { folder, .. } => Some(text(folder)),
         Job::Unzip { into: Some(into), .. } => Some(text(into)),
+        Job::Several { jobs } => jobs.first().and_then(target_of),
         Job::Zip { sources: paths, .. } | Job::Unzip { archives: paths, .. } => {
             paths.first().map(|path| text(&ops::sys::parent(path)))
         }
@@ -761,6 +768,14 @@ impl Bridge {
             back: matches!(plan.history, History::Undo),
             unpack: match &plan.job {
                 Job::Unzip { archives, .. } => archives.iter().map(|path| text(path)).collect(),
+                Job::Several { jobs } => jobs
+                    .iter()
+                    .filter_map(|job| match job {
+                        Job::Unzip { archives, .. } => Some(archives.iter().map(|path| text(path))),
+                        _ => None,
+                    })
+                    .flatten()
+                    .collect(),
                 _ => Vec::new(),
             },
             target: target_of(&plan.job),
@@ -885,6 +900,17 @@ fn title(job: &Job) -> String {
     };
     match job {
         Job::Copy { sources, .. } => listed("Copying", sources),
+        Job::Several { jobs } => {
+            let rows: Vec<PathBuf> = jobs
+                .iter()
+                .flat_map(|job| match job {
+                    Job::Unzip { archives, only, .. } => archives.iter().flat_map(|archive| only.iter().map(|inner| archive.join(inner))).collect(),
+                    Job::Copy { sources, .. } => sources.clone(),
+                    _ => Vec::new(),
+                })
+                .collect();
+            listed("Copying", &rows)
+        }
         Job::Move { sources, .. } => listed("Moving", sources),
         Job::Rename { name, .. } => format!("Renaming to {name}"),
         Job::RenameAll { renames } => format!("Renaming {} items", renames.len()),

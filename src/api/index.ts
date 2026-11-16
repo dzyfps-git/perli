@@ -408,11 +408,12 @@ export type FileDrag =
   /** `effect` is what letting go there would do, or null where nothing would happen. */
   | { kind: "over"; x: number; y: number; effect?: DropAction | null }
   /** `right` means the right button dragged, so the user gets to pick what happens. */
-  | { kind: "drop"; x: number; y: number; right: boolean }
+  | { kind: "drop"; x: number; y: number; right: boolean; forGood: boolean }
   | { kind: "leave" };
 
 /** What a drop can do, when the user picks it from a menu. */
-export type DropAction = "move" | "copy" | "link";
+/** `delete` is Shift on the Recycle Bin, and never a menu choice. */
+export type DropAction = "move" | "copy" | "link" | "delete";
 
 /** What a view wants from its search: a new query, the same one again, or the rows found so far. */
 export type SearchStep = "start" | "again" | "grown";
@@ -982,6 +983,8 @@ export const spaceDown = () => invoke<boolean>("space_down");
 
 /** What the last drop can do on `folder`, for the user to pick from. */
 export const dropChoices = (folder: string) => invoke<DropAction[]>("drop_choices", { folder });
+/** The count and size of the drop that waits for an answer. */
+export const measureDrop = () => invoke<Measured>("measure_drop");
 
 /** Starts dragging the selected files to any app. Ends when the user lets go. */
 export const startDrag = (selection: Selection) => invoke<void>("start_drag", { selection });
