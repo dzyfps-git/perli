@@ -49,6 +49,10 @@ const SCHEMA: &str = "
         path TEXT NOT NULL,
         PRIMARY KEY(volume, file)
     ) WITHOUT ROWID;
+    -- The highest tag id ever given, so a new tag never takes the id an Undo needs back. A
+    -- database from before it starts from the tags it has.
+    CREATE TABLE IF NOT EXISTS last_tag(id INTEGER NOT NULL);
+    INSERT INTO last_tag SELECT IFNULL(MAX(id), 0) FROM tags WHERE NOT EXISTS (SELECT 1 FROM last_tag);
 ";
 const NO_NTFS: &str = "Tags need an NTFS drive";
 const NAME_TAKEN: &str = "A tag with this name already exists";
@@ -57,6 +61,9 @@ const NO_NAME: &str = "A tag needs a name";
 const LISTING_BYTES: usize = 64 * 1024;
 
 type FileId = [u8; 16];
+
+/// A file's volume and ID, which an undo step keeps: by then its path may name another file.
+pub type FileKey = (u64, [u8; 16]);
 
 /// Tells a file apart for as long as it lives on its volume.
 #[derive(Clone, Copy)]
@@ -248,8 +255,12 @@ impl Store {
     }
 
     fn create(&self, name: &str, color: u8) -> rusqlite::Result<Tag> {
-        self.0.execute("INSERT INTO tags(name, color) VALUES(?, ?)", params![name, color])?;
-        Ok(Tag { id: self.0.last_insert_rowid() as u32, name: name.to_string(), color })
+        let all_at_once = self.0.unchecked_transaction()?;
+        let id: u32 = all_at_once.query_row("SELECT MAX(id, (SELECT IFNULL(MAX(id), 0) FROM tags)) + 1 FROM last_tag", [], |row| row.get(0))?;
+        all_at_once.execute("INSERT INTO tags(id, name, color) VALUES(?, ?, ?)", params![id, name, color])?;
+        all_at_once.execute("UPDATE last_tag SET id = ?", [id])?;
+        all_at_once.commit()?;
+        Ok(Tag { id, name: name.to_string(), color })
     }
 
     fn edit(&self, id: u32, name: &str, color: u8) -> rusqlite::Result<()> {
@@ -480,7 +491,7 @@ pub fn revive(removed: &Removed) -> Result<(), String> {
 
 /// Puts `tag` on or off `paths`, and gives back the ones that changed, for undo. Nothing changes
 /// unless every file can take it.
-pub fn change(paths: &[PathBuf], tag: u32, on: bool) -> Result<Vec<PathBuf>, String> {
+pub fn change(paths: &[PathBuf], tag: u32, on: bool) -> Result<Vec<(PathBuf, FileKey)>, String> {
     let keys = file_keys(paths)?;
     opened(|store| {
         let changed = store.change(&keys, tag, on)?;
@@ -488,8 +499,14 @@ pub fn change(paths: &[PathBuf], tag: u32, on: bool) -> Result<Vec<PathBuf>, Str
         if on {
             store.remember(&places)?;
         }
-        Ok(places.into_iter().map(|(_, path)| path.to_path_buf()).collect())
+        Ok(places.into_iter().map(|(key, path)| (path.to_path_buf(), (key.volume, key.file))).collect())
     })
+}
+
+/// The same for an undo, by the files' keys from the step, where `paths` only names them.
+pub fn change_by_key(paths: &[PathBuf], keys: &[FileKey], tag: u32, on: bool) -> Result<Vec<(PathBuf, FileKey)>, String> {
+    let keys: Vec<Key> = keys.iter().map(|&(volume, file)| Key { volume, file }).collect();
+    opened(|store| Ok(store.change(&keys, tag, on)?.into_iter().map(|at| (paths[at].clone(), (keys[at].volume, keys[at].file))).collect()))
 }
 
 /// A tag's name, for what an undo step says.
@@ -766,6 +783,47 @@ mod tests {
         store.revive(&removed).unwrap();
         assert_eq!(store.all().unwrap(), std::slice::from_ref(&red), "under its own id");
         assert_eq!(folder.read(&store), [("a.txt".to_string(), vec![red.id]), ("b.txt".to_string(), vec![red.id])]);
+    }
+
+    /// An undo tags by the key it kept. The file went elsewhere and another took its name.
+    #[test]
+    fn a_kept_key_finds_the_file_where_it_went_and_leaves_a_newcomer_alone() {
+        let store = store();
+        let folder = Folder::new("by-key");
+        let a = folder.file("a.txt");
+        let red = store.create("Red", 1).unwrap();
+        let kept = key(&a);
+        fs::rename(&a, folder.0.join("moved.txt")).unwrap();
+        fs::write(&a, "newcomer").unwrap();
+
+        store.change(&[kept], red.id, true).unwrap();
+        assert_eq!(folder.read(&store), [("moved.txt".to_string(), vec![red.id])]);
+    }
+
+    #[test]
+    fn a_new_tag_never_takes_the_id_of_a_deleted_one_that_undo_brings_back() {
+        let store = store();
+        store.create("Red", 1).unwrap();
+        let blue = store.create("Blue", 2).unwrap();
+        let removed = store.remove(blue.id).unwrap();
+
+        let green = store.create("Green", 3).unwrap();
+        assert_ne!(green.id, blue.id);
+        store.revive(&removed).unwrap();
+        assert!(store.all().unwrap().contains(&blue));
+
+        // A database from before the counter starts past the tags it has.
+        let folder = Folder::new("last-tag");
+        let path = folder.0.join(DATABASE);
+        let old = Connection::open(&path).unwrap();
+        old.execute_batch("CREATE TABLE tags(id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE COLLATE NOCASE, color INTEGER NOT NULL);
+             INSERT INTO tags VALUES(7, 'Old', 1);").unwrap();
+        drop(old);
+        let store = Store::open(&path).unwrap();
+        let old = store.all().unwrap()[0].clone();
+        store.remove(old.id).unwrap();
+        assert_eq!(store.create("New", 2).unwrap().id, 8);
+        drop(store);
     }
 
     #[test]

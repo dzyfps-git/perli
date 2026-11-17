@@ -216,13 +216,14 @@ export function followFileDrag(
   const deck = createDeck();
   const edges = createEdgeScroll();
 
-  const run = (spot: Spot, action?: DropAction) =>
-    startJob({ kind: "drop", folder: spot.folder, action }, spot.view?.id).catch(report);
+  /** `id` names the drop, so an answer that comes late never takes a newer one. */
+  const run = (spot: Spot, id: number, action?: DropAction) =>
+    startJob({ kind: "drop", folder: spot.folder, action, id }, spot.view?.id).catch(report);
 
   /** A right drag asks what to do, in the window's own units. */
-  async function ask(spot: Spot, x: number, y: number) {
+  async function ask(spot: Spot, id: number, x: number, y: number) {
     const choices = await dropChoices(spot.folder);
-    const items: MenuItem[] = choices.map((action) => ({ label: ACTION_LABELS[action], action: () => run(spot, action) }));
+    const items: MenuItem[] = choices.map((action) => ({ label: ACTION_LABELS[action], action: () => run(spot, id, action) }));
     if (items.length === 0) return;
     const scale = window.devicePixelRatio;
     showMenu(x / scale, y / scale, [...items, { label: "Cancel", divider: true }]);
@@ -302,9 +303,13 @@ export function followFileDrag(
     if (event.kind === "leave") return;
     const spot = landed;
     if (spot?.folder.startsWith("perli:")) note(spot.folder);
-    else if (spot && event.right) ask(spot, event.x, event.y).catch(report);
+    else if (spot && event.right) ask(spot, event.id, event.x, event.y).catch(report);
     else if (spot && event.forGood)
-      confirmDelete({ title: "Delete permanently?", measure: measureDrop, confirm: () => void run(spot, "delete") });
-    else if (spot) run(spot);
+      confirmDelete({
+        title: "Delete permanently?",
+        measure: () => measureDrop(event.id),
+        confirm: () => void run(spot, event.id, "delete"),
+      });
+    else if (spot) run(spot, event.id);
   });
 }

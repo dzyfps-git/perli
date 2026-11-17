@@ -140,8 +140,9 @@ pub enum Done {
     Replaced { path: PathBuf, kept: PathBuf },
     /// The desktop picture changed to `after`. `before` is each screen's picture until then.
     Wallpaper { before: Screens, after: PathBuf },
-    /// `tag`, called `name` then, put on or taken off just these files.
-    Tagged { paths: Vec<PathBuf>, tag: u32, name: String, on: bool },
+    /// `tag`, called `name` then, put on or taken off just these files. `keys` tell the files
+    /// apart for the undo, since by then a path may name another file.
+    Tagged { paths: Vec<PathBuf>, keys: Vec<crate::tags::FileKey>, tag: u32, name: String, on: bool },
     TagDeleted { removed: crate::tags::Removed },
     /// A deleted tag brought back, which deleting it again undoes.
     TagRevived { tag: crate::tags::Tag },
@@ -404,7 +405,7 @@ impl<'a> Run<'a> {
             }
             Job::Receive { incoming, folder } => self.receive(incoming, &folder),
             Job::Attachments { mail, folder } => self.save_attachments(&mail, &folder),
-            Job::Tag { paths, tag, on } => self.tag(&paths, tag, on),
+            Job::Tag { paths, tag, on } => self.tag(&paths, None, tag, on),
             Job::DeleteTag { id } => self.delete_tag(id),
             Job::Recycle { paths } => {
                 self.add_total(paths.len() as u64, 0);
@@ -580,7 +581,7 @@ impl<'a> Run<'a> {
                         match record {
                             Done::Replaced { path, kept } => self.put_back_kept(path, kept)?,
                             Done::Wallpaper { before, .. } => self.put_back_wallpaper(before)?,
-                            Done::Tagged { paths, tag, on, .. } => self.tag(paths, *tag, !on)?,
+                            Done::Tagged { paths, keys, tag, on, .. } => self.tag(paths, Some(keys), *tag, !on)?,
                             Done::TagDeleted { removed } => self.revive_tag(removed)?,
                             Done::TagRevived { tag } => self.delete_tag(tag.id)?,
                             _ => {}
@@ -594,15 +595,23 @@ impl<'a> Run<'a> {
 
     /// Only the files whose tags change go in the undo step, so an undo leaves alone what had the
     /// tag before.
-    fn tag(&mut self, paths: &[PathBuf], tag: u32, on: bool) -> Flow {
+    /// `keys`, from an undo step, pick the files in place of `paths`.
+    fn tag(&mut self, paths: &[PathBuf], keys: Option<&[crate::tags::FileKey]>, tag: u32, on: bool) -> Flow {
         let place = paths.first().map_or(Path::new(""), PathBuf::as_path);
-        let change = |_: &mut Self| crate::tags::change(paths, tag, on).map_err(|message| Error::new(E_FAIL, message.as_str()));
+        let change = |_: &mut Self| {
+            match keys {
+                Some(keys) => crate::tags::change_by_key(paths, keys, tag, on),
+                None => crate::tags::change(paths, tag, on),
+            }
+            .map_err(|message| Error::new(E_FAIL, message.as_str()))
+        };
         let Some(changed) = self.attempt(place, None, change)? else {
             return Ok(());
         };
-        self.touched.extend(changed.iter().map(|path| sys::parent(path)));
-        if !changed.is_empty() {
-            self.done.push(Done::Tagged { paths: changed, tag, name: crate::tags::name_of(tag), on });
+        let (paths, keys): (Vec<PathBuf>, Vec<_>) = changed.into_iter().unzip();
+        self.touched.extend(paths.iter().map(|path| sys::parent(path)));
+        if !paths.is_empty() {
+            self.done.push(Done::Tagged { paths, keys, tag, name: crate::tags::name_of(tag), on });
         }
         Ok(())
     }

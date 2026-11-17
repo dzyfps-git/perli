@@ -4,6 +4,7 @@
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::ptr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use serde::{Deserialize, Serialize};
@@ -34,8 +35,9 @@ pub enum Event {
     Leave,
     /// `right` means the right button dragged, so the user gets to pick what happens.
     /// `for_good` is Shift on the Recycle Bin, which asks first and then deletes.
+    /// `id` names this drop, so a job asked for later never takes a newer one.
     #[serde(rename_all = "camelCase")]
-    Drop { x: i32, y: i32, right: bool, for_good: bool },
+    Drop { id: u64, x: i32, y: i32, right: bool, for_good: bool },
 }
 
 /// What a drop can do, when the user picks it from a menu.
@@ -66,6 +68,7 @@ impl DropAction {
 }
 
 struct Dropped {
+    id: u64,
     paths: Vec<PathBuf>,
     keys: MODIFIERKEYS_FLAGS,
     allowed: DROPEFFECT,
@@ -81,6 +84,8 @@ pub struct Drags {
     target: Mutex<Option<PathBuf>>,
     /// Waits for the UI to say where the drop landed. A newer drop replaces it.
     dropped: Mutex<Option<Dropped>>,
+    /// The last drop's id.
+    drops: AtomicU64,
 }
 
 impl Drags {
@@ -88,10 +93,11 @@ impl Drags {
         *self.target.lock().unwrap_or_else(PoisonError::into_inner) = folder;
     }
 
-    /// The job for the last drop, which landed on `folder`. `action` is what the user picked.
-    pub fn job(&self, folder: &Path, action: Option<DropAction>) -> Option<Job> {
-        let dropped = self.dropped.lock().unwrap_or_else(PoisonError::into_inner).take()?;
-        let Dropped { paths: sources, keys, allowed, incoming } = dropped;
+    /// The job for drop `id`, which landed on `folder`. `action` is what the user picked.
+    /// Nothing, and the newer drop left waiting, once another drop replaced it.
+    pub fn job(&self, id: u64, folder: &Path, action: Option<DropAction>) -> Option<Job> {
+        let dropped = self.dropped.lock().unwrap_or_else(PoisonError::into_inner).take_if(|dropped| dropped.id == id)?;
+        let Dropped { paths: sources, keys, allowed, incoming, .. } = dropped;
         if let Some(incoming) = incoming {
             let folder = folder.to_path_buf();
             return (!is_bin(&folder)).then_some(Job::Receive { incoming, folder });
@@ -117,10 +123,10 @@ impl Drags {
         })
     }
 
-    /// The files of the last drop, left waiting, for the count and size a delete asks with.
-    pub fn waiting(&self) -> Vec<PathBuf> {
+    /// The files of drop `id`, left waiting, for the count and size a delete asks with.
+    pub fn waiting(&self, id: u64) -> Vec<PathBuf> {
         let dropped = self.dropped.lock().unwrap_or_else(PoisonError::into_inner);
-        dropped.as_ref().map_or_else(Vec::new, |dropped| dropped.paths.clone())
+        dropped.as_ref().filter(|dropped| dropped.id == id).map_or_else(Vec::new, |dropped| dropped.paths.clone())
     }
 
     /// The files of the last drop, taken for the shelf, where they wait and nothing moves.
@@ -382,10 +388,11 @@ impl IDropTarget_Impl for Target_Impl {
         if let Some(Hover { paths, source, allowed, right, .. }) = self.end() {
             let source = source.filter(|_| shown != DROPEFFECT_NONE);
             let incoming = source.and_then(|data| Incoming::take_over(&data).ok());
+            let id = self.drags.drops.fetch_add(1, Ordering::Relaxed) + 1;
             *self.drags.dropped.lock().unwrap_or_else(PoisonError::into_inner) =
-                Some(Dropped { paths, keys, allowed, incoming });
+                Some(Dropped { id, paths, keys, allowed, incoming });
             let at = self.inside(point);
-            (self.listener)(Event::Drop { x: at.x, y: at.y, right, for_good });
+            (self.listener)(Event::Drop { id, x: at.x, y: at.y, right, for_good });
         }
         Ok(())
     }
@@ -601,18 +608,18 @@ mod tests {
                 Event::Over { x: 5, y: 6, effect: Some(DropAction::Move) },
                 // A rest at the same spot with the same key says nothing new.
                 Event::Over { x: 7, y: 8, effect: Some(DropAction::Copy) },
-                Event::Drop { x: 7, y: 8, right: false, for_good: false }
+                Event::Drop { id: 1, x: 7, y: 8, right: false, for_good: false }
             ]
         );
 
-        match drags.job(&into, None) {
+        match drags.job(1, &into, None) {
             Some(Job::Copy { sources, folder }) => {
                 assert_eq!(sources.len(), 1);
                 assert_eq!(folder, into);
             }
             _ => panic!("expected a copy"),
         }
-        assert!(drags.job(&into, None).is_none(), "a drop runs once");
+        assert!(drags.job(1, &into, None).is_none(), "a drop runs once");
     }
 
     #[test]
@@ -646,19 +653,34 @@ mod tests {
 
         let heard = heard.borrow();
         assert!(heard.contains(&Event::Over { x: 1, y: 1, effect: Some(DropAction::Delete) }), "{heard:?}");
-        assert_eq!(heard.last(), Some(&Event::Drop { x: 1, y: 1, right: false, for_good: true }));
-        assert_eq!(drags.waiting(), std::slice::from_ref(&scene.file), "the ask counts what waits");
-        assert!(matches!(drags.job(Path::new(BIN_PATH), Some(DropAction::Delete)), Some(Job::Delete { .. })));
+        assert_eq!(heard.last(), Some(&Event::Drop { id: 1, x: 1, y: 1, right: false, for_good: true }));
+        assert_eq!(drags.waiting(1), std::slice::from_ref(&scene.file), "the ask counts what waits");
+        assert!(matches!(drags.job(1, Path::new(BIN_PATH), Some(DropAction::Delete)), Some(Job::Delete { .. })));
 
         let elsewhere = dropped(on_c());
-        assert!(elsewhere.job(Path::new(r"D:	here"), Some(DropAction::Delete)).is_none(), "only the bin deletes");
-        assert!(matches!(dropped(on_c()).job(Path::new(BIN_PATH), Some(DropAction::Move)), Some(Job::Recycle { .. })));
+        assert!(elsewhere.job(1, Path::new(r"D:\there"), Some(DropAction::Delete)).is_none(), "only the bin deletes");
+        assert!(matches!(dropped(on_c()).job(1, Path::new(BIN_PATH), Some(DropAction::Move)), Some(Job::Recycle { .. })));
+    }
+
+    /// A second drop while the delete asks replaces what waits. The ask's answer must not
+    /// delete it, wherever it landed.
+    #[test]
+    fn a_delete_asked_for_one_drop_never_takes_a_newer_one() {
+        let drags = dropped(on_c());
+        assert_eq!(drags.waiting(1), on_c());
+        let newer = vec![PathBuf::from(r"C:\from\b.txt")];
+        *drags.dropped.lock().unwrap() =
+            Some(Dropped { id: 2, paths: newer.clone(), keys: NO_KEYS, allowed: ANY, incoming: None });
+
+        assert!(drags.waiting(1).is_empty(), "the ask can't count the newer drop");
+        assert!(drags.job(1, Path::new(BIN_PATH), Some(DropAction::Delete)).is_none());
+        assert_eq!(drags.waiting(2), newer, "the newer drop still waits for its own answer");
     }
 
     /// Drops `paths` by hand, as Windows would have.
     fn dropped(paths: Vec<PathBuf>) -> Drags {
         let drags = Drags::default();
-        let held = Dropped { paths, keys: NO_KEYS, allowed: ANY, incoming: None };
+        let held = Dropped { id: 1, paths, keys: NO_KEYS, allowed: ANY, incoming: None };
         *drags.dropped.lock().unwrap() = Some(held);
         drags
     }
@@ -668,7 +690,7 @@ mod tests {
         let drags = dropped(on_c());
         assert_eq!(drags.shelve(), on_c());
         assert!(drags.shelve().is_empty());
-        assert!(drags.job(Path::new(r"D:\there"), None).is_none());
+        assert!(drags.job(1, Path::new(r"D:\there"), None).is_none());
     }
 
     #[test]
@@ -682,7 +704,7 @@ mod tests {
 
     #[test]
     fn a_drop_on_the_bin_recycles() {
-        match dropped(on_c()).job(Path::new(BIN_PATH), None) {
+        match dropped(on_c()).job(1, Path::new(BIN_PATH), None) {
             Some(Job::Recycle { paths }) => assert_eq!(paths, on_c()),
             _ => panic!("expected a recycle"),
         }
@@ -695,10 +717,10 @@ mod tests {
         assert_eq!(dropped(on_c()).choices(Path::new(r"C:\from")), [DropAction::Copy, DropAction::Link]);
         assert_eq!(dropped(on_c()).choices(Path::new(BIN_PATH)), [DropAction::Move]);
 
-        assert!(matches!(dropped(on_c()).job(into, Some(DropAction::Link)), Some(Job::Shortcut { .. })));
-        assert!(matches!(dropped(on_c()).job(into, Some(DropAction::Copy)), Some(Job::Copy { .. })));
-        assert!(matches!(dropped(on_c()).job(Path::new(r"D:\to"), Some(DropAction::Move)), Some(Job::Move { .. })));
-        assert!(dropped(on_c()).job(Path::new(r"C:\from"), Some(DropAction::Move)).is_none());
+        assert!(matches!(dropped(on_c()).job(1, into, Some(DropAction::Link)), Some(Job::Shortcut { .. })));
+        assert!(matches!(dropped(on_c()).job(1, into, Some(DropAction::Copy)), Some(Job::Copy { .. })));
+        assert!(matches!(dropped(on_c()).job(1, Path::new(r"D:\to"), Some(DropAction::Move)), Some(Job::Move { .. })));
+        assert!(dropped(on_c()).job(1, Path::new(r"C:\from"), Some(DropAction::Move)).is_none());
     }
 
     #[test]
@@ -719,7 +741,7 @@ mod tests {
         effect = ANY;
         unsafe { target.Drop(&data, NO_KEYS, at, &raw mut effect) }.unwrap();
 
-        assert_eq!(heard.borrow().last(), Some(&Event::Drop { x: 1, y: 2, right: true, for_good: false }));
+        assert_eq!(heard.borrow().last(), Some(&Event::Drop { id: 1, x: 1, y: 2, right: true, for_good: false }));
         assert_eq!(drags.choices(&into), DropAction::ALL);
     }
 
@@ -760,6 +782,6 @@ mod tests {
         unsafe { target.DragLeave() }.unwrap();
 
         assert!(drags.target.lock().unwrap().is_none());
-        assert!(drags.job(&scene.folder, None).is_none());
+        assert!(drags.job(1, &scene.folder, None).is_none());
     }
 }

@@ -33,6 +33,7 @@ use crate::clipboard;
 const FROM_ELSEWHERE: &[u8] = b"[ZoneTransfer]\r\nZoneId=3\r\n";
 const UNSAFE_NAME: &str = "This name isn't safe to use, so Perli left it out.";
 const UNREADABLE: &str = "This item can't be read from where it was dragged from.";
+const NOT_A_FILE: &str = "This attachment is an Outlook item, an embedded object or a link, which Perli can't save yet. Save it from Outlook.";
 
 fn format(name: PCWSTR, index: i32, tymed: TYMED) -> FORMATETC {
     FORMATETC {
@@ -228,7 +229,7 @@ impl Run<'_> {
         let Some(parts) = self.attempt(mail, None, read)? else {
             return Ok(());
         };
-        self.add_total(parts.len() as u64, parts.iter().map(|(_, bytes)| bytes.len() as u64).sum());
+        self.add_total(parts.len() as u64, parts.iter().map(|(_, bytes)| bytes.as_ref().map_or(0, Vec::len) as u64).sum());
         let mut landing = Landing::new(folder.to_path_buf(), None, Some(FROM_ELSEWHERE.to_vec()));
         for (name, bytes) in parts {
             self.check()?;
@@ -236,6 +237,10 @@ impl Run<'_> {
             let own = name.rsplit(['/', '\\']).next().unwrap_or_default().to_string();
             let Some(relative) = safe(PathBuf::from(&own)).filter(|_| !own.is_empty()) else {
                 self.refuse(&folder.join(name.replace(['/', '\\'], " ")), UNSAFE_NAME)?;
+                continue;
+            };
+            let Some(bytes) = bytes else {
+                self.refuse(&folder.join(&relative), NOT_A_FILE)?;
                 continue;
             };
             let stat = Stat::of_file(bytes.len() as u64, 0);

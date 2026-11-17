@@ -31,18 +31,22 @@ pub struct Attachment {
     pub size: u64,
 }
 
+/// An attachment's bytes. None for one that holds no file of its own: an Outlook item inside the
+/// mail, an embedded object, or a link.
+type Bytes = Option<Vec<u8>>;
+
 /// What the preview shows of a mail.
 pub fn read(path: &Path) -> Result<Mail, String> {
     parse(path, false).map(|(mail, _)| mail)
 }
 
 /// Each attachment's name and bytes, in the order the preview lists them.
-pub fn attachments(path: &Path) -> Result<Vec<(String, Vec<u8>)>, String> {
+pub fn attachments(path: &Path) -> Result<Vec<(String, Bytes)>, String> {
     let (mail, data) = parse(path, true)?;
     Ok(mail.attachments.into_iter().map(|attachment| attachment.name).zip(data).collect())
 }
 
-fn parse(path: &Path, with_data: bool) -> Result<(Mail, Vec<Vec<u8>>), String> {
+fn parse(path: &Path, with_data: bool) -> Result<(Mail, Vec<Bytes>), String> {
     let size = path.metadata().map_err(|error| error.to_string())?.len();
     if size > MOST_BYTES {
         return Err(format!("Mails over {} MB don't show", MOST_BYTES / 1024 / 1024));
@@ -57,7 +61,7 @@ fn parse(path: &Path, with_data: bool) -> Result<(Mail, Vec<Vec<u8>>), String> {
 
 // .eml
 
-fn eml(bytes: &[u8], with_data: bool) -> (Mail, Vec<Vec<u8>>) {
+fn eml(bytes: &[u8], with_data: bool) -> (Mail, Vec<Bytes>) {
     let (headers, _) = split_head(bytes);
     let field = |name: &str| words(header(&headers, name).unwrap_or_default());
     let mut found = Found::default();
@@ -72,7 +76,7 @@ fn eml(bytes: &[u8], with_data: bool) -> (Mail, Vec<Vec<u8>>) {
         body: body.trim_end().to_string(),
         attachments: found.attachments,
     };
-    (mail, found.data)
+    (mail, found.data.into_iter().map(Some).collect())
 }
 
 #[derive(Default)]
@@ -454,7 +458,7 @@ fn date(text: &str) -> Option<u64> {
 // .msg
 
 /// The streams of an Outlook message, by MS-OXMSG: `__substg1.0_` then the property's id and type.
-fn outlook(path: &Path, with_data: bool) -> std::io::Result<(Mail, Vec<Vec<u8>>)> {
+fn outlook(path: &Path, with_data: bool) -> std::io::Result<(Mail, Vec<Bytes>)> {
     let mut file = cfb::open(path)?;
     let name = text(&mut file, "", "0042").or_else(|| text(&mut file, "", "0C1A")).unwrap_or_default();
     let address = text(&mut file, "", "0C1F").or_else(|| text(&mut file, "", "0065")).unwrap_or_default();
@@ -482,7 +486,9 @@ fn outlook(path: &Path, with_data: bool) -> std::io::Result<(Mail, Vec<Vec<u8>>)
         let size = file.entry(&stream).map_or(0, |entry| entry.len());
         attachments.push(Attachment { name: name.unwrap_or_else(|| "Attachment".into()), size });
         if with_data {
-            data.push(binary(&mut file, &stream).unwrap_or_default());
+            // ponytail: an Outlook item inside the mail sits in a storage of its own, which no
+            // file holds, so it isn't saved. Writing it out as its own .msg would take it.
+            data.push(binary(&mut file, &stream));
         }
     }
     let mail = Mail {
@@ -571,7 +577,7 @@ LjQK\r\n\
         assert_eq!(mail.subject, "Caf\u{e9} tomorrow");
         assert_eq!(mail.body, "See you at the caf\u{e9} at ten. Bring the plan.");
         assert_eq!(mail.attachments, [Attachment { name: "pl\u{e1}n.pdf".into(), size: 9 }]);
-        assert_eq!(data, [b"%PDF-1.4\n".to_vec()]);
+        assert_eq!(data, [Some(b"%PDF-1.4\n".to_vec())]);
         // 2026-11-15 09:00 UTC.
         assert_eq!(mail.date, (1_794_733_200 + 11_644_473_600) * 10_000_000);
     }
@@ -609,6 +615,14 @@ LjQK\r\n\
             };
             put("/__attach_version1.0_#00000000/__substg1.0_3707001F", &utf16("menu.txt"));
             put("/__attach_version1.0_#00000000/__substg1.0_37010102", b"soup");
+            drop(put);
+            file.create_storage("/__attach_version1.0_#00000001").unwrap();
+            file.create_storage("/__attach_version1.0_#00000001/__substg1.0_3701000D").unwrap();
+            let mut put = |path: &str, bytes: &[u8]| {
+                std::io::Write::write_all(&mut file.create_stream(path).unwrap(), bytes).unwrap();
+            };
+            put("/__attach_version1.0_#00000001/__substg1.0_3001001F", &utf16("Re: Lunch"));
+            put("/__attach_version1.0_#00000001/__substg1.0_3701000D/__substg1.0_0037001F", &utf16("Re: Lunch"));
         }
 
         let mail = read(&path).unwrap();
@@ -620,7 +634,14 @@ LjQK\r\n\
         assert_eq!(mail.to, "Jos\u{e9}");
         assert_eq!(mail.body, "Friday at one?");
         assert_eq!(mail.date, 133_000_000_000_000_000);
-        assert_eq!(mail.attachments, [Attachment { name: "menu.txt".into(), size: 4 }]);
-        assert_eq!(attached, [("menu.txt".to_string(), b"soup".to_vec())]);
+        assert_eq!(
+            mail.attachments,
+            [Attachment { name: "menu.txt".into(), size: 4 }, Attachment { name: "Re: Lunch".into(), size: 0 }]
+        );
+        assert_eq!(
+            attached,
+            [("menu.txt".to_string(), Some(b"soup".to_vec())), ("Re: Lunch".to_string(), None)],
+            "an Outlook item inside has no bytes to pass off as a file"
+        );
     }
 }

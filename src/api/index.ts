@@ -224,7 +224,7 @@ export type Task =
   | { kind: "saveAttachments"; path: string; folder: string }
   | { kind: "tag"; target: ShellTarget; tag: number; on: boolean }
   | { kind: "deleteTag"; id: number }
-  | { kind: "drop"; folder: string; action?: DropAction }
+  | { kind: "drop"; folder: string; action?: DropAction; id: number }
   | { kind: "recycle" | "delete" | "restore" | "purge"; selection: Selection }
   | { kind: "restoreTo"; selection: Selection; folder: string }
   | { kind: "empty" }
@@ -419,7 +419,7 @@ export type FileDrag =
   /** `effect` is what letting go there would do, or null where nothing would happen. */
   | { kind: "over"; x: number; y: number; effect?: DropAction | null }
   /** `right` means the right button dragged, so the user gets to pick what happens. */
-  | { kind: "drop"; x: number; y: number; right: boolean; forGood: boolean }
+  | { kind: "drop"; id: number; x: number; y: number; right: boolean; forGood: boolean }
   | { kind: "leave" };
 
 /** What a drop can do, when the user picks it from a menu. */
@@ -1001,7 +1001,7 @@ export const spaceDown = () => invoke<boolean>("space_down");
 /** What the last drop can do on `folder`, for the user to pick from. */
 export const dropChoices = (folder: string) => invoke<DropAction[]>("drop_choices", { folder });
 /** The count and size of the drop that waits for an answer. */
-export const measureDrop = () => invoke<Measured>("measure_drop");
+export const measureDrop = (id: number) => invoke<Measured>("measure_drop", { id });
 
 /** Starts dragging the selected files to any app. Ends when the user lets go. */
 export const startDrag = (selection: Selection) => invoke<void>("start_drag", { selection });

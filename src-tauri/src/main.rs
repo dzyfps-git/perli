@@ -276,7 +276,7 @@ enum Task {
     /// Shortcuts to the files on the clipboard, which stay where they are, cut or not.
     PasteShortcut { folder: String },
     /// The last files dropped on the window landed on `folder`.
-    Drop { folder: String, action: Option<DropAction> },
+    Drop { folder: String, action: Option<DropAction>, id: u64 },
     /// A tag put on or taken off the rows, a folder, or files by path. Undo takes it back.
     Tag { target: ShellTarget, tag: u32, on: bool },
     DeleteTag { id: u32 },
@@ -355,7 +355,8 @@ impl Task {
                 }
             }
             Self::CopyPaths { paths, folder } => copy_job(paths, target(folder)?),
-            Self::SaveAttachments { path, folder } => Job::Attachments { mail: path, folder: target(folder)? },
+            // A mail in a ZIP is read from the copy its preview took out.
+            Self::SaveAttachments { path, folder } => Job::Attachments { mail: zipped::real(&path)?, folder: target(folder)? },
             Self::MovePaths { paths, folder } => {
                 refuse_zipped(&paths)?;
                 Job::Move { sources: paths, folder: target(folder)? }
@@ -411,8 +412,8 @@ impl Task {
                 let files = files.ok_or("The clipboard holds no files")?;
                 Job::Shortcut { sources: files.paths, folder: target(folder)? }
             }
-            Self::Drop { folder, action } => {
-                return Ok(drags.job(Path::new(&target(folder)?), action).map(Plan::from));
+            Self::Drop { folder, action, id } => {
+                return Ok(drags.job(id, Path::new(&target(folder)?), action).map(Plan::from));
             }
             Self::Tag { target, tag, on } => {
                 let paths = match target {
@@ -2254,8 +2255,8 @@ fn templates_folder() -> Result<PathBuf, String> {
 
 /// How many items, and how big, the drop waiting for an answer holds, for the ask before a delete.
 #[tauri::command]
-async fn measure_drop(drags: State<'_, Arc<Drags>>) -> Result<Measured, String> {
-    measure(drags.waiting()).await
+async fn measure_drop(id: u64, drags: State<'_, Arc<Drags>>) -> Result<Measured, String> {
+    measure(drags.waiting(id)).await
 }
 
 /// Whether Space is held, for a drag resting on a folder to open it at once. A drag holds the
@@ -2756,6 +2757,25 @@ mod tests {
             && second == &["b.txt"] && sources == std::slice::from_ref(&archive)));
         assert_eq!(refuse_zipped(&[row]), Err(zipped::READ_ONLY.to_string()));
         assert_eq!(refuse_zipped(&[archive]), Ok(()));
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    #[test]
+    fn attachments_of_a_mail_in_a_zip_come_from_a_real_copy() {
+        use std::io::Write;
+        let folder = std::env::temp_dir().join(format!("perli-zipped-mail-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let archive = folder.join("mails.zip");
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(&archive).unwrap());
+        zip.start_file("note.eml", zip::write::SimpleFileOptions::default()).unwrap();
+        zip.write_all(b"Subject: Hi\r\n\r\nHello\r\n").unwrap();
+        zip.finish().unwrap();
+
+        let task = Task::SaveAttachments { path: archive.join("note.eml"), folder: folder.to_string_lossy().into_owned() };
+        let plan = task.plan(&Views::default(), &Drags::default()).unwrap().unwrap();
+        let Job::Attachments { mail, .. } = plan.job else { panic!("expected an attachments job") };
+        assert!(mail.is_file(), "{mail:?}");
+        assert_eq!(mail.file_name(), Some(std::ffi::OsStr::new("note.eml")));
         let _ = std::fs::remove_dir_all(&folder);
     }
 

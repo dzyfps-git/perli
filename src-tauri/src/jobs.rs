@@ -1028,7 +1028,7 @@ mod tests {
         let saved = Done::Replaced { path: path(r"C:\a\notes.txt"), kept: path(r"C:\k\1-notes.txt") };
         assert_eq!(told(std::slice::from_ref(&saved)), "Changed notes.txt");
         let wallpaper = Done::Wallpaper { before: Vec::new(), after: path(r"C:\a\sea.jpg") };
-        let tagged = |on: bool, paths: &[&str]| Done::Tagged { paths: paths.iter().map(|one| path(one)).collect(), tag: 1, name: "Red".into(), on };
+        let tagged = |on: bool, paths: &[&str]| Done::Tagged { paths: paths.iter().map(|one| path(one)).collect(), keys: Vec::new(), tag: 1, name: "Red".into(), on };
         assert_eq!(told(&[tagged(true, &[r"C:\a\1", r"C:\a\2", r"C:\a\3"])]), "Tagged 3 items Red");
         assert_eq!(told(&[tagged(false, &[r"C:\a\plan.txt"])]), "Took Red off plan.txt");
         assert_eq!(told(&[wallpaper]), "Set sea.jpg as the wallpaper");

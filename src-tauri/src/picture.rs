@@ -65,7 +65,8 @@ impl Keep {
     pub const ALL: Self = Self { camera: true, place: true };
 }
 
-/// The facts a copy in another format takes over one by one, by Windows' names for them.
+/// The facts a copy takes over one by one, by Windows' names for them, when it is in another
+/// format or leaves the place out. None of them says where the photo was taken.
 const FACTS: [PCWSTR; 17] = [
     w!("System.Photo.DateTaken"),
     w!("System.Photo.CameraManufacturer"),
@@ -98,9 +99,6 @@ const PLACE: [PCWSTR; 8] = [
     w!("System.GPS.TimeStamp"),
 ];
 
-/// The blocks that hold the place in a JPEG and a TIFF, which go whole.
-const PLACE_BLOCKS: [PCWSTR; 2] = [w!("/app1/ifd/gps"), w!("/ifd/gps")];
-
 const ORIENTATION: PCWSTR = w!("System.Photo.Orientation");
 
 /// How a JPEG or TIFF says it stands, 1 to 8.
@@ -111,7 +109,9 @@ unsafe fn standing(frame: &IWICBitmapFrameDecode) -> Option<u16> {
 }
 
 /// Carries `from`'s colour profile into `to`, and what `keep` says of its facts. `same` is when
-/// both are one format, so the blocks of facts go whole. The pixels now stand the way the
+/// both are one format, so the blocks of facts go whole, but only with the place: a place can
+/// hide in many notes (EXIF GPS, XMP, IPTC), so a copy without it takes only the facts known to
+/// hold none. The pixels now stand the way the
 /// orientation note said, so it says they stand as they are. Each is a best try: a format with no
 /// room for a fact goes without it.
 unsafe fn carry(factory: &IWICImagingFactory, from: &IWICBitmapFrameDecode, to: &IWICBitmapFrameEncode, same: bool, keep: Keep) {
@@ -128,6 +128,7 @@ unsafe fn carry(factory: &IWICImagingFactory, from: &IWICBitmapFrameDecode, to: 
         }
         let Ok(reader) = from.GetMetadataQueryReader() else { return };
         let whole = same
+            && keep.place
             && from
                 .cast::<IWICMetadataBlockReader>()
                 .and_then(|blocks| to.cast::<IWICMetadataBlockWriter>()?.InitializeFromBlockReader(&blocks))
@@ -140,11 +141,6 @@ unsafe fn carry(factory: &IWICImagingFactory, from: &IWICBitmapFrameDecode, to: 
                 if reader.GetMetadataByName(name, &raw mut value).is_ok() {
                     let _ = writer.SetMetadataByName(name, &raw const value);
                 }
-            }
-        }
-        if !keep.place {
-            for &name in PLACE_BLOCKS.iter().chain(&PLACE) {
-                let _ = writer.RemoveMetadataByName(name);
             }
         }
         let mut value = PROPVARIANT::default();
@@ -588,6 +584,14 @@ mod tests {
         bytes.extend([0xFF, 0xE1]);
         bytes.extend(((app1.len() + 2) as u16).to_be_bytes());
         bytes.extend(app1);
+        // The town in XMP too, which no GPS block holds.
+        let mut xmp = b"http://ns.adobe.com/xap/1.0/\0".to_vec();
+        xmp.extend(br#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">"#);
+        xmp.extend(br#"<rdf:Description rdf:about="" xmlns:photoshop="http://ns.adobe.com/photoshop/1.0/">"#);
+        xmp.extend(br#"<photoshop:City>Lisbon</photoshop:City></rdf:Description></rdf:RDF></x:xmpmeta>"#);
+        bytes.extend([0xFF, 0xE1]);
+        bytes.extend(((xmp.len() + 2) as u16).to_be_bytes());
+        bytes.extend(xmp);
         bytes.extend(&plain[old..]);
         std::fs::write(path, bytes).unwrap();
     }
@@ -610,18 +614,22 @@ mod tests {
         let photo = folder.join("photo.jpg");
         camera_photo(&photo);
         let (model, side) = (w!("System.Photo.CameraModel"), w!("System.GPS.LatitudeRef"));
+        let town = w!("/xmp/photoshop:City");
         assert_eq!(fact(&photo, model).as_deref(), Some("PerliCam"));
         assert_eq!(fact(&photo, side).as_deref(), Some("N"));
+        assert_eq!(fact(&photo, town).as_deref(), Some("Lisbon"));
 
         let small = folder.join("small.jpg");
         assert_eq!(write(&photo, &small, Edit::Resize { longest: 32 }, Keep::default()).unwrap(), (16, 32), "turned the way it shows");
         assert_eq!(fact(&small, model).as_deref(), Some("PerliCam"));
         assert_eq!(fact(&small, side), None, "the place goes by default");
+        assert_eq!(fact(&small, town), None, "and so does a place in XMP");
         assert_eq!(fact(&small, ORIENTATION).as_deref(), Some("1"));
 
         let placed = folder.join("placed.jpg");
         write(&photo, &placed, Edit::Resize { longest: 32 }, Keep::ALL).unwrap();
         assert_eq!(fact(&placed, side).as_deref(), Some("N"));
+        assert_eq!(fact(&placed, town).as_deref(), Some("Lisbon"));
 
         let tiff = folder.join("photo.tif");
         write(&photo, &tiff, Edit::Convert { format: Format::Tiff }, Keep::default()).unwrap();

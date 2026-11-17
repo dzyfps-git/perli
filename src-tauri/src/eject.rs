@@ -39,7 +39,8 @@ const TRIES: u32 = 3;
 const TRY_GAP: Duration = Duration::from_millis(400);
 
 /// Ejects the drive at `root`. None hands it to the shell's own eject instead: a disc, whose tray
-/// answers without any box, a fixed disk, and any drive whose disk can't be found.
+/// answers without any box, a fixed disk, any drive whose disk can't be found, and a card its
+/// reader won't push out.
 pub fn eject(root: &Path) -> Option<Result<Ejected, String>> {
     if unsafe { GetDriveTypeW(&HSTRING::from(root.as_os_str())) } == DRIVE_CDROM {
         return None;
@@ -55,16 +56,20 @@ pub fn eject(root: &Path) -> Option<Result<Ejected, String>> {
         return Some(eject_node(disk));
     }
     let system = std::env::var("SystemDrive").is_ok_and(|system| system.eq_ignore_ascii_case(&letter));
-    (info.MediaRemovable && !system).then(|| eject_media(&volume))
+    (info.MediaRemovable && !system).then(|| eject_media(&volume)).flatten()
 }
 
 /// A card in a reader built into the PC (KB165721): its volume is locked, so nothing is writing
-/// to it, taken off its drive letter, then let go and pushed out. The reader stays.
-fn eject_media(volume: &str) -> Result<Ejected, String> {
+/// to it, taken off its drive letter, then let go and pushed out. The reader stays. None when the
+/// reader won't push it out: the lock ends with this call, so the card could mount again and
+/// isn't safe to pull, and the shell's eject gets its turn.
+fn eject_media(volume: &str) -> Option<Result<Ejected, String>> {
     let share = FILE_SHARE_READ | FILE_SHARE_WRITE;
     let access = (GENERIC_READ | GENERIC_WRITE).0;
-    let opened = unsafe { CreateFileW(&HSTRING::from(volume), access, share, None, OPEN_EXISTING, FILE_FLAGS_AND_ATTRIBUTES(0), None) }
-        .map_err(|_| "Windows can't eject this card".to_string())?;
+    let opened = unsafe { CreateFileW(&HSTRING::from(volume), access, share, None, OPEN_EXISTING, FILE_FLAGS_AND_ATTRIBUTES(0), None) };
+    let Ok(opened) = opened else {
+        return Some(Err("Windows can't eject this card".to_string()));
+    };
     let opened = unsafe { Owned::new(opened) };
     let control = |code: u32, input: Option<*const std::ffi::c_void>, size: u32| {
         unsafe { DeviceIoControl(*opened, code, input, size, None, 0, Some(&mut 0), None) }.is_ok()
@@ -81,16 +86,14 @@ fn eject_media(volume: &str) -> Result<Ejected, String> {
     }
     // A lock is refused while anything has a file on it open.
     if !locked {
-        return Ok(Ejected::Busy { reason: "A file on it is still open".to_string() });
+        return Some(Ok(Ejected::Busy { reason: "A file on it is still open".to_string() }));
     }
     if !control(FSCTL_DISMOUNT_VOLUME, None, 0) {
-        return Err("Windows can't eject this card".to_string());
+        return Some(Err("Windows can't eject this card".to_string()));
     }
-    // Once dismounted, the card is safe to pull. A reader with nothing to push only says no.
     let let_go = PREVENT_MEDIA_REMOVAL { PreventMediaRemoval: false };
     control(IOCTL_STORAGE_MEDIA_REMOVAL, Some((&raw const let_go).cast()), size_of::<PREVENT_MEDIA_REMOVAL>() as u32);
-    control(IOCTL_STORAGE_EJECT_MEDIA, None, 0);
-    Ok(Ejected::Done)
+    control(IOCTL_STORAGE_EJECT_MEDIA, None, 0).then_some(Ok(Ejected::Done))
 }
 
 fn eject_node(disk: u32) -> Result<Ejected, String> {
