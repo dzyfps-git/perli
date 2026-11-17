@@ -1,5 +1,6 @@
 import { createMemo, For, Show } from "solid-js";
 import { MARKS, type Mark, type Marks } from "../../api";
+import { compareByContent, compareHideSame, compareScroll, setCompareByContent, setCompareHideSame, setCompareScroll } from "../filelist/prefs";
 import type { FolderView } from "../navigation/folderView";
 
 const ICON_COMPARE = "";
@@ -17,16 +18,28 @@ const COUNTED: [Mark, string][] = [
 
 /**
  * Sums up how this pane stands against the other while the two are compared, and picks out what
- * the other pane lacks, to copy it over.
+ * the other pane lacks, to copy it over. A count shows only the rows it counts; the switches hide
+ * what matches, read files by their bytes and scroll the panes together.
  */
-export function CompareBar(props: { view: FolderView; marks: Marks | undefined; onCopyOver: () => void; onStop: () => void }) {
+export function CompareBar(props: {
+  view: FolderView;
+  marks: Marks | undefined;
+  /** The one mark this pane's rows are cut down to, if any. */
+  only: Mark | undefined;
+  onOnly: (mark: Mark | undefined) => void;
+  onCopyOver: () => void;
+  onStop: () => void;
+}) {
+  // Counted over every row the pane could show, so rows left out still count.
   const counts = createMemo(() => {
     const counts = new Map<Mark, number>();
-    for (const mark of props.marks?.marks ?? []) counts.set(MARKS[mark], (counts.get(MARKS[mark]) ?? 0) + 1);
+    const summary = props.marks?.summary;
+    if (summary) summary.counts.forEach((count, at) => counts.set(MARKS[at], count));
+    else for (const mark of props.marks?.marks ?? []) counts.set(MARKS[mark], (counts.get(MARKS[mark]) ?? 0) + 1);
     return counts;
   });
   const count = (mark: Mark) => counts().get(mark) ?? 0;
-  const matching = () => count("only") + count("newer") + count("older") + count("differs") === 0;
+  const matching = () => count("only") + count("newer") + count("older") + count("differs") + count("pending") === 0;
 
   /** Selects the rows with any of `wanted`, if those marks are for the rows on screen. */
   function select(wanted: Mark[]) {
@@ -50,15 +63,53 @@ export function CompareBar(props: { view: FolderView; marks: Marks | undefined; 
           <Show when={!matching()} fallback={count("same") ? "Matches the other pane" : "Nothing to compare"}>
             <For each={COUNTED.filter(([mark]) => count(mark) > 0)}>
               {([mark, word]) => (
-                <span class="compare-count" data-compare={mark}>
+                <button
+                  class="compare-count"
+                  data-compare={mark}
+                  aria-pressed={props.only === mark}
+                  data-tip={props.only === mark ? "Show every row again" : `Show only what is ${word}`}
+                  onClick={() => props.onOnly(props.only === mark ? undefined : mark)}
+                >
                   {count(mark)} {word}
-                </span>
+                </button>
               )}
             </For>
+            <Show when={count("pending")}>
+              <span class="compare-pending">
+                <span class="compare-ring" aria-hidden="true" />
+                {count("pending") === 1 ? "1 to compare" : `${count("pending")} to compare`}
+              </span>
+            </Show>
           </Show>
         </Show>
       </span>
       <span class="zip-bar-gap" />
+      <Show when={count("same") || compareHideSame()}>
+        <button
+          class="chip zip-bar-button"
+          aria-pressed={compareHideSame()}
+          data-tip={compareHideSame() ? "Show the rows that match on both sides" : "Leave out the rows that match on both sides"}
+          onClick={() => setCompareHideSame(!compareHideSame())}
+        >
+          {compareHideSame() ? `Show ${count("same")} same` : "Hide same"}
+        </button>
+      </Show>
+      <button
+        class="chip zip-bar-button"
+        aria-pressed={compareByContent()}
+        data-tip="Read files alike in size, so only their bytes decide"
+        onClick={() => setCompareByContent(!compareByContent())}
+      >
+        By content
+      </button>
+      <button
+        class="chip zip-bar-button"
+        aria-pressed={compareScroll()}
+        data-tip="Line the panes up by name as either one scrolls"
+        onClick={() => setCompareScroll(!compareScroll())}
+      >
+        Scroll together
+      </button>
       <Show when={count("only")}>
         <button class="chip zip-bar-button" onClick={() => select(["only"])}>
           Select only here

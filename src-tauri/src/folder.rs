@@ -18,7 +18,7 @@ use windows::Win32::Storage::FileSystem::{
 use windows::Win32::UI::Shell::{PathMatchSpecW, StrCmpLogicalW};
 
 use crate::ops::{self, BinItem};
-use crate::{network, shell, sizes, tags, zipped};
+use crate::{compare, network, shell, sizes, tags, zipped};
 
 /// Stands for the Recycle Bin, which has no folder of its own to open.
 pub const BIN_PATH: &str = "shell:RecycleBinFolder";
@@ -185,6 +185,9 @@ pub struct Filter {
     pub tags: Vec<u32>,
     /// Folders stay whatever the extensions ask, so a picker can still go through them.
     pub folders_stay: bool,
+    /// Rows in the folder itself with these names, in lowercase, are left out: those a compare
+    /// of two panes hides.
+    pub except: HashSet<String>,
 }
 
 fn ticks(milliseconds: i64) -> u64 {
@@ -540,6 +543,30 @@ pub enum Mark {
     /// Modified at the same time but a different size, or a file where the other has a folder.
     Differs,
     Same,
+    /// A folder whose insides, or a file whose content, are still being compared.
+    Pending,
+}
+
+/// What the bar of two compared panes says of one of them.
+#[derive(Debug, Default, Serialize)]
+pub struct Summary {
+    /// How many rows the pane could show have each mark, by its number, whether shown or not.
+    pub counts: [u32; 7],
+    /// The names, in lowercase, of rows with a mark the pane was asked to leave out.
+    pub hidden: Vec<String>,
+    /// What sets each shown folder apart from its twin, once its insides are compared.
+    pub folders: Vec<Apart>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct Apart {
+    pub row: u32,
+    pub count: u32,
+    pub names: Vec<String>,
+}
+
+fn lowered(entry: &Entry) -> String {
+    String::from_utf16_lossy(entry.name()).to_lowercase()
 }
 
 /// A server's shares as rows.
@@ -679,9 +706,14 @@ impl Listing {
         let name = order.filter.name.to_lowercase();
         let sight = order.sight();
         let shown = |entry: &Entry| sight.shows(entry);
+        let excepted = |row: u32| {
+            !order.filter.except.is_empty()
+                && self.parents.get(row as usize).is_none_or(|&parent| parent == TOP)
+                && order.filter.except.contains(&lowered(&entries[row as usize]))
+        };
         let fits = |row: u32| {
             let entry = &entries[row as usize];
-            shown(entry) && order.filter.keeps(entry, &name, self.tags_of(row))
+            shown(entry) && order.filter.keeps(entry, &name, self.tags_of(row)) && !excepted(row)
         };
         let mut visible: Vec<u32> = (0..entries.len() as u32).filter(|&row| fits(row)).collect();
         let locations = self.locations();
@@ -1041,45 +1073,107 @@ impl Listing {
         self.parents.get(entry).is_none_or(|&parent| parent == TOP) && (self.found_in.is_empty() || !self.parents.is_empty())
     }
 
-    /// How each row stands against the row of `other` with its name, in any case, one `Mark`
-    /// a row. Rows of the Recycle Bin, or opened in place, or found by a search, have no mark.
-    /// ponytail: folders with the same name count as the same, whatever they hold; a deep
-    /// compare would walk both trees.
-    pub fn compared(&self, other: &Listing) -> Vec<u8> {
-        let comparable = |listing: &Listing, entry: usize| listing.bin.is_none() && listing.in_folder_itself(entry);
-        let lower = |entry: &Entry| String::from_utf16_lossy(entry.name()).to_lowercase();
-        let theirs: HashMap<String, &Entry> = other
+    /// Rows of the Recycle Bin, or opened in place, or found by a search, have no twin.
+    fn comparable(&self, entry: usize) -> bool {
+        self.bin.is_none() && self.in_folder_itself(entry)
+    }
+
+    /// The entries another listing's rows stand against, by lowercase name: those in the folder
+    /// itself that its sight shows, whether its filter leaves them out or not, so what one pane
+    /// hides never changes the other's marks.
+    fn twins(&self) -> HashMap<String, usize> {
+        let sight = self.order.sight();
+        (0..self.entries.len())
+            .filter(|&entry| self.comparable(entry) && sight.shows(&self.entries[entry]))
+            .map(|entry| (lowered(&self.entries[entry]), entry))
+            .collect()
+    }
+
+    fn side(&self, entry: usize) -> compare::Side {
+        let found = &self.entries[entry];
+        compare::Side { path: self.full_path(entry), size: found.size, modified: found.modified, cloud: found.cloud }
+    }
+
+    /// How an entry stands against its twin, in any case, in `other`. Folders stand by what they
+    /// hold and, with `content`, files alike in size by their bytes; until that is known, Pending.
+    fn mark_of(&self, entry: usize, other: &Listing, twins: &HashMap<String, usize>, content: bool) -> Mark {
+        if !self.comparable(entry) {
+            return Mark::None;
+        }
+        let mine = &self.entries[entry];
+        let Some(&twin) = twins.get(&lowered(mine)) else {
+            return Mark::Only;
+        };
+        match (mine.is_dir, other.entries[twin].is_dir) {
+            (true, true) => compare::folders(&self.side(entry), &other.side(twin), content).map_or(Mark::Pending, |insides| insides.mark),
+            (false, false) => compare::files(&self.side(entry), &other.side(twin), content),
+            _ => Mark::Differs,
+        }
+    }
+
+    /// How each shown row stands against its twin in `other`, one `Mark` a row.
+    pub fn compared(&self, other: &Listing, content: bool) -> Vec<u8> {
+        let twins = other.twins();
+        self.visible.iter().map(|&entry| self.mark_of(entry as usize, other, &twins, content) as u8).collect()
+    }
+
+    /// What the bar of compared panes says of this one, over every row its sight shows and not only
+    /// those its filter leaves: how many have each mark, the names of those whose mark is in
+    /// `hide`, and what sets each shown folder apart from its twin.
+    pub fn compare_summary(&self, other: &Listing, content: bool, hide: &[u8]) -> Summary {
+        let twins = other.twins();
+        let sight = self.order.sight();
+        let mut summary = Summary::default();
+        for entry in (0..self.entries.len()).filter(|&entry| sight.shows(&self.entries[entry])) {
+            let mark = self.mark_of(entry, other, &twins, content);
+            summary.counts[mark as usize] += 1;
+            if self.comparable(entry) && hide.contains(&(mark as u8)) {
+                summary.hidden.push(lowered(&self.entries[entry]));
+            }
+        }
+        for (row, &entry) in self.visible.iter().enumerate() {
+            let entry = entry as usize;
+            let twin = twins.get(&lowered(&self.entries[entry])).copied();
+            let Some(twin) = twin.filter(|&twin| self.entries[entry].is_dir && other.entries[twin].is_dir && self.comparable(entry)) else {
+                continue;
+            };
+            if let Some(insides) = compare::folders(&self.side(entry), &other.side(twin), content).filter(|insides| insides.count > 0) {
+                summary.folders.push(Apart { row: row as u32, count: insides.count, names: insides.names });
+            }
+        }
+        summary
+    }
+
+    /// The twins the marks of shown rows still wait on: folders not walked yet and, with `content`,
+    /// files whose bytes aren't compared yet.
+    pub fn unsettled(&self, other: &Listing, content: bool) -> Vec<compare::Pair> {
+        let twins = other.twins();
+        self.visible
+            .iter()
+            .map(|&entry| entry as usize)
+            .filter(|&entry| self.mark_of(entry, other, &twins, content) == Mark::Pending)
+            .filter_map(|entry| {
+                let &twin = twins.get(&lowered(&self.entries[entry]))?;
+                Some(compare::Pair { mine: self.side(entry), theirs: other.side(twin), folder: self.entries[entry].is_dir })
+            })
+            .collect()
+    }
+
+    pub fn sight(&self) -> Sight {
+        self.order.sight()
+    }
+
+    /// The first of `names` among the rows shown in the folder itself, in any case: which of
+    /// them, and its row.
+    pub fn row_named(&self, names: &[String]) -> Option<(usize, u32)> {
+        let rows: HashMap<String, u32> = self
             .visible
             .iter()
-            .filter(|&&entry| comparable(other, entry as usize))
-            .map(|&entry| (lower(&other.entries[entry as usize]), &other.entries[entry as usize]))
+            .zip(0..)
+            .filter(|&(&entry, _)| self.in_folder_itself(entry as usize))
+            .map(|(&entry, row)| (lowered(&self.entries[entry as usize]), row))
             .collect();
-        let mark = |entry: u32| {
-            let mine = &self.entries[entry as usize];
-            if !comparable(self, entry as usize) {
-                return Mark::None;
-            }
-            let Some(their) = theirs.get(&lower(mine)) else {
-                return Mark::Only;
-            };
-            if mine.is_dir != their.is_dir {
-                return Mark::Differs;
-            }
-            // FAT drives keep times to 2 seconds, so a copy there reads a little apart.
-            let apart = mine.modified.abs_diff(their.modified) > 2 * 1000 * FILETIME_TICKS_PER_MS;
-            if mine.is_dir {
-                Mark::Same
-            } else if apart && mine.modified > their.modified {
-                Mark::Newer
-            } else if apart {
-                Mark::Older
-            } else if mine.size != their.size {
-                Mark::Differs
-            } else {
-                Mark::Same
-            }
-        };
-        self.visible.iter().map(|&entry| mark(entry) as u8).collect()
+        names.iter().enumerate().find_map(|(at, name)| rows.get(&name.to_lowercase()).map(|&row| (at, row)))
     }
 
     pub fn keys(&self, rows: &[u32]) -> Vec<Vec<u16>> {
@@ -2126,10 +2220,14 @@ mod tests {
         let read = |folder: &TempFolder| Listing::read(folder.0.to_str().unwrap(), Order::default()).unwrap();
         let (left, right) = (read(&mine), read(&theirs));
         let marks = |listing: &Listing, other: &Listing| {
-            let marks = listing.compared(other);
+            let marks = listing.compared(other, false);
             names(listing).into_iter().zip(marks).collect::<Vec<_>>()
         };
         let mark = |mark: Mark| mark as u8;
+        assert_eq!(marks(&left, &right)[0], ("sub".into(), mark(Mark::Pending)), "a folder waits on its insides");
+        let pairs = left.unsettled(&right, false);
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(compare::settle(pairs, false, Sight::default(), (901, 902), compare::round(901, 902)), 1);
         assert_eq!(
             marks(&left, &right),
             [
@@ -2153,6 +2251,64 @@ mod tests {
             found.push(entry, Arc::from(null_terminated(&sub)));
         }
         let searched = Listing::searched(found, Order::default());
-        assert_eq!(searched.compared(&right), [mark(Mark::None)]);
+        assert_eq!(searched.compared(&right, false), [mark(Mark::None)]);
+    }
+
+    #[test]
+    fn compared_folders_stand_by_what_they_hold_and_same_rows_can_hide() {
+        let (mine, theirs) = (TempFolder::new("deep-mine"), TempFolder::new("deep-theirs"));
+        let put = |folder: &TempFolder, name: &str, text: &str, seconds: u64| {
+            let path = folder.0.join(name);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, text).unwrap();
+            set_modified(&path, seconds);
+        };
+        // "ahead" has a newer file and one of its own: copied over, nothing is lost.
+        put(&mine, "ahead/inner/a.txt", "a", 3_000_000);
+        put(&mine, "ahead/extra.txt", "a", 1_000_000);
+        put(&theirs, "ahead/inner/a.txt", "a", 1_000_000);
+        // "mixed" leans both ways.
+        put(&mine, "mixed/a.txt", "a", 3_000_000);
+        put(&theirs, "mixed/b.txt", "a", 1_000_000);
+        put(&mine, "same/x.txt", "ab", 1_000_000);
+        put(&theirs, "same/x.txt", "ab", 1_000_000);
+        // The same size and time, other bytes: only a read by content tells.
+        put(&mine, "twin.txt", "ab", 1_000_000);
+        put(&theirs, "twin.txt", "cd", 1_000_000);
+        let read = |folder: &TempFolder| Listing::read(folder.0.to_str().unwrap(), Order::default()).unwrap();
+        let (left, right) = (read(&mine), read(&theirs));
+        compare::settle(left.unsettled(&right, false), false, Sight::default(), (903, 904), compare::round(903, 904));
+        let marked = |content: bool| names(&left).into_iter().zip(left.compared(&right, content)).collect::<Vec<_>>();
+        let mark = |mark: Mark| mark as u8;
+        assert_eq!(
+            marked(false),
+            [
+                ("ahead".into(), mark(Mark::Newer)),
+                ("mixed".into(), mark(Mark::Differs)),
+                ("same".into(), mark(Mark::Same)),
+                ("twin.txt".into(), mark(Mark::Same)),
+            ]
+        );
+        assert_eq!(right.compared(&left, false)[0], mark(Mark::Older), "the other side leans the other way");
+        let summary = left.compare_summary(&right, false, &[mark(Mark::Same)]);
+        assert_eq!(summary.hidden, ["same", "twin.txt"]);
+        assert_eq!(summary.counts[Mark::Newer as usize], 1);
+        let ahead = &summary.folders[0];
+        assert_eq!((ahead.row, ahead.count), (0, 2));
+        assert!(ahead.names.contains(&"extra.txt".to_string()));
+
+        // By content, folders walk again and files alike in size wait on a read.
+        assert_eq!(marked(true)[3], ("twin.txt".into(), mark(Mark::Pending)));
+        let pending = left.unsettled(&right, true);
+        assert_eq!(pending.len(), 4);
+        compare::settle(pending, true, Sight::default(), (903, 904), compare::round(903, 904));
+        assert_eq!(marked(true)[3], ("twin.txt".into(), mark(Mark::Differs)));
+
+        // Rows left out by name stay out, and only those in the folder itself.
+        let order = Order { filter: Filter { except: HashSet::from(["same".to_string()]), ..Filter::default() }, ..Order::default() };
+        let hidden = Listing::read(mine.0.to_str().unwrap(), order).unwrap();
+        assert_eq!(names(&hidden), ["ahead", "mixed", "twin.txt"]);
+        // The other pane still marks its "same" against the hidden one.
+        assert_eq!(right.compared(&hidden, false)[2], mark(Mark::Same));
     }
 }

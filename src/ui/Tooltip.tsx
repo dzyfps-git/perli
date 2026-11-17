@@ -55,6 +55,8 @@ export function Tooltip() {
     // Already open, it glides over to the next control instead of jumping.
     box.classList.toggle("tooltip-glide", isOpen());
     box.textContent = current.getAttribute("data-tip") || current.getAttribute("aria-label");
+    // A list, such as what sets a compared folder apart, keeps its lines.
+    box.toggleAttribute("data-lines", box.textContent?.includes("\n") ?? false);
     const keys = current.getAttribute("aria-keyshortcuts");
     if (keys) box.append(keyPills(keys));
     box.togglePopover(true);

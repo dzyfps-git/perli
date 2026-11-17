@@ -115,6 +115,8 @@ export interface Filter {
   tags: number[];
   /** Folders stay whatever `extensions` asks, so a picker can still go through them. */
   foldersStay?: boolean;
+  /** Rows in the folder itself with these names, in lowercase, are left out, as a compare asks. */
+  except?: string[];
 }
 
 /** Which rows a view shows and in what order. */
@@ -773,19 +775,53 @@ export interface GitStatus {
 /** What git says of `folder`'s rows and its branch, or null outside a repository or without git. */
 export const gitStatus = (folder: string) => invoke<GitStatus | null>("git_status", { folder });
 
-/** How a row stands against the other pane's row of the same name, in the order of `folder::Mark`. */
-export const MARKS = ["none", "only", "newer", "older", "differs", "same"] as const;
+/** How a row stands against the other pane's row of the same name, in the order of `folder::Mark`.
+ *  Pending is a folder whose insides, or a file whose bytes, are still being compared. */
+export const MARKS = ["none", "only", "newer", "older", "differs", "same", "pending"] as const;
 export type Mark = (typeof MARKS)[number];
 
-/** One byte a row of `snapshot`, each an index into `MARKS`. */
+/** What sets a compared folder apart from its twin: how many things under it, and the first few. */
+export interface Apart {
+  count: number;
+  names: string[];
+}
+
+/** What the bar of compared panes says of one: how many rows it could show have each mark (by its
+ *  place in `MARKS`), the names of rows to leave out, and what sets each shown folder apart. */
+export interface CompareSummary {
+  counts: number[];
+  hidden: string[];
+  folders: ({ row: number } & Apart)[];
+}
+
+/** One byte a row of `snapshot`, each an index into `MARKS`, and what the bar says. */
 export interface Marks {
   snapshot: number;
   marks: Uint8Array;
+  summary?: CompareSummary;
+  /** What sets each folder row apart, by row. */
+  apart?: Map<number, Apart>;
 }
 
-/** How each row of one pane stands against the rows of the other. */
-export const compared = (view: number, request: number, other: number, otherRequest: number) =>
-  invoke<ArrayBuffer>("compared", { view, request, other, otherRequest }).then((bytes) => new Uint8Array(bytes));
+/** How each row of one pane stands against the rows of the other. With `content`, files alike in
+ *  size stand by their bytes. */
+export const compared = (view: number, request: number, other: number, otherRequest: number, content = false) =>
+  invoke<ArrayBuffer>("compared", { view, request, other, otherRequest, content }).then((bytes) => new Uint8Array(bytes));
+
+/** What the bar of compared panes says of one, with the names of its rows whose mark is in `hide`. */
+export const compareSummary = (view: number, request: number, other: number, otherRequest: number, content: boolean, hide: number[]) =>
+  invoke<CompareSummary>("compare_summary", { view, request, other, otherRequest, content, hide });
+
+/** Learns for a while what the marks of compared panes wait on. How many pairs it settled. */
+export const compareSettle = (view: number, request: number, other: number, otherRequest: number, content: boolean) =>
+  invoke<number>("compare_settle", { view, request, other, otherRequest, content });
+
+/** Stops learning for two panes' marks, as their compare ended. */
+export const compareStop = (view: number, other: number) => invoke<void>("compare_stop", { view, other });
+
+/** The first of `names` among a view's rows, in any case: which of them, and its row. */
+export const rowNamed = (view: number, request: number, names: string[]) =>
+  invoke<[number, number] | null>("row_named", { view, request, names });
 
 /** How many rows fit `filter`, to tell a folder of songs or pictures by. */
 export const countWhere = (view: number, request: number, filter: Filter) =>

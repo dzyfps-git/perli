@@ -85,6 +85,7 @@ const COMPARE_TEXT: Record<Mark, string> = {
   older: "Older than in the other pane",
   differs: "Differs from the one in the other pane",
   same: "Same as in the other pane",
+  pending: "Still being compared with the other pane",
 };
 /** Pages of rows kept per list, the least lately painted going first: 8,192 rows, many screens. */
 const MAX_PAGES = 32;
@@ -413,6 +414,8 @@ export function FileList(props: {
   /** `two` holds both rows when exactly two are selected. */
   barItems: (two?: Row[]) => BarItem[];
   connect: (list: ListHandle) => void;
+  /** The user scrolled: the names of the rows on top, each with how far below the top it sits. */
+  onScrolled?: (tops: { name: string; offset: number }[]) => void;
   /** Where to start scrolled to, on coming back to a folder. */
   scrollTo?: number;
   /** The list goes: what was selected, by name, and how far down it was. */
@@ -728,6 +731,16 @@ export function FileList(props: {
     const mark = row && props.marks?.snapshot === shown ? MARKS[props.marks.marks[index]] : undefined;
     if (mark && mark !== "none") pooled.element.dataset.compare = mark;
     else delete pooled.element.dataset.compare;
+    // A compared folder says how many things under it set it apart, and names them on hover.
+    const apart = mark && mark !== "none" ? props.marks?.apart?.get(index) : undefined;
+    if (apart) {
+      const more = apart.count - apart.names.length;
+      pooled.element.style.setProperty("--compare-count", JSON.stringify(` · ${apart.count}`));
+      pooled.element.dataset.tip = [...apart.names, ...(more > 0 ? [`and ${more} more`] : [])].join("\n");
+    } else if (pooled.element.dataset.tip !== undefined) {
+      pooled.element.style.removeProperty("--compare-count");
+      delete pooled.element.dataset.tip;
+    }
     const gitMark = row && !row.location ? props.git?.get(row.name.toLowerCase()) : undefined;
     if (gitMark) pooled.element.dataset.git = gitMark;
     else delete pooled.element.dataset.git;
@@ -1245,10 +1258,30 @@ export function FileList(props: {
     props.onMenu(new MouseEvent("contextmenu", { clientX: left + rowHeight(), clientY: bottom }), row);
   }
 
+  /** Where the list was last scrolled to for another list, which it then doesn't report. */
+  let ledTop = -1;
+  let topsFrame = 0;
   function onScroll() {
     hideCard(true);
     paint();
     if (header) header.scrollLeft = grid.scrollLeft;
+    if (props.onScrolled && Math.abs(grid.scrollTop - ledTop) >= 1) reportTops();
+    ledTop = -1;
+  }
+
+  /** The names of the first rows on screen, once a frame. Rows opened in place have no twin. */
+  function reportTops() {
+    if (topsFrame) return;
+    topsFrame = requestAnimationFrame(() => {
+      topsFrame = 0;
+      const first = places.firstAt(grid.scrollTop);
+      const tops: { name: string; offset: number }[] = [];
+      for (let index = first; index < Math.min(props.count, first + 12); index++) {
+        const row = pages.get(Math.floor(index / PAGE_SIZE))?.[index % PAGE_SIZE];
+        if (row && !row.location) tops.push({ name: row.name, offset: places.top(index) - grid.scrollTop });
+      }
+      props.onScrolled?.(tops);
+    });
   }
 
   function jumpTo(key: string, repeat: boolean) {
@@ -1616,6 +1649,11 @@ export function FileList(props: {
         selectionChanged(true);
       },
       left: () => (grid.isConnected ? { names: selectedNames(), scrollTop: grid.scrollTop } : undefined),
+      scrollToRow(row, offset) {
+        if (row < 0 || row >= props.count) return;
+        grid.scrollTop = places.top(row) - offset;
+        ledTop = grid.scrollTop;
+      },
     });
     if (props.selected?.length) {
       selection.restore(props.selected);

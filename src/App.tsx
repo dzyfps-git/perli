@@ -2249,6 +2249,8 @@ export function App() {
             <CompareBar
               view={view}
               marks={tab.marksOf(view)}
+              only={tab.onlyMark(view)}
+              onOnly={(mark) => tab.setOnlyMark(view, mark)}
               onCopyOver={() => actions.toOtherPane(view, "copy")}
               onStop={() => tab.setComparing(false)}
             />
@@ -2307,6 +2309,7 @@ export function App() {
                 wall={pictureWall() && view.columnSet() === "pictures"}
                 cut={view.query() ? undefined : cutNames(view.folder()!.path)}
                 marks={tab.marksOf(view)}
+                onScrolled={(tops) => tab.scrolled(view, tops)}
                 git={view.gitMarks()}
                 expanded={view.expanded()}
                 // Rows gathered under headers can't also nest under their folders.

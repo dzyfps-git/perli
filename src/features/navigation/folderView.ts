@@ -109,6 +109,8 @@ export interface ListHandle {
   select: (rows: number[]) => void;
   /** The names selected and how far down the list is, while it is on screen. */
   left: () => Kept | undefined;
+  /** Scrolls so that `row` sits `offset` pixels below the top, without telling anyone it scrolled. */
+  scrollToRow: (row: number, offset: number) => void;
 }
 
 export interface ShownFolder extends Opened {
@@ -182,6 +184,8 @@ export function createFolderView(id: number, saved?: SavedPane, fixed?: Filter) 
   const [depth, setDepthValue] = createSignal<number | null>(null);
   /** The columns that suit the folder: its songs' or pictures' own, or the plain ones. */
   const [columnSet, setColumnSet] = createSignal<ColumnSet>("plain");
+  /** Rows in the folder itself left out by name, in lowercase: those a compare of two panes hides. */
+  const [except, setExceptValue] = createSignal<string[]>([]);
   /** The one row selected in the list, for the details panel. */
   const [cursor, setCursor] = createSignal<RowAt | undefined>(undefined, {
     equals: (a, b) => a?.snapshot === b?.snapshot && a?.index === b?.index,
@@ -224,8 +228,8 @@ export function createFolderView(id: number, saved?: SavedPane, fixed?: Filter) 
     group: query() || isBin(target) ? "mixed" : grouping(),
     showHidden: showHidden(),
     showSystem: showSystem(),
-    // Rows of a search carry no tags, so a tag would leave none of them.
-    filter: fixed ?? { ...toFilter(filterForm()), tags: query() ? [] : filterForm().tags },
+    // Rows of a search carry no tags, so a tag would leave none of them, and have no twins.
+    filter: fixed ?? { ...toFilter(filterForm()), tags: query() ? [] : filterForm().tags, except: query() ? [] : except() },
     // Grouped rows don't nest, so the folders opened in place close.
     expanded: query() || isBin(target) || shownGroupBy() !== "none" || !nests() ? [] : expanded(),
     ...grouped(shownGroupBy(), folded()),
@@ -236,7 +240,7 @@ export function createFolderView(id: number, saved?: SavedPane, fixed?: Filter) 
     group: isBin(target) ? "mixed" : grouping(),
     showHidden: showHidden(),
     showSystem: showSystem(),
-    filter: fixed ?? toFilter(form),
+    filter: fixed ?? { ...toFilter(form), except: samePath(path(), target) ? except() : [] },
     expanded: isBin(target) || by !== "none" || !nests() ? [] : samePath(path(), target) ? expanded() : (openedIn.get(target.toLowerCase()) ?? []),
     ...grouped(by, samePath(path(), target) ? folded() : []),
   });
@@ -248,6 +252,8 @@ export function createFolderView(id: number, saved?: SavedPane, fixed?: Filter) 
 
   function show(next: ShownFolder) {
     batch(() => {
+      // Names left out belong to the folder they were worked out for.
+      if (!samePath(folder()?.path, next.path)) setExceptValue([]);
       setFolder(next);
       setArrival(arrival() + 1);
     });
@@ -756,6 +762,13 @@ export function createFolderView(id: number, saved?: SavedPane, fixed?: Filter) 
       list = handle;
     },
     list: () => list,
+    /** Leaves out rows of the folder itself by name, in lowercase, as a compare asks. */
+    setExcept(names: string[]) {
+      const now = except();
+      if (names.length === now.length && names.every((name, at) => name === now[at])) return;
+      setExceptValue(names);
+      void rearrange();
+    },
     expanded,
     groupBy: shownGroupBy,
     setGroupBy,

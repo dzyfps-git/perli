@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod clipboard;
+mod compare;
 mod copies;
 mod default_app;
 mod eject;
@@ -2160,12 +2161,64 @@ async fn git_status(folder: String) -> Result<Option<git::Status>, String> {
     blocking(move || Ok(git::status(Path::new(&folder)))).await
 }
 
-/// How each row of one pane stands against the other pane's rows, one `folder::Mark` a row.
-#[tauri::command]
-fn compared(view: u32, request: u64, other: u32, other_request: u64, views: State<'_, Views>) -> Result<Response, String> {
+/// The two listings of compared panes, as `work` needs them.
+fn compared_pair<T>(views: &Views, one: (u32, u64), two: (u32, u64), work: impl FnOnce(&folder::Listing, &folder::Listing) -> T) -> Result<T, String> {
     let views = views.0.read().unwrap_or_else(|error| error.into_inner());
-    let listing = |id, request| views.get(&id).and_then(|view| view.listing(request)).ok_or("This folder is no longer open");
-    Ok(Response::new(listing(view, request)?.compared(listing(other, other_request)?)))
+    let listing = |(id, request): (u32, u64)| views.get(&id).and_then(|view| view.listing(request)).ok_or("This folder is no longer open");
+    Ok(work(listing(one)?, listing(two)?))
+}
+
+/// How each row of one pane stands against the other pane's rows, one `folder::Mark` a row. With
+/// `content`, files alike in size stand by their bytes.
+#[tauri::command]
+fn compared(view: u32, request: u64, other: u32, other_request: u64, content: bool, views: State<'_, Views>) -> Result<Response, String> {
+    compared_pair(&views, (view, request), (other, other_request), |mine, theirs| Response::new(mine.compared(theirs, content)))
+}
+
+/// What the bar of compared panes says of one: its counts, the names of rows with a mark in
+/// `hide` for it to leave out, and what sets its folders apart.
+#[tauri::command]
+fn compare_summary(
+    view: u32,
+    request: u64,
+    other: u32,
+    other_request: u64,
+    content: bool,
+    hide: Vec<u8>,
+    views: State<'_, Views>,
+) -> Result<folder::Summary, String> {
+    compared_pair(&views, (view, request), (other, other_request), |mine, theirs| mine.compare_summary(theirs, content, &hide))
+}
+
+/// Learns, for a while, what the marks of two compared panes wait on: what folders on both sides
+/// hold and, with `content`, what files hold. How many pairs it settled, for the marks to be asked
+/// for again; none once a newer round took over.
+#[tauri::command]
+async fn compare_settle(view: u32, request: u64, other: u32, other_request: u64, content: bool, views: State<'_, Views>) -> Result<usize, String> {
+    let (pairs, sight) = compared_pair(&views, (view, request), (other, other_request), |mine, theirs| {
+        let mut pairs = mine.unsettled(theirs, content);
+        // Folders on both sides are the same pairs; files or folders shown only over there aren't.
+        let known: std::collections::HashSet<String> = pairs.iter().map(|pair| pair.theirs.path.to_string_lossy().to_lowercase()).collect();
+        let theirs_too = theirs.unsettled(mine, content).into_iter().filter(|pair| !known.contains(&pair.mine.path.to_string_lossy().to_lowercase()));
+        pairs.extend(theirs_too.map(|pair| compare::Pair { mine: pair.theirs, theirs: pair.mine, folder: pair.folder }));
+        (pairs, mine.sight())
+    })?;
+    let round = compare::round(view, other);
+    blocking(move || Ok(compare::settle(pairs, content, sight, (view, other), round))).await
+}
+
+/// The first of `names` among a view's rows, in any case: which of them, and its row. Compared
+/// panes scroll together by it.
+#[tauri::command]
+fn row_named(view: u32, request: u64, names: Vec<String>, views: State<'_, Views>) -> Result<Option<(usize, u32)>, String> {
+    let selection = Selection { view, request, rows: Vec::new(), ranges: Vec::new() };
+    views.read(&selection, |listing, _| listing.row_named(&names))
+}
+
+/// Stops learning for the marks of two panes, as their compare ended.
+#[tauri::command]
+fn compare_stop(view: u32, other: u32) {
+    compare::round(view, other);
 }
 
 /// How many rows fit `filter`, to tell a folder of songs or pictures by.
@@ -2647,6 +2700,10 @@ fn main() {
             archive_password,
             archive_test,
             drag_entry,
+            compare_summary,
+            compare_settle,
+            compare_stop,
+            row_named,
             mail_attachment,
             read_mail,
             audio_peaks,

@@ -53,6 +53,12 @@ const COLUMN_SETS = { plain: columnStore("plain"), music: columnStore("music"), 
 export const columnsOf = (set: ColumnSet) => COLUMN_SETS[set][0]();
 const setColumnsOf = (set: ColumnSet, next: Column[]) => COLUMN_SETS[set][1](next);
 export const [showHidden, setShowHidden] = stored("show-hidden", saved("show-hidden") === true);
+/** Compared panes leave out the rows that match. */
+export const [compareHideSame, setCompareHideSame] = stored("compare-hide-same", saved("compare-hide-same") === true);
+/** Compared files alike in size are read, so only their bytes decide. */
+export const [compareByContent, setCompareByContent] = stored("compare-by-content", saved("compare-by-content") === true);
+/** Compared panes scroll together, lined up by the names of their rows. */
+export const [compareScroll, setCompareScroll] = stored("compare-scroll", saved("compare-scroll") === true);
 /** Windows' own protected files. They only show with hidden files too. */
 export const [showSystem, setShowSystem] = stored("show-system", saved("show-system") === true);
 export const [grouping, setGrouping] = stored<Grouping>(

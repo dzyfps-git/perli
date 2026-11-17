@@ -770,10 +770,45 @@ fn latest_in(lane: u32) -> u64 {
     LATEST_HASH.lock().unwrap().get_or_insert_default().get(&lane).copied().unwrap_or(0)
 }
 
+/// Checksums worked out already, by path and kind, with the file's size and time then. A file
+/// changed since has another time, so its old checksum is never given.
+// ponytail: a file rewritten with its old time put back reads as unchanged.
+type HashKey = (String, String);
+/// A checksum with the size and time of the file it was for.
+type Stamped = (u64, u64, String);
+static KNOWN_HASHES: Mutex<Option<HashMap<HashKey, Stamped>>> = Mutex::new(None);
+/// Past this many, the checksums known start over.
+const MOST_KNOWN_HASHES: usize = 50_000;
+
+fn hash_key(path: &Path, algorithm: &str) -> HashKey {
+    (path.to_string_lossy().to_lowercase(), algorithm.to_string())
+}
+
 /// The file's checksum by `algorithm` (md5, sha1, sha256 or sha512) in lowercase hex, through
 /// Windows' own crypto. `None` once a newer checksum was asked for in the same `lane`: each place
-/// that shows one has its own, so one never cancels another's.
+/// that shows one has its own, so one never cancels another's. One worked out before, for the
+/// same size and time, is given at once.
 pub fn hash(path: &Path, algorithm: &str, lane: u32) -> std::io::Result<Option<String>> {
+    use std::os::windows::fs::MetadataExt;
+    let stamp = std::fs::metadata(path).map(|data| (data.len(), data.last_write_time()))?;
+    let key = hash_key(path, algorithm);
+    let known = KNOWN_HASHES.lock().unwrap().as_ref().and_then(|known| known.get(&key).cloned());
+    if let Some((_, _, digest)) = known.filter(|&(size, modified, _)| (size, modified) == stamp) {
+        return Ok(Some(digest));
+    }
+    let digest = hash_anew(path, algorithm, lane)?;
+    if let Some(digest) = &digest {
+        let mut known = KNOWN_HASHES.lock().unwrap();
+        let known = known.get_or_insert_default();
+        if known.len() > MOST_KNOWN_HASHES {
+            known.clear();
+        }
+        known.insert(key, (stamp.0, stamp.1, digest.clone()));
+    }
+    Ok(digest)
+}
+
+fn hash_anew(path: &Path, algorithm: &str, lane: u32) -> std::io::Result<Option<String>> {
     let (handle, length) = match algorithm {
         "md5" => (BCRYPT_MD5_ALG_HANDLE, 16),
         "sha1" => (BCRYPT_SHA1_ALG_HANDLE, 20),

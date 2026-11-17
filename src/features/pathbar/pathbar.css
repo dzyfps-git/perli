@@ -849,9 +849,55 @@
   overflow: visible;
 }
 
-/* The bar's counts take the colors of the words on the rows they count. */
+/* The bar's counts take the colors of the words on the rows they count. Each shows only its rows. */
 .compare-count {
+  padding: 1px 6px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: none;
   color: color-mix(in srgb, var(--compare, var(--text-muted)) 80%, var(--text));
+  font: inherit;
+  cursor: pointer;
+  transition:
+    background-color var(--motion),
+    border-color var(--motion);
+}
+
+.compare-count:hover,
+.compare-count:focus-visible {
+  background: color-mix(in srgb, var(--compare, var(--accent)) 12%, transparent);
+}
+
+.compare-count[aria-pressed="true"] {
+  border-color: color-mix(in srgb, var(--compare, var(--accent)) 50%, transparent);
+  background: color-mix(in srgb, var(--compare, var(--accent)) 16%, transparent);
+}
+
+.compare-pending {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 8px;
+  color: var(--text-muted);
+}
+
+.compare-ring {
+  width: 8px;
+  height: 8px;
+  border: 2px solid color-mix(in srgb, var(--accent) 25%, transparent);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: compare-turn 900ms linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .compare-ring {
+    animation: none;
+  }
+
+  .compare-count {
+    transition: none;
+  }
 }
 
 .compare-count + .compare-count::before {
