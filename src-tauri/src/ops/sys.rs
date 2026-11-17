@@ -708,6 +708,13 @@ pub mod test_guard {
         );
     }
 
+    /// The temp folder under its long name. CI's runner has an 8.3 short one (RUNNER~1), and
+    /// the shell hands paths back long, so a short root would miss them.
+    pub fn temp() -> PathBuf {
+        let long = std::env::temp_dir().canonicalize().unwrap();
+        PathBuf::from(long.to_string_lossy().trim_start_matches(r"\\?\"))
+    }
+
     pub fn enter(root: &Path) {
         ROOT.set(Some(root.to_path_buf()));
     }

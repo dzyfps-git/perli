@@ -539,7 +539,7 @@ mod tests {
         fn new(name: &str) -> Self {
             let _turn = ONE_DRAG.lock().unwrap_or_else(PoisonError::into_inner);
             let _com = Com::enter();
-            let folder = std::env::temp_dir().join(format!("perli-drag-{name}-{}", std::process::id()));
+            let folder = crate::ops::sys::test_guard::temp().join(format!("perli-drag-{name}-{}", std::process::id()));
             fs::create_dir_all(folder.join("into")).unwrap();
             let file = folder.join("a.txt");
             fs::write(&file, "dragged").unwrap();

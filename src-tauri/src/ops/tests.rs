@@ -42,7 +42,7 @@ pub(super) struct Sandbox(PathBuf);
 impl Sandbox {
     pub(super) fn new() -> Self {
         let number = NEXT_FOLDER.fetch_add(1, AtomicOrdering::Relaxed);
-        let root = std::env::temp_dir().join(format!("perli-ops-{}-{number}", std::process::id()));
+        let root = test_guard::temp().join(format!("perli-ops-{}-{number}", std::process::id()));
         fs::create_dir_all(&root).unwrap();
         test_guard::enter(&root);
         Self(root)
