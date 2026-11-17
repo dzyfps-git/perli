@@ -1,8 +1,8 @@
 //! Mail saved as a file: `.eml`, as most mail apps save it, and `.msg`, as classic Outlook does.
 //! Only what the preview shows is read: who, when, the subject, the text and the attachments.
 
-use std::io::Read;
-use std::path::Path;
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 
 use base64::Engine;
 use serde::Serialize;
@@ -31,9 +31,15 @@ pub struct Attachment {
     pub size: u64,
 }
 
-/// An attachment's bytes. None for one that holds no file of its own: an Outlook item inside the
-/// mail, an embedded object, or a link.
+/// An attachment's bytes. None for one that holds no file of its own: an embedded object or a link.
+/// An Outlook item inside a .msg comes out as a .msg of its own.
 type Bytes = Option<Vec<u8>>;
+
+/// The mark Windows puts on a file from the internet, as a mail app puts on an attachment it opens.
+const FROM_ELSEWHERE: &[u8] = b"[ZoneTransfer]\r\nZoneId=3\r\n";
+
+/// The class Outlook gives a message's root storage.
+const MESSAGE: uuid::Uuid = uuid::Uuid::from_u128(0x0002_0D0B_0000_0000_C000_0000_0000_0046);
 
 /// What the preview shows of a mail.
 pub fn read(path: &Path) -> Result<Mail, String> {
@@ -44,6 +50,26 @@ pub fn read(path: &Path) -> Result<Mail, String> {
 pub fn attachments(path: &Path) -> Result<Vec<(String, Bytes)>, String> {
     let (mail, data) = parse(path, true)?;
     Ok(mail.attachments.into_iter().map(|attachment| attachment.name).zip(data).collect())
+}
+
+/// One attachment written into `folder`, marked as from the internet, so Windows warns about
+/// opening it as it would from a mail app.
+pub fn take_out(path: &Path, index: usize, folder: &Path) -> Result<PathBuf, String> {
+    let (name, bytes) = attachments(path)?.into_iter().nth(index).ok_or("The mail has no such attachment")?;
+    let bytes = bytes.ok_or("This attachment is an object kept inside the mail, not a file of its own")?;
+    let file = folder.join(file_name(&name));
+    std::fs::write(&file, bytes).map_err(|error| error.to_string())?;
+    let mut zone = file.clone().into_os_string();
+    zone.push(":Zone.Identifier");
+    let _ = std::fs::write(zone, FROM_ELSEWHERE);
+    Ok(file)
+}
+
+/// A name a file may take, from one a mail gives: letters no file name holds become `_`.
+fn file_name(name: &str) -> String {
+    let clean: String = name.chars().map(|letter| if letter < ' ' || "<>:\"/\\|?*".contains(letter) { '_' } else { letter }).collect();
+    let clean = clean.trim().trim_end_matches('.');
+    if clean.is_empty() { "Attachment".into() } else { clean.into() }
 }
 
 fn parse(path: &Path, with_data: bool) -> Result<(Mail, Vec<Bytes>), String> {
@@ -106,7 +132,11 @@ fn walk(bytes: &[u8], found: &mut Found, with_data: bool, depth: usize) {
     if attached || base == "message/rfc822" {
         let data = transfer(body, encoding);
         let fallback = if base == "message/rfc822" { "Message.eml" } else { "Attachment" };
-        let name = named.filter(|name| !name.trim().is_empty()).unwrap_or_else(|| fallback.to_string());
+        let mut name = named.filter(|name| !name.trim().is_empty()).unwrap_or_else(|| fallback.to_string());
+        // A mail inside a mail is named for its subject at times. As .eml it opens as a mail.
+        if base == "message/rfc822" && !name.to_ascii_lowercase().ends_with(".eml") {
+            name.push_str(".eml");
+        }
         found.attachments.push(Attachment { name, size: data.len() as u64 });
         if with_data {
             found.data.push(data);
@@ -482,12 +512,22 @@ fn outlook(path: &Path, with_data: bool) -> std::io::Result<(Mail, Vec<Bytes>)> 
     let mut data = Vec::new();
     for folder in folders {
         let name = ["3707", "3704", "3001"].iter().find_map(|id| text(&mut file, &folder, id).filter(|name| !name.trim().is_empty()));
+        let item = format!("{folder}/__substg1.0_3701000D");
+        if file.is_storage(&item) && is_message(&mut file, &folder, &item) {
+            // Its name is mostly its subject, which may hold letters a file name can't.
+            let name = file_name(&name.unwrap_or_else(|| "Message".into()));
+            let name = if name.to_ascii_lowercase().ends_with(".msg") { name } else { format!("{name}.msg") };
+            let size = file.walk_storage(&item)?.filter(|entry| entry.is_stream()).map(|entry| entry.len()).sum();
+            attachments.push(Attachment { name, size });
+            if with_data {
+                data.push(Some(item_msg(&mut file, &item)?));
+            }
+            continue;
+        }
         let stream = format!("{folder}/__substg1.0_37010102");
         let size = file.entry(&stream).map_or(0, |entry| entry.len());
         attachments.push(Attachment { name: name.unwrap_or_else(|| "Attachment".into()), size });
         if with_data {
-            // ponytail: an Outlook item inside the mail sits in a storage of its own, which no
-            // file holds, so it isn't saved. Writing it out as its own .msg would take it.
             data.push(binary(&mut file, &stream));
         }
     }
@@ -503,17 +543,70 @@ fn outlook(path: &Path, with_data: bool) -> std::io::Result<(Mail, Vec<Bytes>)> 
     Ok((mail, data))
 }
 
+/// Whether an attachment's storage holds an Outlook item, not an embedded object. Its attach
+/// method says so, or, where a writer left that out, the item's message class.
+fn is_message(file: &mut cfb::CompoundFile<std::fs::File>, folder: &str, item: &str) -> bool {
+    // A 32-bit value sits in the low half of the 8 bytes `properties` reads.
+    match properties(file, &format!("{folder}/__properties_version1.0"), 8, &[0x3705_0003]) {
+        Some(method) => method as u32 == 5,
+        None => ["001F", "001E"].iter().any(|kind| file.is_stream(format!("{item}/__substg1.0_001A{kind}"))),
+    }
+}
+
+/// An Outlook item kept in a mail, as a .msg of its own, laid out as MS-OXMSG says: the item's
+/// storage becomes the root, the mail's named-property map comes along, and the root's property
+/// stream gets the longer header a top-level message has.
+fn item_msg(file: &mut cfb::CompoundFile<std::fs::File>, item: &str) -> std::io::Result<Vec<u8>> {
+    let mut out = cfb::CompoundFile::create(std::io::Cursor::new(Vec::new()))?;
+    out.set_storage_clsid("/", MESSAGE)?;
+    copy_tree(file, &mut out, item, Path::new("/"))?;
+    let names = "/__nameid_version1.0";
+    if file.is_storage(names) {
+        copy_tree(file, &mut out, names, Path::new(names))?;
+    }
+    out.flush()?;
+    Ok(out.into_inner().into_inner())
+}
+
+/// Every storage and stream under `from`, made again under `to`.
+fn copy_tree(
+    file: &mut cfb::CompoundFile<std::fs::File>,
+    out: &mut cfb::CompoundFile<std::io::Cursor<Vec<u8>>>,
+    from: &str,
+    to: &Path,
+) -> std::io::Result<()> {
+    let entries: Vec<(std::path::PathBuf, bool)> =
+        file.walk_storage(from)?.map(|entry| (entry.path().to_path_buf(), entry.is_stream())).collect();
+    for (path, stream) in entries {
+        let Ok(relative) = path.strip_prefix(from) else { continue };
+        let target = if relative.as_os_str().is_empty() { to.to_path_buf() } else { to.join(relative) };
+        if !stream {
+            if !out.exists(&target) {
+                out.create_storage(&target)?;
+            }
+            continue;
+        }
+        let mut bytes = binary(file, &path).unwrap_or_default();
+        // An embedded message's header is 24 bytes; a top-level one's has 8 more, all zero.
+        if target == Path::new("/__properties_version1.0") && bytes.len() >= 24 {
+            bytes.splice(24..24, [0; 8]);
+        }
+        out.create_stream(&target)?.write_all(&bytes)?;
+    }
+    Ok(())
+}
+
 /// A string property under `folder`: UTF-16, or in this PC's ANSI code page for older mails.
 fn text(file: &mut cfb::CompoundFile<std::fs::File>, folder: &str, id: &str) -> Option<String> {
-    if let Some(bytes) = binary(file, &format!("{folder}/__substg1.0_{id}001F")) {
+    if let Some(bytes) = binary(file, format!("{folder}/__substg1.0_{id}001F")) {
         let units: Vec<u16> = bytes.as_chunks::<2>().0.iter().map(|&pair| u16::from_le_bytes(pair)).collect();
         return Some(String::from_utf16_lossy(&units).trim_end_matches('\0').to_string());
     }
-    let bytes = binary(file, &format!("{folder}/__substg1.0_{id}001E"))?;
+    let bytes = binary(file, format!("{folder}/__substg1.0_{id}001E"))?;
     Some(paged(bytes.strip_suffix(&[0]).unwrap_or(&bytes), 0).unwrap_or_default())
 }
 
-fn binary(file: &mut cfb::CompoundFile<std::fs::File>, path: &str) -> Option<Vec<u8>> {
+fn binary(file: &mut cfb::CompoundFile<std::fs::File>, path: impl AsRef<Path>) -> Option<Vec<u8>> {
     let mut stream = file.open_stream(path).ok()?;
     let mut bytes = Vec::new();
     stream.read_to_end(&mut bytes).ok()?;
@@ -618,16 +711,46 @@ LjQK\r\n\
             drop(put);
             file.create_storage("/__attach_version1.0_#00000001").unwrap();
             file.create_storage("/__attach_version1.0_#00000001/__substg1.0_3701000D").unwrap();
+            file.create_storage("/__attach_version1.0_#00000002").unwrap();
+            file.create_storage("/__attach_version1.0_#00000002/__substg1.0_3701000D").unwrap();
+            file.create_storage("/__nameid_version1.0").unwrap();
             let mut put = |path: &str, bytes: &[u8]| {
                 std::io::Write::write_all(&mut file.create_stream(path).unwrap(), bytes).unwrap();
             };
+            // Attach method 5, an Outlook item, and 6, an embedded object.
+            let method = |method: u32| [&[0u8; 8][..], &0x3705_0003u32.to_le_bytes()[..], &[0; 4][..], &u64::from(method).to_le_bytes()[..]].concat();
+            put("/__attach_version1.0_#00000001/__properties_version1.0", &method(5));
             put("/__attach_version1.0_#00000001/__substg1.0_3001001F", &utf16("Re: Lunch"));
             put("/__attach_version1.0_#00000001/__substg1.0_3701000D/__substg1.0_0037001F", &utf16("Re: Lunch"));
+            let mut inner = vec![0u8; 24];
+            inner.extend(0x0039_0040u32.to_le_bytes());
+            inner.extend([0; 4]);
+            inner.extend(132_000_000_000_000_000u64.to_le_bytes());
+            put("/__attach_version1.0_#00000001/__substg1.0_3701000D/__properties_version1.0", &inner);
+            put("/__attach_version1.0_#00000002/__properties_version1.0", &method(6));
+            put("/__attach_version1.0_#00000002/__substg1.0_3001001F", &utf16("Chart"));
+            put("/__attach_version1.0_#00000002/__substg1.0_3701000D/\u{1}Ole", b"ole");
+            put("/__nameid_version1.0/__substg1.0_00020102", &[1; 16]);
         }
 
         let mail = read(&path).unwrap();
         let attached = attachments(&path).unwrap();
+        let folder = path.with_extension("out");
+        std::fs::create_dir_all(&folder).unwrap();
+        let taken = take_out(&path, 0, &folder);
+        let object = take_out(&path, 2, &folder);
+        let zone = std::fs::read(folder.join("menu.txt:Zone.Identifier"));
+        let _ = std::fs::remove_dir_all(&folder);
         let _ = std::fs::remove_file(&path);
+        let item = path.with_extension("item.msg");
+        std::fs::write(&item, attached[1].1.as_deref().unwrap()).unwrap();
+        let inner = read(&item).unwrap();
+        let mut file = cfb::open(&item).unwrap();
+        let header = binary(&mut file, "/__properties_version1.0").unwrap();
+        let names = file.is_stream("/__nameid_version1.0/__substg1.0_00020102");
+        let class = *file.root_entry().clsid();
+        drop(file);
+        let _ = std::fs::remove_file(&item);
 
         assert_eq!(mail.subject, "Lunch");
         assert_eq!(mail.from, "Ana <ana@example.com>");
@@ -636,12 +759,30 @@ LjQK\r\n\
         assert_eq!(mail.date, 133_000_000_000_000_000);
         assert_eq!(
             mail.attachments,
-            [Attachment { name: "menu.txt".into(), size: 4 }, Attachment { name: "Re: Lunch".into(), size: 0 }]
+            [
+                Attachment { name: "menu.txt".into(), size: 4 },
+                Attachment { name: "Re_ Lunch.msg".into(), size: 18 + 40 },
+                Attachment { name: "Chart".into(), size: 0 },
+            ]
         );
-        assert_eq!(
-            attached,
-            [("menu.txt".to_string(), Some(b"soup".to_vec())), ("Re: Lunch".to_string(), None)],
-            "an Outlook item inside has no bytes to pass off as a file"
-        );
+        assert_eq!(attached[0], ("menu.txt".to_string(), Some(b"soup".to_vec())));
+        assert_eq!(attached[2], ("Chart".to_string(), None), "an embedded object has no bytes to pass off as a file");
+        assert_eq!(inner.subject, "Re: Lunch", "the Outlook item inside comes out as a .msg of its own");
+        assert_eq!(inner.date, 132_000_000_000_000_000, "its properties are read past a top-level header");
+        assert_eq!(header.len(), 32 + 16);
+        assert!(names, "the mail's named-property map comes along");
+        assert_eq!(class, MESSAGE);
+        assert_eq!(taken, Ok(folder.join("menu.txt")));
+        assert_eq!(zone.unwrap(), FROM_ELSEWHERE, "an attachment taken out to open is marked as from the internet");
+        assert!(object.is_err());
+    }
+
+    #[test]
+    fn a_mail_inside_a_mail_is_named_as_one() {
+        let mail = b"Content-Type: multipart/mixed; boundary=b\n\n--b\nContent-Type: message/rfc822; name=\"Re: plan\"\n\nSubject: plan\n\nhi\n--b--\n";
+        let (mail, _) = eml(mail, false);
+        assert_eq!(mail.attachments[0].name, "Re: plan.eml");
+        assert_eq!(file_name("Re: a/b?. "), "Re_ a_b_");
+        assert_eq!(file_name(" .. "), "Attachment");
     }
 }

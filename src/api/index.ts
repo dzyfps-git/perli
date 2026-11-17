@@ -221,7 +221,7 @@ export type Task =
   | { kind: "paste"; folder: string }
   | { kind: "pasteShortcut"; folder: string }
   /** Every attachment of a mail file, into `folder`. */
-  | { kind: "saveAttachments"; path: string; folder: string }
+  | { kind: "saveAttachments"; path: string; folder: string; only?: number }
   | { kind: "tag"; target: ShellTarget; tag: number; on: boolean }
   | { kind: "deleteTag"; id: number }
   | { kind: "drop"; folder: string; action?: DropAction; id: number }
@@ -1126,6 +1126,12 @@ export const archiveTest = (view: number, request: number, row: number, password
 /** Drags one file out of a ZIP, the way a row is dragged out of the list. */
 export const dragEntry = (view: number, request: number, row: number, entry: string, password?: string) =>
   invoke<void>("drag_entry", { view, request, row, entry, password: password ?? null });
+
+/** One attachment of a mail, taken out to a file of its own to open, show or drag. */
+export const mailAttachment = (path: string, index: number) => invoke<string>("mail_attachment", { path, index });
+
+/** A mail taken out of another, to show in its place. */
+export const readMail = (path: string) => invoke<Mail>("read_mail", { path });
 
 /** The words beside a file under its own name: lyrics (`lrc`) or subtitles (`srt`, `vtt`). */
 /** The loudest point of each of `bars` slices of a sound, from 0 to 1, read a little at a time. */

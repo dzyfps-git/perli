@@ -322,14 +322,17 @@ export function QuickPreview(props: {
     const folder = folderOf(item);
     return {
       mail: preview,
-      save: async (choose) => {
+      path,
+      save: async (from, choose, only) => {
         // Loaded when asked for, since the picker's sidebar draws with this file's own helpers.
         const picker = choose ? await import("../dialogs/Picker") : undefined;
-        const into = picker ? (await picker.pick({ mode: "folder", title: "Save attachments to", purpose: "folders", start: folder }))?.path : folder;
+        const title = only === undefined ? "Save attachments to" : "Save attachment to";
+        const into = picker ? (await picker.pick({ mode: "folder", title, purpose: "folders", start: folder }))?.path : folder;
         if (!into) return false;
-        const end = await runJob({ kind: "saveAttachments", path, folder: into }, view);
+        const end = await runJob({ kind: "saveAttachments", path: from, folder: into, only }, view);
         return !!end && !end.cancelled && end.failed.length === 0;
       },
+      keys: (handler) => (viewKeys = handler),
     };
   }
 

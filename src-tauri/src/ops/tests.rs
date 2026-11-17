@@ -1884,7 +1884,7 @@ Content-Disposition: attachment; filename=\"b.txt\"\r\nContent-Transfer-Encoding
     let into = sandbox.path("into");
     fs::create_dir_all(&into).unwrap();
 
-    let outcome = go(Job::Attachments { mail, folder: into.clone() });
+    let outcome = go(Job::Attachments { mail, folder: into.clone(), only: None });
 
     assert!(outcome.failed.is_empty());
     assert_eq!(sandbox.names("into"), ["a.txt", "b.txt"], "a sender's folders never come along");

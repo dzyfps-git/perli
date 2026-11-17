@@ -77,8 +77,9 @@ pub enum Job {
     /// A tag put on or taken off files. Only the files that change are undone.
     Tag { paths: Vec<PathBuf>, tag: u32, on: bool },
     DeleteTag { id: u32 },
-    /// Every attachment of a mail file, landed in `folder` as dragged files land.
-    Attachments { mail: PathBuf, folder: PathBuf },
+    /// Every attachment of a mail file, or with `only` the one at that place, landed in `folder`
+    /// as dragged files land.
+    Attachments { mail: PathBuf, folder: PathBuf, only: Option<usize> },
     /// One after another under one card, such as rows of two archives and a folder copied at once.
     Several { jobs: Vec<Job> },
 }
@@ -404,7 +405,7 @@ impl<'a> Run<'a> {
                 self.unzip(archives, own_folder, smart, &only, password.as_deref(), into.as_deref())
             }
             Job::Receive { incoming, folder } => self.receive(incoming, &folder),
-            Job::Attachments { mail, folder } => self.save_attachments(&mail, &folder),
+            Job::Attachments { mail, folder, only } => self.save_attachments(&mail, &folder, only),
             Job::Tag { paths, tag, on } => self.tag(&paths, None, tag, on),
             Job::DeleteTag { id } => self.delete_tag(id),
             Job::Recycle { paths } => {
