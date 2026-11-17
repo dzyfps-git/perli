@@ -520,6 +520,22 @@ html[data-blurred] .place-used::before {
   }
 }
 
+/* The Recycle Bin tips toward a drag over it, as if to take the files in. */
+.place[data-drop="shell:RecycleBinFolder"] .place-icon {
+  transition: rotate var(--motion-spring), translate var(--motion-spring);
+}
+
+.place[data-drop="shell:RecycleBinFolder"][data-drop-over] .place-icon {
+  rotate: -14deg;
+  translate: 0 -1px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .place[data-drop="shell:RecycleBinFolder"] .place-icon {
+    transition: none;
+  }
+}
+
 /* The folder look sheet: color, a searchable set of icons, the cover. */
 .look-picker {
   width: min(480px, 92vw);

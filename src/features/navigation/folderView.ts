@@ -656,6 +656,7 @@ export function createFolderView(id: number, saved?: SavedPane, fixed?: Filter) 
     /** A folder inside a ZIP, or the ZIP itself, which can be read and copied out of only. */
     isZip: () => !!folder()?.archive,
     archive: () => folder()?.archive ?? undefined,
+    archives: () => folder()?.archives ?? [],
     locked: () => !!folder()?.locked,
     openSaved() {
       if (saved && !savedOpened) {

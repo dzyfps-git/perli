@@ -507,6 +507,7 @@ export function App() {
     ejectRoot: (path) =>
       places()?.drives.find((drive) => drive.removable && path.toLowerCase().startsWith(drive.path.toLowerCase()))?.path,
     driveName: (root) => places()?.drives.find((drive) => samePath(drive.path, root))?.name ?? root,
+    tagsChanged,
   });
   const [zipping, setZipping] = createSignal<ZipRequest>();
   // The pane beside the one acting, which a button in a pane that isn't active must still find.
@@ -572,8 +573,13 @@ export function App() {
 
   // Covers every way to close, including Alt+F4 and the taskbar.
   const closeListener = onCloseAsked(onClose);
-  const dragListener = followFileDrag(tabs.allViews, jobs.report, (x, y, items) => setMenu({ x, y, items }), dropNoted, (folder) =>
-    void tabs.active().active().open(folder),
+  const dragListener = followFileDrag(
+    tabs.allViews,
+    jobs.report,
+    (x, y, items) => setMenu({ x, y, items }),
+    dropNoted,
+    (folder) => void tabs.active().active().open(folder),
+    setDeleting,
   );
   // Other apps and Windows' own commands change folders without Perli running a job.
   const folderListener = onFolderChanged((id) => everyView().find((view) => view.id === id)?.reload());
@@ -628,7 +634,7 @@ export function App() {
   function openRow(view: FolderView, row: Row, toSide: boolean) {
     if (view.isBin()) return;
     const path = rowPath(view, row);
-    const asFolder = row.isDir || (isArchiveName(row.name) && !view.isZip());
+    const asFolder = row.isDir || isArchiveName(row.name);
     if (!asFolder) openFile(path).catch(jobs.report);
     else if (toSide) tabs.openToSide(path);
     else view.open(path);
@@ -774,7 +780,6 @@ export function App() {
       addBookmarks(paths.filter((_, at) => !files[at]));
     } else if (place.startsWith(TAG_DROP)) {
       await setTagPaths(paths, Number(place.slice(TAG_DROP.length)), true);
-      showTagChange();
     }
   }
 
@@ -1079,7 +1084,6 @@ export function App() {
       const rows = { kind: "rows", selection } as const;
       const common = await commonTags(rows);
       await setTag(rows, tag.id, !common.includes(tag.id));
-      showTagChange();
     } catch (failure) {
       jobs.report(failure);
     }
@@ -1089,16 +1093,24 @@ export function App() {
     for (const view of tabs.allViews()) if (!view.query() || view.query().startsWith(tagQuery(""))) view.reload();
   }
 
+  /** After a tag job, its undo or its redo: a filter forgets a tag that is gone, and the dots show the change. */
+  async function tagsChanged() {
+    const before = allTags();
+    await refreshTags();
+    for (const tag of before) {
+      if (allTags().some((known) => known.id === tag.id)) continue;
+      for (const view of tabs.allViews()) view.forgetTag(tag.id);
+    }
+    showTagChange();
+  }
+
   function askDeleteTag(tag: Tag) {
     setDeleting({
       title: `Delete the tag ${tag.name}?`,
-      note: "It comes off every file that has it. The files stay as they are.",
+      note: "It comes off every file that has it. The files stay as they are, and Undo brings the tag back on them.",
       confirmLabel: "Delete tag",
       async confirm() {
         await deleteTag(tag.id).catch(jobs.report);
-        for (const view of tabs.allViews()) view.forgetTag(tag.id);
-        await refreshTags();
-        showTagChange();
       },
     });
   }
@@ -1349,7 +1361,7 @@ export function App() {
     } else if (pick.kind === "folder" || pick.kind === "file") actions.newItem(view, pick.kind === "folder");
     else if (pick.kind === "clipboard") actions.newFromClipboard(view);
     else if (pick.kind === "type") actions.newFrom(view, pick.extension);
-    else if (pick.kind === "own") actions.newFromOwn(view, pick.name);
+    else if (pick.kind === "own") actions.newFromOwn(view, pick.name, pick.called);
     else actions.openTemplates(view);
   }
 
@@ -1619,7 +1631,6 @@ export function App() {
     const selection = actions.selected(view);
     if (!tag || !selection) return;
     await setTag({ kind: "rows", selection }, tag.id, on);
-    showTagChange();
   }
 
   /** Picks the rows whose names fit a pattern, such as `*.jpg` or `report`. */
@@ -2479,6 +2490,11 @@ export function App() {
           onDeleteTag={askDeleteTag}
           onBeforeUpdate={flushSession}
           onKeys={() => setKeysOpen(true)}
+          onRevealTemplates={() => {
+            closeSettings();
+            actions.openTemplates(tabs.activeView());
+          }}
+          onFailure={jobs.report}
         />
       </main>
       <Show when={menu()} keyed>

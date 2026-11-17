@@ -1,6 +1,6 @@
 //! Copy and move.
 
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io;
 use std::mem;
@@ -121,6 +121,37 @@ impl Run<'_> {
             self.settle(node, false);
         }
         copied
+    }
+
+    /// A folder template, copied whole to `target` the way a copy would, with `tokens` filled in on
+    /// the names inside. One undo step takes it all back.
+    // ponytail: a part that needs admin rights goes through Windows' copy, which keeps the names as
+    // they are; fill them in there too if templates ever land in protected folders.
+    pub(super) fn new_tree(&mut self, source: &Path, target: PathBuf, tokens: Vec<(String, String)>) -> Flow {
+        let Some(found) = self.attempt(source, None, |_| sys::stat(source))? else {
+            return Ok(());
+        };
+        let Some(stat) = found.filter(|stat| stat.is_folder()) else {
+            return self.refuse(source, "The template folder is gone");
+        };
+        let Some(mut node) = self.scan(source, stat)? else {
+            return Ok(());
+        };
+        self.add_total(node.items, node.bytes);
+        self.tokens = tokens;
+        let placed = self.place(&mut node, Plan::Write(target), false);
+        self.settle(&node, false);
+        placed
+    }
+
+    /// A name inside a folder template with its tokens filled in. Any other copy keeps its names.
+    fn filled(&self, name: &OsStr) -> OsString {
+        match name.to_str() {
+            Some(text) if !self.tokens.is_empty() => {
+                self.tokens.iter().fold(text.to_string(), |text, (token, value)| text.replace(token, value)).into()
+            }
+            _ => name.to_os_string(),
+        }
     }
 
     fn copy_nodes(&mut self, nodes: &mut [Node], folder: &Path, identity: &str) -> Flow {
@@ -459,7 +490,7 @@ impl Run<'_> {
     fn fill(&mut self, node: &mut Node, target: &Path, moving: bool) -> Flow {
         let fresh = node.fresh;
         for child in node.children.iter_mut().flatten() {
-            let child_target = target.join(file_name(&child.path));
+            let child_target = target.join(self.filled(file_name(&child.path)));
             let plan = if fresh {
                 Plan::Write(child_target)
             } else {

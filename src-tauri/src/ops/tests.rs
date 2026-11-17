@@ -42,7 +42,7 @@ pub(super) struct Sandbox(PathBuf);
 impl Sandbox {
     pub(super) fn new() -> Self {
         let number = NEXT_FOLDER.fetch_add(1, AtomicOrdering::Relaxed);
-        let root = std::env::temp_dir().join(format!("perli-ops-{}-{number}", std::process::id()));
+        let root = test_guard::temp().join(format!("perli-ops-{}-{number}", std::process::id()));
         fs::create_dir_all(&root).unwrap();
         test_guard::enter(&root);
         Self(root)
@@ -211,11 +211,18 @@ fn purge_item(item: &Path) {
     let info = item.with_file_name(format!("$I{}", &name[2..]));
     test_guard::allow(item);
     test_guard::allow(&info);
-    if item.is_dir() {
-        // Only this item's own tree, by exact path.
-        for entry in fs::read_dir(item).unwrap() {
-            test_guard::allow(&entry.unwrap().path());
+    // Only this item's own tree, by exact path.
+    fn allow_tree(folder: &Path) {
+        for entry in fs::read_dir(folder).unwrap() {
+            let path = entry.unwrap().path();
+            test_guard::allow(&path);
+            if path.is_dir() {
+                allow_tree(&path);
+            }
         }
+    }
+    if item.is_dir() {
+        allow_tree(item);
     }
     go(Job::Purge {
         items: vec![BinItem {
@@ -228,7 +235,7 @@ fn purge_item(item: &Path) {
     });
 }
 
-fn allow_bin_copy(outcome: &Outcome) {
+pub(super) fn allow_bin_copy(outcome: &Outcome) {
     for record in &outcome.done {
         if let Done::Recycled { item, .. } = record {
             let name = item.file_name().unwrap().to_string_lossy();
@@ -238,7 +245,7 @@ fn allow_bin_copy(outcome: &Outcome) {
     }
 }
 
-fn undo(outcome: Outcome) -> Outcome {
+pub(super) fn undo(outcome: Outcome) -> Outcome {
     allow_bin_copy(&outcome);
     go(Job::Undo {
         records: outcome.done,
@@ -1124,6 +1131,36 @@ fn zip_of(path: &Path, entries: &[(&str, &[u8])]) {
     zip.finish().unwrap();
 }
 
+#[test]
+fn rows_of_two_archives_and_a_file_copy_as_one_job_with_one_undo() {
+    let sandbox = Sandbox::new();
+    let first = sandbox.path("one.zip");
+    let second = sandbox.path("two.zip");
+    zip_of(&first, &[("a.txt", b"a"), ("skip.txt", b"no")]);
+    zip_of(&second, &[("docs/b.txt", b"b")]);
+    let plain = sandbox.file("c.txt", "c");
+    let into = sandbox.path("to");
+    fs::create_dir_all(&into).unwrap();
+    let from = |archive: &Path, inner: &str| Job::Unzip {
+        archives: vec![archive.to_path_buf()],
+        own_folder: false,
+        smart: false,
+        only: vec![inner.into()],
+        password: None,
+        into: Some(into.clone()),
+    };
+
+    let outcome = go(Job::Several {
+        jobs: vec![from(&first, "a.txt"), from(&second, "docs"), copy(&plain, &into)],
+    });
+
+    assert!(outcome.failed.is_empty());
+    assert_eq!(sandbox.names("to"), ["a.txt", "c.txt", "docs"]);
+    assert_eq!(read(&sandbox.path(r"to\docs\b.txt")), "b");
+    undo(outcome);
+    assert!(sandbox.names("to").is_empty());
+}
+
 fn unzip(archive: &Path, own_folder: bool) -> Job {
     Job::Unzip {
         archives: vec![archive.to_path_buf()],
@@ -1321,6 +1358,31 @@ fn a_new_7z_tar_or_aes_zip_reads_back_as_it_went_in() {
     let mut top = String::new();
     std::io::Read::read_to_string(&mut zip.by_index_decrypt(index, b"open sesame").unwrap(), &mut top).unwrap();
     assert_eq!(top, "top");
+}
+
+#[test]
+fn a_file_that_fails_partway_into_a_7z_is_left_out_and_the_rest_goes_in() {
+    let sandbox = Sandbox::new();
+    sandbox.file(r"here\tree\a.txt", "alpha");
+    let stuck = sandbox.file(r"here\tree\b.txt", "beta");
+    sandbox.file(r"here\tree\c.txt", "gamma");
+    // Opens fine, and then every read fails, as a file locked by another app does.
+    let holder = fs::OpenOptions::new().read(true).write(true).open(&stuck).unwrap();
+    holder.lock().unwrap();
+    let script = Script::answering(&[Answer::Retry, Answer::Skip]);
+    let job = Job::Zip { sources: vec![sandbox.path(r"here\tree")], level: ZipLevel::Fast, password: None, format: ArchiveFormat::SevenZ, aes: false };
+
+    run_with(job, &script);
+    drop(holder);
+
+    let questions = script.questions.borrow();
+    assert_eq!(questions.len(), 2, "asked again after a retry: {questions:?}");
+    assert!(questions.iter().all(|question| matches!(question, Question::Problem { path, .. } if Path::new(path) == stuck)), "{questions:?}");
+    let seven = sandbox.path(r"here\tree.7z");
+    let mut names: Vec<_> = crate::packs::list(&seven, None).unwrap().items.iter().filter(|item| !item.folder).map(|item| item.name.clone()).collect();
+    names.sort();
+    assert_eq!(names, ["tree/a.txt", "tree/c.txt"]);
+    assert_eq!(crate::packs::read(&seven, "tree/c.txt", 100, true, None).unwrap(), b"gamma");
 }
 
 #[test]
@@ -1604,9 +1666,33 @@ fn something_that_is_no_archive_is_a_plain_problem() {
 
 struct Virtual {
     name: &'static str,
-    /// `None` for a folder.
+    /// `None` for a folder. For a storage, the text of its one stream.
     bytes: Option<&'static [u8]>,
-    as_stream: bool,
+    medium: Medium,
+}
+
+/// How a source hands over a file's contents.
+#[derive(Clone, Copy, PartialEq)]
+enum Medium {
+    Memory,
+    Stream,
+    /// A whole storage, as classic Outlook drags a mail.
+    Storage,
+}
+
+/// A storage holding one stream called `subject`, as a mail's parts sit in one.
+fn storage_with(text: &[u8]) -> windows::Win32::System::Com::StructuredStorage::IStorage {
+    use windows::Win32::System::Com::StructuredStorage::{CreateILockBytesOnHGlobal, StgCreateDocfileOnILockBytes};
+    use windows::Win32::System::Com::{STGC_DEFAULT, STGM_CREATE, STGM_READWRITE, STGM_SHARE_EXCLUSIVE};
+    unsafe {
+        let bytes = CreateILockBytesOnHGlobal(None, true).unwrap();
+        let mode = STGM_CREATE | STGM_READWRITE | STGM_SHARE_EXCLUSIVE;
+        let storage = StgCreateDocfileOnILockBytes(&bytes, mode, 0).unwrap();
+        let stream = storage.CreateStream(windows::core::w!("subject"), mode, 0, 0).unwrap();
+        stream.Write(text.as_ptr().cast(), text.len() as u32, None).ok().unwrap();
+        storage.Commit(STGC_DEFAULT.0 as u32).unwrap();
+        storage
+    }
 }
 
 #[implement(IDataObject, IDataObjectAsyncCapability)]
@@ -1695,11 +1781,16 @@ impl IDataObject_Impl for Source_Impl {
             return Err(DV_E_FORMATETC.into());
         };
         let bytes = item.bytes.ok_or(DV_E_FORMATETC)?;
-        Ok(if item.as_stream {
-            let stream = std::mem::ManuallyDrop::new(unsafe { SHCreateMemStream(Some(bytes)) });
-            medium(TYMED_ISTREAM.0, STGMEDIUM_0 { pstm: stream })
-        } else {
-            medium(TYMED_HGLOBAL.0, STGMEDIUM_0 { hGlobal: global(bytes) })
+        Ok(match item.medium {
+            Medium::Stream => {
+                let stream = std::mem::ManuallyDrop::new(unsafe { SHCreateMemStream(Some(bytes)) });
+                medium(TYMED_ISTREAM.0, STGMEDIUM_0 { pstm: stream })
+            }
+            Medium::Storage => {
+                let storage = std::mem::ManuallyDrop::new(Some(storage_with(bytes)));
+                medium(windows::Win32::System::Com::TYMED_ISTORAGE.0, STGMEDIUM_0 { pstg: storage })
+            }
+            Medium::Memory => medium(TYMED_HGLOBAL.0, STGMEDIUM_0 { hGlobal: global(bytes) }),
         })
     }
 
@@ -1751,9 +1842,9 @@ fn receive(sandbox: &Sandbox, items: Vec<Virtual>, script: &Script) -> Outcome {
 fn dragged_files_land_with_their_folders_and_a_warning() {
     let sandbox = Sandbox::new();
     let items = vec![
-        Virtual { name: "sub", bytes: None, as_stream: false },
-        Virtual { name: r"sub\in stream.txt", bytes: Some(b"from a stream"), as_stream: true },
-        Virtual { name: "from memory.txt", bytes: Some(b"from memory"), as_stream: false },
+        Virtual { name: "sub", bytes: None, medium: Medium::Memory },
+        Virtual { name: r"sub\in stream.txt", bytes: Some(b"from a stream"), medium: Medium::Stream },
+        Virtual { name: "from memory.txt", bytes: Some(b"from memory"), medium: Medium::Memory },
     ];
 
     let outcome = receive(&sandbox, items, &Script::default());
@@ -1766,6 +1857,41 @@ fn dragged_files_land_with_their_folders_and_a_warning() {
         outcome.done,
         [Done::Created { path: sandbox.path(r"into\sub") }, Done::Created { path: file }]
     );
+}
+
+#[test]
+fn a_mail_dragged_as_a_whole_storage_lands_as_a_msg_file() {
+    let sandbox = Sandbox::new();
+    let items = vec![Virtual { name: "Lunch on Friday.msg", bytes: Some(b"Lunch on Friday"), medium: Medium::Storage }];
+
+    let outcome = receive(&sandbox, items, &Script::default());
+
+    assert!(outcome.failed.is_empty());
+    let landed = fs::read(sandbox.path(r"into\Lunch on Friday.msg")).unwrap();
+    assert_eq!(landed[..8], [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1], "a compound file, as Outlook saves one");
+    assert!(landed.windows(15).any(|bytes| bytes == b"Lunch on Friday"), "its stream came along");
+}
+
+#[test]
+fn a_mails_attachments_land_by_their_own_names_and_undo_takes_them_away() {
+    let sandbox = Sandbox::new();
+    let mail = sandbox.file(
+        "note.eml",
+        "Subject: Files\r\nContent-Type: multipart/mixed; boundary=b\r\n\r\n--b\r\nContent-Type: text/plain\r\n\r\nHi\r\n--b\r\n\
+Content-Disposition: attachment; filename=\"..\\\\evil\\\\a.txt\"\r\n\r\nalpha\r\n--b\r\n\
+Content-Disposition: attachment; filename=\"b.txt\"\r\nContent-Transfer-Encoding: base64\r\n\r\nYmV0YQ==\r\n--b--\r\n",
+    );
+    let into = sandbox.path("into");
+    fs::create_dir_all(&into).unwrap();
+
+    let outcome = go(Job::Attachments { mail, folder: into.clone() });
+
+    assert!(outcome.failed.is_empty());
+    assert_eq!(sandbox.names("into"), ["a.txt", "b.txt"], "a sender's folders never come along");
+    assert_eq!(read(&into.join("b.txt")), "beta");
+    assert_eq!(sys::read_zone(&into.join("a.txt")).as_deref(), Some(b"[ZoneTransfer]\r\nZoneId=3\r\n".as_slice()));
+    undo(outcome);
+    assert!(sandbox.names("into").is_empty());
 }
 
 #[test]
@@ -1783,7 +1909,7 @@ fn a_drop_that_never_runs_still_frees_its_source() {
 fn a_finished_drop_tells_its_source_once() {
     let sandbox = Sandbox::new();
     ENDED.with_borrow_mut(Vec::clear);
-    let items = vec![Virtual { name: "a.txt", bytes: Some(b"a"), as_stream: false }];
+    let items = vec![Virtual { name: "a.txt", bytes: Some(b"a"), medium: Medium::Memory }];
 
     receive(&sandbox, items, &Script::default());
 
@@ -1795,8 +1921,8 @@ fn dragged_names_cannot_land_outside_and_conflicts_ask() {
     let sandbox = Sandbox::new();
     sandbox.file(r"into\taken.txt", "old");
     let items = vec![
-        Virtual { name: r"..\evil.txt", bytes: Some(b"x"), as_stream: false },
-        Virtual { name: "taken.txt", bytes: Some(b"new"), as_stream: false },
+        Virtual { name: r"..\evil.txt", bytes: Some(b"x"), medium: Medium::Memory },
+        Virtual { name: "taken.txt", bytes: Some(b"new"), medium: Medium::Memory },
     ];
     let script = Script::answering(&[Answer::Skip, Answer::KeepBoth]);
 
@@ -2030,6 +2156,7 @@ fn a_template_fills_the_new_file_and_undo_recycles_it() {
         go(Job::Template {
             folder: folder.clone(),
             template,
+            named: false,
         })
     };
 
@@ -2042,6 +2169,33 @@ fn a_template_fills_the_new_file_and_undo_recycles_it() {
     assert_eq!(read(&folder.join("New Note (3).note")), "from a file");
     let undone = undo(outcome);
     assert!(!folder.join("New Note (3).note").exists());
+    purge(&undone);
+}
+
+#[test]
+fn a_folder_template_lands_whole_with_its_names_filled_in_and_undo_takes_it_all() {
+    let sandbox = Sandbox::new();
+    let folder = sandbox.folder("here");
+    let source = sandbox.folder("Trip {date}");
+    fs::create_dir_all(source.join("{name} photos")).unwrap();
+    fs::write(source.join("{name} photos").join("plan {date}.txt"), "plan").unwrap();
+    fs::write(source.join("list.txt"), "list").unwrap();
+    let tokens = vec![("{date}".to_string(), "2026-03-05".to_string()), ("{name}".to_string(), "Rome".to_string())];
+    let template = Template {
+        stem: "Trip 2026-03-05".to_string(),
+        extension: String::new(),
+        content: Content::Tree { folder: source.clone(), tokens },
+    };
+
+    let outcome = go(Job::Template { folder: folder.clone(), template, named: true });
+
+    let made = folder.join("Trip 2026-03-05");
+    assert_eq!(read(&made.join("Rome photos").join("plan 2026-03-05.txt")), "plan");
+    assert_eq!(read(&made.join("list.txt")), "list");
+    assert_eq!(outcome.done, [Done::Created { path: made.clone() }], "one step for the whole folder");
+    assert!(source.join("{name} photos").exists(), "the template stays as it is");
+    let undone = undo(outcome);
+    assert!(!made.exists());
     purge(&undone);
 }
 
@@ -2736,7 +2890,7 @@ fn pictures_turn_in_place_and_change_as_copies() {
     let original = crate::inside::tests::turned_jpeg(1);
     fs::write(&photo, &original).unwrap();
     let host = keeping(&sandbox);
-    let edit = |edit: Edit, path: &Path| run_with(Job::Picture { paths: vec![path.to_path_buf()], edit }, &host);
+    let edit = |edit: Edit, path: &Path| run_with(Job::Picture { paths: vec![path.to_path_buf()], edit, keep: crate::picture::Keep::default() }, &host);
 
     // A JPEG's turn changes one number, so it is as long as before.
     let turned = edit(Edit::Turn { quarters: 1, flip: false }, &photo);

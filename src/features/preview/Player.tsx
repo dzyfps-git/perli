@@ -545,18 +545,17 @@ export function Player(live: PlayerProps) {
   }
 
   function paint(pen: CanvasRenderingContext2D, width: number, height: number, scale: number) {
-    const notes = song()?.notes;
-    if (notes?.start.length && length()) {
-      let [low, high] = [127, 0];
-      for (const key of notes.key) [low, high] = [Math.min(low, key), Math.max(high, key)];
+    const shown = song();
+    if (shown?.end && length()) {
+      const { overview, low, high, end } = shown;
       const rows = high - low + 1;
       const tall = Math.max(scale, Math.min(height / rows, 4 * scale));
-      const seconds = length() * tempo();
-      for (let at = 0; at < notes.start.length; at++) {
-        if (silent(notes.channel[at])) continue;
-        const x = (notes.start[at] / seconds) * width;
-        const y = height - ((notes.key[at] - low + 1) / rows) * (height - tall) - tall / 2;
-        pen.fillRect(x, y, Math.max(scale, (notes.long[at] / seconds) * width), tall);
+      // The strip runs to the song's end and its fade, the slices only to its last note.
+      const slice = ((end / (length() * tempo())) * width) / overview.columns;
+      for (let at = 0; at < overview.key.length; at++) {
+        if (silent(overview.channel[at])) continue;
+        const y = height - ((overview.key[at] - low + 1) / rows) * (height - tall) - tall / 2;
+        pen.fillRect(overview.column[at] * slice, y, Math.max(scale, slice), tall);
       }
       return;
     }
@@ -594,7 +593,7 @@ export function Player(live: PlayerProps) {
       data-lyrics={(lyricsShown() && lyrics().length > 0) || undefined}
     >
       <Show
-        when={midi && song()?.notes.start.length}
+        when={midi && song()?.end}
         fallback={
           <div class="player-art">
             <span class="song-icon" aria-hidden="true">
@@ -607,9 +606,7 @@ export function Player(live: PlayerProps) {
         }
       >
         <MidiStage
-          notes={song()!.notes}
-          beats={song()!.beats}
-          bars={song()!.bars}
+          song={song()!}
           muted={settings().muted}
           falling={falling()}
           time={() => time() * tempo()}

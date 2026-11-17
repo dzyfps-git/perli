@@ -5,17 +5,18 @@
 use std::path::Path;
 
 use serde::Deserialize;
-use windows::core::{w, Error, Interface, Result, GUID, PWSTR};
+use windows::core::{w, Error, Interface, Result, GUID, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{E_FAIL, GENERIC_READ, GENERIC_WRITE};
 use windows::Win32::Graphics::Imaging::{
     CLSID_WICImagingFactory, GUID_ContainerFormatBmp, GUID_ContainerFormatJpeg, GUID_ContainerFormatPng, GUID_ContainerFormatTiff,
     GUID_WICPixelFormat1bppIndexed, GUID_WICPixelFormat2bppIndexed, GUID_WICPixelFormat32bppBGRA, GUID_WICPixelFormat4bppIndexed,
-    GUID_WICPixelFormat8bppIndexed, IWICBitmapSource, IWICImagingFactory, WICBitmapDitherTypeNone, WICBitmapEncoderNoCache,
+    GUID_WICPixelFormat8bppIndexed, IWICBitmapFrameDecode, IWICBitmapFrameEncode, IWICBitmapSource, IWICColorContext, IWICImagingFactory,
+    IWICMetadataBlockReader, IWICMetadataBlockWriter, WICBitmapDitherTypeNone, WICBitmapEncoderNoCache,
     WICBitmapInterpolationModeHighQualityCubic, WICBitmapPaletteTypeCustom, WICBitmapTransformFlipHorizontal, WICBitmapTransformOptions,
     WICBitmapTransformRotate0, WICBitmapTransformRotate180, WICBitmapTransformRotate270, WICBitmapTransformRotate90,
     WICConvertBitmapSource, WICDecodeMetadataCacheOnDemand, WICRect,
 };
-use windows::Win32::System::Com::StructuredStorage::PROPBAG2;
+use windows::Win32::System::Com::StructuredStorage::{PROPBAG2, PROPVARIANT};
 use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
 use windows::Win32::System::Variant::{VARIANT, VT_R4};
 
@@ -42,6 +43,112 @@ pub enum Edit {
     /// A copy of part of the picture, each side a share of the whole from 0 to 1, of the picture
     /// as it stands. Shares and not pixels, so a photo its EXIF turns crops where it shows.
     Crop { left: f32, top: f32, width: f32, height: f32 },
+}
+
+/// What a copy keeps of the facts a photo carries. A turn saved into the file keeps them all.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Keep {
+    /// The camera, its settings, when it was taken, and the rest of the picture's notes.
+    pub camera: bool,
+    /// Where it was taken, which goes only with the camera facts.
+    pub place: bool,
+}
+
+impl Default for Keep {
+    fn default() -> Self {
+        Self { camera: true, place: false }
+    }
+}
+
+impl Keep {
+    pub const ALL: Self = Self { camera: true, place: true };
+}
+
+/// The facts a copy takes over one by one, by Windows' names for them, when it is in another
+/// format or leaves the place out. None of them says where the photo was taken.
+const FACTS: [PCWSTR; 17] = [
+    w!("System.Photo.DateTaken"),
+    w!("System.Photo.CameraManufacturer"),
+    w!("System.Photo.CameraModel"),
+    w!("System.Photo.FNumber"),
+    w!("System.Photo.ExposureTime"),
+    w!("System.Photo.ISOSpeed"),
+    w!("System.Photo.FocalLength"),
+    w!("System.Photo.Flash"),
+    w!("System.Photo.ExposureBias"),
+    w!("System.Photo.WhiteBalance"),
+    w!("System.ApplicationName"),
+    w!("System.Author"),
+    w!("System.Copyright"),
+    w!("System.Title"),
+    w!("System.Comment"),
+    w!("System.Keywords"),
+    w!("System.Rating"),
+];
+
+/// Where a photo was taken.
+const PLACE: [PCWSTR; 8] = [
+    w!("System.GPS.Latitude"),
+    w!("System.GPS.LatitudeRef"),
+    w!("System.GPS.Longitude"),
+    w!("System.GPS.LongitudeRef"),
+    w!("System.GPS.Altitude"),
+    w!("System.GPS.AltitudeRef"),
+    w!("System.GPS.Date"),
+    w!("System.GPS.TimeStamp"),
+];
+
+const ORIENTATION: PCWSTR = w!("System.Photo.Orientation");
+
+/// How a JPEG or TIFF says it stands, 1 to 8.
+unsafe fn standing(frame: &IWICBitmapFrameDecode) -> Option<u16> {
+    let mut value = PROPVARIANT::default();
+    unsafe { frame.GetMetadataQueryReader().ok()?.GetMetadataByName(ORIENTATION, &raw mut value) }.ok()?;
+    u16::try_from(&value).ok()
+}
+
+/// Carries `from`'s colour profile into `to`, and what `keep` says of its facts. `same` is when
+/// both are one format, so the blocks of facts go whole, but only with the place: a place can
+/// hide in many notes (EXIF GPS, XMP, IPTC), so a copy without it takes only the facts known to
+/// hold none. The pixels now stand the way the
+/// orientation note said, so it says they stand as they are. Each is a best try: a format with no
+/// room for a fact goes without it.
+unsafe fn carry(factory: &IWICImagingFactory, from: &IWICBitmapFrameDecode, to: &IWICBitmapFrameEncode, same: bool, keep: Keep) {
+    unsafe {
+        let mut count = 0;
+        if from.GetColorContexts(&mut [], &raw mut count).is_ok() && count > 0 {
+            let mut contexts: Vec<Option<IWICColorContext>> = (0..count).map(|_| factory.CreateColorContext().ok()).collect();
+            if contexts.iter().all(Option::is_some) && from.GetColorContexts(&mut contexts, &raw mut count).is_ok() {
+                let _ = to.SetColorContexts(&contexts);
+            }
+        }
+        if !keep.camera {
+            return;
+        }
+        let Ok(reader) = from.GetMetadataQueryReader() else { return };
+        let whole = same
+            && keep.place
+            && from
+                .cast::<IWICMetadataBlockReader>()
+                .and_then(|blocks| to.cast::<IWICMetadataBlockWriter>()?.InitializeFromBlockReader(&blocks))
+                .is_ok();
+        let Ok(writer) = to.GetMetadataQueryWriter() else { return };
+        if !whole {
+            let place: &[PCWSTR] = if keep.place { &PLACE } else { &[] };
+            for &name in FACTS.iter().chain(place) {
+                let mut value = PROPVARIANT::default();
+                if reader.GetMetadataByName(name, &raw mut value).is_ok() {
+                    let _ = writer.SetMetadataByName(name, &raw const value);
+                }
+            }
+        }
+        let mut value = PROPVARIANT::default();
+        if reader.GetMetadataByName(ORIENTATION, &raw mut value).is_ok() {
+            let upright = PROPVARIANT::from(1u16);
+            let _ = writer.SetMetadataByName(ORIENTATION, &raw const upright);
+        }
+    }
 }
 
 /// The formats Windows can write.
@@ -271,11 +378,9 @@ unsafe fn size_of(picture: &IWICBitmapSource) -> Result<(u32, u32)> {
 }
 
 /// Draws `source` into `target` with `edit` done, through Windows' own imaging, and gives the
-/// size it came out. A copy drops the EXIF that says how a photo stands, so the copy stands that
-/// way itself.
-// ponytail: metadata is not carried into what WIC writes (a turned PNG or TIFF, or any copy);
-// copy it with a query writer if someone misses it.
-pub fn write(source: &Path, target: &Path, edit: Edit) -> Result<(u32, u32)> {
+/// size it came out. The pixels are turned the way the photo's EXIF says it stands, so what comes
+/// out stands that way itself. Its colour profile goes with it, and what `keep` says of its facts.
+pub fn write(source: &Path, target: &Path, edit: Edit, keep: Keep) -> Result<(u32, u32)> {
     let _com = Com::enter();
     unsafe {
         let factory: IWICImagingFactory = CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER)?;
@@ -285,9 +390,14 @@ pub fn write(source: &Path, target: &Path, edit: Edit) -> Result<(u32, u32)> {
         }
         let frame = decoder.GetFrame(0)?;
         let mut picture: IWICBitmapSource = frame.cast()?;
+        let noted = match format_of(source) {
+            Some(Format::Jpeg | Format::Tiff) => standing(&frame),
+            _ => None,
+        };
+        let stands = turn_of(noted.or_else(|| crate::inside::orientation(&frame)).unwrap_or(1));
         let turn = match edit {
-            Edit::Turn { quarters, flip } => (quarters % 4, flip),
-            _ => turn_of(crate::inside::orientation(&frame).unwrap_or(1)),
+            Edit::Turn { quarters, flip } => compose(stands, (quarters % 4, flip)),
+            _ => stands,
         };
         if turn != (0, false) {
             let rotator = factory.CreateBitmapFlipRotator()?;
@@ -322,7 +432,9 @@ pub fn write(source: &Path, target: &Path, edit: Edit) -> Result<(u32, u32)> {
             _ => format_of(source).unwrap_or(Format::Png),
         };
         let quality = if edit == Edit::Share { SHARE_QUALITY } else { QUALITY };
-        encode(&factory, &picture, target, format, quality)?;
+        let keep = if matches!(edit, Edit::Turn { .. }) { Keep::ALL } else { keep };
+        let same = decoder.GetContainerFormat()? == format.container();
+        encode(&factory, &picture, target, format, quality, Some((&frame, same, keep)))?;
         size_of(&picture)
     }
 }
@@ -335,7 +447,15 @@ fn span(start: f32, length: f32, whole: u32) -> (i32, i32) {
     (from as i32, (to - from) as i32)
 }
 
-unsafe fn encode(factory: &IWICImagingFactory, picture: &IWICBitmapSource, target: &Path, format: Format, quality: f32) -> Result<()> {
+/// Writes `picture` to `target`, with the facts `from` carries when one is given.
+unsafe fn encode(
+    factory: &IWICImagingFactory,
+    picture: &IWICBitmapSource,
+    target: &Path,
+    format: Format,
+    quality: f32,
+    from: Option<(&IWICBitmapFrameDecode, bool, Keep)>,
+) -> Result<()> {
     unsafe {
         let mut picture = picture.clone();
         let indexed = [GUID_WICPixelFormat1bppIndexed, GUID_WICPixelFormat2bppIndexed, GUID_WICPixelFormat4bppIndexed, GUID_WICPixelFormat8bppIndexed];
@@ -367,6 +487,9 @@ unsafe fn encode(factory: &IWICImagingFactory, picture: &IWICBitmapSource, targe
             let converter = factory.CreateFormatConverter()?;
             converter.Initialize(&picture, &pixels, WICBitmapDitherTypeNone, None, 0.0, WICBitmapPaletteTypeCustom)?;
             picture = converter.cast()?;
+        }
+        if let Some((from, same, keep)) = from {
+            carry(factory, from, &frame, same, keep);
         }
         frame.WriteSource(&picture, std::ptr::null())?;
         frame.Commit()?;
@@ -441,6 +564,83 @@ mod tests {
         assert_eq!(&turned[list + 14..list + 16], &[0x01, 0x31]);
         let length = usize::from(u16::from_be_bytes([turned[10], turned[11]]));
         assert_eq!(&turned[8 + 2 + length..8 + 2 + length + 2], &[0xFF, 0xDA]);
+    }
+
+    /// A photo that stands a quarter turn right, from a camera, with the side of the world it was
+    /// taken in.
+    fn camera_photo(path: &Path) {
+        let plain = crate::inside::tests::turned_jpeg(1);
+        let old = 4 + usize::from(u16::from_be_bytes([plain[4], plain[5]]));
+        let mut tiff = b"II*\0\x08\0\0\0\x03\0".to_vec();
+        tiff.extend(b"\x10\x01\x02\0\x09\0\0\0\x32\0\0\0");
+        tiff.extend(b"\x12\x01\x03\0\x01\0\0\0\x06\0\0\0");
+        tiff.extend(b"\x25\x88\x04\0\x01\0\0\0\x3C\0\0\0");
+        tiff.extend([0; 4]);
+        tiff.extend(b"PerliCam\0\0");
+        tiff.extend(b"\x01\0\x01\0\x02\0\x02\0\0\0N\0\0\0\0\0\0\0");
+        let mut app1 = b"Exif\0\0".to_vec();
+        app1.extend(tiff);
+        let mut bytes = plain[..2].to_vec();
+        bytes.extend([0xFF, 0xE1]);
+        bytes.extend(((app1.len() + 2) as u16).to_be_bytes());
+        bytes.extend(app1);
+        // The town in XMP too, which no GPS block holds.
+        let mut xmp = b"http://ns.adobe.com/xap/1.0/\0".to_vec();
+        xmp.extend(br#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">"#);
+        xmp.extend(br#"<rdf:Description rdf:about="" xmlns:photoshop="http://ns.adobe.com/photoshop/1.0/">"#);
+        xmp.extend(br#"<photoshop:City>Lisbon</photoshop:City></rdf:Description></rdf:RDF></x:xmpmeta>"#);
+        bytes.extend([0xFF, 0xE1]);
+        bytes.extend(((xmp.len() + 2) as u16).to_be_bytes());
+        bytes.extend(xmp);
+        bytes.extend(&plain[old..]);
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    fn fact(path: &Path, name: PCWSTR) -> Option<String> {
+        let _com = Com::enter();
+        unsafe {
+            let factory: IWICImagingFactory = CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER).ok()?;
+            let decoder = factory.CreateDecoderFromFilename(&extended(path), None, GENERIC_READ, WICDecodeMetadataCacheOnDemand).ok()?;
+            let mut value = PROPVARIANT::default();
+            decoder.GetFrame(0).ok()?.GetMetadataQueryReader().ok()?.GetMetadataByName(name, &raw mut value).ok()?;
+            Some(value.to_string())
+        }
+    }
+
+    #[test]
+    fn copies_keep_the_camera_facts_asked_for_and_stand_as_they_show() {
+        let folder = std::env::temp_dir().join(format!("perli-picture-facts-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let photo = folder.join("photo.jpg");
+        camera_photo(&photo);
+        let (model, side) = (w!("System.Photo.CameraModel"), w!("System.GPS.LatitudeRef"));
+        let town = w!("/xmp/photoshop:City");
+        assert_eq!(fact(&photo, model).as_deref(), Some("PerliCam"));
+        assert_eq!(fact(&photo, side).as_deref(), Some("N"));
+        assert_eq!(fact(&photo, town).as_deref(), Some("Lisbon"));
+
+        let small = folder.join("small.jpg");
+        assert_eq!(write(&photo, &small, Edit::Resize { longest: 32 }, Keep::default()).unwrap(), (16, 32), "turned the way it shows");
+        assert_eq!(fact(&small, model).as_deref(), Some("PerliCam"));
+        assert_eq!(fact(&small, side), None, "the place goes by default");
+        assert_eq!(fact(&small, town), None, "and so does a place in XMP");
+        assert_eq!(fact(&small, ORIENTATION).as_deref(), Some("1"));
+
+        let placed = folder.join("placed.jpg");
+        write(&photo, &placed, Edit::Resize { longest: 32 }, Keep::ALL).unwrap();
+        assert_eq!(fact(&placed, side).as_deref(), Some("N"));
+        assert_eq!(fact(&placed, town).as_deref(), Some("Lisbon"));
+
+        let tiff = folder.join("photo.tif");
+        write(&photo, &tiff, Edit::Convert { format: Format::Tiff }, Keep::default()).unwrap();
+        assert_eq!(fact(&tiff, model).as_deref(), Some("PerliCam"), "facts go over to another format");
+        assert_eq!(fact(&tiff, side), None);
+
+        let bare = folder.join("bare.jpg");
+        write(&photo, &bare, Edit::Share, Keep { camera: false, place: true }).unwrap();
+        assert_eq!(fact(&bare, model), None);
+        assert_eq!(fact(&bare, side), None, "no place without the camera facts");
+        std::fs::remove_dir_all(folder).unwrap();
     }
 
     #[test]

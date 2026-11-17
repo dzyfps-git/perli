@@ -1,10 +1,11 @@
-import { dropChoices, onFileDrag, setDropTarget, shelveDrop, spaceDown, startJob, type DropAction } from "../../api";
+import { dropChoices, measureDrop, onFileDrag, setDropTarget, shelveDrop, spaceDown, startJob, type DropAction } from "../../api";
 import { setDragging, SHELF, shelve } from "../reach/reach";
 import type { MenuItem } from "../../ui/Menu";
 import { iconKindOf } from "../filelist/fileKinds";
 import { iconTheme } from "../filelist/prefs";
 import type { FolderView } from "../navigation/folderView";
 import { isBin, join } from "../navigation/path";
+import type { DeleteRequest } from "./ConfirmDelete";
 
 /** A folder under the pointer, and what to mark while it is. */
 interface Spot {
@@ -110,7 +111,7 @@ function createDeck() {
       badge.className = "drag-effect";
       deck.append(badge);
     }
-    const shown = isBin(folder) ? "bin" : action;
+    const shown = action === "delete" ? action : isBin(folder) ? "bin" : action;
     badge.dataset.effect = shown;
     badge.textContent = EFFECT_LABELS[shown];
   }
@@ -164,12 +165,14 @@ const EFFECT_LABELS: Record<DropAction | "bin", string> = {
   copy: "Copy",
   link: "Shortcut",
   bin: "Recycle",
+  delete: "Delete for good",
 };
 
 const ACTION_LABELS: Record<DropAction, string> = {
   move: "Move here",
   copy: "Copy here",
   link: "Create shortcuts here",
+  delete: "Delete for good",
 };
 
 /** `x` and `y` are physical pixels inside the window. */
@@ -203,6 +206,8 @@ export function followFileDrag(
   noted: (place: string, paths: string[]) => void,
   /** A drag rested on a place that stands for `folder`, such as one in the sidebar. */
   openPlace: (folder: string) => void,
+  /** Shift on the Recycle Bin asks first, as Shift+Delete does. */
+  confirmDelete: (request: DeleteRequest) => void,
 ) {
   let shown: Spot | undefined;
   let opening: { element: HTMLElement; folder: string; timer: number; poll: number } | undefined;
@@ -211,13 +216,14 @@ export function followFileDrag(
   const deck = createDeck();
   const edges = createEdgeScroll();
 
-  const run = (spot: Spot, action?: DropAction) =>
-    startJob({ kind: "drop", folder: spot.folder, action }, spot.view?.id).catch(report);
+  /** `id` names the drop, so an answer that comes late never takes a newer one. */
+  const run = (spot: Spot, id: number, action?: DropAction) =>
+    startJob({ kind: "drop", folder: spot.folder, action, id }, spot.view?.id).catch(report);
 
   /** A right drag asks what to do, in the window's own units. */
-  async function ask(spot: Spot, x: number, y: number) {
+  async function ask(spot: Spot, id: number, x: number, y: number) {
     const choices = await dropChoices(spot.folder);
-    const items: MenuItem[] = choices.map((action) => ({ label: ACTION_LABELS[action], action: () => run(spot, action) }));
+    const items: MenuItem[] = choices.map((action) => ({ label: ACTION_LABELS[action], action: () => run(spot, id, action) }));
     if (items.length === 0) return;
     const scale = window.devicePixelRatio;
     showMenu(x / scale, y / scale, [...items, { label: "Cancel", divider: true }]);
@@ -297,7 +303,13 @@ export function followFileDrag(
     if (event.kind === "leave") return;
     const spot = landed;
     if (spot?.folder.startsWith("perli:")) note(spot.folder);
-    else if (spot && event.right) ask(spot, event.x, event.y).catch(report);
-    else if (spot) run(spot);
+    else if (spot && event.right) ask(spot, event.id, event.x, event.y).catch(report);
+    else if (spot && event.forGood)
+      confirmDelete({
+        title: "Delete permanently?",
+        measure: () => measureDrop(event.id),
+        confirm: () => void run(spot, event.id, "delete"),
+      });
+    else if (spot) run(spot, event.id);
   });
 }

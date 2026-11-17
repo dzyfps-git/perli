@@ -2556,10 +2556,12 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 name = "perli"
 version = "0.5.0"
 dependencies = [
+ "base64 0.23.1",
  "brotli",
  "brotli-decompressor",
  "bzip2",
  "cab",
+ "cfb",
  "flate2",
  "lzma-rust2",
  "pulldown-cmark",
@@ -5043,6 +5045,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "23f17fbc870bfac28c6228aed7d6e6df352e26bf7015c4313727e16a7a01ce5e"
 dependencies = [
  "aes",
+ "bzip2",
  "constant_time_eq",
  "crc32fast",
  "deflate64",
@@ -5051,9 +5054,11 @@ dependencies = [
  "hmac",
  "indexmap 2.14.2",
  "libc",
+ "lzma-rust2",
  "memchr",
  "nix",
  "pbkdf2",
+ "ppmd-rust",
  "sha1",
  "typed-path",
  "windows-sys 0.61.2",

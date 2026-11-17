@@ -432,11 +432,11 @@ impl Run<'_> {
             // The shell stops at a refusal, so nothing after it ran.
             let refused = cleared.iter().position(|slot| *slot == Slot::Refused).filter(|_| performed.is_err());
             let mut again = Vec::new();
-            for (index, (entry, slot)) in list.into_iter().zip(slots).enumerate() {
+            for (index, ((entry, slot), clear)) in list.into_iter().zip(slots).zip(cleared).enumerate() {
                 match refused {
                     Some(at) if index == at => again.extend(self.replace_without_bin(entry)?),
                     Some(at) if index > at => again.push(entry),
-                    _ => self.record_elevated(entry, slot),
+                    _ => self.record_elevated(entry, slot, clear),
                 }
             }
             match performed {
@@ -475,7 +475,12 @@ impl Run<'_> {
     /// Only the shell's own report counts. A target that exists proves nothing, because the
     /// user may have told the shell to skip it or keep both, and undo would then remove their
     /// old file.
-    fn record_elevated(&mut self, entry: Elevated, slot: Slot) {
+    /// The old item a replace sent to the bin comes first, so Undo takes the new one away and
+    /// then brings the old one back.
+    fn record_elevated(&mut self, entry: Elevated, slot: Slot, cleared: Slot) {
+        if let (Elevated::Copy { target, .. } | Elevated::Move { target, .. }, Slot::Recycled(item)) = (&entry, cleared) {
+            self.done.push(Done::Recycled { original: target.clone(), item });
+        }
         match (entry, slot) {
             (Elevated::Copy { .. } | Elevated::New { .. }, Slot::Finished(path)) => {
                 self.done.push(Done::Created { path });
@@ -577,7 +582,7 @@ mod tests {
     use windows::Win32::UI::Shell::COPYENGINE_S_USER_IGNORED;
 
     use super::super::tests::{Sandbox, Script};
-    use super::super::Run;
+    use super::super::{Done, Outcome, Run};
     use super::*;
 
     /// The real flags, less the Recycle Bin, which tests stay out of.
@@ -638,7 +643,7 @@ mod tests {
         let mut run = Run::new(&script, &control);
         let slots = slots.lock().unwrap().clone();
         for (entry, slot) in list.into_iter().zip(slots) {
-            run.record_elevated(entry, slot);
+            run.record_elevated(entry, slot, Slot::Waiting);
         }
         assert_eq!(fs::read_to_string(&old).unwrap(), "old");
         // Only the names, because the shell spells out a temp folder given in short 8.3 form.
@@ -664,6 +669,39 @@ mod tests {
                 ("created", "new".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn undo_after_an_admin_replace_brings_the_old_file_back() {
+        let sandbox = Sandbox::new();
+        let _com = Com::enter();
+        let replaced = sandbox.file(r"to\c.txt", "old c");
+        let newer = sandbox.file("c.txt", "new c");
+        let list = vec![Elevated::Copy { source: newer, target: replaced.clone(), replace: true }];
+        let script = Script::default();
+        let control = Arc::new(Control::default());
+        let mut run = Run::new(&script, &control);
+
+        // The real flags less elevation, so the old file goes to the bin as it would under UAC.
+        assert!(run.run_elevated(list, ELEVATED_FLAGS).is_ok());
+
+        assert_eq!(fs::read_to_string(&replaced).unwrap(), "new c");
+        assert!(
+            matches!(&run.done[..], [Done::Recycled { original, .. }, Done::Created { .. }] if *original == replaced),
+            "{:?}",
+            run.done
+        );
+        let outcome = Outcome {
+            done: std::mem::take(&mut run.done),
+            touched: Default::default(),
+            kept: Vec::new(),
+            failed: Vec::new(),
+            retries: false,
+            cancelled: false,
+        };
+        let undone = super::super::tests::undo(outcome);
+        assert!(undone.failed.is_empty());
+        assert_eq!(fs::read_to_string(&replaced).unwrap(), "old c");
     }
 
     #[test]

@@ -422,7 +422,10 @@ struct Bin {
 
 /// What a ZIP opened as a folder knows beyond a normal folder.
 pub struct Zipped {
+    /// The archive read, a file in the cache for one inside another.
     pub archive: PathBuf,
+    /// The shown path of each archive on the way, the outermost first.
+    pub levels: Vec<PathBuf>,
     /// Anything in the archive needs a password.
     pub locked: bool,
     /// Each entry's packed size, in the same order as `Listing::entries`.
@@ -550,8 +553,8 @@ impl Listing {
             return Self::read_bin(order);
         }
         let full = resolve(path)?;
-        if let Some((archive, inner)) = zipped::split(Path::new(&full)) {
-            return Self::read_zip(full, archive, &inner, order);
+        if let Some(zip) = zipped::opened(Path::new(&full)) {
+            return Self::read_zip(full, zip, order);
         }
         let (mut entries, mut tagged) = if network::is_server(&full) {
             (read_shares(&full)?, tags::Tagged::new())
@@ -593,14 +596,17 @@ impl Listing {
         Ok(listing.arrange(order))
     }
 
-    fn read_zip(full: String, archive: PathBuf, inner: &str, order: Order) -> Result<Self> {
+    fn read_zip(full: String, zip: zipped::Opened, order: Order) -> Result<Self> {
         let failed = |message: String| windows::core::Error::new(windows::Win32::Foundation::E_FAIL, message);
-        let (nodes, locked) = zipped::list(&archive, inner, false).map_err(failed)?;
+        if let Some(reason) = zip.failed {
+            return Err(failed(reason));
+        }
+        let (nodes, locked) = zipped::list(&zip.archive, &zip.inner, false).map_err(failed)?;
         let packed = nodes.iter().map(|node| node.packed).collect();
         let listing = Self {
             folder: full.into(),
             entries: Arc::new(nodes.into_iter().map(Entry::from_zip).collect()),
-            zip: Some(Arc::new(Zipped { archive, locked, packed })),
+            zip: Some(Arc::new(Zipped { archive: zip.archive, levels: zip.levels, locked, packed })),
             ..Self::default()
         };
         Ok(listing.arrange(order))
@@ -1300,8 +1306,8 @@ pub fn pictures_in(folder: &Path, most: usize) -> Vec<PathBuf> {
 pub fn subfolders(path: &Path, sight: Sight) -> std::io::Result<Vec<String>> {
     use std::os::windows::fs::MetadataExt;
 
-    if let Some((archive, inner)) = zipped::split(path) {
-        let (nodes, _) = zipped::list(&archive, &inner, false).map_err(std::io::Error::other)?;
+    if let Some(zip) = zipped::opened(path) {
+        let (nodes, _) = zipped::list(&zip.archive, &zip.inner, false).map_err(std::io::Error::other)?;
         let mut names: Vec<String> = nodes.into_iter().filter(|node| node.folder).map(|node| node.name).collect();
         names.sort_by(|a, b| natural(&null_terminated(a.as_ref()), &null_terminated(b.as_ref())));
         return Ok(names);

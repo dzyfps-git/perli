@@ -1,9 +1,10 @@
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { Effect, getCurrentWindow } from "@tauri-apps/api/window";
 import { createEffect, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
-import { createTag, fetchPictureFile, isDefaultApp, listTags, restoreTagged, setDefaultApp, taggedFiles, terminals } from "../../api";
+import { archiveCacheSize, clearArchiveCache, createTag, fetchPictureFile, isDefaultApp, listTags, restoreTagged, setDefaultApp, taggedFiles, terminals } from "../../api";
 import type { Tag, Terminal } from "../../api";
 import { ColorField, Switch } from "../../ui/Controls";
+import { formatSize } from "../../ui/format";
 import { morph } from "../../ui/morph";
 import {
   dateForm,
@@ -57,6 +58,7 @@ import {
 import { counted } from "../dialogs/parts";
 import { openSettingsFile, pick, PICTURE_TYPES, saveSettingsFile } from "../dialogs/Picker";
 import { keyText } from "../keys/keybinds";
+import { TemplateSettings } from "./TemplateSettings";
 import { baseName } from "../navigation/path";
 import { VIEWER_SETTINGS } from "../preview/viewerPrefs";
 import { bookmarksCompact, setBookmarksCompact, setSidebarOpen, sidebarOpen } from "../sidebar/saved";
@@ -136,6 +138,8 @@ const SECTIONS = [
   { id: "tags", label: "Tags", icon: "" },
   { id: "viewers", label: "Viewers", icon: "" },
   { id: "icons", label: "Icons", icon: "" },
+  { id: "archives", label: "Archives", icon: "" },
+  { id: "templates", label: "Templates", icon: "" },
   { id: "default", label: "Default file manager", icon: "" },
   { id: "backup", label: "Backup", icon: "" },
   { id: "updates", label: "Updates", icon: "" },
@@ -192,6 +196,9 @@ export function Settings(props: {
   onBeforeUpdate: () => Promise<unknown>;
   /** Opens the sheet of keyboard shortcuts. */
   onKeys: () => void;
+  /** Shows the templates folder in the file list. */
+  onRevealTemplates: () => void;
+  onFailure: (failure: unknown) => void;
 }) {
   const [isDefault, setIsDefault] = createSignal(false);
   const [defaultFailure, setDefaultFailure] = createSignal<string>();
@@ -254,13 +261,28 @@ export function Settings(props: {
   onMount(() => window.addEventListener("focus", followWindows));
   onCleanup(() => window.removeEventListener("focus", followWindows));
 
+  /** What files taken out of archives take up, and what became of the last clear. */
+  const [cacheSize, setCacheSize] = createSignal<number>();
+  const [cacheNote, setCacheNote] = createSignal<string>();
   /** The terminals on this PC, which are the ones on offer. */
   const [found, setFound] = createSignal<Terminal[]>([]);
   createEffect(() => {
     if (!props.open) return;
     isDefaultApp().then(setIsDefault).catch(console.error);
     terminals().then(setFound).catch(console.error);
+    archiveCacheSize().then(setCacheSize).catch(console.error);
   });
+
+  async function clearCache() {
+    const before = cacheSize() ?? 0;
+    const left = await clearArchiveCache().catch(() => before);
+    setCacheSize(left);
+    setCacheNote(
+      left
+        ? `Cleared ${formatSize(Math.max(before - left, 0))}. ${formatSize(left)} stays, as an app still has it open.`
+        : `Cleared ${formatSize(before)}.`,
+    );
+  }
 
   createEffect(() => {
     if (props.shown) queueMicrotask(() => searchInput?.focus({ preventScroll: true }));
@@ -897,6 +919,40 @@ export function Settings(props: {
           >
             <h3>Icons</h3>
             <IconSettings />
+          </section>
+
+          <section
+            class="settings-section"
+            data-section="archives"
+            data-words="zip 7z rar cache temp space disk taken out clear storage"
+          >
+            <h3>Archives</h3>
+            <p class="settings-note">
+              A file opened from inside an archive is taken out to a cache first. It stays a day, in case the app it
+              opened in still uses it.
+            </p>
+            <div class="settings-chips settings-cache">
+              <span class="settings-cache-size" role="status" data-empty={!cacheSize() || undefined}>
+                {cacheSize() === undefined ? "Adding up…" : cacheSize() ? `${formatSize(cacheSize()!)} taken out` : "Nothing taken out"}
+              </span>
+              <button class="settings-chip" disabled={!cacheSize()} onClick={() => void clearCache()}>
+                Clear
+              </button>
+            </div>
+            <Show when={cacheNote()}>
+              <p class="settings-note" role="status">
+                {cacheNote()}
+              </p>
+            </Show>
+          </section>
+
+          <section
+            class="settings-section"
+            data-section="templates"
+            data-words="new template templates make start from date name folder"
+          >
+            <h3>Templates</h3>
+            <TemplateSettings onReveal={props.onRevealTemplates} onFailure={props.onFailure} />
           </section>
 
           <section

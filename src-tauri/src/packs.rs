@@ -338,9 +338,66 @@ fn tar_reader(path: &Path, squeeze: Squeeze) -> Result<Box<dyn Read>, String> {
         Squeeze::Gzip => Box::new(flate2::read::MultiGzDecoder::new(file)),
         Squeeze::Bzip2 => Box::new(bzip2::read::MultiBzDecoder::new(file)),
         Squeeze::Xz => Box::new(lzma_rust2::XzReader::new(file, true)),
-        // ponytail: one zstd frame, as tools write a TAR; several frames would end after the first.
-        Squeeze::Zstd => Box::new(ruzstd::decoding::StreamingDecoder::new(file).map_err(|error| error.to_string())?),
+        Squeeze::Zstd => Box::new(Zstd::new(file)),
     })
+}
+
+/// A zstd stream read through all its frames. Tools that write in parts, and files joined end to
+/// end, hold more than one. Skippable frames are passed over.
+pub(crate) struct Zstd<R> {
+    source: R,
+    frame: ruzstd::decoding::FrameDecoder,
+    frames: u32,
+}
+
+impl<R: io::BufRead> Zstd<R> {
+    pub(crate) fn new(source: R) -> Self {
+        Self { source, frame: ruzstd::decoding::FrameDecoder::new(), frames: 0 }
+    }
+
+    /// Starts the next frame. False at the end of the stream, and at bytes after the first frame
+    /// that are no frame at all, which zstd's own tools leave be too.
+    fn next_frame(&mut self) -> io::Result<bool> {
+        use ruzstd::decoding::errors::{FrameDecoderError, ReadFrameHeaderError};
+        loop {
+            if self.frames > 0 && self.source.fill_buf()?.is_empty() {
+                return Ok(false);
+            }
+            match self.frame.reset(&mut self.source) {
+                Ok(()) => {
+                    self.frames += 1;
+                    return Ok(true);
+                }
+                Err(FrameDecoderError::ReadFrameHeaderError(ReadFrameHeaderError::SkipFrame { length, .. })) => {
+                    io::copy(&mut (&mut self.source).take(u64::from(length)), &mut io::sink())?;
+                }
+                Err(FrameDecoderError::ReadFrameHeaderError(ReadFrameHeaderError::BadMagicNumber(_))) if self.frames > 0 => return Ok(false),
+                Err(error) => return Err(io::Error::new(io::ErrorKind::InvalidData, error)),
+            }
+        }
+    }
+}
+
+impl<R: io::BufRead> Read for Zstd<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        if buffer.is_empty() {
+            return Ok(0);
+        }
+        loop {
+            if self.frames > 0 && self.frame.can_collect() > 0 {
+                return self.frame.read(buffer);
+            }
+            if self.frames == 0 || self.frame.is_finished() {
+                if !self.next_frame()? {
+                    return Ok(0);
+                }
+                continue;
+            }
+            self.frame
+                .decode_blocks(&mut self.source, ruzstd::decoding::BlockDecodingStrategy::UptoBlocks(1))
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        }
+    }
 }
 
 /// A TAR entry as an item. Links and devices are left out: they lead outside what was packed.
@@ -952,7 +1009,10 @@ pub(crate) mod tests {
         bz.write_all(&plain).unwrap();
         let mut xz = lzma_rust2::XzWriter::new(Vec::new(), lzma_rust2::XzOptions::with_preset(1)).unwrap();
         xz.write_all(&plain).unwrap();
-        let zst = ruzstd::encoding::compress_to_vec(plain.as_slice(), ruzstd::encoding::CompressionLevel::Fastest);
+        // Two frames, as a writer that squeezes in parts makes.
+        let half = plain.len() / 2;
+        let mut zst = ruzstd::encoding::compress_to_vec(&plain[..half], ruzstd::encoding::CompressionLevel::Fastest);
+        zst.extend(ruzstd::encoding::compress_to_vec(&plain[half..], ruzstd::encoding::CompressionLevel::Fastest));
         let files = [("a.tar", plain.clone()), ("a.tar.gz", gz.finish().unwrap()), ("a.tbz2", bz.finish().unwrap()), ("a.txz", xz.finish().unwrap()), ("a.tar.zst", zst)];
         for (name, bytes) in files {
             let path = fixture.0.join(name);

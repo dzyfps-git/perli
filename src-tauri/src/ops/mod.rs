@@ -25,11 +25,12 @@ use std::sync::{Arc, Condvar, Mutex};
 
 use serde::{Deserialize, Serialize};
 use windows::core::{Error, Result};
+use windows::Win32::Foundation::E_FAIL;
 
 pub use archive::{safe as safe_relative, ticks_of as zip_ticks};
 pub use bin::{limit as bin_limit, read as read_bin, BinItem};
 pub use incoming::{offers_files, Incoming};
-pub use names::{check_rename, check_renames};
+pub use names::{check as check_name, check_rename, check_renames};
 pub use replace::{seen, sweep as sweep_kept, Seen};
 pub use shell::{shell_item, Com};
 pub use wallpaper::shown as wallpaper_shown;
@@ -49,7 +50,8 @@ pub enum Job {
     New { folder: PathBuf, directory: bool },
     /// A new folder in `folder`, called `name` if that works, with `sources` moved into it.
     Gather { sources: Vec<PathBuf>, folder: PathBuf, name: Option<String> },
-    Template { folder: PathBuf, template: Template },
+    /// `named` means the user already named it, so nothing asks them to rename it.
+    Template { folder: PathBuf, template: Template, named: bool },
     Shortcut { sources: Vec<PathBuf>, folder: PathBuf },
     /// A new archive beside the first source, its files locked with `password` if there is one
     /// and the format can lock. With `aes`, a ZIP's lock is AES-256 rather than ZipCrypto.
@@ -70,8 +72,15 @@ pub enum Job {
     /// Text the user edited, written over the file it came from. `read` is how the file stood
     /// when they read it, which a change since is asked about.
     Save { path: PathBuf, bytes: Vec<u8>, read: Option<Seen> },
-    Picture { paths: Vec<PathBuf>, edit: crate::picture::Edit },
+    Picture { paths: Vec<PathBuf>, edit: crate::picture::Edit, keep: crate::picture::Keep },
     Wallpaper { picture: PathBuf },
+    /// A tag put on or taken off files. Only the files that change are undone.
+    Tag { paths: Vec<PathBuf>, tag: u32, on: bool },
+    DeleteTag { id: u32 },
+    /// Every attachment of a mail file, landed in `folder` as dragged files land.
+    Attachments { mail: PathBuf, folder: PathBuf },
+    /// One after another under one card, such as rows of two archives and a folder copied at once.
+    Several { jobs: Vec<Job> },
 }
 
 /// How hard a new archive squeezes its files.
@@ -117,6 +126,8 @@ pub enum Content {
     Bytes(Vec<u8>),
     /// A blank document of that type, to copy.
     Copy(PathBuf),
+    /// A folder to copy whole. Each `(token, text)` pair is filled in on the names inside it.
+    Tree { folder: PathBuf, tokens: Vec<(String, String)> },
 }
 
 /// One change a job made, in a form that can be undone.
@@ -129,6 +140,12 @@ pub enum Done {
     Replaced { path: PathBuf, kept: PathBuf },
     /// The desktop picture changed to `after`. `before` is each screen's picture until then.
     Wallpaper { before: Screens, after: PathBuf },
+    /// `tag`, called `name` then, put on or taken off just these files. `keys` tell the files
+    /// apart for the undo, since by then a path may name another file.
+    Tagged { paths: Vec<PathBuf>, keys: Vec<crate::tags::FileKey>, tag: u32, name: String, on: bool },
+    TagDeleted { removed: crate::tags::Removed },
+    /// A deleted tag brought back, which deleting it again undoes.
+    TagRevived { tag: crate::tags::Tag },
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -347,6 +364,8 @@ struct Run<'a> {
     temp_folders: HashSet<PathBuf>,
     /// Names taken and names free where this job's picks are going.
     tally: (u64, u64),
+    /// Filled in on the names a folder template copies, such as `{date}`. Empty for any other copy.
+    tokens: Vec<(String, String)>,
 }
 
 impl<'a> Run<'a> {
@@ -366,6 +385,7 @@ impl<'a> Run<'a> {
             undoing: false,
             temp_folders: HashSet::new(),
             tally: (0, 0),
+            tokens: Vec::new(),
         }
     }
 
@@ -377,13 +397,16 @@ impl<'a> Run<'a> {
             Job::RenameAll { renames } => self.rename_all(renames),
             Job::New { folder, directory } => self.new_item(&folder, directory),
             Job::Gather { sources, folder, name } => self.gather(sources, &folder, name.as_deref()),
-            Job::Template { folder, template } => self.new_from(&folder, &template),
+            Job::Template { folder, template, .. } => self.new_from(&folder, &template),
             Job::Shortcut { sources, folder } => self.shortcuts(&sources, &folder),
             Job::Zip { sources, level, password, format, aes } => self.zip(sources, level, password.as_deref(), format, aes),
             Job::Unzip { archives, own_folder, smart, only, password, into } => {
                 self.unzip(archives, own_folder, smart, &only, password.as_deref(), into.as_deref())
             }
             Job::Receive { incoming, folder } => self.receive(incoming, &folder),
+            Job::Attachments { mail, folder } => self.save_attachments(&mail, &folder),
+            Job::Tag { paths, tag, on } => self.tag(&paths, None, tag, on),
+            Job::DeleteTag { id } => self.delete_tag(id),
             Job::Recycle { paths } => {
                 self.add_total(paths.len() as u64, 0);
                 self.recycle(paths)
@@ -399,8 +422,11 @@ impl<'a> Run<'a> {
             }
             Job::Undo { records } => self.undo(records),
             Job::Save { path, bytes, read } => self.save(&path, &bytes, read),
-            Job::Picture { paths, edit } => self.edit_pictures(&paths, edit),
+            Job::Picture { paths, edit, keep } => self.edit_pictures(&paths, edit, keep),
             Job::Wallpaper { picture } => self.set_wallpaper(&picture),
+            // ponytail: each part adds its total as it starts, so the bar steps back once per part;
+            // count all parts first if that reads as wrong.
+            Job::Several { jobs } => jobs.into_iter().try_for_each(|job| self.job(job)),
         }
     }
 
@@ -482,12 +508,16 @@ impl<'a> Run<'a> {
 
     // ponytail: no admin route for templates, as the shell's new item can't carry their content.
     fn new_from(&mut self, folder: &Path, template: &Template) -> Flow {
-        self.add_total(1, 0);
         let target = names::free(folder, &template.stem, &template.extension);
+        if let Content::Tree { folder: source, tokens } = &template.content {
+            return self.new_tree(source, target, tokens.clone());
+        }
+        self.add_total(1, 0);
         let made = self.attempt(folder, None, |_| match &template.content {
             Content::Empty => sys::create_file(&target),
             Content::Bytes(bytes) => sys::write_new(&target, bytes),
             Content::Copy(file) => sys::copy_file(file, &target, false, |_| true),
+            Content::Tree { .. } => unreachable!("a folder template is copied as a tree"),
         })?;
         if made.is_some() {
             self.done.push(Done::Created { path: target });
@@ -546,16 +576,58 @@ impl<'a> Run<'a> {
                         _ => None,
                     }).collect())?;
                 }
-                Done::Replaced { .. } | Done::Wallpaper { .. } => {
+                Done::Replaced { .. } | Done::Wallpaper { .. } | Done::Tagged { .. } | Done::TagDeleted { .. } | Done::TagRevived { .. } => {
                     for record in group {
                         match record {
                             Done::Replaced { path, kept } => self.put_back_kept(path, kept)?,
                             Done::Wallpaper { before, .. } => self.put_back_wallpaper(before)?,
+                            Done::Tagged { paths, keys, tag, on, .. } => self.tag(paths, Some(keys), *tag, !on)?,
+                            Done::TagDeleted { removed } => self.revive_tag(removed)?,
+                            Done::TagRevived { tag } => self.delete_tag(tag.id)?,
                             _ => {}
                         }
                     }
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// Only the files whose tags change go in the undo step, so an undo leaves alone what had the
+    /// tag before.
+    /// `keys`, from an undo step, pick the files in place of `paths`.
+    fn tag(&mut self, paths: &[PathBuf], keys: Option<&[crate::tags::FileKey]>, tag: u32, on: bool) -> Flow {
+        let place = paths.first().map_or(Path::new(""), PathBuf::as_path);
+        let change = |_: &mut Self| {
+            match keys {
+                Some(keys) => crate::tags::change_by_key(paths, keys, tag, on),
+                None => crate::tags::change(paths, tag, on),
+            }
+            .map_err(|message| Error::new(E_FAIL, message.as_str()))
+        };
+        let Some(changed) = self.attempt(place, None, change)? else {
+            return Ok(());
+        };
+        let (paths, keys): (Vec<PathBuf>, Vec<_>) = changed.into_iter().unzip();
+        self.touched.extend(paths.iter().map(|path| sys::parent(path)));
+        if !paths.is_empty() {
+            self.done.push(Done::Tagged { paths, keys, tag, name: crate::tags::name_of(tag), on });
+        }
+        Ok(())
+    }
+
+    fn delete_tag(&mut self, id: u32) -> Flow {
+        let remove = |_: &mut Self| crate::tags::remove(id).map_err(|message| Error::new(E_FAIL, message.as_str()));
+        if let Some(removed) = self.attempt(Path::new("Tags"), None, remove)? {
+            self.done.push(Done::TagDeleted { removed });
+        }
+        Ok(())
+    }
+
+    fn revive_tag(&mut self, removed: &crate::tags::Removed) -> Flow {
+        let revive = |_: &mut Self| crate::tags::revive(removed).map_err(|message| Error::new(E_FAIL, message.as_str()));
+        if self.attempt(Path::new("Tags"), None, revive)?.is_some() {
+            self.done.push(Done::TagRevived { tag: removed.tag.clone() });
         }
         Ok(())
     }
@@ -680,7 +752,11 @@ impl<'a> Run<'a> {
                     self.touched.insert(sys::parent(to))
                 }
                 Done::Recycled { original, .. } | Done::Replaced { path: original, .. } => self.touched.insert(sys::parent(original)),
-                Done::Wallpaper { .. } => false,
+                Done::Wallpaper { .. } | Done::TagDeleted { .. } | Done::TagRevived { .. } => false,
+                Done::Tagged { paths, .. } => {
+                    self.touched.extend(paths.iter().map(|path| sys::parent(path)));
+                    false
+                }
             };
         }
         Outcome {

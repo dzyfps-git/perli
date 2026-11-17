@@ -23,8 +23,10 @@ export interface Opened {
   loadMs: number;
   /** Rows to select straight away, when this is a new order of the same folder. */
   selected?: number[];
-  /** The ZIP file this folder is in, when it is one inside a ZIP. */
+  /** The archive this folder is in, when it is one inside an archive: the innermost as shown. */
   archive: string | null;
+  /** The shown path of each archive on the way, the outermost first. */
+  archives: string[];
   /** Something in that ZIP needs a password Perli doesn't have yet. */
   locked: boolean;
 }
@@ -207,7 +209,10 @@ export type Task =
   | { kind: "newFolderFrom"; selection: Selection; folder: string; moveIn: boolean }
   | { kind: "copyPaths" | "movePaths"; paths: string[]; folder: string }
   | { kind: "template"; folder: string; extension: string }
-  | { kind: "ownTemplate"; folder: string; name: string; date?: string }
+  /** `called` is what the user named it, for a `{name}` in the template's names. */
+  | { kind: "ownTemplate"; folder: string; name: string; date?: string; called?: string }
+  | { kind: "renameTemplate"; name: string; to: string }
+  | { kind: "removeTemplate"; name: string }
   | { kind: "fromClipboard"; folder: string }
   | { kind: "saveTemplate"; selection: Selection }
   | { kind: "zip"; selection: Selection; level?: ZipLevel; password?: string; format?: ArchiveFormat; aes?: boolean }
@@ -215,7 +220,11 @@ export type Task =
   | { kind: "unzip"; selection: Selection; ownFolder: boolean; smart?: boolean; only?: string[]; password?: string }
   | { kind: "paste"; folder: string }
   | { kind: "pasteShortcut"; folder: string }
-  | { kind: "drop"; folder: string; action?: DropAction }
+  /** Every attachment of a mail file, into `folder`. */
+  | { kind: "saveAttachments"; path: string; folder: string }
+  | { kind: "tag"; target: ShellTarget; tag: number; on: boolean }
+  | { kind: "deleteTag"; id: number }
+  | { kind: "drop"; folder: string; action?: DropAction; id: number }
   | { kind: "recycle" | "delete" | "restore" | "purge"; selection: Selection }
   | { kind: "restoreTo"; selection: Selection; folder: string }
   | { kind: "empty" }
@@ -224,8 +233,14 @@ export type Task =
   /** A quick edit's text saved over its file. `seen` is what the preview said of it when read. */
   | { kind: "save"; path: string; text: string; seen?: string }
   /** Pictures by path, from a preview, or the selected rows. */
-  | { kind: "picture"; paths?: string[]; selection?: Selection; edit: PictureEdit }
+  | { kind: "picture"; paths?: string[]; selection?: Selection; edit: PictureEdit; keep?: PictureKeep }
   | { kind: "wallpaper"; path: string };
+
+/** What a copy keeps of a photo's facts. A turn saved into the file keeps them all. */
+export interface PictureKeep {
+  camera: boolean;
+  place: boolean;
+}
 
 export type PictureFormat = "png" | "jpeg" | "tiff" | "bmp";
 /** The formats a picture can be copied as, and their names. */
@@ -239,7 +254,7 @@ export type PictureEdit =
   /** Never bigger than the picture already is. */
   | { kind: "resize"; longest: number }
   | { kind: "convert"; format: PictureFormat }
-  /** A smaller JPEG with no place or camera in it. */
+  /** A smaller JPEG, keeping what `keep` says of the photo's facts. */
   | { kind: "share" }
   /** A copy of part of it. Each side is a share of the whole picture as it shows, from 0 to 1. */
   | { kind: "crop"; left: number; top: number; width: number; height: number };
@@ -310,6 +325,8 @@ export type JobEvent = { id: number } & (
       /** False for a restore or an undo, whose skips are only listed. */
       retries: boolean;
       cancelled: boolean;
+      /** Tags changed, so the tag list and the tag dots need reading again. */
+      tags: boolean;
       /** The undo step this job added. */
       step: number | null;
     } & Undoable)
@@ -402,11 +419,12 @@ export type FileDrag =
   /** `effect` is what letting go there would do, or null where nothing would happen. */
   | { kind: "over"; x: number; y: number; effect?: DropAction | null }
   /** `right` means the right button dragged, so the user gets to pick what happens. */
-  | { kind: "drop"; x: number; y: number; right: boolean }
+  | { kind: "drop"; id: number; x: number; y: number; right: boolean; forGood: boolean }
   | { kind: "leave" };
 
 /** What a drop can do, when the user picks it from a menu. */
-export type DropAction = "move" | "copy" | "link";
+/** `delete` is Shift on the Recycle Bin, and never a menu choice. */
+export type DropAction = "move" | "copy" | "link" | "delete";
 
 /** What a view wants from its search: a new query, the same one again, or the rows found so far. */
 export type SearchStep = "start" | "again" | "grown";
@@ -531,6 +549,10 @@ export const isFile = (path: string) => invoke<boolean>("is_file", { path });
 /** Keeps the password of a ZIP opened as a folder for this session. Fails with the
  *  wrong-password message unless it opens the ZIP's locked files. */
 export const unlockZip = (path: string, password: string) => invoke<void>("unlock_zip", { path, password });
+/** What files taken out of archives take up in Perli's cache, in bytes. */
+export const archiveCacheSize = () => invoke<number>("archive_cache_size");
+/** Empties that cache. Gives back the bytes left, which apps still have open. */
+export const clearArchiveCache = () => invoke<number>("clear_archive_cache");
 
 /** `shown` is the request of the folder on screen, whose rows must outlive this open. */
 export const openFolder = (view: number, request: number, shown: number, path: string, order: Order) =>
@@ -707,15 +729,14 @@ export const createTag = (name: string, color: number) => invoke<Tag>("create_ta
 
 export const editTag = (id: number, name: string, color: number) => invoke<void>("edit_tag", { id, name, color });
 
-export const deleteTag = (id: number) => invoke<void>("delete_tag", { id });
+/** Undo brings the tag back, on every file that had it. */
+export const deleteTag = (id: number) => runJob({ kind: "deleteTag", id });
 
-/** Puts `tag` on the selected rows, or takes it off. */
-export const setTag = (target: ShellTarget, tag: number, on: boolean) =>
-  invoke<void>("set_tag", { target, tag, on });
+/** Puts `tag` on the selected rows, or takes it off, as a job Undo can take back. */
+export const setTag = (target: ShellTarget, tag: number, on: boolean) => runJob({ kind: "tag", target, tag, on });
 
 /** Puts `tag` on files by their paths, or takes it off. */
-export const setTagPaths = (paths: string[], tag: number, on: boolean) =>
-  invoke<void>("set_tag_paths", { paths, tag, on });
+export const setTagPaths = (paths: string[], tag: number, on: boolean) => setTag({ kind: "paths", paths }, tag, on);
 
 /** Every tagged file here, by path, with its tags, for a backup. */
 export const taggedFiles = () => invoke<[string, number[]][]>("tagged_files");
@@ -900,7 +921,14 @@ export const terminals = () => invoke<Terminal[]>("terminals");
 export const newTypes = () => invoke<NewType[]>("new_types");
 
 /** The names of the user's own templates, A to Z. */
-export const ownTemplates = () => invoke<string[]>("own_templates");
+/** One of the user's own templates. `asks` means a `{name}` is in it, so the user names it first. */
+export interface OwnTemplate {
+  name: string;
+  folder: boolean;
+  asks: boolean;
+}
+
+export const ownTemplates = () => invoke<OwnTemplate[]>("own_templates");
 
 export const templatesFolder = () => invoke<string>("templates_folder");
 
@@ -972,6 +1000,8 @@ export const spaceDown = () => invoke<boolean>("space_down");
 
 /** What the last drop can do on `folder`, for the user to pick from. */
 export const dropChoices = (folder: string) => invoke<DropAction[]>("drop_choices", { folder });
+/** The count and size of the drop that waits for an answer. */
+export const measureDrop = (id: number) => invoke<Measured>("measure_drop", { id });
 
 /** Starts dragging the selected files to any app. Ends when the user lets go. */
 export const startDrag = (selection: Selection) => invoke<void>("start_drag", { selection });
@@ -1000,6 +1030,7 @@ export type Preview =
   | { kind: "database"; tables: DbTable[]; failure: string | null }
   | { kind: "parquet" }
   | { kind: "font"; faces: FontFacts[] }
+  | ({ kind: "mail" } & Mail)
   | { kind: "pdf" }
   | { kind: "song" }
   | { kind: "audio" }
@@ -1007,6 +1038,17 @@ export type Preview =
   | { kind: "picture" }
   /** Only in the cloud, so nothing was read. Windows' picture of it shows, if it has one. */
   | { kind: "cloud" };
+
+/** A mail saved as a file. `date` is FILETIME ticks, or 0 when the mail doesn't say. */
+export interface Mail {
+  subject: string;
+  from: string;
+  to: string;
+  cc: string;
+  date: number;
+  body: string;
+  attachments: { name: string; size: number }[];
+}
 
 /** A line of a book's own table of contents, and which chapter it opens. */
 export interface BookHeading {
@@ -1023,6 +1065,8 @@ export interface ArchiveEntry {
   modified: string | null;
   /** Protected by a password. */
   locked: boolean;
+  /** How a ZIP's file is squeezed, such as "Deflate" or "Zstandard". Null for other kinds. */
+  method?: string | null;
 }
 
 export const previewRow = (view: number, request: number, row: number, offset = 0) =>
@@ -1193,6 +1237,14 @@ export interface Notes {
   channel: Uint8Array;
 }
 
+/** Where a MIDI song's notes sound across it, in `columns` slices: each key and channel once a slice. */
+export interface Overview {
+  columns: number;
+  column: Uint16Array;
+  key: Uint8Array;
+  channel: Uint8Array;
+}
+
 /** A MIDI file's name, instruments and notes. */
 export interface SongInfo {
   title: string | null;
@@ -1200,12 +1252,25 @@ export interface SongInfo {
   instruments: number[];
   /** Each channel that plays and the instrument it starts with. */
   channels: [channel: number, instrument: number][];
-  notes: Notes;
   /** When each beat falls, in seconds. */
   beats: number[];
   /** When each bar starts, in seconds, following the time signatures. */
   bars: number[];
+  /** The lowest and highest key played. */
+  low: number;
+  high: number;
+  /** The longest note, in seconds. */
+  longest: number;
+  /** When the last note ends, in seconds. 0 for a song with no notes. */
+  end: number;
+  overview: Overview;
+  /** The notes that may sound from `from` to `to` seconds, in order of start. A big song has
+   *  millions, so they come a stretch at a time. */
+  notesBetween: (from: number, to: number) => Promise<Notes>;
 }
+
+/** Slices of a song the player's strip shows, about one a pixel. */
+const OVERVIEW_COLUMNS = 1200;
 
 /** How a MIDI file is played: silent channels as bits, keys up or down, and how fast. */
 export interface Playing {
@@ -1216,10 +1281,18 @@ export interface Playing {
 
 export async function songInfo(view: number, request: number, row: number): Promise<SongInfo> {
   const [info, packed] = await Promise.all([
-    invoke<Omit<SongInfo, "notes">>("song_info", { view, request, row }),
-    invoke<ArrayBuffer>("song_notes", { view, request, row }),
+    invoke<Omit<SongInfo, "overview" | "notesBetween">>("song_info", { view, request, row }),
+    invoke<ArrayBuffer>("song_overview", { view, request, row, columns: OVERVIEW_COLUMNS }),
   ]);
-  return { ...info, notes: unpackNotes(packed) };
+  const count = Math.floor(packed.byteLength / 4);
+  const overview = {
+    columns: OVERVIEW_COLUMNS,
+    column: new Uint16Array(packed, 0, count),
+    key: new Uint8Array(packed, 2 * count, count),
+    channel: new Uint8Array(packed, 3 * count, count),
+  };
+  const notesBetween = (from: number, to: number) => invoke<ArrayBuffer>("song_notes", { view, request, row, from, to }).then(unpackNotes);
+  return { ...info, overview, notesBetween };
 }
 
 /** Notes packed by Rust as columns: every start, every length, every key, every channel. */

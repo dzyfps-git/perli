@@ -14,12 +14,14 @@ use windows::Win32::Devices::DeviceAndDriverInstallation::{
     PNP_VetoOutstandingOpen, PNP_VetoTypeUnknown, PNP_VetoWindowsApp, PNP_VetoWindowsService,
     SP_DEVICE_INTERFACE_DATA, SP_DEVICE_INTERFACE_DETAIL_DATA_W, SP_DEVINFO_DATA,
 };
+use windows::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, GetDriveTypeW, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
 };
 use windows::Win32::System::Ioctl::{
-    GUID_DEVINTERFACE_DISK, IOCTL_STORAGE_GET_DEVICE_NUMBER, IOCTL_STORAGE_GET_HOTPLUG_INFO, STORAGE_DEVICE_NUMBER,
-    STORAGE_HOTPLUG_INFO,
+    FSCTL_DISMOUNT_VOLUME, FSCTL_LOCK_VOLUME, GUID_DEVINTERFACE_DISK, IOCTL_STORAGE_EJECT_MEDIA,
+    IOCTL_STORAGE_GET_DEVICE_NUMBER, IOCTL_STORAGE_GET_HOTPLUG_INFO, IOCTL_STORAGE_MEDIA_REMOVAL, PREVENT_MEDIA_REMOVAL,
+    STORAGE_DEVICE_NUMBER, STORAGE_HOTPLUG_INFO,
 };
 use windows::Win32::System::WindowsProgramming::DRIVE_CDROM;
 use windows::Win32::System::IO::DeviceIoControl;
@@ -37,22 +39,61 @@ const TRIES: u32 = 3;
 const TRY_GAP: Duration = Duration::from_millis(400);
 
 /// Ejects the drive at `root`. None hands it to the shell's own eject instead: a disc, whose tray
-/// answers without any box, a card in a reader built into the PC, and any drive whose disk
-/// can't be found.
-// ponytail: a card in a built-in reader still gets Windows' box when busy. Its own eject would
-// lock, dismount and eject the media (KB165721), and needs a reader to try it on.
+/// answers without any box, a fixed disk, any drive whose disk can't be found, and a card its
+/// reader won't push out.
 pub fn eject(root: &Path) -> Option<Result<Ejected, String>> {
     if unsafe { GetDriveTypeW(&HSTRING::from(root.as_os_str())) } == DRIVE_CDROM {
         return None;
     }
     let letter = root.to_string_lossy().trim_end_matches('\\').to_string();
-    let number = device_number(&format!(r"\\.\{letter}"))?;
+    let volume = format!(r"\\.\{letter}");
+    let number = device_number(&volume)?;
     let (disk, path) = disk_node(&number)?;
-    // Taking the device out whole fits a USB stick or disk. A built-in reader would vanish.
-    if !device_hotplug(&path) {
-        return None;
+    let info = hotplug(&path)?;
+    // Taking the device out whole fits a USB stick or disk. A built-in reader would vanish, so
+    // only its card comes out.
+    if info.DeviceHotplug {
+        return Some(eject_node(disk));
     }
-    Some(eject_node(disk))
+    let system = std::env::var("SystemDrive").is_ok_and(|system| system.eq_ignore_ascii_case(&letter));
+    (info.MediaRemovable && !system).then(|| eject_media(&volume)).flatten()
+}
+
+/// A card in a reader built into the PC (KB165721): its volume is locked, so nothing is writing
+/// to it, taken off its drive letter, then let go and pushed out. The reader stays. None when the
+/// reader won't push it out: the lock ends with this call, so the card could mount again and
+/// isn't safe to pull, and the shell's eject gets its turn.
+fn eject_media(volume: &str) -> Option<Result<Ejected, String>> {
+    let share = FILE_SHARE_READ | FILE_SHARE_WRITE;
+    let access = (GENERIC_READ | GENERIC_WRITE).0;
+    let opened = unsafe { CreateFileW(&HSTRING::from(volume), access, share, None, OPEN_EXISTING, FILE_FLAGS_AND_ATTRIBUTES(0), None) };
+    let Ok(opened) = opened else {
+        return Some(Err("Windows can't eject this card".to_string()));
+    };
+    let opened = unsafe { Owned::new(opened) };
+    let control = |code: u32, input: Option<*const std::ffi::c_void>, size: u32| {
+        unsafe { DeviceIoControl(*opened, code, input, size, None, 0, Some(&mut 0), None) }.is_ok()
+    };
+    let mut locked = false;
+    for attempt in 0..TRIES {
+        if attempt > 0 {
+            thread::sleep(TRY_GAP);
+        }
+        locked = control(FSCTL_LOCK_VOLUME, None, 0);
+        if locked {
+            break;
+        }
+    }
+    // A lock is refused while anything has a file on it open.
+    if !locked {
+        return Some(Ok(Ejected::Busy { reason: "A file on it is still open".to_string() }));
+    }
+    if !control(FSCTL_DISMOUNT_VOLUME, None, 0) {
+        return Some(Err("Windows can't eject this card".to_string()));
+    }
+    let let_go = PREVENT_MEDIA_REMOVAL { PreventMediaRemoval: false };
+    control(IOCTL_STORAGE_MEDIA_REMOVAL, Some((&raw const let_go).cast()), size_of::<PREVENT_MEDIA_REMOVAL>() as u32);
+    control(IOCTL_STORAGE_EJECT_MEDIA, None, 0).then_some(Ok(Ejected::Done))
 }
 
 fn eject_node(disk: u32) -> Result<Ejected, String> {
@@ -79,10 +120,10 @@ fn eject_node(disk: u32) -> Result<Ejected, String> {
     Ok(last)
 }
 
-/// True when the whole device can come out, as a USB stick or disk can, rather than only its
-/// media, as with a card in a reader built into the PC.
-fn device_hotplug(disk: &str) -> bool {
-    ask::<STORAGE_HOTPLUG_INFO>(disk, IOCTL_STORAGE_GET_HOTPLUG_INFO).is_some_and(|info| info.DeviceHotplug)
+/// Whether the whole device can come out, as a USB stick or disk can, or only its media, as with
+/// a card in a reader built into the PC.
+fn hotplug(disk: &str) -> Option<STORAGE_HOTPLUG_INFO> {
+    ask(disk, IOCTL_STORAGE_GET_HOTPLUG_INFO)
 }
 
 /// The disk type and number of a drive or a disk, which tie a drive letter to its disk.
@@ -157,6 +198,7 @@ mod tests {
         // Only looks: nothing here asks Windows to eject anything.
         let number = device_number(r"\\.\C:").expect("C: has a disk number");
         let (_, disk) = disk_node(&number).expect("C:'s disk is among the disks");
-        assert!(!device_hotplug(&disk));
+        let info = hotplug(&disk).expect("C:'s disk answers");
+        assert!(!info.DeviceHotplug && !info.MediaRemovable, "so neither eject touches it");
     }
 }

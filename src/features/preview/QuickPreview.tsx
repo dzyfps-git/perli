@@ -39,6 +39,7 @@ import {
   type Preview,
   type DbTable,
   type FontFacts,
+  type Mail,
   type Row,
   type Thumb,
 } from "../../api";
@@ -49,7 +50,7 @@ import type { FolderView } from "../navigation/folderView";
 import { archiveKind, isArchiveName, join, parentOf, resolveRelative } from "../navigation/path";
 import { languageOf } from "./highlight";
 import { tableDelimiter } from "./table";
-import { neighbours, previewSize, setNeighbours, setPreviewSize } from "./viewerPrefs";
+import { neighbours, pictureKeep, previewSize, setNeighbours, setPreviewSize } from "./viewerPrefs";
 import { previewWidth } from "../filelist/prefs";
 import { DockEdge } from "./DockEdge";
 import type { TextPiece, TextViewProps } from "./TextView";
@@ -65,6 +66,7 @@ import type { PlayerProps } from "./Player";
 import type { VideoViewProps } from "./VideoView";
 import type { DatabaseViewProps } from "./DatabaseView";
 import type { FontViewProps } from "./FontView";
+import type { MailViewProps } from "./MailView";
 import { song, wav, type Track } from "./nowPlaying";
 import type { Film } from "../mini/handover";
 import "./preview.css";
@@ -102,6 +104,7 @@ const PictureView = lazy(() => import("./PictureView").then((module) => ({ defau
 const DatabaseView = lazy(() => import("./DatabaseView").then((module) => ({ default: module.DatabaseView })));
 const ParquetView = lazy(() => import("./ParquetView").then((module) => ({ default: module.ParquetView })));
 const FontView = lazy(() => import("./FontView").then((module) => ({ default: module.FontView })));
+const MailView = lazy(() => import("./MailView").then((module) => ({ default: module.MailView })));
 const PdfView = lazy(() => import("./PdfView").then((module) => ({ default: module.PdfView })));
 const VideoView = lazy(() => import("./VideoView").then((module) => ({ default: module.VideoView })));
 
@@ -312,6 +315,24 @@ export function QuickPreview(props: {
     return { open: () => openStreamed(view, shot, at), size: item.size, keys: (handler: typeof viewKeys) => (viewKeys = handler) };
   }
 
+  /** Attachments land beside the mail, or in a folder picked for them, as one job with an Undo. */
+  function mail(item: Row, preview: Mail): MailViewProps {
+    const { view } = props.at;
+    const path = pathOf(item);
+    const folder = folderOf(item);
+    return {
+      mail: preview,
+      save: async (choose) => {
+        // Loaded when asked for, since the picker's sidebar draws with this file's own helpers.
+        const picker = choose ? await import("../dialogs/Picker") : undefined;
+        const into = picker ? (await picker.pick({ mode: "folder", title: "Save attachments to", purpose: "folders", start: folder }))?.path : folder;
+        if (!into) return false;
+        const end = await runJob({ kind: "saveAttachments", path, folder: into }, view);
+        return !!end && !end.cancelled && end.failed.length === 0;
+      },
+    };
+  }
+
   function font(faces: FontFacts[]): FontViewProps {
     const { view } = props.at;
     const at = index();
@@ -363,7 +384,7 @@ export function QuickPreview(props: {
     return {
       canSave: !!format,
       format,
-      run: async (edit) => ran(await runJob({ kind: "picture", paths: [path], edit }, view)),
+      run: async (edit) => ran(await runJob({ kind: "picture", paths: [path], edit, keep: pictureKeep() }, view)),
       wallpaper: async () => ran(await runJob({ kind: "wallpaper", path }, view)),
       offerTurn: (edit) =>
         props.notify?.(`Keep the turn of ${item.name}?`, "It was only turned on screen.", true, {
@@ -538,9 +559,7 @@ export function QuickPreview(props: {
       test: (password) => archiveTest(view, shot, at, password),
       drag: (entry, password) => dragEntry(view, shot, at, entry, password),
       keys: (handler) => (viewKeys = handler),
-      // ponytail: an archive inside an archive opens in its app, and a folder named like x.zip
-      // loses the button too.
-      onOpenFolder: props.at.folder.split("\\").some(isArchiveName) || !isArchiveName(row()?.name ?? "")
+      onOpenFolder: !isArchiveName(row()?.name ?? "")
         ? undefined
         : () => (props.docked ? props.onOpen(row()!) : shut(() => props.onOpen(row()!), false)),
     };
@@ -740,6 +759,7 @@ export function QuickPreview(props: {
               {preview.kind === "database" && <DatabaseView {...database(preview)} />}
               {preview.kind === "parquet" && <ParquetView {...streamed(row()!)} />}
               {preview.kind === "font" && <FontView {...font(preview.faces)} />}
+              {preview.kind === "mail" && <MailView {...mail(row()!, preview)} />}
               {preview.kind === "pdf" && <PdfView path={pathOf(row()!)} {...streamed(row()!)} note={setNote} />}
             </>
           )}

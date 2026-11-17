@@ -52,6 +52,8 @@ pub struct Entry {
     pub modified: Option<String>,
     /// Protected by a password.
     pub locked: bool,
+    /// How a ZIP's file is squeezed, such as "Deflate" or "Zstandard". `None` for other kinds.
+    pub method: Option<String>,
 }
 
 /// What the UI looks for to ask for the password again.
@@ -80,29 +82,87 @@ pub(crate) fn read_failed(error: std::io::Error, path: &Path, name: &str, passwo
     }
 }
 
-/// Whether `password` reads the smallest other locked file of the archive whole.
-// ponytail: tries one other file. If that one is damaged too, the password reads as wrong.
+/// Whether `password` reads one of the smallest other locked files of the archive whole. Three
+/// are tried, so one more damaged file doesn't make a right password read as wrong.
 fn opens_another(path: &Path, name: &str, password: &str) -> bool {
     let Ok(mut zip) = open(path) else { return false };
-    let smallest = (0..zip.len())
+    let mut others: Vec<(u64, usize)> = (0..zip.len())
         .filter_map(|index| {
             let entry = zip.by_index_data(index).ok()?;
             let other = entry.encrypted() && !entry.is_dir() && entry.name().ok()?.as_ref() != name;
             other.then(|| (entry.size(), index))
         })
-        .min();
-    let Some((_, index)) = smallest else { return false };
-    zip.by_index_decrypt(index, password.as_bytes())
-        .is_ok_and(|mut entry| std::io::copy(&mut entry, &mut std::io::sink()).is_ok())
+        .collect();
+    others.sort_unstable();
+    others.into_iter().take(3).any(|(_, index)| data(&mut zip, index, Some(password)).is_ok_and(|mut entry| std::io::copy(&mut entry, &mut std::io::sink()).is_ok()))
 }
 
-/// One entry, opened with the password if it has one.
-fn entry<'a>(zip: &'a mut Zip, name: &str, password: Option<&str>) -> Result<zip::read::ZipFile<'a, BufReader<File>>, String> {
-    match password {
-        Some(password) => zip.by_name_decrypt(name, password.as_bytes()),
-        None => zip.by_name(name),
+/// One entry's data, opened with the password if it has one. Zstandard, which the zip crate reads
+/// only through the C zstd library, is read here through ruzstd and checked against its CRC.
+pub(crate) fn data<'a>(zip: &'a mut Zip, index: usize, password: Option<&str>) -> Result<Box<dyn Read + 'a>, ZipError> {
+    let (method, locked) = zip.by_index_data(index).map(|entry| (entry.compression(), entry.encrypted()))?;
+    if method != zip::CompressionMethod::ZSTD {
+        let file = match password {
+            Some(password) => zip.by_index_decrypt(index, password.as_bytes()),
+            None => zip.by_index(index),
+        }?;
+        return Ok(Box::new(file));
     }
-    .map_err(reason)
+    // ponytail: a locked Zstandard file would need the zip crate's own zstd and its C library.
+    // No common tool writes one; read it through that crate if one turns up.
+    if locked {
+        return Err(ZipError::UnsupportedArchive("Perli can't read a locked file squeezed with Zstandard"));
+    }
+    let raw = zip.by_index_raw(index)?;
+    let want = raw.crc32();
+    Ok(Box::new(Checked { from: packs::Zstd::new(std::io::BufReader::new(raw)), sum: flate2::Crc::new(), want }))
+}
+
+/// A file's data that fails at its end if it doesn't match the checksum the archive keeps.
+struct Checked<R> {
+    from: R,
+    sum: flate2::Crc,
+    want: u32,
+}
+
+impl<R: Read> Read for Checked<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let count = self.from.read(buffer)?;
+        self.sum.update(&buffer[..count]);
+        if count == 0 && !buffer.is_empty() && self.sum.sum() != self.want {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid checksum"));
+        }
+        Ok(count)
+    }
+}
+
+/// The place of the entry by this name.
+fn index_of(zip: &Zip, name: &str) -> Result<usize, String> {
+    zip.index_for_name(name).ok_or_else(|| reason(ZipError::FileNotFound))
+}
+
+/// One entry by name, opened with the password if it has one.
+fn entry<'a>(zip: &'a mut Zip, name: &str, password: Option<&str>) -> Result<Box<dyn Read + 'a>, String> {
+    let index = index_of(zip, name)?;
+    data(zip, index, password).map_err(reason)
+}
+
+/// How an entry is squeezed, in the words the list shows.
+// The number is the one way to name a method the zip crate has no name for.
+#[allow(deprecated)]
+fn method_name(method: zip::CompressionMethod) -> String {
+    use zip::CompressionMethod as M;
+    match method {
+        M::Stored => "Stored".into(),
+        M::Deflated => "Deflate".into(),
+        M::Deflate64 => "Deflate64".into(),
+        M::Bzip2 => "BZip2".into(),
+        M::Lzma => "LZMA".into(),
+        M::Xz => "XZ".into(),
+        M::Ppmd => "PPMd".into(),
+        other if other == M::ZSTD => "Zstandard".into(),
+        other => format!("Method {}", other.to_u16()),
+    }
 }
 
 #[derive(Debug, PartialEq, Serialize)]
@@ -173,6 +233,7 @@ pub fn entries(path: &Path) -> Result<Contents, String> {
             folder: item.folder,
             modified: when(item.ticks),
             locked: item.locked,
+            method: None,
         };
         // 7z locks with AES-256 alone. RAR 5 does too, and RAR 4 with AES-128.
         let lock = listed.locked().then_some(if packs::kind_of(path.as_os_str()) == Some(packs::Kind::SevenZ) { "AES-256" } else { "AES" });
@@ -192,7 +253,8 @@ pub fn entries(path: &Path) -> Result<Contents, String> {
         if entry.encrypted() && !entry.is_dir() {
             first_locked.get_or_insert(index);
         }
-        list.push(Entry { name, size: entry.size(), folder: entry.is_dir(), modified, locked: entry.encrypted() });
+        let method = (!entry.is_dir()).then(|| method_name(entry.compression()));
+        list.push(Entry { name, size: entry.size(), folder: entry.is_dir(), modified, locked: entry.encrypted(), method });
     }
     let lock = first_locked.map(|index| match zip.get_aes_verification_key_and_salt(index) {
         Ok(Some(aes)) => match aes.aes_mode {
@@ -256,12 +318,13 @@ fn read_entry(zip: &mut Zip, name: &str, most: u64) -> Result<Vec<u8>, String> {
 }
 
 fn read_locked(zip: &mut Zip, name: &str, most: u64, password: Option<&str>) -> Result<Vec<u8>, String> {
-    let entry = entry(zip, name, password)?;
-    if entry.size() > most {
+    let index = index_of(zip, name)?;
+    let size = zip.by_index_data(index).map_err(reason)?.size();
+    if size > most {
         return Err(format!("{name} is too big to show"));
     }
-    let mut bytes = Vec::with_capacity(entry.size() as usize);
-    entry.take(most).read_to_end(&mut bytes).map_err(|error| error.to_string())?;
+    let mut bytes = Vec::with_capacity(size as usize);
+    data(zip, index, password).map_err(reason)?.take(most).read_to_end(&mut bytes).map_err(|error| error.to_string())?;
     Ok(bytes)
 }
 
@@ -311,10 +374,7 @@ pub fn test(path: &Path, password: Option<&str>) -> Result<Tested, String> {
             found.locked += 1;
             continue;
         }
-        let read = match password.filter(|_| locked) {
-            Some(password) => zip.by_index_decrypt(index, password.as_bytes()),
-            None => zip.by_index(index),
-        }
+        let read = data(&mut zip, index, password.filter(|_| locked))
         .map_err(reason)
         .and_then(|mut entry| std::io::copy(&mut entry, &mut std::io::sink()).map_err(|error| error.to_string()));
         match read {
@@ -341,11 +401,13 @@ pub fn take_out(path: &Path, name: &str, password: Option<&str>, folder: &Path) 
         return if wrote { Ok(target) } else { Err("Only a file can be dragged out".into()) };
     }
     let mut zip = open(path)?;
-    let mut entry = entry(&mut zip, name, password)?;
-    let own = entry.enclosed_name().and_then(|inside| inside.file_name().map(PathBuf::from)).ok_or("This name in the archive isn't safe to use")?;
-    if entry.is_dir() {
+    let index = index_of(&zip, name)?;
+    let (own, folder_entry) = zip.by_index_data(index).map(|entry| (entry.enclosed_name(), entry.is_dir())).map_err(reason)?;
+    let own = own.and_then(|inside| inside.file_name().map(PathBuf::from)).ok_or("This name in the archive isn't safe to use")?;
+    if folder_entry {
         return Err("Only a file can be dragged out".into());
     }
+    let mut entry = data(&mut zip, index, password).map_err(reason)?;
     let target = folder.join(own);
     let mut file = File::create(&target).map_err(|error| error.to_string())?;
     std::io::copy(&mut entry, &mut file).map_err(|error| error.to_string())?;
@@ -655,7 +717,7 @@ fn read_book(zip: &mut Zip, package: &str, index: &str) -> Result<Book, String> 
         .iter()
         .filter_map(|id| items.iter().find(|(item, _)| item == id))
         .map(|(_, href)| resolve(package, href))
-        .filter(|name| !locked.contains(name) && zip.by_name(name).is_ok_and(|entry| entry.size() <= MOST_CHAPTER_BYTES))
+        .filter(|name| !locked.contains(name) && zip.index_for_name(name).is_some_and(|index| zip.by_index_data(index).is_ok_and(|entry| entry.size() <= MOST_CHAPTER_BYTES)))
         .collect();
     let ncx = ncx_id.and_then(|id| items.iter().find(|(item, _)| *item == id)).map(|(_, href)| resolve(package, href));
     // A book with a broken contents page still reads, just without it.
@@ -1046,6 +1108,98 @@ pub(crate) mod tests {
         let aspects = shown_aspects(&[flat, turned, note, PathBuf::new(), folder.join("gone.png"), folder.join("clip.MP4")]);
         assert_eq!(aspects, [2.0, 0.5, 0.0, 0.0, 0.0, 16.0 / 9.0]);
         std::fs::remove_dir_all(folder).unwrap();
+    }
+
+    /// A ZIP of one file squeezed with Zstandard in two frames with a skippable one between, which
+    /// the zip crate can't write without the C library: it is written stored and then marked.
+    pub(crate) fn zstd_zip(name: &str, text: &[u8]) -> std::path::PathBuf {
+        use ruzstd::encoding::{compress_to_vec, CompressionLevel};
+        let half = text.len() / 2;
+        let mut squeezed = compress_to_vec(&text[..half], CompressionLevel::Fastest);
+        squeezed.extend_from_slice(&0x184D_2A50u32.to_le_bytes());
+        squeezed.extend_from_slice(&3u32.to_le_bytes());
+        squeezed.extend_from_slice(b"pad");
+        squeezed.extend(compress_to_vec(&text[half..], CompressionLevel::Fastest));
+        let path = std::env::temp_dir().join(format!("perli-inside-{}-{name}", std::process::id()));
+        let mut zip = ZipWriter::new(File::create(&path).unwrap());
+        zip.start_file("a.txt", SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored)).unwrap();
+        zip.write_all(&squeezed).unwrap();
+        zip.finish().unwrap();
+        let mut bytes = std::fs::read(&path).unwrap();
+        let mut crc = flate2::Crc::new();
+        crc.update(text);
+        let central = bytes.windows(4).position(|four| four == b"PK\x01\x02").unwrap();
+        for (at, method, sums) in [(0, 8, 14), (central, 10, 16)] {
+            bytes[at + method..at + method + 2].copy_from_slice(&93u16.to_le_bytes());
+            bytes[at + sums..at + sums + 4].copy_from_slice(&crc.sum().to_le_bytes());
+            bytes[at + sums + 8..at + sums + 12].copy_from_slice(&(text.len() as u32).to_le_bytes());
+        }
+        std::fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    #[test]
+    fn rare_zip_methods_read_and_say_what_they_are() {
+        let path = std::env::temp_dir().join(format!("perli-inside-{}-methods.zip", std::process::id()));
+        let mut zip = ZipWriter::new(File::create(&path).unwrap());
+        for (name, method) in [("b.txt", zip::CompressionMethod::Bzip2), ("x.txt", zip::CompressionMethod::Xz), ("p.txt", zip::CompressionMethod::Ppmd)] {
+            zip.start_file(name, SimpleFileOptions::default().compression_method(method)).unwrap();
+            zip.write_all(b"squeezed words, squeezed words").unwrap();
+        }
+        zip.finish().unwrap();
+        for name in ["b.txt", "x.txt", "p.txt"] {
+            assert_eq!(text(&path, name, None).unwrap().as_deref(), Some("squeezed words, squeezed words"), "{name}");
+        }
+        let methods: Vec<_> = entries(&path).unwrap().entries.into_iter().map(|entry| entry.method.unwrap()).collect();
+        assert_eq!(methods, ["BZip2", "XZ", "PPMd"]);
+        std::fs::remove_file(path).unwrap();
+
+        let words = "frame one, then frame two ".repeat(50);
+        let path = zstd_zip("zstd.zip", words.as_bytes());
+        assert_eq!(entries(&path).unwrap().entries[0].method.as_deref(), Some("Zstandard"));
+        assert_eq!(text(&path, "a.txt", None).unwrap().as_deref(), Some(words.as_str()));
+        assert_eq!(test(&path, None).unwrap(), Tested { sound: 1, damaged: vec![], locked: 0 });
+        let folder = std::env::temp_dir().join(format!("perli-inside-zstd-out-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        assert_eq!(std::fs::read(take_out(&path, "a.txt", None, &folder).unwrap()).unwrap(), words.as_bytes());
+        std::fs::remove_dir_all(folder).unwrap();
+        // A checksum that doesn't match marks the file damaged.
+        let mut bytes = std::fs::read(&path).unwrap();
+        let central = bytes.windows(4).position(|four| four == b"PK\x01\x02").unwrap();
+        for at in [14, central + 16] {
+            bytes[at] ^= 0xFF;
+        }
+        std::fs::write(&path, bytes).unwrap();
+        assert_eq!(test(&path, None).unwrap().damaged, ["a.txt"]);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn a_password_is_right_when_any_of_three_other_locked_files_reads() {
+        use zip::unstable::write::FileOptionsExt;
+        let path = std::env::temp_dir().join(format!("perli-inside-{}-three.zip", std::process::id()));
+        let mut zip = ZipWriter::new(File::create(&path).unwrap());
+        let locked = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored).with_deprecated_encryption(b"key").unwrap();
+        // a.txt is the one looked at; b.txt, the smallest other, is damaged too; c.txt reads.
+        for (name, words) in [("a.txt", "some words to keep"), ("b.txt", "few"), ("c.txt", "a few more words")] {
+            zip.start_file(name, locked).unwrap();
+            zip.write_all(words.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap();
+        let starts: Vec<usize> = {
+            let mut zip = open(&path).unwrap();
+            (0..2).map(|index| zip.by_index_raw(index).unwrap().data_start().unwrap() as usize).collect()
+        };
+        let mut bytes = std::fs::read(&path).unwrap();
+        for start in starts {
+            // The first byte after the 12 of the lock.
+            bytes[start + 12] ^= 0xFF;
+        }
+        std::fs::write(&path, bytes).unwrap();
+
+        assert_eq!(text(&path, "a.txt", Some("key")), Err(DAMAGED_LOCKED.to_string()));
+        assert_eq!(text(&path, "a.txt", Some("nope")), Err(WRONG_PASSWORD.to_string()));
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

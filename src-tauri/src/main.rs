@@ -12,6 +12,7 @@ mod fonts;
 mod git;
 mod jobs;
 mod launch;
+mod mail;
 mod menus;
 mod network;
 mod ops;
@@ -229,10 +230,21 @@ enum Task {
     NewFolderFrom { selection: Selection, folder: String, move_in: bool },
     /// Files that wait on the shelf, by path, since their folder may not be on show.
     CopyPaths { paths: Vec<PathBuf>, folder: String },
+    /// Every attachment of a mail file, into `folder`.
+    SaveAttachments { path: PathBuf, folder: String },
     MovePaths { paths: Vec<PathBuf>, folder: String },
     Template { folder: String, extension: String },
-    /// `date` is today as the user writes it, for a `{date}` in the template's name.
-    OwnTemplate { folder: String, name: String, date: Option<String> },
+    /// `date` is today as the user writes it, for a `{date}` in the template's names. `called` is
+    /// what the user named it, for a `{name}`.
+    OwnTemplate {
+        folder: String,
+        name: String,
+        date: Option<String>,
+        #[serde(default)]
+        called: Option<String>,
+    },
+    RenameTemplate { name: String, to: String },
+    RemoveTemplate { name: String },
     /// A new file from the text or picture on the clipboard, never its files.
     FromClipboard { folder: String },
     SaveTemplate { selection: Selection },
@@ -264,7 +276,10 @@ enum Task {
     /// Shortcuts to the files on the clipboard, which stay where they are, cut or not.
     PasteShortcut { folder: String },
     /// The last files dropped on the window landed on `folder`.
-    Drop { folder: String, action: Option<DropAction> },
+    Drop { folder: String, action: Option<DropAction>, id: u64 },
+    /// A tag put on or taken off the rows, a folder, or files by path. Undo takes it back.
+    Tag { target: ShellTarget, tag: u32, on: bool },
+    DeleteTag { id: u32 },
     Recycle { selection: Selection },
     Delete { selection: Selection },
     Restore { selection: Selection },
@@ -280,6 +295,9 @@ enum Task {
         paths: Vec<PathBuf>,
         selection: Option<Selection>,
         edit: picture::Edit,
+        /// What copies keep of the facts a photo carries.
+        #[serde(default)]
+        keep: picture::Keep,
     },
     Wallpaper { path: PathBuf },
 }
@@ -304,7 +322,7 @@ impl Task {
         let sources = |selection: &Selection| views.read(selection, folder::Listing::paths);
         let items = |selection: &Selection| views.read(selection, folder::Listing::bin_items);
         let job = match self {
-            Self::Copy { selection, folder } => copy_job(sources(&selection)?, target(folder)?)?,
+            Self::Copy { selection, folder } => copy_job(sources(&selection)?, target(folder)?),
             Self::Move { selection, folder } => Job::Move {
                 sources: paths(&selection)?,
                 folder: target(folder)?,
@@ -336,7 +354,9 @@ impl Task {
                     folder: target(folder)?,
                 }
             }
-            Self::CopyPaths { paths, folder } => copy_job(paths, target(folder)?)?,
+            Self::CopyPaths { paths, folder } => copy_job(paths, target(folder)?),
+            // A mail in a ZIP is read from the copy its preview took out.
+            Self::SaveAttachments { path, folder } => Job::Attachments { mail: zipped::real(&path)?, folder: target(folder)? },
             Self::MovePaths { paths, folder } => {
                 refuse_zipped(&paths)?;
                 Job::Move { sources: paths, folder: target(folder)? }
@@ -344,17 +364,25 @@ impl Task {
             Self::Template { folder, extension } => Job::Template {
                 folder: target(folder)?,
                 template: templates::template(&extension)?,
+                named: false,
             },
-            Self::OwnTemplate { folder, name, date } => Job::Template {
+            Self::OwnTemplate { folder, name, date, called } => Job::Template {
                 folder: target(folder)?,
-                template: templates::own_template(&name, date.as_deref())?,
+                template: templates::own_template(&name, date.as_deref(), called.as_deref())?,
+                named: called.is_some(),
             },
+            Self::RenameTemplate { name, to } => {
+                let path = templates::own_item(&name)?;
+                ops::check_rename(&path, &to)?;
+                Job::Rename { path, name: to }
+            }
+            Self::RemoveTemplate { name } => Job::Recycle { paths: vec![templates::own_item(&name)?] },
             Self::FromClipboard { folder } => {
                 let content = clipboard::content().map_err(|error| error.message())?;
                 let template = content.ok_or("The clipboard holds no text or picture")?;
-                Job::Template { folder: target(folder)?, template }
+                Job::Template { folder: target(folder)?, template, named: false }
             }
-            Self::SaveTemplate { selection } => copy_job(sources(&selection)?, templates::own_folder()?)?,
+            Self::SaveTemplate { selection } => copy_job(sources(&selection)?, templates::own_folder()?),
             Self::Zip { selection, level, password, format, aes } => Job::Zip {
                 sources: paths(&selection)?,
                 level,
@@ -369,9 +397,14 @@ impl Task {
                 Job::Unzip { archives, own_folder, smart, only, password, into: None }
             }
             Self::ExtractZip { path } => {
-                let (archive, _) = zipped::split(Path::new(&path)).ok_or("This isn't an archive")?;
-                let password = zipped::password(&archive);
-                Job::Unzip { archives: vec![archive], own_folder: false, smart: true, only: Vec::new(), password, into: None }
+                let zip = zipped::opened(Path::new(&path)).ok_or("This isn't an archive")?;
+                if let Some(reason) = zip.failed {
+                    return Err(reason);
+                }
+                let password = zipped::password(&zip.archive);
+                // One inside another comes out beside the outermost, not in the cache.
+                let into = (zip.levels.len() > 1).then(|| ops::sys::parent(&zip.levels[0]));
+                Job::Unzip { archives: vec![zip.archive], own_folder: false, smart: true, only: Vec::new(), password, into }
             }
             Self::Paste { folder } => return paste(target(folder)?),
             Self::PasteShortcut { folder } => {
@@ -379,9 +412,18 @@ impl Task {
                 let files = files.ok_or("The clipboard holds no files")?;
                 Job::Shortcut { sources: files.paths, folder: target(folder)? }
             }
-            Self::Drop { folder, action } => {
-                return Ok(drags.job(Path::new(&target(folder)?), action).map(Plan::from));
+            Self::Drop { folder, action, id } => {
+                return Ok(drags.job(id, Path::new(&target(folder)?), action).map(Plan::from));
             }
+            Self::Tag { target, tag, on } => {
+                let paths = match target {
+                    ShellTarget::Rows { selection } => sources(&selection)?,
+                    ShellTarget::Folder { path } => vec![PathBuf::from(path)],
+                    ShellTarget::Paths { paths } => paths,
+                };
+                Job::Tag { paths, tag, on }
+            }
+            Self::DeleteTag { id } => Job::DeleteTag { id },
             Self::Recycle { selection } => Job::Recycle {
                 paths: paths(&selection)?,
             },
@@ -408,7 +450,7 @@ impl Task {
                 let bytes = preview::encoded(&path, &text)?;
                 Job::Save { path, bytes, read: seen.as_deref().and_then(preview::parse_seen) }
             }
-            Self::Picture { mut paths, selection, edit } => {
+            Self::Picture { mut paths, selection, edit, keep } => {
                 if let Some(selection) = &selection {
                     paths.extend(views.read(selection, folder::Listing::paths)?);
                 }
@@ -416,7 +458,7 @@ impl Task {
                 if let Some(problem) = paths.iter().find_map(|path| picture::refusal(path, edit)) {
                     return Err(problem);
                 }
-                Job::Picture { paths, edit }
+                Job::Picture { paths, edit, keep }
             }
             Self::Wallpaper { path } => {
                 refuse_zipped(std::slice::from_ref(&path))?;
@@ -436,20 +478,37 @@ fn refuse_zipped(paths: &[PathBuf]) -> Result<(), String> {
 
 /// A copy of `sources` into `folder`. Rows of one ZIP opened as a folder come out of it the
 /// way Extract takes them, with its progress, questions and undo.
-fn copy_job(sources: Vec<PathBuf>, folder: PathBuf) -> Result<Job, String> {
-    let inside: Option<Vec<(PathBuf, String)>> =
-        sources.iter().map(|path| zipped::split(path).filter(|(_, inner)| !inner.is_empty())).collect();
-    match inside {
-        Some(inside) if inside.first().is_some_and(|(first, _)| inside.iter().all(|(archive, _)| archive == first)) => {
-            let archive = inside[0].0.clone();
-            let password = zipped::password(&archive);
-            let only = inside.into_iter().map(|(_, inner)| inner).collect();
-            Ok(Job::Unzip { archives: vec![archive], own_folder: false, smart: false, only, password, into: Some(folder) })
+fn copy_job(sources: Vec<PathBuf>, folder: PathBuf) -> Job {
+    let mut plain = Vec::new();
+    let mut archives: Vec<(PathBuf, Vec<String>)> = Vec::new();
+    for path in sources {
+        match zipped::split(&path).filter(|(_, inner)| !inner.is_empty()) {
+            Some((archive, inner)) => match archives.iter_mut().find(|(known, _)| *known == archive) {
+                Some((_, only)) => only.push(inner),
+                None => archives.push((archive, vec![inner])),
+            },
+            None => plain.push(path),
         }
-        // ponytail: rows of two ZIPs, or of a ZIP and a folder, are taken out before the copy
-        // with no progress; an extract per ZIP would show it.
-        _ if sources.iter().any(|path| zipped::is_inside(path)) => Ok(Job::Copy { sources: zipped::real_all(&sources)?, folder }),
-        _ => Ok(Job::Copy { sources, folder }),
+    }
+    // Each archive is an extract of its own rows, with its own password, so all of it shows progress.
+    let mut jobs: Vec<Job> = archives
+        .into_iter()
+        .map(|(archive, only)| Job::Unzip {
+            password: zipped::password(&archive),
+            archives: vec![archive],
+            own_folder: false,
+            smart: false,
+            only,
+            into: Some(folder.clone()),
+        })
+        .collect();
+    if !plain.is_empty() || jobs.is_empty() {
+        jobs.push(Job::Copy { sources: plain, folder });
+    }
+    if jobs.len() == 1 {
+        jobs.remove(0)
+    } else {
+        Job::Several { jobs }
     }
 }
 
@@ -459,7 +518,7 @@ fn paste(folder: PathBuf) -> Result<Option<Plan>, String> {
     let sequence = clipboard::sequence();
     let Some(files) = clipboard::read().map_err(|error| error.message())? else {
         let content = clipboard::content().map_err(|error| error.message())?;
-        return Ok(content.map(|template| Job::Template { folder, template }.into()));
+        return Ok(content.map(|template| Job::Template { folder, template, named: false }.into()));
     };
     let sources = files.paths;
     let job = if files.cut {
@@ -490,8 +549,10 @@ struct Opened {
     #[serde(flatten)]
     shape: folder::Shape,
     load_ms: f64,
-    /// The ZIP this folder is in, when it is one opened as a folder.
+    /// The archive this folder is in, when it is one opened as a folder: the innermost as shown.
     archive: Option<String>,
+    /// The shown path of each archive on the way, the outermost first.
+    archives: Vec<String>,
     /// Something in that ZIP needs a password Perli doesn't have yet.
     locked: bool,
 }
@@ -692,7 +753,8 @@ async fn open_folder(
         path: resolved,
         shape: listing.shape(),
         load_ms: started.elapsed().as_secs_f64() * 1000.0,
-        archive: listing.zipped().map(|zip| zip.archive.to_string_lossy().into_owned()),
+        archive: listing.zipped().and_then(|zip| zip.levels.last()).map(|level| level.to_string_lossy().into_owned()),
+        archives: listing.zipped().map_or_else(Vec::new, |zip| zip.levels.iter().map(|level| level.to_string_lossy().into_owned()).collect()),
         locked: listing.zipped().is_some_and(|zip| zip.locked && zipped::password(&zip.archive).is_none()),
     };
     let mut views = views.0.write().unwrap_or_else(|error| error.into_inner());
@@ -712,7 +774,7 @@ async fn open_folder(
 fn watch_of(path: &str, expanded: &[String]) -> Option<Watch> {
     let resolved = PathBuf::from(folder::resolve(path).ok().filter(|_| path != folder::BIN_PATH)?);
     // A ZIP changes as one file, in the folder it sits in.
-    let watched = zipped::split(&resolved).map_or(resolved, |(archive, _)| ops::sys::parent(&archive));
+    let watched = zipped::outer(&resolved).map_or(resolved, |archive| ops::sys::parent(&archive));
     Some(Watch::new(std::iter::once(watched).chain(expanded.iter().map(PathBuf::from))))
 }
 
@@ -1314,8 +1376,9 @@ impl ShellTarget {
             Self::Rows { selection } => {
                 menus::Target::Items(on_disk(views.read(&selection, folder::Listing::paths)?).await?)
             }
-            Self::Folder { path } => match zipped::split(Path::new(&path)) {
-                Some((archive, _)) => menus::Target::Items(vec![archive]),
+            // ponytail: one inside another stands for the outermost, a menu of its own when asked for.
+            Self::Folder { path } => match zipped::outer(Path::new(&path)) {
+                Some(archive) => menus::Target::Items(vec![archive]),
                 None => menus::Target::Folder(path.into()),
             },
             Self::Paths { paths } => menus::Target::Items(on_disk(paths).await?),
@@ -1489,10 +1552,22 @@ async fn big_picture(view: u32, request: u64, row: u32, edge: u32, views: State<
 #[tauri::command]
 async fn unlock_zip(path: PathBuf, password: String) -> Result<(), String> {
     blocking(move || {
-        let (archive, _) = zipped::split(&path).ok_or("This isn't an archive")?;
-        zipped::unlock(&archive, &password)
+        let zip = zipped::opened(&path).ok_or("This isn't an archive")?;
+        zipped::unlock(&zip.archive, &password)
     })
     .await
+}
+
+/// What files taken out of archives take up in the cache, in bytes.
+#[tauri::command]
+async fn archive_cache_size() -> Result<u64, String> {
+    blocking(|| Ok(zipped::cache_size())).await
+}
+
+/// Empties the cache of files taken out of archives, and says what is left: files still open.
+#[tauri::command]
+async fn clear_archive_cache() -> Result<u64, String> {
+    blocking(|| Ok(zipped::clear_cache())).await
 }
 
 /// A picture's own width and height in pixels, if Windows' imaging can read them.
@@ -1788,16 +1863,48 @@ fn forget_song(number: u64, streams: State<'_, midi::Streams>) {
 
 /// A MIDI file's name, instruments and notes, for the piano roll.
 #[tauri::command]
-async fn song_info(view: u32, request: u64, row: u32, views: State<'_, Views>) -> Result<midi::SongInfo, String> {
+async fn song_info(
+    view: u32,
+    request: u64,
+    row: u32,
+    views: State<'_, Views>,
+    songs: State<'_, midi::Songs>,
+) -> Result<serde_json::Value, String> {
     let path = row_file(&views, view, request, row).await?;
-    blocking(move || midi::info(&path)).await
+    let songs = songs.inner().clone();
+    blocking(move || serde_json::to_value(&*songs.song(&path)?).map_err(|error| error.to_string())).await
 }
 
-/// A MIDI file's notes, packed, for the piano roll. See `SongInfo::packed_notes`.
+/// The notes of a MIDI file that may sound from `from` to `to` seconds, packed, for the piano
+/// roll. See `SongInfo::notes_between`.
 #[tauri::command]
-async fn song_notes(view: u32, request: u64, row: u32, views: State<'_, Views>) -> Result<Response, String> {
+async fn song_notes(
+    view: u32,
+    request: u64,
+    row: u32,
+    from: f32,
+    to: f32,
+    views: State<'_, Views>,
+    songs: State<'_, midi::Songs>,
+) -> Result<Response, String> {
     let path = row_file(&views, view, request, row).await?;
-    blocking(move || midi::info(&path).map(|info| Response::new(info.packed_notes()))).await
+    let songs = songs.inner().clone();
+    blocking(move || songs.song(&path).map(|song| Response::new(song.notes_between(from, to)))).await
+}
+
+/// Where a MIDI file's notes sound across it, for the player's strip. See `SongInfo::overview`.
+#[tauri::command]
+async fn song_overview(
+    view: u32,
+    request: u64,
+    row: u32,
+    columns: usize,
+    views: State<'_, Views>,
+    songs: State<'_, midi::Songs>,
+) -> Result<Response, String> {
+    let path = row_file(&views, view, request, row).await?;
+    let songs = songs.inner().clone();
+    blocking(move || songs.song(&path).map(|song| Response::new(song.overview(columns)))).await
 }
 
 /// A sound file's tags, and its path for the window to stream it. Only this file opens to the
@@ -1987,23 +2094,6 @@ async fn edit_tag(id: u32, name: String, color: u8) -> Result<(), String> {
     with_tags(move || tags::edit(id, &name, color)).await
 }
 
-#[tauri::command]
-async fn delete_tag(id: u32) -> Result<(), String> {
-    with_tags(move || tags::delete(id)).await
-}
-
-#[tauri::command]
-async fn set_tag(target: ShellTarget, tag: u32, on: bool, views: State<'_, Views>) -> Result<(), String> {
-    let paths = target.paths(&views).await?;
-    with_tags(move || tags::set(&paths, tag, on)).await
-}
-
-/// Puts `tag` on files by their paths, for a drop on a tag.
-#[tauri::command]
-async fn set_tag_paths(paths: Vec<PathBuf>, tag: u32, on: bool) -> Result<(), String> {
-    with_tags(move || tags::set(&paths, tag, on)).await
-}
-
 /// Every tagged file here by path, with its tags, for a backup.
 #[tauri::command]
 async fn tagged_files() -> Result<Vec<(String, Box<[u32]>)>, String> {
@@ -2147,7 +2237,7 @@ fn drop_choices(folder: PathBuf, drags: State<'_, Arc<Drags>>) -> Vec<DropAction
 }
 
 #[tauri::command]
-async fn own_templates() -> Vec<String> {
+async fn own_templates() -> Vec<templates::Own> {
     templates::own_names()
 }
 
@@ -2161,6 +2251,12 @@ async fn subfolders(path: PathBuf, show_hidden: bool, show_system: bool) -> Resu
 #[tauri::command]
 fn templates_folder() -> Result<PathBuf, String> {
     templates::own_folder()
+}
+
+/// How many items, and how big, the drop waiting for an answer holds, for the ask before a delete.
+#[tauri::command]
+async fn measure_drop(id: u64, drags: State<'_, Arc<Drags>>) -> Result<Measured, String> {
+    measure(drags.waiting(id)).await
 }
 
 /// Whether Space is held, for a drag resting on a folder to open it at once. A drag holds the
@@ -2403,6 +2499,7 @@ fn main() {
         .manage(Searches::default())
         .manage(Scans::default())
         .manage(midi::Streams::default())
+        .manage(midi::Songs::default())
         .manage(mini::Handed::default())
         // A MIDI song as it is made, which the window streams by number from `song://`.
         .register_asynchronous_uri_scheme_protocol("song", |context, request, responder| {
@@ -2523,6 +2620,8 @@ fn main() {
             thumbnail,
             big_picture,
             unlock_zip,
+            archive_cache_size,
+            clear_archive_cache,
             picture_size,
             picture_aspects,
             archive_text,
@@ -2560,6 +2659,7 @@ fn main() {
             song_audio,
             song_info,
             song_notes,
+            song_overview,
             forget_song,
             open_audio,
             aiff_audio,
@@ -2580,9 +2680,6 @@ fn main() {
             list_tags,
             create_tag,
             edit_tag,
-            delete_tag,
-            set_tag,
-            set_tag_paths,
             tagged_files,
             restore_tagged,
             keep_on_device,
@@ -2602,6 +2699,7 @@ fn main() {
             send_to_file_dialog,
             stop_map,
             drop_choices,
+            measure_drop,
             own_templates,
             templates_folder,
             subfolders,
@@ -2640,12 +2738,44 @@ mod tests {
         zip.finish().unwrap();
         let row = archive.join("docs").join("a.txt");
 
-        let job = copy_job(vec![row.clone()], folder.clone()).unwrap();
+        let job = copy_job(vec![row.clone()], folder.clone());
         assert!(matches!(&job, Job::Unzip { archives, only, into: Some(into), .. }
             if archives == std::slice::from_ref(&archive) && only == &["docs/a.txt"] && into == &folder));
-        assert!(matches!(copy_job(vec![archive.clone()], folder.clone()).unwrap(), Job::Copy { .. }));
+        assert!(matches!(copy_job(vec![archive.clone()], folder.clone()), Job::Copy { .. }));
+        let other = folder.join("other.zip");
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(&other).unwrap());
+        zip.start_file("b.txt", zip::write::SimpleFileOptions::default()).unwrap();
+        zip.write_all(b"beta").unwrap();
+        zip.finish().unwrap();
+        let several = copy_job(vec![row.clone(), other.join("b.txt"), archive.clone(), archive.join("docs")], folder.clone());
+        let Job::Several { jobs } = &several else { panic!("one job per archive, then the copy") };
+        assert!(matches!(&jobs[..], [
+            Job::Unzip { archives: a, only: first, .. },
+            Job::Unzip { archives: b, only: second, .. },
+            Job::Copy { sources, .. },
+        ] if a == std::slice::from_ref(&archive) && first == &["docs/a.txt", "docs"] && b == std::slice::from_ref(&other)
+            && second == &["b.txt"] && sources == std::slice::from_ref(&archive)));
         assert_eq!(refuse_zipped(&[row]), Err(zipped::READ_ONLY.to_string()));
         assert_eq!(refuse_zipped(&[archive]), Ok(()));
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    #[test]
+    fn attachments_of_a_mail_in_a_zip_come_from_a_real_copy() {
+        use std::io::Write;
+        let folder = std::env::temp_dir().join(format!("perli-zipped-mail-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let archive = folder.join("mails.zip");
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(&archive).unwrap());
+        zip.start_file("note.eml", zip::write::SimpleFileOptions::default()).unwrap();
+        zip.write_all(b"Subject: Hi\r\n\r\nHello\r\n").unwrap();
+        zip.finish().unwrap();
+
+        let task = Task::SaveAttachments { path: archive.join("note.eml"), folder: folder.to_string_lossy().into_owned() };
+        let plan = task.plan(&Views::default(), &Drags::default()).unwrap().unwrap();
+        let Job::Attachments { mail, .. } = plan.job else { panic!("expected an attachments job") };
+        assert!(mail.is_file(), "{mail:?}");
+        assert_eq!(mail.file_name(), Some(std::ffi::OsStr::new("note.eml")));
         let _ = std::fs::remove_dir_all(&folder);
     }
 

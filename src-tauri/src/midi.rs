@@ -1,14 +1,18 @@
 //! MIDI files played through the bundled SoundFont. The song becomes one WAV, made a block at a
-//! time while the page's own audio player streams it, so it plays at once, and pausing, seeking
-//! and volume need nothing here.
+//! time into a temp file while the page's own audio player streams it, so it plays at once, and
+//! pausing, seeking and volume need nothing here.
 
 use std::collections::HashMap;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::BufReader;
+use std::os::windows::fs::{FileExt, OpenOptionsExt};
 use std::panic::AssertUnwindSafe;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
+use std::time::SystemTime;
+
+use windows::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_TEMPORARY, FILE_FLAG_DELETE_ON_CLOSE};
 
 use serde::{Deserialize, Serialize};
 use rustysynth::{MidiFile, MidiFileSequencer, SoundFont, Synthesizer, SynthesizerSettings};
@@ -21,9 +25,11 @@ const CHANNELS: u16 = 2;
 const SAMPLE_BYTES: u16 = 2;
 /// Long enough for the last notes to fade out.
 const TAIL_SECONDS: f64 = 2.0;
-// ponytail: the made song stays in memory, about 10.6 MB a minute, so seeking back needs no
-// second render. Past this it is cut. Keep only a window round the playhead if longer songs matter.
-const MOST_SECONDS: f64 = 20.0 * 60.0;
+/// A WAV counts its bytes in 32 bits, so it holds at most 4 GB, a little over six and a half hours.
+const MOST_SECONDS: f64 = 6.0 * 60.0 * 60.0;
+/// How far making the song runs ahead of what the window has asked for, so a long song played
+/// for a minute fills no gigabytes of disk. About 53 MB.
+const AHEAD_BYTES: usize = 5 * 60 * RATE as usize * 4;
 const BLOCK_FRAMES: usize = 4096;
 const WAV_HEADER_BYTES: usize = 44;
 
@@ -64,12 +70,15 @@ pub fn stream(sound_font: &Path, song: &Path, playing: Playing) -> Result<Arc<St
 
     let header = wav_header(frames);
     let total = header.len() + frames * usize::from(CHANNELS * SAMPLE_BYTES);
-    let stream = Arc::new(Stream { made: Mutex::new((header, false)), grown: Condvar::new(), total });
+    let file = temp_wav().map_err(|error| error.to_string())?;
+    write_at(&file, &header, 0).map_err(|error| error.to_string())?;
+    let made = Made { bytes: header.len(), ended: false, asked: 0 };
+    let stream = Arc::new(Stream { file, made: Mutex::new(made), grown: Condvar::new(), total });
     let filling = Arc::clone(&stream);
     std::thread::spawn(move || {
         // A broken file can trip the synthesizer's own checks. The song then ends where it got to.
         let _ = std::panic::catch_unwind(AssertUnwindSafe(|| fill(&mut sequencer, frames, &filling)));
-        filling.lock().1 = true;
+        filling.lock().ended = true;
         filling.grown.notify_all();
     });
     Ok(stream)
@@ -88,22 +97,73 @@ fn fill(sequencer: &mut MidiFileSequencer, frames: usize, stream: &Arc<Stream>) 
             block.extend_from_slice(&sample(*l));
             block.extend_from_slice(&sample(*r));
         }
-        let mut made = stream.lock();
-        // Let go of, so nothing more is made.
-        if made.1 {
+        // Far enough ahead waits for the window to ask for more, or to let go.
+        let made = stream.grown.wait_while(stream.lock(), |made| made.bytes > made.asked + AHEAD_BYTES && !made.ended);
+        let at = made.unwrap_or_else(PoisonError::into_inner).bytes;
+        if write_at(&stream.file, &block, at).is_err() {
             return;
         }
-        made.0.extend_from_slice(&block);
+        let mut made = stream.lock();
+        // Let go of, so nothing more is made.
+        if made.ended {
+            return;
+        }
+        made.bytes += block.len();
         drop(made);
         stream.grown.notify_all();
         done += count;
     }
 }
 
+static TEMP_NUMBER: AtomicU64 = AtomicU64::new(0);
+
+/// A temp file Windows deletes once its last handle closes, even if Perli ends without asking.
+fn temp_wav() -> std::io::Result<File> {
+    let number = TEMP_NUMBER.fetch_add(1, Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!("perli-song-{}-{number}.wav", std::process::id()));
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .attributes(FILE_ATTRIBUTE_TEMPORARY.0)
+        .custom_flags(FILE_FLAG_DELETE_ON_CLOSE.0)
+        .open(path)
+}
+
+fn write_at(file: &File, mut bytes: &[u8], mut at: usize) -> std::io::Result<()> {
+    while !bytes.is_empty() {
+        let wrote = file.seek_write(bytes, at as u64)?;
+        bytes = &bytes[wrote..];
+        at += wrote;
+    }
+    Ok(())
+}
+
+fn read_at(file: &File, mut into: &mut [u8], mut at: usize) -> std::io::Result<()> {
+    while !into.is_empty() {
+        let read = file.seek_read(into, at as u64)?;
+        if read == 0 {
+            return Err(std::io::ErrorKind::UnexpectedEof.into());
+        }
+        into = &mut into[read..];
+        at += read;
+    }
+    Ok(())
+}
+
+/// How far a song's WAV has got.
+struct Made {
+    bytes: usize,
+    /// Making it has ended, all of it or not.
+    ended: bool,
+    /// The furthest byte the window has asked for.
+    asked: usize,
+}
+
 /// A song being made into a WAV a block at a time. The window plays it as it grows.
 pub struct Stream {
-    /// The WAV so far, and whether making it has ended, all of it or not.
-    made: Mutex<(Vec<u8>, bool)>,
+    file: File,
+    made: Mutex<Made>,
     grown: Condvar,
     /// How long the whole WAV is.
     total: usize,
@@ -113,21 +173,30 @@ pub struct Stream {
 const CHUNK_BYTES: usize = 1 << 20;
 
 impl Stream {
-    fn lock(&self) -> std::sync::MutexGuard<'_, (Vec<u8>, bool)> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Made> {
         self.made.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Ends the making, and wakes every ask still waiting with what there is.
     fn stop(&self) {
-        self.lock().1 = true;
+        self.lock().ended = true;
         self.grown.notify_all();
     }
 
     /// The bytes from `start` up to `end`, waiting until they are made.
     fn read(&self, start: usize, end: usize) -> Vec<u8> {
-        let made = self.grown.wait_while(self.lock(), |(wav, ended)| wav.len() < end && !*ended);
-        let made = made.unwrap_or_else(PoisonError::into_inner);
-        made.0.get(start..end.min(made.0.len())).unwrap_or_default().to_vec()
+        let mut made = self.lock();
+        if end > made.asked {
+            made.asked = end;
+            self.grown.notify_all();
+        }
+        let made = self.grown.wait_while(made, |made| made.bytes < end && !made.ended);
+        let end = end.min(made.unwrap_or_else(PoisonError::into_inner).bytes);
+        let mut body = vec![0; end.saturating_sub(start)];
+        if read_at(&self.file, &mut body, start).is_err() {
+            body.clear();
+        }
+        body
     }
 
     /// The answer to the window's ask for a part of the song, by an HTTP `Range` such as `bytes=0-`.
@@ -281,6 +350,9 @@ fn wav_header(frames: usize) -> Vec<u8> {
     wav
 }
 
+/// One note: start and length in seconds, key, and channel.
+type Note = (f32, f32, u8, u8);
+
 /// What the player shows beside the sound: the song's name, its instruments and its notes.
 #[derive(Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -290,33 +362,95 @@ pub struct SongInfo {
     instruments: Vec<u8>,
     /// Each channel that plays and the instrument it starts with, in the order they first play.
     channels: Vec<(u8, u8)>,
-    /// Each note as start and length in seconds, key, and channel. They go to the window
-    /// packed, by `packed_notes`, as a big song has millions.
+    /// In order of start. A big song has millions, so the window asks for a few seconds of them
+    /// at a time, by `notes_between`.
     #[serde(skip)]
-    notes: Vec<(f32, f32, u8, u8)>,
+    notes: Vec<Note>,
     /// When each beat falls, in seconds.
     beats: Vec<f32>,
     /// When each bar starts, in seconds, following the song's time signatures.
     bars: Vec<f32>,
+    /// The lowest and highest key played, so the keyboard is laid out before any notes come.
+    low: u8,
+    high: u8,
+    /// The longest note, in seconds: notes that started this long before a time can still sound.
+    longest: f32,
+    /// When the last note ends, in seconds.
+    end: f32,
 }
 
+/// Packs notes as columns of little-endian numbers: every start, every length, every key, every
+/// channel. The window reads each column in place.
+fn pack(notes: &[Note]) -> Vec<u8> {
+    let mut packed = Vec::with_capacity(notes.len() * 10);
+    packed.extend(notes.iter().flat_map(|note| note.0.to_le_bytes()));
+    packed.extend(notes.iter().flat_map(|note| note.1.to_le_bytes()));
+    packed.extend(notes.iter().map(|note| note.2));
+    packed.extend(notes.iter().map(|note| note.3));
+    packed
+}
+
+/// The most columns the song's overview strip can ask for.
+const MOST_COLUMNS: usize = 4000;
+
 impl SongInfo {
-    /// The notes as columns of little-endian numbers: every start, every length, every key,
-    /// every channel. The window reads each column in place.
-    pub fn packed_notes(&self) -> Vec<u8> {
-        let mut packed = Vec::with_capacity(self.notes.len() * 10);
-        packed.extend(self.notes.iter().flat_map(|note| note.0.to_le_bytes()));
-        packed.extend(self.notes.iter().flat_map(|note| note.1.to_le_bytes()));
-        packed.extend(self.notes.iter().map(|note| note.2));
-        packed.extend(self.notes.iter().map(|note| note.3));
+    /// The notes that may sound at some time from `from` to `to` seconds, packed by `pack`.
+    pub fn notes_between(&self, from: f32, to: f32) -> Vec<u8> {
+        let first = self.notes.partition_point(|note| note.0 < from - self.longest);
+        let last = first + self.notes[first..].partition_point(|note| note.0 < to);
+        pack(&self.notes[first..last])
+    }
+
+    /// Where notes sound across the whole song, in `columns` slices of it up to `end`: each key
+    /// and channel once a column, however many notes. As columns: every column (16 bits), every
+    /// key, every channel.
+    pub fn overview(&self, columns: usize) -> Vec<u8> {
+        let columns = columns.clamp(1, MOST_COLUMNS);
+        let mut seen = vec![false; columns * 128 * 16];
+        let end = self.end.max(f32::MIN_POSITIVE);
+        let column = |seconds: f32| ((seconds / end * columns as f32) as usize).min(columns - 1);
+        for &(start, long, key, channel) in &self.notes {
+            for at in column(start)..=column(start + long) {
+                seen[(at * 128 + usize::from(key & 0x7F)) * 16 + usize::from(channel & 0x0F)] = true;
+            }
+        }
+        let found: Vec<usize> = seen.iter().enumerate().filter_map(|(index, seen)| seen.then_some(index)).collect();
+        let mut packed = Vec::with_capacity(found.len() * 4);
+        packed.extend(found.iter().flat_map(|index| ((index / (128 * 16)) as u16).to_le_bytes()));
+        packed.extend(found.iter().map(|index| (index / 16 % 128) as u8));
+        packed.extend(found.iter().map(|index| (index % 16) as u8));
         packed
+    }
+}
+
+/// The song last shown, so the window's asks for its notes need no second read of the file.
+#[derive(Clone, Default)]
+pub struct Songs(Arc<Mutex<Option<Shown>>>);
+
+/// A song's path, when it last changed, and what was read of it.
+type Shown = (PathBuf, Option<SystemTime>, Arc<SongInfo>);
+
+impl Songs {
+    /// Blocks while a big song is read, so a second ask for it waits for the first.
+    pub fn song(&self, path: &Path) -> Result<Arc<SongInfo>, String> {
+        let changed = std::fs::metadata(path).and_then(|meta| meta.modified()).ok();
+        let mut last = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some((known, when, song)) = last.as_ref() {
+            if known == path && *when == changed {
+                return Ok(Arc::clone(song));
+            }
+        }
+        let song = Arc::new(info(path)?);
+        *last = Some((path.to_path_buf(), changed, Arc::clone(&song)));
+        Ok(song)
     }
 }
 
 pub const DRUMS: u8 = 128;
 const DRUM_CHANNEL: u8 = 9;
-// ponytail: a piano roll past this many notes shows only the first ones, 40 MB of them packed.
-const MOST_NOTES: usize = 4_000_000;
+// ponytail: past this many notes, about 360 MB of them, the rest are left out. Read the file a
+// stretch at a time if bigger songs matter.
+const MOST_NOTES: usize = 30_000_000;
 const MOST_BEATS: usize = 20_000;
 const DEFAULT_TEMPO: f64 = 500_000.0;
 
@@ -423,6 +557,13 @@ fn read_info(bytes: &[u8]) -> Option<SongInfo> {
         }
     }
     info.notes.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let (mut low, mut high) = (127, 0);
+    for &(start, long, key, _) in &info.notes {
+        (low, high) = (low.min(key), high.max(key));
+        info.longest = info.longest.max(long);
+        info.end = info.end.max(start + long);
+    }
+    (info.low, info.high) = if low > high { (60, 71) } else { (low, high) };
     Some(info)
 }
 
@@ -637,9 +778,9 @@ mod tests {
 
         let status = waited.recv_timeout(std::time::Duration::from_secs(1)).expect("the seek still waits");
         assert_eq!(status, 416);
-        let made = watched.lock().0.len();
+        let made = watched.lock().bytes;
         std::thread::sleep(std::time::Duration::from_millis(100));
-        assert_eq!(watched.lock().0.len(), made, "still making it");
+        assert_eq!(watched.lock().bytes, made, "still making it");
         assert!(made < watched.total);
         std::fs::remove_dir_all(folder).unwrap();
     }
@@ -705,10 +846,22 @@ mod tests {
         assert_eq!(info.title.as_deref(), Some("Tune"));
         assert_eq!(info.instruments, [0, 40, DRUMS]);
         assert_eq!(info.notes, [(0.0, 1.0, 60, 0), (1.0, 0.5, 64, 0), (1.5, 0.5, 36, 9)]);
-        let packed = info.packed_notes();
+        assert_eq!((info.low, info.high, info.longest, info.end), (36, 64, 1.0, 2.0));
+        let packed = info.notes_between(0.0, 10.0);
         assert_eq!(packed.len(), 30);
         assert_eq!((&packed[4..8], &packed[12..16]), (&1f32.to_le_bytes()[..], &1f32.to_le_bytes()[..]), "starts, then lengths");
         assert_eq!(&packed[24..], [60, 64, 36, 0, 0, 9], "keys, then channels");
+        // From half a second, the C begun at 0 may still sound, as the longest note counts back.
+        // The drum at 1.5 starts after the stretch.
+        assert_eq!(info.notes_between(0.5, 1.4).len(), 20);
+        assert_eq!(info.notes_between(3.5, 4.0).len(), 0);
+        // Four columns of half a second: the C runs from the first into the third, where it ends.
+        let overview = info.overview(4);
+        let count = overview.len() / 4;
+        let columns: Vec<u16> = overview[..count * 2].chunks(2).map(|pair| u16::from_le_bytes([pair[0], pair[1]])).collect();
+        assert_eq!(columns, [0, 1, 2, 2, 3, 3]);
+        assert_eq!(&overview[count * 2..count * 3], [60, 60, 60, 64, 36, 64]);
+        assert_eq!(&overview[count * 3..], [0, 0, 0, 0, 9, 0]);
         assert_eq!(info.channels, [(0, 0), (9, DRUMS)]);
         assert_eq!((info.beats.as_slice(), info.bars.as_slice()), ([0.0, 1.0, 2.0].as_slice(), [0.0].as_slice()));
         assert!(read_info(b"RIFF").is_none());

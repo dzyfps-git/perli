@@ -153,10 +153,11 @@ export function createFileActions(
       if (folder && writable(view)) start(view, { kind: "template", folder, extension });
     },
 
-    /** A new file from one the user keeps in their templates folder. A `{date}` in its name is today. */
-    newFromOwn(view: FolderView, name: string) {
+    /** A new file or folder from one the user keeps in their templates folder. A `{date}` in its
+     *  names is today, and a `{name}` is what the user `called` it. */
+    newFromOwn(view: FolderView, name: string, called?: string) {
       const folder = view.folder()?.path;
-      if (folder && writable(view)) start(view, { kind: "ownTemplate", folder, name, date: dayText(Date.now()) });
+      if (folder && writable(view)) start(view, { kind: "ownTemplate", folder, name, date: dayText(Date.now()), called });
     },
 
     /** A new file from the text or picture on the clipboard. */

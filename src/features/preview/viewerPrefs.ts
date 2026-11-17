@@ -35,6 +35,10 @@ export const [previewSize, setPreviewSize] = stored<{ width: number; height: num
 );
 /** Each pixel of a picture stays a hard square when zoomed in, instead of being smoothed. */
 export const [sharpPixels, setSharpPixels] = stored("picture-sharp", saved("picture-sharp") === true);
+/** What picture copies keep of a photo's facts: the camera on, the place off. */
+export const [copyFacts, setCopyFacts] = stored("picture-copy-facts", saved("picture-copy-facts") !== false);
+export const [copyNoPlace, setCopyNoPlace] = stored("picture-copy-no-place", saved("picture-copy-no-place") !== false);
+export const pictureKeep = () => ({ camera: copyFacts(), place: !copyNoPlace() });
 /** A small map of the whole picture, page or film shows while zoomed in. */
 export const [minimapShown, setMinimapShown] = stored("minimap", saved("minimap") !== false);
 /** A song's lyrics from the `.lrc` file beside it. */
@@ -87,7 +91,12 @@ const item = (label: string, checked: () => boolean, set: (on: boolean) => void)
 /** The settings of each viewer, as its cog and the settings page both show them. */
 export const VIEWER_SETTINGS = {
   Preview: [item("Neighbouring files along the bottom", neighbours, setNeighbours)],
-  Pictures: [item("Sharp pixels when zoomed in", sharpPixels, setSharpPixels), item("Map of the whole picture when zoomed in", minimapShown, setMinimapShown)],
+  Pictures: [
+    item("Sharp pixels when zoomed in", sharpPixels, setSharpPixels),
+    item("Map of the whole picture when zoomed in", minimapShown, setMinimapShown),
+    item("Keep camera facts in copies", copyFacts, setCopyFacts),
+    item("Remove location from copies", copyNoPlace, setCopyNoPlace),
+  ],
   Text: [
     item("Wrap long lines", wrap, setWrap),
     item("Line numbers", numbers, setNumbers),
