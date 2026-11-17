@@ -611,6 +611,12 @@ struct Start {
     new_window: bool,
     /// A tab moved here from another window, with where the window goes, as the UI wrote it.
     moved: Option<String>,
+    /// The file this window keeps its tabs in. None for a start on one folder, a detour whose
+    /// tabs must not replace the saved ones.
+    #[serde(skip)]
+    own: Option<PathBuf>,
+    /// The window keeps its tabs for the next start.
+    keep: bool,
 }
 
 /// Windows quotes a drive as `"C:\"`, and the backslash then escapes the closing quote.
@@ -631,7 +637,22 @@ impl Start {
             let _ = std::fs::remove_file(file);
             text
         });
-        let session = (ask.folder.is_none() && moved.is_none()).then(session::read).flatten();
+        // One more window keeps a file of its own: the one it comes back from, or a new one.
+        let own = if ask.new_window {
+            ask.window.as_ref().map(PathBuf::from).or_else(session::window_file)
+        } else if ask.folder.is_none() {
+            session::first_file()
+        } else {
+            None
+        };
+        let session = if ask.new_window {
+            ask.window.as_ref().and_then(|file| std::fs::read_to_string(file).ok())
+        } else {
+            own.as_ref().and_then(|_| session::read())
+        };
+        if let Some(file) = own.as_ref().filter(|_| ask.new_window) {
+            session::hold(file);
+        }
         let home = std::env::var("USERPROFILE").ok();
         Self {
             folder: ask.folder,
@@ -640,6 +661,8 @@ impl Start {
             home,
             new_window: ask.new_window,
             moved,
+            keep: own.is_some(),
+            own,
         }
     }
 
@@ -676,11 +699,43 @@ fn asks_waiting(inbox: State<'_, Inbox>) -> Vec<launch::Ask> {
 }
 
 #[tauri::command]
-async fn save_session(text: String) -> Result<(), String> {
-    async_runtime::spawn_blocking(move || session::save(&text))
-        .await
-        .map_err(|error| error.to_string())?
-        .map_err(|error| error.to_string())
+async fn save_session(text: String, start: State<'_, Start>) -> Result<(), String> {
+    let Some(file) = start.own.clone() else { return Ok(()) };
+    blocking(move || session::write(&file, &text).map_err(|error| error.to_string())).await
+}
+
+/// This window closes while others stay open, so it won't come back at the next start. It can
+/// be reopened, unless its tabs went to another window.
+#[tauri::command]
+async fn forget_session(reopenable: bool, start: State<'_, Start>) -> Result<(), String> {
+    let Some(file) = start.own.clone() else { return Ok(()) };
+    blocking(move || session::forget(&file, reopenable).map_err(|error| error.to_string())).await
+}
+
+/// The windows open when Perli last stopped come back, once the first window shows its own tabs.
+#[tauri::command]
+async fn restore_windows(start: State<'_, Start>) -> Result<(), String> {
+    if start.new_window || !start.keep {
+        return Ok(());
+    }
+    blocking(|| {
+        for file in session::left_windows() {
+            window_command()?.arg("--window").arg(&file).spawn().map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    })
+    .await
+}
+
+/// The window closed last opens again. False when none is left to reopen.
+#[tauri::command]
+async fn reopen_window() -> Result<bool, String> {
+    blocking(|| {
+        let Some(file) = session::reopen() else { return Ok(false) };
+        window_command()?.arg("--window").arg(&file).spawn().map_err(|error| error.to_string())?;
+        Ok(true)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -2451,12 +2506,19 @@ fn come_forward(window: tauri::WebviewWindow) {
     let _ = window.set_focus();
 }
 
-/// Starts one more Perli with a window of its own, for those who want each folder in one. With
-/// `moved`, the window takes a whole tab from this one instead, written to a file it reads once.
-#[tauri::command]
-fn open_window(folder: String, select: Vec<String>, moved: Option<String>) -> Result<(), String> {
+/// One more Perli, with a window of its own.
+fn window_command() -> Result<Command, String> {
     let mut start = Command::new(std::env::current_exe().map_err(|error| error.to_string())?);
     start.arg("--new-window");
+    Ok(start)
+}
+
+/// Starts one more Perli with a window of its own, for those who want each folder in one. With
+/// `moved`, the window takes a whole tab from this one instead, written to a file it reads once.
+/// Gives the new Perli's process number, which reaches its window once it is up.
+#[tauri::command]
+fn open_window(folder: String, select: Vec<String>, moved: Option<String>) -> Result<u32, String> {
+    let mut start = window_command()?;
     if let Some(moved) = moved {
         let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|since| since.as_nanos()).unwrap_or_default();
         let file = session::data_file(&format!("moved-{stamp}.json")).ok_or("No folder for app data")?;
@@ -2468,7 +2530,18 @@ fn open_window(folder: String, select: Vec<String>, moved: Option<String>) -> Re
     for name in &select {
         start.arg("--select").arg(Path::new(&folder).join(name));
     }
-    start.spawn().map(|_| ()).map_err(|error| error.to_string())
+    start.spawn().map(|child| child.id()).map_err(|error| error.to_string())
+}
+
+/// What a later start, or another window, asks to open goes to the UI, or waits till it listens.
+fn deliver(app: &AppHandle, ask: launch::Ask) {
+    // Held while sending, so an ask can't slip between the UI's take and its event.
+    let inbox = app.state::<Inbox>();
+    let mut inbox = inbox.0.lock().unwrap();
+    match inbox.as_mut() {
+        Some(waiting) => waiting.push(ask),
+        None => drop(app.emit("open-asked", ask)),
+    }
 }
 
 /// How long Perli answers for the Explorer window another app expects after it asks Windows to
@@ -2594,15 +2667,7 @@ fn main() {
             });
             if let Some(door) = door {
                 let asked = app.handle().clone();
-                door.listen(move |ask| {
-                    // Held while sending, so an ask can't slip between the UI's take and its event.
-                    let inbox = asked.state::<Inbox>();
-                    let mut inbox = inbox.0.lock().unwrap();
-                    match inbox.as_mut() {
-                        Some(waiting) => waiting.push(ask),
-                        None => drop(asked.emit("open-asked", ask)),
-                    }
-                });
+                door.listen(move |ask| deliver(&asked, ask));
             }
             watch::start(app.handle().clone());
             if let Some(main) = app.get_webview_window("main") {
@@ -2620,6 +2685,9 @@ fn main() {
             start_state,
             asks_waiting,
             save_session,
+            forget_session,
+            restore_windows,
+            reopen_window,
             list_places,
             drive_space,
             type_names,
@@ -2713,6 +2781,12 @@ fn main() {
             tearoff::send_tab,
             tearoff::other_windows,
             tearoff::ask_for_tabs,
+            tearoff::set_workspace,
+            tearoff::workspace_windows,
+            tearoff::show_window,
+            tearoff::bring_workspace,
+            tearoff::send_workspace,
+            tearoff::select_in_window,
             tearoff::ghost_show,
             tearoff::ghost_move,
             tearoff::ghost_hide,

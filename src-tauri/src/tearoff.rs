@@ -1,9 +1,11 @@
 //! A tab dragged out of its window. While it is out, a small picture of it follows the pointer
 //! in a window of its own, since a page can't draw past its window. Dropped on another Perli
 //! window, the tab goes to it as a message between the two; elsewhere it opens a new window.
+//! The same messages tell which window has a workspace on show, and hand one over.
 
 use std::sync::atomic::{AtomicIsize, Ordering};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
@@ -19,9 +21,9 @@ use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
     AllowSetForegroundWindow, CreateWindowExW, DefWindowProcW, EnumWindows, GetAncestor, GetCursorPos, GetPropW,
-    GetWindowRect, GetWindowThreadProcessId, IsWindowVisible, RegisterClassW, SendMessageTimeoutW, SetForegroundWindow, SetPropW,
-    SetWindowPos, ShowWindow, UpdateLayeredWindow, WindowFromPoint, GA_ROOT, SMTO_ABORTIFHUNG, SWP_NOACTIVATE, SWP_NOSIZE,
-    SWP_NOZORDER, SW_HIDE, SW_SHOWNOACTIVATE, ULW_ALPHA, WM_COPYDATA, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+    GetWindowRect, GetWindowThreadProcessId, IsIconic, IsWindowVisible, RegisterClassW, SendMessageTimeoutW, SetForegroundWindow,
+    SetPropW, SetWindowPos, ShowWindow, UpdateLayeredWindow, WindowFromPoint, GA_ROOT, SMTO_ABORTIFHUNG, SWP_NOACTIVATE,
+    SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_RESTORE, SW_SHOWNOACTIVATE, ULW_ALPHA, WM_COPYDATA, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
     WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
@@ -30,6 +32,15 @@ const MARK: PCWSTR = w!("PerliTabs");
 /// What a message between two Perli windows carries: a tab, or an ask for all of them.
 const TAB: usize = 0x5045_5254;
 const GATHER: usize = 0x5045_5247;
+/// Has this window a workspace on show; come to the front; hand a workspace to the window that
+/// asks, then close; here is the workspace asked for; select these in a window just opened.
+const HOLDS: usize = 0x5045_5248;
+const FORWARD: usize = 0x5045_5246;
+const BRING: usize = 0x5045_5242;
+const SPACE: usize = 0x5045_5253;
+const SELECT: usize = 0x5045_524C;
+/// How long a window just started has to come up before a file to select in it is dropped.
+const SELECT_WAIT: Duration = Duration::from_secs(8);
 const SUBCLASS: usize = 0x7461_6273;
 /// How long a window that doesn't answer is waited for.
 const ANSWER_MS: u32 = 3000;
@@ -41,6 +52,13 @@ const HOLD_Y: i32 = 20;
 
 static APP: OnceLock<AppHandle> = OnceLock::new();
 static GHOST: AtomicIsize = AtomicIsize::new(0);
+/// The workspace on show in this window, so other windows can ask without waiting on its page.
+static WORKSPACE: Mutex<String> = Mutex::new(String::new());
+
+fn holds(name: &[u8]) -> bool {
+    let shown = WORKSPACE.lock().unwrap();
+    !shown.is_empty() && shown.as_bytes() == name
+}
 
 fn tauri_error(error: impl ToString) -> String {
     error.to_string()
@@ -79,6 +97,34 @@ unsafe extern "system" fn subclass(window: HWND, message: u32, wparam: WPARAM, l
         GATHER if bytes.len() == size_of::<isize>() && !app.state::<crate::jobs::Jobs>().running() => {
             let asker = isize::from_le_bytes(bytes.try_into().unwrap());
             LRESULT(app.emit_to("main", "tabs-asked", asker).is_ok() as isize)
+        }
+        HOLDS => LRESULT(holds(bytes) as isize),
+        FORWARD => {
+            if IsIconic(window).as_bool() {
+                let _ = ShowWindow(window, SW_RESTORE);
+            }
+            LRESULT(SetForegroundWindow(window).as_bool() as isize)
+        }
+        // Like a gather, a window whose jobs still run keeps its workspace, as it can't close.
+        BRING if bytes.len() > size_of::<isize>() && !app.state::<crate::jobs::Jobs>().running() => {
+            let (asker, name) = bytes.split_at(size_of::<isize>());
+            if !holds(name) {
+                return LRESULT(0);
+            }
+            let asker = isize::from_le_bytes(asker.try_into().unwrap());
+            let name = String::from_utf8_lossy(name).into_owned();
+            LRESULT(app.emit_to("main", "workspace-asked", (asker, name)).is_ok() as isize)
+        }
+        SPACE => {
+            let Ok(text) = std::str::from_utf8(bytes) else { return LRESULT(0) };
+            let _ = SetForegroundWindow(window);
+            LRESULT(app.emit_to("main", "workspace-brought", text).is_ok() as isize)
+        }
+        SELECT => {
+            let Ok(mut ask) = serde_json::from_slice::<crate::launch::Ask>(bytes) else { return LRESULT(0) };
+            ask.here = true;
+            crate::deliver(app, ask);
+            LRESULT(1)
         }
         _ => LRESULT(0),
     }
@@ -171,6 +217,86 @@ pub fn ask_for_tabs(window: isize, own: WebviewWindow) -> Result<bool, String> {
     let to = HWND(window as _);
     let me = native(&own)?.0 as isize;
     Ok(other_perli(to) && send(to, GATHER, &me.to_le_bytes()))
+}
+
+/// The workspace on show here, for other windows that ask.
+#[tauri::command]
+pub fn set_workspace(name: Option<String>) {
+    *WORKSPACE.lock().unwrap() = name.unwrap_or_default();
+}
+
+/// For each of `names`, the other window that has it on show, if one does.
+#[tauri::command]
+pub fn workspace_windows(names: Vec<String>) -> Vec<Option<isize>> {
+    let windows = other_windows();
+    names
+        .iter()
+        .map(|name| windows.iter().copied().find(|&window| send(HWND(window as _), HOLDS, name.as_bytes())))
+        .collect()
+}
+
+/// Brings another Perli window to the front, out of the taskbar if it is minimized.
+#[tauri::command]
+pub fn show_window(window: isize) -> bool {
+    let to = HWND(window as _);
+    other_perli(to) && send(to, FORWARD, &[])
+}
+
+/// Asks the window that has workspace `name` on show to hand it here, then close. False when it
+/// won't, because its jobs still run, or it shows another workspace by now.
+#[tauri::command]
+pub fn bring_workspace(window: isize, name: String, own: WebviewWindow) -> Result<bool, String> {
+    let to = HWND(window as _);
+    let mut bytes = (native(&own)?.0 as isize).to_le_bytes().to_vec();
+    bytes.extend_from_slice(name.as_bytes());
+    Ok(other_perli(to) && send(to, BRING, &bytes))
+}
+
+/// Hands a workspace, as the UI wrote it, to the window that asked for it.
+#[tauri::command]
+pub fn send_workspace(window: isize, text: String) -> bool {
+    let to = HWND(window as _);
+    other_perli(to) && send(to, SPACE, text.as_bytes())
+}
+
+/// The window of Perli's process `process`, shown yet or not.
+fn window_of(process: u32) -> Option<HWND> {
+    unsafe extern "system" fn each(window: HWND, found: LPARAM) -> windows::core::BOOL {
+        let wanted = &mut *(found.0 as *mut (u32, Option<HWND>));
+        let mut process = 0;
+        GetWindowThreadProcessId(window, Some(&mut process));
+        if process == wanted.0 && !GetPropW(window, MARK).is_invalid() {
+            wanted.1 = Some(window);
+            return false.into();
+        }
+        true.into()
+    }
+    let mut wanted = (process, None);
+    unsafe {
+        let _ = EnumWindows(Some(each), LPARAM(&mut wanted as *mut _ as isize));
+    }
+    wanted.1
+}
+
+/// Hands names to select to the window of the Perli started as `process`, which may still be
+/// coming up. False when no such window turns up in time.
+#[tauri::command]
+pub async fn select_in_window(process: u32, ask: crate::launch::Ask) -> bool {
+    let Ok(text) = serde_json::to_vec(&ask) else { return false };
+    tauri::async_runtime::spawn_blocking(move || {
+        let end = Instant::now() + SELECT_WAIT;
+        loop {
+            if let Some(window) = window_of(process) {
+                return send(window, SELECT, &text);
+            }
+            if Instant::now() > end {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    })
+    .await
+    .unwrap_or(false)
 }
 
 unsafe extern "system" fn plain(window: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -339,5 +465,18 @@ mod tests {
     fn a_window_of_this_perli_or_an_unmarked_one_is_no_target() {
         assert!(!other_perli(HWND(std::ptr::null_mut())));
         assert!(!send_tab(0, "{}".into()));
+        assert!(!show_window(0));
+        assert!(!send_workspace(0, "{}".into()));
+    }
+
+    #[test]
+    fn a_workspace_is_held_only_while_on_show() {
+        assert!(!holds(b""));
+        set_workspace(Some("Work".into()));
+        assert!(holds(b"Work"));
+        assert!(!holds(b"Home"));
+        set_workspace(None);
+        assert!(!holds(b"Work"));
+        assert!(!holds(b""));
     }
 }

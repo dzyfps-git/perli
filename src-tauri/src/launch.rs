@@ -41,6 +41,12 @@ pub struct Ask {
     /// Set by `--tab`: the file a tab moved from another window waits in.
     #[serde(skip)]
     pub moved: Option<String>,
+    /// Set by `--window`: the file of a window that comes back, which keeps its tabs there.
+    #[serde(skip)]
+    pub window: Option<String>,
+    /// For a window already open: select there, and open no window of its own.
+    #[serde(default)]
+    pub here: bool,
 }
 
 impl Ask {
@@ -56,6 +62,8 @@ impl Ask {
                 args.next().into_iter().for_each(|path| ask.point_at(path));
             } else if arg == "--tab" {
                 ask.moved = args.next().cloned();
+            } else if arg == "--window" {
+                ask.window = args.next().cloned();
             } else if arg == "--directory" {
                 ask.folder = args.next().cloned().map(crate::folder_argument);
             } else if let Some(path) = arg.strip_prefix("/select,") {
@@ -275,7 +283,7 @@ mod tests {
         door.listen(move |ask| sender.send(ask).unwrap());
 
         for name in ["one", "two"] {
-            let ask = Ask { folder: Some(r"C:\Users".into()), select: vec![name.into()], new_window: true, moved: Some("x".into()) };
+            let ask = Ask { folder: Some(r"C:\Users".into()), select: vec![name.into()], new_window: true, moved: Some("x".into()), ..Default::default() };
             assert!(hand_off(&ask));
             let got = asked.recv_timeout(Duration::from_secs(5)).unwrap();
             assert_eq!(got, Ask { new_window: false, moved: None, ..ask });
