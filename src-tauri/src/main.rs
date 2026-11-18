@@ -2371,11 +2371,11 @@ async fn own_templates() -> Vec<templates::Own> {
     templates::own_names()
 }
 
-/// The folders inside one, for a path crumb's menu.
+/// The folders inside one, for a path crumb's menu, and with `files` its files after them.
 #[tauri::command]
-async fn subfolders(path: PathBuf, show_hidden: bool, show_system: bool) -> Result<Vec<String>, String> {
+async fn subfolders(path: PathBuf, show_hidden: bool, show_system: bool, files: Option<bool>) -> Result<Vec<(String, bool)>, String> {
     let sight = folder::Sight { hidden: show_hidden, system: show_system };
-    blocking(move || folder::subfolders(&path, sight).map_err(|error| error.to_string())).await
+    blocking(move || folder::subfolders(&path, sight, files.unwrap_or(false)).map_err(|error| error.to_string())).await
 }
 
 #[tauri::command]

@@ -124,6 +124,8 @@ import {
   setTileSize,
   openInWindow,
   showHidden,
+  columnFiles,
+  setColumnFiles,
   showSystem,
   tileSize,
   toggleColumn,
@@ -913,16 +915,15 @@ export function App() {
     if (folder && (await view.open(folder))) await view.reload([baseName(path)]);
   }
 
-  /** From the disc on the sidebar back to the song's full player, among its own folder. */
-  /** A file's preview, over its folder in the tab on show: for a song or a film playing on. */
-  async function previewOf(path: string) {
-    const view = tabs.activeView();
+  /** A file's preview, over its folder in the tab on show (or in `view`): for a song or a film playing on. */
+  async function previewOf(path: string, view = tabs.activeView()) {
     await showInFolder(view, path);
     const folder = view.folder();
     const index = folder?.selected?.[0];
     if (folder && index !== undefined) preview(view, { snapshot: folder.request, index });
   }
 
+  /** From the disc on the sidebar back to the song's full player, among its own folder. */
   async function backToPlayer() {
     const song = now();
     if (song) await previewOf(song.path);
@@ -1330,6 +1331,7 @@ export function App() {
           layoutItem("Grid", "grid"),
           layoutItem("Gallery", "gallery"),
           layoutItem("Columns", "columns"),
+          { label: "Files in columns", checked: columnFiles(), action: () => setColumnFiles(!columnFiles()) },
           ...(tiled(view) ? tileItems : rowItems),
           { label: "Windows icons", divider: true, checked: windowsIcons(), action: () => setWindowsIcons(!windowsIcons()) },
           { label: "Details panel", checked: detailsPanel(), action: toggleDetails },
@@ -2142,6 +2144,7 @@ export function App() {
           run: item.action,
         })),
         { label: sizeBars() ? "Hide size bars" : "Show size bars", run: () => setSizeBars(!sizeBars()) },
+        { label: columnFiles() ? "Only folders in columns" : "Files in columns", run: () => setColumnFiles(!columnFiles()) },
         { label: pictureWall() ? "Picture folders with names" : "Picture folders as a wall", run: () => setPictureWall(!pictureWall()) },
         {
           label: picturesInGallery() ? "Picture folders open in their layout" : "Picture folders open in gallery",
@@ -2352,7 +2355,23 @@ export function App() {
           </Show>
           <div class="file-stage">
           <Show when={inColumns(view)}>
-            <FolderColumns view={view} onMenu={(event, path) => showFolderMenu(event, view, path)} onNewTab={(path) => tabs.add([path])} />
+            <FolderColumns
+              view={view}
+              onMenu={(event, path) => showFolderMenu(event, view, path)}
+              onNewTab={(path) => tabs.add([path])}
+              onFile={(path, look) => void (look ? previewOf(path, view) : showInFolder(view, path))}
+              onFileMenu={(event, path) =>
+                setMenu({
+                  x: event.clientX,
+                  y: event.clientY,
+                  items: [
+                    { label: "Show in folder", action: () => showInFolder(view, path) },
+                    { label: "Preview", action: () => previewOf(path, view) },
+                    { label: "Copy path", action: () => quietly(copyFolderPath(path)) },
+                  ],
+                })
+              }
+            />
           </Show>
           {/* A real arrival starts the list over. A reload only swaps its rows, so nothing blinks. */}
           <Show when={view.folder() && view.arrival()} keyed>
@@ -2600,7 +2619,7 @@ export function App() {
         {(open) => <Menu x={open.x} y={open.y} above={open.above} items={open.items} mount={open.mount} onClose={closeMenu} />}
       </Show>
       <Show when={lookFor()} keyed>
-        {(path) => <LookPicker path={path} onClose={() => setLookFor(undefined)} />}
+        {(path) => <LookPicker path={path} onClose={() => setLookFor(undefined)} onOpen={setLookFor} />}
       </Show>
       <Show when={tinting()} keyed>
         {(at) => (

@@ -53,6 +53,8 @@ const COLUMN_SETS = { plain: columnStore("plain"), music: columnStore("music"), 
 export const columnsOf = (set: ColumnSet) => COLUMN_SETS[set][0]();
 const setColumnsOf = (set: ColumnSet, next: Column[]) => COLUMN_SETS[set][1](next);
 export const [showHidden, setShowHidden] = stored("show-hidden", saved("show-hidden") === true);
+/** The column view's columns list each folder's files after its folders. */
+export const [columnFiles, setColumnFiles] = stored("column-files", saved("column-files") === true);
 /** Compared panes leave out the rows that match. */
 export const [compareHideSame, setCompareHideSame] = stored("compare-hide-same", saved("compare-hide-same") === true);
 /** Compared files alike in size are read, so only their bytes decide. */

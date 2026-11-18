@@ -971,9 +971,13 @@ export const ownTemplates = () => invoke<OwnTemplate[]>("own_templates");
 
 export const templatesFolder = () => invoke<string>("templates_folder");
 
+/** What is right inside `path`, in Explorer's order, as [name, is a folder]: the folders, then with `files` the files. */
+export const folderItems = (path: string, showHidden: boolean, showSystem: boolean, files: boolean) =>
+  invoke<[string, boolean][]>("subfolders", { path, showHidden, showSystem, files });
+
 /** The names of the folders right inside `path`, in Explorer's order. */
 export const subfolders = (path: string, showHidden: boolean, showSystem: boolean) =>
-  invoke<string[]>("subfolders", { path, showHidden, showSystem });
+  folderItems(path, showHidden, showSystem, false).then((items) => items.map(([name]) => name));
 
 /** The apps holding the selected files. */
 export const fileUsers = (selection: Selection) => invoke<string[]>("file_users", { selection });

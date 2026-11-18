@@ -1396,32 +1396,35 @@ pub fn pictures_in(folder: &Path, most: usize) -> Vec<PathBuf> {
     found
 }
 
-/// The names of the folders right inside `path`, in Explorer's order, for a path crumb's menu.
-pub fn subfolders(path: &Path, sight: Sight) -> std::io::Result<Vec<String>> {
+/// What is right inside `path`, in Explorer's order, as (name, is a folder): the folders, for a
+/// path crumb's menu, and with `files` the files after them, for the column view.
+pub fn subfolders(path: &Path, sight: Sight, files: bool) -> std::io::Result<Vec<(String, bool)>> {
     use std::os::windows::fs::MetadataExt;
 
-    if let Some(zip) = zipped::opened(path) {
+    let mut found: Vec<(Box<[u16]>, bool)> = if let Some(zip) = zipped::opened(path) {
         let (nodes, _) = zipped::list(&zip.archive, &zip.inner, false).map_err(std::io::Error::other)?;
-        let mut names: Vec<String> = nodes.into_iter().filter(|node| node.folder).map(|node| node.name).collect();
-        names.sort_by(|a, b| natural(&null_terminated(a.as_ref()), &null_terminated(b.as_ref())));
-        return Ok(names);
-    }
-    let mut names: Vec<Box<[u16]>> = std::fs::read_dir(path)?
-        .flatten()
-        .filter(|entry| {
-            entry.metadata().is_ok_and(|facts| {
-                let attributes = facts.file_attributes();
+        nodes
+            .into_iter()
+            .filter(|node| files || node.folder)
+            .map(|node| (null_terminated(node.name.as_ref()), node.folder))
+            .collect()
+    } else {
+        std::fs::read_dir(path)?
+            .flatten()
+            .filter_map(|entry| {
+                let attributes = entry.metadata().ok()?.file_attributes();
                 let hidden = attributes & FILE_ATTRIBUTE_HIDDEN.0 != 0;
                 let system = attributes & PROTECTED == PROTECTED;
-                attributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0 && (sight.hidden || !hidden) && (sight.system || !system)
+                let folder = attributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0;
+                ((files || folder) && (sight.hidden || !hidden) && (sight.system || !system))
+                    .then(|| (null_terminated(Path::new(&entry.file_name())), folder))
             })
-        })
-        .map(|entry| null_terminated(Path::new(&entry.file_name())))
-        .collect();
-    names.sort_by(|a, b| natural(a, b));
-    Ok(names
-        .iter()
-        .map(|name| String::from_utf16_lossy(&name[..name.len() - 1]))
+            .collect()
+    };
+    found.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| natural(&a.0, &b.0)));
+    Ok(found
+        .into_iter()
+        .map(|(name, folder)| (String::from_utf16_lossy(&name[..name.len() - 1]), folder))
         .collect())
 }
 
@@ -1755,8 +1758,15 @@ mod tests {
         hide(&folder.0.join("secret"));
 
         let shown = Sight { hidden: true, system: false };
-        assert_eq!(subfolders(&folder.0, Sight::default()).unwrap(), ["Apps", "photos 2", "photos 10"]);
-        assert_eq!(subfolders(&folder.0, shown).unwrap(), ["Apps", "photos 2", "photos 10", "secret"]);
+        let names = |sight, files| -> Vec<(String, bool)> { subfolders(&folder.0, sight, files).unwrap() };
+        let folders = |list: &[&str]| -> Vec<(String, bool)> { list.iter().map(|name| (name.to_string(), true)).collect() };
+        assert_eq!(names(Sight::default(), false), folders(&["Apps", "photos 2", "photos 10"]));
+        assert_eq!(names(shown, false), folders(&["Apps", "photos 2", "photos 10", "secret"]));
+
+        fs::write(folder.0.join("a.txt"), "").unwrap();
+        let mut with_files = folders(&["Apps", "photos 2", "photos 10"]);
+        with_files.extend([("a.txt".to_string(), false), ("notes.txt".to_string(), false)]);
+        assert_eq!(names(Sight::default(), true), with_files, "files come after the folders");
     }
 
     #[test]
@@ -2308,7 +2318,9 @@ mod tests {
         let order = Order { filter: Filter { except: HashSet::from(["same".to_string()]), ..Filter::default() }, ..Order::default() };
         let hidden = Listing::read(mine.0.to_str().unwrap(), order).unwrap();
         assert_eq!(names(&hidden), ["ahead", "mixed", "twin.txt"]);
-        // The other pane still marks its "same" against the hidden one.
+        // The other pane still marks its "same" against the hidden one. NTFS can hand a fresh read a
+        // newer folder time than the first one saw, so the pair is settled again before the look.
+        compare::settle(right.unsettled(&hidden, false), false, Sight::default(), (903, 904), compare::round(903, 904));
         assert_eq!(right.compared(&hidden, false)[2], mark(Mark::Same));
     }
 }
