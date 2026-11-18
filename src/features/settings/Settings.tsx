@@ -66,6 +66,7 @@ import { rememberRecent, setRememberRecent } from "../reach/reach";
 import { TagSettings } from "../tags/TagSettings";
 import { IconSettings } from "./IconSettings";
 import { IndexSettings } from "./IndexSettings";
+import { CloudSettings } from "../cloud/CloudDialogs";
 import {
   accent,
   accentColors,
@@ -137,6 +138,7 @@ const SECTIONS = [
   { id: "files", label: "Files", icon: "" },
   { id: "sidebar", label: "Sidebar", icon: "" },
   { id: "index", label: "Search index", icon: "\uE721" },
+  { id: "cloud", label: "Cloud places", icon: "\uE753" },
   { id: "tags", label: "Tags", icon: "" },
   { id: "viewers", label: "Viewers", icon: "" },
   { id: "icons", label: "Icons", icon: "" },
@@ -899,6 +901,15 @@ export function Settings(props: {
             <IndexSettings open={props.open} />
           </section>
 
+          <section
+            class="settings-section"
+            data-section="cloud"
+            data-words="cloud onedrive dropbox google drive s3 bucket amazon r2 backblaze wasabi minio sign in account place pdf docs"
+          >
+            <h3>Cloud places</h3>
+            <CloudSettings onFailure={props.onFailure} />
+          </section>
+
           <section class="settings-section" data-section="tags" data-words="label color">
             <h3>Tags</h3>
             <TagSettings onChanged={props.onTagsChanged} onDelete={props.onDeleteTag} />
@@ -939,7 +950,7 @@ export function Settings(props: {
           >
             <h3>Archives</h3>
             <p class="settings-note">
-              A file opened from inside an archive is taken out to a cache first. It stays a day, in case the app it
+              A file opened from inside an archive or a cloud place is taken out to a cache first. It stays a day, in case the app it
               opened in still uses it.
             </p>
             <div class="settings-chips settings-cache">

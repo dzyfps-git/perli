@@ -475,6 +475,58 @@ export const saveSession = (text: string) => invoke<void>("save_session", { text
 
 export const listPlaces = () => invoke<Places>("list_places");
 
+export type CloudKind = "s3" | "oneDrive" | "dropbox" | "google";
+
+/** Where an S3 place's bucket is, and the key's id. Its secret stays with Windows. */
+export interface S3Setup {
+  preset: string;
+  endpoint: string;
+  region: string;
+  bucket: string;
+  pathStyle: boolean;
+  keyId: string;
+}
+
+/** A cloud place of Perli's own, which opens as a folder of its own. */
+export interface CloudPlace {
+  id: string;
+  name: string;
+  kind: CloudKind;
+  /** Who signed in, or the bucket. */
+  account: string;
+  s3: S3Setup | null;
+  /** Google's Docs, Sheets and Slides come down as PDFs. */
+  pdf: boolean;
+}
+
+export interface CloudAbout {
+  used: number | null;
+  total: number | null;
+  hasBin: boolean;
+  kind: CloudKind;
+}
+
+/** An older version of a file, which Bring back makes the current one again. */
+export interface CloudVersion {
+  id: string;
+  size: number;
+  /** FILETIME ticks. */
+  modified: number;
+}
+
+export const cloudPlaces = () => invoke<CloudPlace[]>("cloud_places");
+export const addS3 = (setup: S3Setup, secret: string, name: string) => invoke<CloudPlace>("add_s3", { setup, secret, name });
+export const signInCloud = (kind: CloudKind) => invoke<CloudPlace>("sign_in_cloud", { kind });
+export const cancelSignIn = () => invoke<void>("cancel_sign_in");
+export const renamePlace = (id: string, name: string) => invoke<CloudPlace>("rename_place", { id, name });
+export const removePlace = (id: string) => invoke<void>("remove_place", { id });
+export const reorderPlaces = (ids: string[]) => invoke<void>("reorder_places", { ids });
+export const setCloudPdf = (id: string, pdf: boolean) => invoke<void>("set_cloud_pdf", { id, pdf });
+export const cloudAbout = (path: string) => invoke<CloudAbout>("cloud_about", { path });
+export const shareLink = (path: string) => invoke<string>("share_link", { path });
+export const cloudVersions = (path: string) => invoke<CloudVersion[]>("cloud_versions", { path });
+export const bringBack = (path: string, version: string) => invoke<void>("bring_back", { path, version });
+
 /** How an eject went. A busy drive says what still holds it. */
 export type Ejected = { kind: "done" } | { kind: "busy"; reason: string };
 

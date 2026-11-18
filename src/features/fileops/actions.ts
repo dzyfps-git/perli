@@ -11,6 +11,8 @@ import {
   type Task,
 } from "../../api";
 import type { FolderView } from "../navigation/folderView";
+import { isPerliCloud } from "../cloud/cloud";
+import { keepsNoBin } from "../cloud/cloudState";
 import { dayText } from "./renameRules";
 import type { RenameRequest } from "./BatchRename";
 import { forgetCut, markCut } from "./clipboard";
@@ -170,6 +172,16 @@ export function createFileActions(
     remove(view: FolderView, permanently: boolean) {
       const selection = view.isZip() ? changeable(view) : selected(view);
       if (!selection) return;
+      const folder = view.folder()?.path ?? "";
+      // A cloud place's own bin is its last stop, and S3 storage has none, so only that asks.
+      if (isPerliCloud(folder)) {
+        if (!keepsNoBin(folder)) return void start(view, { kind: "recycle", selection });
+        return confirmDelete({
+          title: "Delete for good?",
+          note: "S3 storage keeps no bin, so these can't be brought back.",
+          confirm: () => start(view, { kind: "recycle", selection }),
+        });
+      }
       if (!permanently && !view.isBin()) {
         start(view, { kind: "recycle", selection });
         return;

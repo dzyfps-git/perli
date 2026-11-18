@@ -1,0 +1,128 @@
+.cloud-sheet {
+  width: min(480px, 92vw);
+}
+
+.cloud-kinds {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+}
+
+.cloud-kind {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  column-gap: var(--space-2);
+  align-items: center;
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-large);
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  transition:
+    background var(--motion),
+    transform var(--motion-spring),
+    border-color var(--motion);
+}
+
+.cloud-kind:hover {
+  background: var(--surface-hover);
+  border-color: var(--accent);
+  transform: translateY(-1px);
+}
+
+.cloud-kind:active {
+  transform: scale(0.98);
+}
+
+.cloud-kind-icon {
+  grid-row: span 2;
+  font-family: var(--font-icons);
+  font-size: 22px;
+  color: var(--accent);
+}
+
+.cloud-kind-name {
+  font-weight: 600;
+}
+
+.cloud-kind-note {
+  color: var(--text-muted);
+  font-size: 0.9em;
+}
+
+.cloud-waiting {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-top: var(--space-3);
+}
+
+.cloud-spinner {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border: 2px solid var(--accent-line);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: cloud-spin 0.9s linear infinite;
+}
+
+@keyframes cloud-spin {
+  to {
+    transform: rotate(1turn);
+  }
+}
+
+.cloud-versions,
+.cloud-settings {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+}
+
+.cloud-versions li,
+.cloud-settings li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) 0;
+  animation: cloud-in var(--motion-slide) both;
+}
+
+.cloud-version-size,
+.cloud-settings-name {
+  flex: 1;
+}
+
+.cloud-settings-name {
+  display: flex;
+  flex-direction: column;
+}
+
+.cloud-settings li > :last-child:not(button) {
+  flex-basis: 100%;
+}
+
+@keyframes cloud-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cloud-kind,
+  .cloud-versions li,
+  .cloud-settings li {
+    transition: none;
+    animation: none;
+  }
+
+  .cloud-spinner {
+    animation-duration: 3s;
+  }
+}

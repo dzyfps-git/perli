@@ -1,6 +1,7 @@
 import { createEffect, createSignal, For, on, onCleanup, onMount, Show, type JSX } from "solid-js";
 import {
   binUsage,
+  cloudAbout,
   driveSpace,
   fetchPictureFile,
   forgetRecent,
@@ -25,6 +26,8 @@ import { TAG_DROP, tagColor, tagQuery, tags } from "../tags/tags";
 import type { FolderView } from "../navigation/folderView";
 import { BIN_PATH, samePath } from "../navigation/path";
 import { movedTo, placeLabel } from "./placeLists";
+import { KIND_LABELS, placePath } from "../cloud/cloud";
+import { cloudPlaceList, readCloudPlaces } from "../cloud/cloudState";
 import { RecentFlyout } from "./RecentFlyout";
 import { showsSmart, type SmartFolder } from "../smart/smartList";
 import {
@@ -63,6 +66,7 @@ const ICON_PHONE = "\uE8EA";
 const ICON_NETWORK = "";
 const ICON_CLOUD = "";
 const ICON_LOCK = "\uE72E";
+const ICON_ADD = "\uE710";
 
 const FULL_SHARE = 0.9;
 /** How long a drive's bar takes to make its wave. */
@@ -224,6 +228,8 @@ export function Sidebar(props: {
   /** The places were read again. */
   onPlaces: (places: Places) => void;
   onEject: (root: string) => void;
+  /** Opens the sheet that adds a cloud place of Perli's own. */
+  onAddCloud: () => void;
   report: (failure: unknown) => void;
 }) {
   const [places, setPlaces] = createSignal<Places>();
@@ -314,6 +320,20 @@ export function Sidebar(props: {
   }
   createEffect(on(shownServers, readReach, { defer: true }));
 
+  /** How full each cloud place of Perli's own is, where its service says. */
+  function readCloudSpaces() {
+    for (const place of cloudPlaceList()) {
+      const path = placePath(place);
+      if (asking.has(path)) continue;
+      asking.add(path);
+      cloudAbout(path)
+        .then(({ used, total }) => total && used !== null && setSpaces({ ...spaces(), [path]: { free: Math.max(0, total - used), total } }))
+        // Offline, a place has no bar until it answers again.
+        .catch(() => undefined)
+        .finally(() => asking.delete(path));
+    }
+  }
+
   /** A sync app's own folder icon, read once per folder. */
   function readPictures() {
     for (const { path } of places()?.clouds ?? []) {
@@ -342,10 +362,12 @@ export function Sidebar(props: {
         readPictures();
       })
       .catch(console.error);
+  createEffect(on(cloudPlaceList, readCloudSpaces));
   const drivesListener = onDrivesChanged(readPlaces);
 
   onMount(() => {
     readPlaces();
+    void readCloudPlaces();
     readRecent();
     readBin();
     window.addEventListener("focus", onFocus);
@@ -590,7 +612,7 @@ export function Sidebar(props: {
           </For>
         </Section>
       </Show>
-      <Show when={places()?.clouds.length}>
+      <Show when={places()}>
         <Section id="cloud" label="Cloud">
           <For each={places()?.clouds}>
             {(cloud) => (
@@ -606,6 +628,29 @@ export function Sidebar(props: {
               />
             )}
           </For>
+          <For each={cloudPlaceList()}>
+            {(place) => (
+              <Place
+                view={props.view}
+                path={placePath(place)}
+                label={place.name}
+                onMenu={props.onMenu}
+                icon={folderGlyph(placePath(place), ICON_CLOUD).icon}
+                color={folderGlyph(placePath(place), ICON_CLOUD).color}
+                about={`${KIND_LABELS[place.kind]}, ${place.account}`}
+                space={spaces()[placePath(place)]}
+              />
+            )}
+          </For>
+          <Place
+            view={props.view}
+            path=""
+            label="Add a cloud place"
+            icon={ICON_ADD}
+            about="OneDrive, Dropbox, Google Drive or S3 storage, opened as folders"
+            onMenu={() => undefined}
+            onOpen={props.onAddCloud}
+          />
         </Section>
       </Show>
       <Show when={shownServers().length}>
