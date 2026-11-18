@@ -10,6 +10,7 @@ import { Minimap } from "./Minimap";
 import { minimapShown, setMinimapShown } from "./viewerPrefs";
 import { seenPart, type ViewRect } from "./zoomView";
 import "./pdfFields.css";
+import "./pdfXfa.css";
 
 pdfjs.GlobalWorkerOptions.workerSrc = worker;
 
@@ -33,6 +34,8 @@ const FILES = import.meta.env.DEV ? "/node_modules/pdfjs-dist/" : "/pdfjs/";
 /** CSS pixels per PDF point, so 100% is the page's printed size. */
 const CSS_UNITS = pdfjs.PixelsPerInch.PDF_TO_CSS_UNITS;
 const GAP = 12;
+/** How often an open PDF looks whether its file changed on disk. */
+const FILE_LOOK_MS = 1500;
 const PAD = 16;
 const LEAST_ZOOM = 0.25;
 const MOST_ZOOM = 8;
@@ -148,6 +151,8 @@ export function PdfView(live: PdfViewProps) {
   const [fieldsRound, setFieldsRound] = createSignal(0);
   /** How the file stood when read, so a save over it asks if it changed since. */
   let readAs: string | undefined;
+  /** Every field of the form, by name, for its own Reset buttons to know what they clear. */
+  let fieldObjects: Promise<Map<string, object[]> | null> = Promise.resolve(null);
   let toldTimer: number | undefined;
   const savedPage = places()[props.path] ?? 0;
 
@@ -200,23 +205,30 @@ export function PdfView(live: PdfViewProps) {
       standardFontDataUrl: `${FILES}standard_fonts/`,
       wasmUrl: `${FILES}wasm/`,
       useWasm: false,
+      // A form made only of XFA, which most readers but Acrobat show as a page saying so, shows
+      // and fills in as it was laid out.
+      enableXfa: true,
     });
     task.onPassword = (answer: (password: string) => void, reason: number) =>
       setLocked({ answer, wrong: reason === pdfjs.PasswordResponses.INCORRECT_PASSWORD });
     const opened = await task.promise;
-    if (gone) return;
+    if (gone) return void opened.loadingTask.destroy();
     setLocked(undefined);
+    fieldObjects = opened.getFieldObjects().catch(() => null);
     (opened.annotationStorage as unknown as { onSetModified: () => void }).onSetModified = () => batch(() => (setChanged(true), setEdited(true)));
     void fileSeen(props.path).then(
       (stamp) => (readAs = stamp ?? undefined),
       () => {},
     );
     const first = (await opened.getPage(1)).getViewport({ scale: 1 });
+    const before = doc();
     batch(() => {
-      setSizes(Array.from({ length: opened.numPages }, () => ({ width: first.width, height: first.height })));
+      // Read again, the pages keep the sizes they have and the place stays.
+      if (!before || sizes().length !== opened.numPages) setSizes(Array.from({ length: opened.numPages }, () => ({ width: first.width, height: first.height })));
       setDoc(opened);
-      if (savedPage > 0 && savedPage < opened.numPages) setOffer(savedPage);
+      if (!before && savedPage > 0 && savedPage < opened.numPages) setOffer(savedPage);
     });
+    void before?.loadingTask.destroy();
     void opened.getOutline().then((found) => !gone && setOutline((found as Heading[] | null) ?? []));
     void opened.getMetadata().then(({ info }) => {
       const known = info as Record<string, unknown>;
@@ -234,8 +246,23 @@ export function PdfView(live: PdfViewProps) {
     });
   }
 
+  // The file changed on disk, as an Undo of a save over it does when it puts the old one back:
+  // with nothing filled in here since, it is read again, so the page shows what the file holds.
+  const looking = setInterval(() => {
+    if (gone || !doc() || changed() || saving() || document.hidden) return;
+    void fileSeen(props.path).then(
+      (stamp) => {
+        if (!stamp || !readAs || stamp === readAs || changed() || saving()) return;
+        readAs = stamp;
+        void load().catch(console.error);
+      },
+      () => {},
+    );
+  }, FILE_LOOK_MS);
+
   onCleanup(() => {
     gone = true;
+    clearInterval(looking);
     watch.disconnect();
     props.keys(undefined);
     props.note(undefined);
@@ -331,6 +358,7 @@ export function PdfView(live: PdfViewProps) {
     let text!: HTMLDivElement;
     let fieldsBox!: HTMLDivElement;
     let fields: pdfjs.AnnotationLayer | undefined;
+    let xfaBox!: HTMLDivElement;
     const [close, setClose] = createSignal(false);
     let drawing: pdfjs.RenderTask | undefined;
     let layer: pdfjs.TextLayer | undefined;
@@ -385,6 +413,7 @@ export function PdfView(live: PdfViewProps) {
     /** The page's links and form fields: made once while the page is near, then moved with each zoom. */
     async function drawFields(proxy: pdfjs.PDFPageProxy, viewport: pdfjs.PageViewport, mine: number) {
       const fitted = viewport.clone({ dontFlip: true });
+      if (doc()!.isPureXfa) return drawXfa(proxy, fitted, mine);
       if (fields) return fields.update({ viewport: fitted } as Parameters<pdfjs.AnnotationLayer["update"]>[0]);
       const annotations = await proxy.getAnnotations({ intent: "display" });
       if (gone || !close() || mine !== ticket || fields || !annotations.length) return;
@@ -401,8 +430,8 @@ export function PdfView(live: PdfViewProps) {
         structTreeLayer: null,
         commentManager: null,
       });
-      // ponytail: no fieldObjects or scripting, so a PDF's own Reset button and field scripts do
-      // nothing; Clear changes covers the reset.
+      // ponytail: no scripting, so a PDF's own field scripts, such as a total that adds itself up,
+      // do nothing. pdf.js runs them in a sandbox built as WebAssembly, which the app's rules don't let run.
       await fields.render({
         annotations,
         viewport: fitted,
@@ -413,13 +442,25 @@ export function PdfView(live: PdfViewProps) {
         imageResourcesPath: `${FILES}web/images/`,
         renderForms: true,
         enableScripting: false,
+        // A Reset button in the form clears the fields it names.
+        fieldObjects: await fieldObjects,
       });
       tidyFields(fieldsBox);
+    }
+
+    /** An XFA form's page: its fields laid out over the page, made once, then moved with each zoom. */
+    async function drawXfa(proxy: pdfjs.PDFPageProxy, viewport: pdfjs.PageViewport, mine: number) {
+      const parameters = { viewport, div: xfaBox, annotationStorage: doc()!.annotationStorage, linkService: links as never, intent: "display" };
+      if (xfaBox.childElementCount) return pdfjs.XfaLayer.update({ ...parameters, xfaHtml: {} });
+      const xfaHtml = await proxy.getXfa();
+      if (gone || !close() || mine !== ticket || !xfaHtml || xfaBox.childElementCount) return;
+      pdfjs.XfaLayer.render({ ...parameters, xfaHtml });
     }
 
     function forgetFields() {
       fields = undefined;
       fieldsBox.replaceChildren();
+      xfaBox.replaceChildren();
     }
 
     function forget() {
@@ -481,6 +522,7 @@ export function PdfView(live: PdfViewProps) {
         <canvas ref={canvas} aria-label={`Page ${at + 1}`} />
         <div ref={text} class="textLayer" />
         <div ref={fieldsBox} class="annotationLayer" />
+        <div ref={xfaBox} class="xfaLayer" />
       </div>
     );
   }
@@ -973,13 +1015,16 @@ export function PdfView(live: PdfViewProps) {
             </p>
           </Show>
           <div class="pdf-pages" style={{ "--pdf-gap": `${GAP}px`, padding: `${PAD}px` }}>
-            <For each={rows()}>
-              {(row) => (
-                <div class="pdf-row">
-                  <For each={row}>{(at) => <Page at={at} />}</For>
-                </div>
-              )}
-            </For>
+            {/* A file read again draws its pages afresh. */}
+            <Show when={doc()} keyed>
+              <For each={rows()}>
+                {(row) => (
+                  <div class="pdf-row">
+                    <For each={row}>{(at) => <Page at={at} />}</For>
+                  </div>
+                )}
+              </For>
+            </Show>
           </div>
           <Show when={!doc() && !problem() && !locked()}>
             <p class="preview-note">Reading…</p>
