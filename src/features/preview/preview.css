@@ -3870,6 +3870,9 @@ th[aria-sort="descending"] .table-sort::after {
 }
 
 .pdf-page {
+  /* pdf.js sizes its layers rounded to these; without them the field layer has no size at all. */
+  --scale-round-x: 1px;
+  --scale-round-y: 1px;
   position: relative;
   flex: none;
   background: white;
