@@ -545,8 +545,7 @@ pub fn shown_aspects(paths: &[PathBuf]) -> Vec<f32> {
         if !video && (!is(&crate::folder::PICTURE_TYPES) || crate::thumbs::is_online_only(path)) {
             return None;
         }
-        let stat = crate::ops::sys::stat(path).ok()??;
-        let (key, stamp) = (path.to_string_lossy().to_lowercase(), (stat.size, stat.modified));
+        let (key, stamp) = (path.to_string_lossy().to_lowercase(), crate::ops::sys::stamp(path).ok()?);
         if let Some(known) = KNOWN_ASPECTS.get(&key, stamp) {
             return Some(known);
         }

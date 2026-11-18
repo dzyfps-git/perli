@@ -847,14 +847,14 @@ fn latest_in(lane: u32) -> u64 {
     LATEST_HASH.lock().unwrap().get_or_insert_default().get(&lane).copied().unwrap_or(0)
 }
 
-/// A file's size and time.
-type Stamp = (u64, u64);
+/// A file's size, time and change time, from `sys::stamp`.
+type Stamp = (u64, u64, u64);
 type Entries<V> = HashMap<String, (Stamp, V)>;
 
 /// What was worked out from files' bytes, by a key such as the file's lowercase path, each with
-/// the size and time the file had then. A file changed since has another time, so what was
-/// known of it is never given, and a look again reads only files that changed.
-// ponytail: a file rewritten with its old time put back reads as unchanged.
+/// the stamp the file had then. A file changed since has another change time, even one rewritten
+/// with its old time put back, so what was known of it is never given, and a look again reads
+/// only files that changed.
 pub struct Known<V> {
     known: Mutex<Option<Entries<V>>>,
     /// Past this many, what is known starts over.
@@ -866,7 +866,7 @@ impl<V: Clone> Known<V> {
         Self { known: Mutex::new(None), most }
     }
 
-    /// What is known for `key`, if it was worked out for the same size and time.
+    /// What is known for `key`, if it was worked out for the same stamp.
     pub fn get(&self, key: &str, stamp: Stamp) -> Option<V> {
         let known = self.known.lock().unwrap_or_else(PoisonError::into_inner);
         known.as_ref()?.get(key).filter(|(was, _)| *was == stamp).map(|(_, value)| value.clone())
@@ -887,11 +887,10 @@ static KNOWN_HASHES: Known<String> = Known::new(50_000);
 
 /// The file's checksum by `algorithm` (md5, sha1, sha256 or sha512) in lowercase hex, through
 /// Windows' own crypto. `None` once a newer checksum was asked for in the same `lane`: each place
-/// that shows one has its own, so one never cancels another's. One worked out before, for the
-/// same size and time, is given at once.
+/// that shows one has its own, so one never cancels another's. One worked out before, for a file
+/// unchanged since, is given at once.
 pub fn hash(path: &Path, algorithm: &str, lane: u32) -> std::io::Result<Option<String>> {
-    use std::os::windows::fs::MetadataExt;
-    let stamp = std::fs::metadata(path).map(|data| (data.len(), data.last_write_time()))?;
+    let stamp = crate::ops::sys::stamp(path)?;
     let key = format!("{}\n{algorithm}", path.to_string_lossy().to_lowercase());
     if let Some(digest) = KNOWN_HASHES.get(&key, stamp) {
         return Ok(Some(digest));

@@ -217,6 +217,18 @@ fn identity(path: &Path) -> Result<(u32, u64)> {
     Ok((info.dwVolumeSerialNumber, index))
 }
 
+/// A file's size, modified time and change time, in FILETIME ticks. Windows moves the change time
+/// on with every write, and a tool that puts the old modified time back leaves it be.
+pub fn stamp(path: &Path) -> Result<(u64, u64, u64)> {
+    let file = open(path, FILE_READ_ATTRIBUTES.0, FILE_FLAG_BACKUP_SEMANTICS)?;
+    let mut basic = FILE_BASIC_INFO::default();
+    unsafe { GetFileInformationByHandleEx(*file, FileBasicInfo, (&raw mut basic).cast(), size_of::<FILE_BASIC_INFO>() as u32) }?;
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    unsafe { GetFileInformationByHandle(*file, &mut info) }?;
+    let size = (u64::from(info.nFileSizeHigh) << 32) | u64::from(info.nFileSizeLow);
+    Ok((size, basic.LastWriteTime as u64, basic.ChangeTime as u64))
+}
+
 /// True when two paths reach the same object, such as through a junction.
 pub fn same_file(a: &Path, b: &Path) -> Result<bool> {
     Ok(identity(a)? == identity(b)?)
