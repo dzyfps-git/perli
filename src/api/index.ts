@@ -144,10 +144,12 @@ export interface Start {
   select: string[];
   session: string | null;
   home: string | null;
-  /** Started by "Move to new window", so it keeps no window place of its own. */
+  /** One more window, which keeps its place in its own session, not the first window's. */
   newWindow: boolean;
   /** A tab moved here from another window, as `parseMoved` reads it. */
   moved: string | null;
+  /** The window keeps its tabs in a file of its own. False for a start on one folder, a detour. */
+  keep: boolean;
 }
 
 export interface DriveSpace {
@@ -983,6 +985,8 @@ export const onFolderChanged = (handler: (view: number) => void) =>
 export interface OpenAsk {
   folder: string | null;
   select: string[];
+  /** For this window, which opened for the folder: select here, and open no window of its own. */
+  here?: boolean;
 }
 
 export const onOpenAsked = (handler: (ask: OpenAsk) => void) =>
@@ -1018,10 +1022,30 @@ export function ghostShow(width: number, height: number, rgba: Uint8ClampedArray
 export const ghostMove = () => invoke<void>("ghost_move");
 export const ghostHide = () => invoke<void>("ghost_hide");
 
-/** Starts one more Perli with a window of its own. */
+/** Starts one more Perli with a window of its own, and gives its process id. */
 /** `moved` is a whole tab for the new window to take, as `parseMoved` reads it. */
 export const openWindow = (folder: string, select: string[], moved?: string) =>
-  invoke<void>("open_window", { folder, select, moved: moved ?? null });
+  invoke<number>("open_window", { folder, select, moved: moved ?? null });
+
+/** This window's tabs go on closing: kept to reopen, or dropped when they went to another window. */
+export const forgetSession = (reopenable: boolean) => invoke<void>("forget_session", { reopenable });
+/** Opens again every window that was open when Perli last stopped. */
+export const restoreWindows = () => invoke<void>("restore_windows");
+/** Opens the window closed last. False when none is kept. */
+export const reopenWindow = () => invoke<boolean>("reopen_window");
+/** Tells the back end which workspace this window shows, for other windows to ask. */
+export const setWorkspace = (name: string | undefined) => invoke<void>("set_workspace", { name: name ?? null });
+/** For each name, the other Perli window showing that workspace, or null. */
+export const workspaceWindows = (names: string[]) => invoke<(number | null)[]>("workspace_windows", { names });
+/** Brings another Perli window to the front. */
+export const showWindow = (window: number) => invoke<boolean>("show_window", { window });
+/** Asks the window showing workspace `name` to send it here and close. False when it won't. */
+export const bringWorkspace = (window: number, name: string) => invoke<boolean>("bring_workspace", { window, name });
+/** Sends a workspace, as JSON, to the window that asked for it. */
+export const sendWorkspace = (window: number, text: string) => invoke<boolean>("send_workspace", { window, text });
+/** Selects `select` in `folder` in the window of Perli `process`, once it is up. False if it never came. */
+export const selectInWindow = (process: number, folder: string, select: string[]) =>
+  invoke<boolean>("select_in_window", { process, ask: { folder, select, here: true } });
 
 export const onDrivesChanged = (handler: () => void) => listen("drives-changed", handler);
 

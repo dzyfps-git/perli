@@ -88,6 +88,7 @@ export const KEYS: KeyCommand[] = [
   { id: "pinTab", label: "Pin tab", group: "Tabs and panes", keys: [] },
   { id: "tabToWindow", label: "Move to new window", group: "Tabs and panes", keys: [] },
   { id: "gatherWindows", label: "Bring all windows into one", group: "Tabs and panes", keys: [] },
+  { id: "reopenWindow", label: "Reopen closed window", group: "Tabs and panes", keys: [] },
   { id: "split", label: "Split view", group: "Tabs and panes", keys: ["Ctrl+\\"] },
   { id: "otherPane", label: "Go to the other pane", group: "Tabs and panes", keys: ["F6"] },
   { id: "stackPanes", label: "Stack or unstack panes", group: "Tabs and panes", keys: [] },
@@ -96,8 +97,8 @@ export const KEYS: KeyCommand[] = [
   { id: "tabSearch", label: "Search tabs", group: "Tabs and panes", keys: ["Ctrl+Shift+L"] },
   // Ctrl+Alt is AltGr on some keyboards, which types into a text box.
   { id: "workspaces", label: "Switch workspace", group: "Tabs and panes", keys: ["Ctrl+Alt+W"], where: "free" },
-  { id: "nextWorkspace", label: "Next workspace", group: "Tabs and panes", keys: [] },
-  { id: "previousWorkspace", label: "Previous workspace", group: "Tabs and panes", keys: [] },
+  { id: "nextWorkspace", label: "Next workspace", group: "Tabs and panes", keys: ["Ctrl+Alt+PageDown"], where: "free" },
+  { id: "previousWorkspace", label: "Previous workspace", group: "Tabs and panes", keys: ["Ctrl+Alt+PageUp"], where: "free" },
   { id: "nextTab", label: "Next tab", group: "Tabs and panes", keys: ["Ctrl+Tab", "Ctrl+PageDown"] },
   { id: "previousTab", label: "Previous tab", group: "Tabs and panes", keys: ["Ctrl+Shift+Tab", "Ctrl+PageUp"] },
   ...nine.map(

@@ -26,6 +26,11 @@ import {
   fetchRows,
   setTagPaths,
   openWindow,
+  forgetSession,
+  reopenWindow,
+  restoreWindows,
+  selectInWindow,
+  workspaceWindows,
   recentFiles,
   onSearchGrew,
   onSizesGrew,
@@ -129,6 +134,7 @@ import {
   upOnDoubleClick,
   iconTheme,
   setIconTheme,
+  saved,
 } from "./features/filelist/prefs";
 import { SelectPattern } from "./features/filelist/SelectPattern";
 import { COPIES_QUERY, FLAT_QUERY, type FolderView, type RowAt } from "./features/navigation/folderView";
@@ -206,8 +212,9 @@ import {
   toggleSection,
 } from "./features/sidebar/saved";
 import { folderGlyph, FOLDERS, Sidebar } from "./features/sidebar/Sidebar";
-import { parseMoved, parseSession } from "./features/tabs/session";
-import { createTabs, type Tab } from "./features/tabs/tabs";
+import { parseMoved, parseSession, windowExtras } from "./features/tabs/session";
+import { createTabs, leaveWindow, leftWindow, type Tab } from "./features/tabs/tabs";
+import { ownPlace } from "./ui/windowPlace";
 import { createWorkspaces, workspaces } from "./features/tabs/workspaces";
 import { NewTag } from "./features/tags/NewTag";
 import { refreshTags, TAG_DROP, tagQuery, tags as allTags } from "./features/tags/tags";
@@ -223,6 +230,8 @@ import "./ui/controls.css";
 const SAVE_DELAY_MS = 300;
 /** How long a folder bound for its own window waits to hear which file to select there. */
 const WINDOW_WAIT_MS = 600;
+/** How long a window opened for a folder takes the file named for it after. */
+const LATE_SELECT_MS = 10_000;
 const MOUSE_BACK = 3;
 const MOUSE_FORWARD = 4;
 const ICON_SETTINGS = "\uE713";
@@ -523,8 +532,11 @@ export function App() {
     const here = tabs.activeView();
     return { here: real(here), there: real(tabs.active().panes().find((other) => other !== here)), home: homePath };
   };
-  // A run started on one folder is a detour, so it must not replace the saved tabs.
+  // Each window keeps its tabs in a file of its own, except a run started on one folder: a detour,
+  // which must not replace the saved tabs.
   const [keepSession, setKeepSession] = createSignal(false);
+  /** One more window, whose session keeps its place too. */
+  let newWindow = false;
   let saveTimer: number | undefined;
   let unsaved: unknown;
   let saving = Promise.resolve();
@@ -551,7 +563,7 @@ export function App() {
   createEffect(() => {
     const session = keepSession() ? tabs.session() : undefined;
     if (!session) return;
-    unsaved = session;
+    unsaved = { ...session, workspace: spaces.current() ?? null, ...(newWindow ? { place: ownPlace() } : {}) };
     window.clearTimeout(saveTimer);
     saveTimer = window.setTimeout(() => flushSession().catch(console.error), SAVE_DELAY_MS);
   });
@@ -561,14 +573,32 @@ export function App() {
     note: "Closing Perli cancels them. Anything already finished stays.",
     cancelLabel: "Keep working",
     confirmLabel: "Cancel jobs and close",
-    confirm: () => cancelJobsAndClose().catch(jobs.report),
+    // The back end closes the window itself here, with no close event to forget it on.
+    confirm: () => leaveSession().catch(console.error).then(cancelJobsAndClose).catch(jobs.report),
   };
 
   async function onClose(request: number) {
     // A failed save must not keep the window open.
     const [held] = await Promise.all([holdClose(request), flushSession().catch(console.error)]);
-    if (held) setDeleting(stopJobs);
-    else await getCurrentWindow().destroy();
+    if (held) {
+      setDeleting(stopJobs);
+      return;
+    }
+    await leaveSession().catch(console.error);
+    await getCurrentWindow().destroy();
+  }
+
+  /**
+   * Browser-style: a window closed while others stay open is forgotten, kept a while to reopen
+   * unless its tabs went to another window. The last one keeps its tabs for the next start, and a
+   * Windows restart, which closes no window, keeps them all.
+   */
+  async function leaveSession() {
+    if (!keepSession() || (await otherWindows()).length === 0) return;
+    // Nothing may be written once the file is gone, which would bring it back.
+    setKeepSession(false);
+    await flushSession();
+    await forgetSession(!leftWindow());
   }
 
   // Covers every way to close, including Alt+F4 and the taskbar.
@@ -590,6 +620,12 @@ export function App() {
 
   let windowTimer: number | undefined;
   let windowWaiting: string | undefined;
+  /** The window opened last for a folder alone, which a file named a little later is selected in. */
+  let lastOpened: { folder: string; process: number; at: number } | undefined;
+
+  async function openFolderWindow(folder: string) {
+    lastOpened = { folder, process: await openWindow(folder, []), at: Date.now() };
+  }
 
   /**
    * A folder opened from outside Perli gets a tab. Items to select go to the tab that shows their
@@ -598,20 +634,25 @@ export function App() {
   async function openAsked(ask: OpenAsk) {
     if (!ask.folder) return comeForward();
     const folder = ask.folder;
-    if (openInWindow()) {
-      // "Show in folder" asks twice: for the folder, then for the file to select in it. A window
-      // can't be reached once it is open, so the folder waits a moment for its file.
-      // ponytail: a file named later than this gets a second window. Windows names it in well
-      // under the wait on every machine tried.
+    if (openInWindow() && !ask.here) {
+      // "Show in folder" asks twice: for the folder, then for the file to select in it. The folder
+      // waits a moment for its file, and a file named after that goes to the window it opened.
       window.clearTimeout(windowTimer);
       const waited = windowWaiting;
       windowWaiting = undefined;
-      if (waited && !samePath(waited, folder)) await openWindow(waited, []);
-      if (ask.select.length > 0) return openWindow(folder, ask.select);
+      if (waited && !samePath(waited, folder)) await openFolderWindow(waited);
+      if (ask.select.length > 0) {
+        const last = lastOpened;
+        if (last && samePath(last.folder, folder) && Date.now() - last.at < LATE_SELECT_MS) {
+          lastOpened = undefined;
+          if (await selectInWindow(last.process, folder, ask.select)) return;
+        }
+        return void (await openWindow(folder, ask.select));
+      }
       windowWaiting = folder;
       windowTimer = window.setTimeout(() => {
         windowWaiting = undefined;
-        openWindow(folder, []).catch(console.error);
+        openFolderWindow(folder).catch(console.error);
       }, WINDOW_WAIT_MS);
       return;
     }
@@ -907,8 +948,13 @@ export function App() {
     for (const tab of tabs.tabs()) {
       if (!(await sendTab(asker, JSON.stringify({ tab: tabs.handover(tab) })))) return;
     }
-    await getCurrentWindow().close();
+    await leaveWindow();
   });
+  // Another window asked for the workspace on screen here: it goes there, and this window closes.
+  void listen<[number, string]>("workspace-asked", async ({ payload: [asker, name] }) => {
+    if (await spaces.handOver(asker, name)) await leaveWindow();
+  });
+  void listen<string>("workspace-brought", ({ payload }) => void spaces.take(payload));
 
   async function gatherWindows() {
     const others = await otherWindows();
@@ -1502,8 +1548,25 @@ export function App() {
   /** The palette, asking for one kind of thing. Asked again for the same, it closes. */
   function askFor(scope: "tabs" | "workspaces" | "renameWorkspace") {
     if (paletteOpen() && paletteScope() === scope) return setPaletteOpen(false);
+    if (scope === "workspaces") findWorkspacesElsewhere().catch(console.error);
     setPaletteScope(scope);
     setPaletteOpen(true);
+  }
+
+  /** The workspaces other windows show, with the window of each. */
+  const [elsewhere, setElsewhere] = createSignal(new Map<string, number>());
+  async function findWorkspacesElsewhere() {
+    const names = workspaces().map((one) => one.name);
+    const windows = await workspaceWindows(names);
+    setElsewhere(new Map(names.flatMap((name, index) => (windows[index] == null ? [] : [[name, windows[index]!] as const]))));
+  }
+
+  async function bringWorkspaceHere(name: string, there: number) {
+    if (!(await spaces.bringHere(name, there))) jobs.notify(`"${name}" stayed in its window`, "Its jobs are still running. Bring it here once they finish.", true);
+  }
+
+  async function reopenClosedWindow() {
+    if (!(await reopenWindow())) jobs.notify("No closed windows", "A window closed while others stay open can be opened again from here.", true);
   }
   /** One of the open or lately closed tabs. */
   const searchTabs = () => askFor("tabs");
@@ -1515,17 +1578,29 @@ export function App() {
   function workspaceCommands(): Command[] {
     const now = spaces.current();
     return [
-      ...workspaces().map((one) => ({
-        label: one.name,
-        group: "Workspaces",
-        icon: one.name === now ? ICON_CHECK : ICON_WORKSPACE,
-        // The one on screen counts what is open now, not what was kept on leaving it.
-        keys: tabCount(one.name === now ? tabs.tabs().length : one.tabs.length),
-        run: () => {
-          setSettingsShown(false);
-          spaces.switchTo(one.name).catch(console.error);
-        },
-      })),
+      ...workspaces().flatMap((one) => {
+        const there = one.name === now ? undefined : elsewhere().get(one.name);
+        const pick: Command = {
+          label: one.name,
+          group: "Workspaces",
+          icon: one.name === now ? ICON_CHECK : ICON_WORKSPACE,
+          // The one on screen counts what is open now, not what was kept on leaving it.
+          keys: there !== undefined ? "In another window" : tabCount(one.name === now ? tabs.tabs().length : one.tabs.length),
+          run: () => {
+            setSettingsShown(false);
+            spaces.switchTo(one.name).catch(console.error);
+          },
+        };
+        if (there === undefined) return [pick];
+        const bring: Command = {
+          label: `Bring "${one.name}" here`,
+          group: "Workspaces",
+          icon: ICON_WORKSPACE,
+          keys: "Its window closes",
+          run: () => void bringWorkspaceHere(one.name, there).catch(jobs.report),
+        };
+        return [pick, bring];
+      }),
       ...(now === undefined
         ? []
         : [
@@ -1835,6 +1910,7 @@ export function App() {
     pinTab: () => tabs.togglePinned(tabs.active()),
     tabToWindow: () => quietly(tabs.toWindow(tabs.active())),
     gatherWindows: () => quietly(gatherWindows()),
+    reopenWindow: () => quietly(reopenClosedWindow()),
     split: splitView,
     otherPane: () => tabs.active().activate(tabs.active().other() ?? here()),
     nextTab: () => tabs.cycle(1),
@@ -1845,8 +1921,8 @@ export function App() {
     home: () => homePath && here().open(homePath),
     tabSearch: searchTabs,
     workspaces: askWorkspace,
-    nextWorkspace: () => spaces.cycle(1)?.catch(console.error),
-    previousWorkspace: () => spaces.cycle(-1)?.catch(console.error),
+    nextWorkspace: () => spaces.cycle(1).catch(console.error),
+    previousWorkspace: () => spaces.cycle(-1).catch(console.error),
     stackPanes: () => tabs.active().panes().length > 1 && tabs.active().stack(),
     linkPanes: () => tabs.active().panes().length > 1 && tabs.active().setLinked(!tabs.active().linked()),
     mirrorPane: () => quietly(Promise.resolve(tabs.mirror())),
@@ -2183,13 +2259,17 @@ export function App() {
       if (opened) performance.mark("perli-folder-open", { detail: opened });
       if (opened && start.select.length > 0) await tabs.activeView().reload(start.select);
     }
-    // Only the first window keeps its tabs for the next start.
-    setKeepSession(!start.folder && !start.moved);
-    // Its tabs came back with the session, so its workspace does too.
-    if (keepSession()) spaces.resume();
+    newWindow = start.newWindow;
+    setKeepSession(start.keep);
+    // Its tabs came back with the session, so its workspace does too. The first window's was kept
+    // apart before, which it reads that once.
+    const { workspace } = windowExtras(start.session);
+    if (keepSession()) spaces.resume(workspace !== undefined ? workspace : newWindow ? undefined : saved("workspace")).catch(console.error);
     // Starts handed over while this window loaded wait in the back end until now.
     await openListener;
     for (const ask of await asksWaiting()) await openAsked(ask).catch(console.error);
+    // The other windows open once this one is up, so they never hold up its first look.
+    if (keepSession() && !newWindow) restoreWindows().catch(console.error);
   });
   onCleanup(() => {
     window.clearTimeout(saveTimer);
@@ -2368,12 +2448,28 @@ export function App() {
 
   return (
     <div class="shell" data-sidebar={sidebarOpen() ? "open" : "rail"} data-arriving={edgeShown() ? "" : undefined}>
+      <div class="workspace-pill-place" role="status" aria-live="polite">
+        <Show when={spaces.pill()} keyed>
+          {(pill) => (
+            <div class="workspace-pill">
+              <span class="workspace-glyph" aria-hidden="true">
+                {ICON_WORKSPACE}
+              </span>
+              <span>{pill.name}</span>
+              <span class="workspace-pill-count">
+                · {pill.at} of {pill.of}
+              </span>
+            </div>
+          )}
+        </Show>
+      </div>
       <TitleBar
         tabs={tabs}
         onNewTab={newTab}
         onTabSearch={searchTabs}
         workspace={spaces.current()}
         onWorkspaces={askWorkspace}
+        onReopenWindow={() => void quietly(reopenClosedWindow())}
         settings={
           settingsOpen()
             ? {

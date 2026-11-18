@@ -1,3 +1,4 @@
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { createEffect, createResource, createSignal, on } from "solid-js";
 import {
   closeView,
@@ -245,6 +246,17 @@ function createTab(views: FolderView[], startSwapped = false, saved: Layout = {}
     },
   };
 }
+
+/** This window's tabs went to another window, so closing it leaves nothing to reopen. */
+let left = false;
+
+/** Closes this window once its tabs live in another one. */
+export function leaveWindow() {
+  left = true;
+  return getCurrentWindow().close();
+}
+
+export const leftWindow = () => left;
 
 export function createTabs() {
   let nextId = 0;

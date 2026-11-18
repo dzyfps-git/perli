@@ -2,7 +2,7 @@ import { cursorPosition, getCurrentWindow, monitorFromPoint } from "@tauri-apps/
 import { ghostHide, ghostMove, ghostShow, jobsRunning, perliWindowAt, sendTab } from "../../api";
 import type { Place } from "./session";
 import { placeFor } from "./tabList";
-import type { Tab, Tabs } from "./tabs";
+import { leaveWindow, type Tab, type Tabs } from "./tabs";
 
 /** How far the pointer goes before a press on a tab becomes a drag. */
 const LIFT_PX = 5;
@@ -204,7 +204,7 @@ export function dragTab(down: PointerEvent, tab: Tab, tabs: Tabs, strip: HTMLEle
     if (tabs.tabs().length > 1) return tabs.close(tab, true, true);
     // A window whose jobs still run stays, with the folder in both windows until they finish.
     if (await jobsRunning()) return settle();
-    await getCurrentWindow().close();
+    await leaveWindow();
   }
 
   async function letGo(event: PointerEvent) {

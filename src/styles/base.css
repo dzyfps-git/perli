@@ -503,6 +503,59 @@ html[data-blurred] .logo {
   view-transition-name: var(--tab-name);
 }
 
+/* A step to the next or previous workspace slides the panes the way it goes. */
+[data-slide] .panes:not([hidden]) {
+  view-transition-name: workspace-panes;
+}
+
+[data-slide]::view-transition-image-pair(workspace-panes) {
+  overflow: clip;
+}
+
+[data-slide="next"]::view-transition-old(workspace-panes) {
+  animation: slide-to-start 220ms ease-in both;
+}
+
+[data-slide="next"]::view-transition-new(workspace-panes) {
+  animation: slide-from-end 420ms var(--spring) both;
+}
+
+[data-slide="previous"]::view-transition-old(workspace-panes) {
+  animation: slide-to-end 220ms ease-in both;
+}
+
+[data-slide="previous"]::view-transition-new(workspace-panes) {
+  animation: slide-from-start 420ms var(--spring) both;
+}
+
+@keyframes slide-to-start {
+  to {
+    opacity: 0;
+    translate: -8% 0;
+  }
+}
+
+@keyframes slide-to-end {
+  to {
+    opacity: 0;
+    translate: 8% 0;
+  }
+}
+
+@keyframes slide-from-end {
+  from {
+    opacity: 0;
+    translate: 8% 0;
+  }
+}
+
+@keyframes slide-from-start {
+  from {
+    opacity: 0;
+    translate: -8% 0;
+  }
+}
+
 /* Reading and editing a text trade places in a quick blend, the rest of the window still. */
 [data-morph="edit"]::view-transition-old(root),
 [data-morph="edit"]::view-transition-new(root) {

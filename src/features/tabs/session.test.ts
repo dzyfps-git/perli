@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { parseMoved, parseSession, parseWorkspaces, put } from "./session.ts";
+import { parseMoved, parseSession, parseWorkspaces, put, windowExtras } from "./session.ts";
 
 const pane = { path: "C:\\a", sort: { key: "size", descending: true }, layout: "grid" };
 
@@ -128,4 +128,14 @@ test("put replaces the workspace of the same name, or adds it at the end", () =>
   const newA = { name: "a", tabs: [], active: 1 };
   assert.deepEqual(put([a, b], newA), [newA, b]);
   assert.deepEqual(put([a], b), [a, b]);
+});
+
+test("a window's session keeps its workspace and, for one more window, its place", () => {
+  const place = { x: -1700, y: 40, width: 900, height: 600, maximized: true };
+  assert.deepEqual(windowExtras(JSON.stringify({ tabs: [], workspace: "Work", place })), { workspace: "Work", place });
+  assert.deepEqual(windowExtras('{"workspace":null}'), { workspace: null });
+  assert.deepEqual(windowExtras('{"tabs":[]}'), { workspace: undefined });
+  const broken = { workspace: 4, place: { x: 0, y: 0, width: 0, height: 5 } };
+  assert.deepEqual(windowExtras(JSON.stringify(broken)), { workspace: undefined });
+  for (const text of [null, "", "nope", "null"]) assert.deepEqual(windowExtras(text), { workspace: undefined });
 });
