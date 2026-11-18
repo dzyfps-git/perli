@@ -188,9 +188,16 @@ export async function drawDiagrams(root: HTMLElement) {
     if (!block.isConnected) return;
     const text = block.querySelector("code")!.textContent ?? "";
     const id = `perli-diagram-${++drawn}`;
+    // What a failed draw leaves in the scratch place. The drawing keeps the same id, so this runs
+    // before it goes into the page.
+    const scrap = () => {
+      document.getElementById(id)?.remove();
+      document.getElementById(`d${id}`)?.remove();
+    };
     try {
       await mermaid.parse(text);
       const { svg } = await mermaid.render(id, text);
+      scrap();
       const figure = document.createElement("figure");
       figure.className = "md-diagram";
       figure.innerHTML = svg;
@@ -213,10 +220,8 @@ export async function drawDiagrams(root: HTMLElement) {
       figure.append(tools);
       block.replaceWith(figure);
     } catch (error) {
+      scrap();
       failed(block, text, error);
-    } finally {
-      document.getElementById(id)?.remove();
-      document.getElementById(`d${id}`)?.remove();
     }
   }
 }
