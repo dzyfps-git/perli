@@ -298,6 +298,17 @@ fn is_markdown(path: &Path) -> bool {
     matches!(extension.as_deref(), Some("md" | "markdown" | "mdown" | "mkd"))
 }
 
+/// A Mermaid diagram on its own, which shows as a Markdown page holding just that diagram.
+fn is_diagram(path: &Path) -> bool {
+    let extension = path.extension().map(|extension| extension.to_string_lossy().to_lowercase());
+    matches!(extension.as_deref(), Some("mmd" | "mermaid"))
+}
+
+/// The page a diagram file shows as: one Mermaid block, which the window draws.
+fn diagram(source: &str) -> String {
+    format!("<pre><code class=\"language-mermaid\">{}</code></pre>\n", escape(source))
+}
+
 /// Names a new, empty file is written under: plain text, notes, settings, code and web pages.
 fn is_written(path: &Path) -> bool {
     let extension = path.extension().map(|extension| extension.to_string_lossy().to_lowercase());
@@ -307,7 +318,7 @@ fn is_written(path: &Path) -> bool {
             "txt" | "text" | "nfo" | "log" | "md" | "markdown" | "mdown" | "mkd" | "ini" | "cfg" | "conf" | "env" | "json" | "jsonc"
                 | "yaml" | "yml" | "toml" | "xml" | "csv" | "tsv" | "html" | "htm" | "css" | "js" | "mjs" | "ts" | "tsx" | "jsx"
                 | "py" | "rs" | "c" | "h" | "cpp" | "cs" | "java" | "go" | "rb" | "php" | "lua" | "sql" | "bat" | "cmd" | "ps1"
-                | "sh" | "reg" | "srt" | "vtt"
+                | "sh" | "reg" | "srt" | "vtt" | "mmd" | "mermaid"
         )
     )
 }
@@ -335,18 +346,19 @@ pub fn read(path: &Path, offset: u64) -> Preview {
     // A text file with nothing in it yet still shows as text, so it can be written in.
     if offset == 0 && size == 0 && is_written(path) {
         let seen = seen_text(path);
-        return if is_markdown(path) {
+        return if is_markdown(path) || is_diagram(path) {
             Preview::Markdown { html: String::new(), source: String::new(), seen }
         } else {
             Preview::Text { text: String::new(), next: None, end: 0, encoding: "UTF-8".into(), seen }
         };
     }
-    if offset == 0 && is_markdown(path) && size <= MARKDOWN_BYTES {
+    if offset == 0 && (is_markdown(path) || is_diagram(path)) && size <= MARKDOWN_BYTES {
         // Before the read, so a change during it shows as a change.
         let seen = seen_text(path);
         let read = std::fs::read(path).ok();
         if let Some(source) = read.as_deref().and_then(|bytes| as_text(bytes, false)) {
-            return Preview::Markdown { html: markdown(&source), source, seen };
+            let html = if is_diagram(path) { diagram(&source) } else { markdown(&source) };
+            return Preview::Markdown { html, source, seen };
         }
     }
     piece(path, offset).unwrap_or(Preview::Picture)
@@ -1135,6 +1147,16 @@ mod tests {
         fs::write(folder.join("empty.png"), "").unwrap();
 
         assert_eq!(read(&folder.join("read.md"), 0), Preview::Markdown { html: "<p><em>hi</em></p>\n".into(), source: "*hi*".into(), seen: seen_text(&folder.join("read.md")) });
+        // A diagram file is one Mermaid block, its text kept as text.
+        fs::write(folder.join("flow.mmd"), "graph TD\nA-->B<b>").unwrap();
+        assert_eq!(
+            read(&folder.join("flow.mmd"), 0),
+            Preview::Markdown {
+                html: "<pre><code class=\"language-mermaid\">graph TD\nA--&gt;B&lt;b&gt;</code></pre>\n".into(),
+                source: "graph TD\nA-->B<b>".into(),
+                seen: seen_text(&folder.join("flow.mmd")),
+            }
+        );
         // A text that is still being written is read on from where the last piece stopped.
         std::fs::write(folder.join("grow.log"), "one\n").unwrap();
         let Preview::Text { end, next, encoding, .. } = read(&folder.join("grow.log"), 0) else { panic!("not text") };
