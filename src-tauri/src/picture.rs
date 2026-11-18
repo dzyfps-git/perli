@@ -134,6 +134,11 @@ unsafe fn carry(factory: &IWICImagingFactory, from: &IWICBitmapFrameDecode, to: 
                 .and_then(|blocks| to.cast::<IWICMetadataBlockWriter>()?.InitializeFromBlockReader(&blocks))
                 .is_ok();
         let Ok(writer) = to.GetMetadataQueryWriter() else { return };
+        // The small picture a camera keeps for a quick look still shows the photo as it was, so a
+        // whole copy leaves it out. Windows makes its own from the new pixels.
+        if whole {
+            let _ = writer.RemoveMetadataByName(w!("/app1/thumb"));
+        }
         if !whole {
             let place: &[PCWSTR] = if keep.place { &PLACE } else { &[] };
             for &name in FACTS.iter().chain(place) {
@@ -575,9 +580,14 @@ mod tests {
         tiff.extend(b"\x10\x01\x02\0\x09\0\0\0\x32\0\0\0");
         tiff.extend(b"\x12\x01\x03\0\x01\0\0\0\x06\0\0\0");
         tiff.extend(b"\x25\x88\x04\0\x01\0\0\0\x3C\0\0\0");
-        tiff.extend([0; 4]);
+        // The second list, at 78, holds the small picture that cameras keep for a quick look.
+        tiff.extend(78u32.to_le_bytes());
         tiff.extend(b"PerliCam\0\0");
         tiff.extend(b"\x01\0\x01\0\x02\0\x02\0\0\0N\0\0\0\0\0\0\0");
+        tiff.extend(b"\x02\0\x01\x02\x04\0\x01\0\0\0\x6C\0\0\0\x02\x02\x04\0\x01\0\0\0");
+        tiff.extend((plain.len() as u32).to_le_bytes());
+        tiff.extend([0; 4]);
+        tiff.extend(&plain);
         let mut app1 = b"Exif\0\0".to_vec();
         app1.extend(tiff);
         let mut bytes = plain[..2].to_vec();
@@ -630,6 +640,14 @@ mod tests {
         write(&photo, &placed, Edit::Resize { longest: 32 }, Keep::ALL).unwrap();
         assert_eq!(fact(&placed, side).as_deref(), Some("N"));
         assert_eq!(fact(&placed, town).as_deref(), Some("Lisbon"));
+        let quick_look = w!("/app1/thumb/{ushort=513}");
+        assert!(fact(&photo, quick_look).is_some());
+        assert_eq!(fact(&placed, quick_look), None, "the camera's small picture of the old pixels goes");
+        assert_eq!(fact(&placed, model).as_deref(), Some("PerliCam"), "and only that");
+
+        let png = folder.join("photo.png");
+        write(&photo, &png, Edit::Convert { format: Format::Png }, Keep::default()).unwrap();
+        assert_eq!(fact(&png, model).as_deref(), Some("PerliCam"), "a PNG keeps them in XMP");
 
         let tiff = folder.join("photo.tif");
         write(&photo, &tiff, Edit::Convert { format: Format::Tiff }, Keep::default()).unwrap();
@@ -642,6 +660,7 @@ mod tests {
         assert_eq!(fact(&bare, side), None, "no place without the camera facts");
         std::fs::remove_dir_all(folder).unwrap();
     }
+
 
     #[test]
     fn copies_are_named_for_what_they_are() {
