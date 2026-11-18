@@ -21,7 +21,7 @@ fn failed(message: String) -> Error {
 
 /// Where a copy lands.
 enum Spot {
-    Cloud(At),
+    Cloud(Box<At>),
     Local(PathBuf),
 }
 
@@ -57,7 +57,7 @@ fn local_facts(path: &Path) -> Option<Facts> {
 impl Run<'_> {
     fn spot(folder: &Path) -> std::result::Result<Spot, String> {
         match remote::at(folder) {
-            Some(at) => Ok(Spot::Cloud(at?)),
+            Some(at) => Ok(Spot::Cloud(Box::new(at?))),
             None if remote::is_remote(folder) => Err("Files go into a cloud place, not next to the places".into()),
             None => Ok(Spot::Local(folder.to_path_buf())),
         }

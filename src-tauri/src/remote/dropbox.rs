@@ -270,7 +270,7 @@ impl Service for Dropbox {
             Ok(made) => made["url"].as_str().map(str::to_string).ok_or_else(|| "Dropbox made no link".into()),
             Err(failure) if failure.status == 409 => {
                 let links = self.call("sharing/list_shared_links", &json!({ "path": path_of(path), "direct_only": true }))?;
-                links["links"][0]["url"].as_str().map(str::to_string).ok_or_else(|| failure.message)
+                links["links"][0]["url"].as_str().map(str::to_string).ok_or(failure.message)
             }
             Err(failure) => Err(failure.message),
         }
