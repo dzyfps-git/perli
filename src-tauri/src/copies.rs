@@ -134,6 +134,9 @@ mod tests {
         let print = head_of(&file).unwrap();
         assert_eq!(head_of(&file), Some(print), "unchanged, it gives the print known");
         let (modified, ticks) = (fs::metadata(&file).unwrap().modified().unwrap(), crate::ops::sys::stamp(&file).unwrap().1);
+        // Windows stamps the change time from a clock that moves about every 16 ms, so a rewrite
+        // straight after could carry the same one. A tool puts an old time back later than that.
+        std::thread::sleep(std::time::Duration::from_millis(50));
         fs::write(&file, "other").unwrap();
         fs::File::options().write(true).open(&file).unwrap().set_modified(modified).unwrap();
         assert_eq!(crate::ops::sys::stamp(&file).unwrap().1, ticks, "its old time is back");
