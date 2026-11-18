@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Thumb } from "../../api";
-import { cachedThumb, createThumbLoader } from "./thumbs.ts";
+import { cachedThumb, createThumbLoader, MAX_BYTES } from "./thumbs.ts";
 
 const picture = (length = 4): Thumb => ({ width: 1, height: 1, pixels: new Uint8ClampedArray(length) });
 
@@ -90,12 +90,13 @@ test("the oldest pictures go first once the cache is full, and a look keeps one"
     loader.ask(0, key);
     await settle();
   };
-  const big = 30 * 1024 * 1024;
+  // Only the size counts, so no memory is taken for the pixels.
+  const big = (): Thumb => ({ width: 1, height: 1, pixels: { length: Math.ceil(MAX_BYTES * 0.45) } as Uint8ClampedArray });
 
-  await load("first", picture(big));
-  await load("second", picture(big));
+  await load("first", big());
+  await load("second", big());
   cachedThumb("first");
-  await load("third", picture(big));
+  await load("third", big());
 
   assert.notEqual(cachedThumb("first"), undefined);
   assert.equal(cachedThumb("second"), undefined);

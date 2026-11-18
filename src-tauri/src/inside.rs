@@ -526,6 +526,9 @@ const VIDEO_TYPES: [&str; 8] = ["mp4", "m4v", "webm", "mov", "mkv", "ogv", "avi"
 
 /// How wide each picture shows for its height, turned the way its EXIF says, from its header.
 /// Anything that is no picture by its name, can't be read, or is only in the cloud gets 0.
+/// Shapes worked out already, by lowercase path, so a gallery shown again lays out at once.
+static KNOWN_ASPECTS: crate::preview::Known<f32> = crate::preview::Known::new(200_000);
+
 pub fn shown_aspects(paths: &[PathBuf]) -> Vec<f32> {
     let _com = Com::enter();
     let Ok(factory) = (unsafe { CoCreateInstance::<_, IWICImagingFactory>(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER) }) else {
@@ -534,28 +537,39 @@ pub fn shown_aspects(paths: &[PathBuf]) -> Vec<f32> {
     let aspect = |path: &PathBuf| -> Option<f32> {
         let extension = path.extension().and_then(|ext| ext.to_str()).unwrap_or_default();
         let is = |types: &[&str]| types.iter().any(|known| extension.eq_ignore_ascii_case(known));
-        // ponytail: every video shows wide; read System.Video.FrameWidth/Height if tall phone videos crop badly.
-        if is(&VIDEO_TYPES) {
-            return Some(16.0 / 9.0);
-        }
-        if !is(&crate::folder::PICTURE_TYPES) || crate::thumbs::is_online_only(path) {
+        let video = is(&VIDEO_TYPES);
+        // A video in the cloud still has its frame size among the properties kept on this PC.
+        if !video && (!is(&crate::folder::PICTURE_TYPES) || crate::thumbs::is_online_only(path)) {
             return None;
         }
-        unsafe {
-            let decoder = factory
-                .CreateDecoderFromFilename(&HSTRING::from(path.as_path()), None, GENERIC_READ, WICDecodeMetadataCacheOnDemand)
-                .ok()?;
-            let frame = decoder.GetFrame(0).ok()?;
-            let (mut width, mut height) = (0, 0);
-            frame.GetSize(&raw mut width, &raw mut height).ok()?;
-            if width == 0 || height == 0 {
-                return None;
-            }
-            let turned = matches!(orientation(&frame), Some(5..=8));
-            Some(if turned { height as f32 / width as f32 } else { width as f32 / height as f32 })
+        let stat = crate::ops::sys::stat(path).ok()??;
+        let (key, stamp) = (path.to_string_lossy().to_lowercase(), (stat.size, stat.modified));
+        if let Some(known) = KNOWN_ASPECTS.get(&key, stamp) {
+            return Some(known);
         }
+        let found = if video { crate::preview::video_aspect(path) } else { picture_aspect(&factory, path) };
+        if let Some(found) = found {
+            KNOWN_ASPECTS.put(key, stamp, found);
+        }
+        // A video whose frame Windows can't tell shows wide, as most are.
+        found.or(video.then_some(16.0 / 9.0))
     };
     paths.iter().map(|path| aspect(path).unwrap_or(0.0)).collect()
+}
+
+/// A picture's width over its height as shown, turned the way its photo says.
+fn picture_aspect(factory: &IWICImagingFactory, path: &Path) -> Option<f32> {
+    unsafe {
+        let decoder = factory.CreateDecoderFromFilename(&HSTRING::from(path), None, GENERIC_READ, WICDecodeMetadataCacheOnDemand).ok()?;
+        let frame = decoder.GetFrame(0).ok()?;
+        let (mut width, mut height) = (0, 0);
+        frame.GetSize(&raw mut width, &raw mut height).ok()?;
+        if width == 0 || height == 0 {
+            return None;
+        }
+        let turned = matches!(orientation(&frame), Some(5..=8));
+        Some(if turned { height as f32 / width as f32 } else { width as f32 / height as f32 })
+    }
 }
 
 /// A picture file's own width and height, read from its header by Windows' imaging, or `None`
@@ -1105,8 +1119,13 @@ pub(crate) mod tests {
         std::fs::write(&flat, turned_jpeg(1)).unwrap();
         std::fs::write(&turned, turned_jpeg(6)).unwrap();
         std::fs::write(&note, b"no picture").unwrap();
-        let aspects = shown_aspects(&[flat, turned, note, PathBuf::new(), folder.join("gone.png"), folder.join("clip.MP4")]);
+        // A video whose frame Windows can't tell shows wide.
+        let clip = folder.join("clip.MP4");
+        std::fs::write(&clip, b"no video").unwrap();
+        let aspects = shown_aspects(&[flat.clone(), turned, note, PathBuf::new(), folder.join("gone.png"), clip]);
         assert_eq!(aspects, [2.0, 0.5, 0.0, 0.0, 0.0, 16.0 / 9.0]);
+        // A shape known is given again for the same size and time, without reading the file.
+        assert_eq!(shown_aspects(std::slice::from_ref(&flat)), [2.0]);
         std::fs::remove_dir_all(folder).unwrap();
     }
 

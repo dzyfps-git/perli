@@ -6,7 +6,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, PoisonError};
 
 use pulldown_cmark::{html, CowStr, Event, Options, Parser, Tag, TagEnd};
 use serde::Serialize;
@@ -623,12 +623,29 @@ fn date(store: &IPropertyStore, name: &str) -> Option<u64> {
 /// A whole number property, such as a drive's `System.Volume.BitLockerProtection`.
 pub fn whole_number(path: &Path, name: &str) -> Option<i32> {
     let _com = Com::enter();
-    let store = store_of(path)?;
+    number_in(&store_of(path)?, name)
+}
+
+fn number_in(store: &IPropertyStore, name: &str) -> Option<i32> {
     let key = key_of(name)?;
     let mut value = unsafe { store.GetValue(&raw const key) }.ok()?;
     let number = unsafe { PropVariantToInt32(&raw const value) };
     let _ = unsafe { PropVariantClear(&raw mut value) };
     number.ok()
+}
+
+/// A video's width over its height as it plays, turned as its rotation says, from what Windows
+/// reads of it. A phone's tall video is stored wide, with a turn of 90 or 270 degrees.
+pub fn video_aspect(path: &Path) -> Option<f32> {
+    let _com = Com::enter();
+    let store = store_of(path)?;
+    let width = number_in(&store, "System.Video.FrameWidth")?;
+    let height = number_in(&store, "System.Video.FrameHeight")?;
+    if width <= 0 || height <= 0 {
+        return None;
+    }
+    let turned = matches!(number_in(&store, "System.Video.Orientation"), Some(90 | 270));
+    Some(if turned { height as f32 / width as f32 } else { width as f32 / height as f32 })
 }
 
 /// FILETIME ticks since 1601 as milliseconds since 1970. Nothing for a time before 1970 or none.
@@ -770,19 +787,43 @@ fn latest_in(lane: u32) -> u64 {
     LATEST_HASH.lock().unwrap().get_or_insert_default().get(&lane).copied().unwrap_or(0)
 }
 
-/// Checksums worked out already, by path and kind, with the file's size and time then. A file
-/// changed since has another time, so its old checksum is never given.
-// ponytail: a file rewritten with its old time put back reads as unchanged.
-type HashKey = (String, String);
-/// A checksum with the size and time of the file it was for.
-type Stamped = (u64, u64, String);
-static KNOWN_HASHES: Mutex<Option<HashMap<HashKey, Stamped>>> = Mutex::new(None);
-/// Past this many, the checksums known start over.
-const MOST_KNOWN_HASHES: usize = 50_000;
+/// A file's size and time.
+type Stamp = (u64, u64);
+type Entries<V> = HashMap<String, (Stamp, V)>;
 
-fn hash_key(path: &Path, algorithm: &str) -> HashKey {
-    (path.to_string_lossy().to_lowercase(), algorithm.to_string())
+/// What was worked out from files' bytes, by a key such as the file's lowercase path, each with
+/// the size and time the file had then. A file changed since has another time, so what was
+/// known of it is never given, and a look again reads only files that changed.
+// ponytail: a file rewritten with its old time put back reads as unchanged.
+pub struct Known<V> {
+    known: Mutex<Option<Entries<V>>>,
+    /// Past this many, what is known starts over.
+    most: usize,
 }
+
+impl<V: Clone> Known<V> {
+    pub const fn new(most: usize) -> Self {
+        Self { known: Mutex::new(None), most }
+    }
+
+    /// What is known for `key`, if it was worked out for the same size and time.
+    pub fn get(&self, key: &str, stamp: Stamp) -> Option<V> {
+        let known = self.known.lock().unwrap_or_else(PoisonError::into_inner);
+        known.as_ref()?.get(key).filter(|(was, _)| *was == stamp).map(|(_, value)| value.clone())
+    }
+
+    pub fn put(&self, key: String, stamp: Stamp, value: V) {
+        let mut known = self.known.lock().unwrap_or_else(PoisonError::into_inner);
+        let known = known.get_or_insert_default();
+        if known.len() >= self.most {
+            known.clear();
+        }
+        known.insert(key, (stamp, value));
+    }
+}
+
+/// Checksums worked out already, by path and kind.
+static KNOWN_HASHES: Known<String> = Known::new(50_000);
 
 /// The file's checksum by `algorithm` (md5, sha1, sha256 or sha512) in lowercase hex, through
 /// Windows' own crypto. `None` once a newer checksum was asked for in the same `lane`: each place
@@ -791,19 +832,13 @@ fn hash_key(path: &Path, algorithm: &str) -> HashKey {
 pub fn hash(path: &Path, algorithm: &str, lane: u32) -> std::io::Result<Option<String>> {
     use std::os::windows::fs::MetadataExt;
     let stamp = std::fs::metadata(path).map(|data| (data.len(), data.last_write_time()))?;
-    let key = hash_key(path, algorithm);
-    let known = KNOWN_HASHES.lock().unwrap().as_ref().and_then(|known| known.get(&key).cloned());
-    if let Some((_, _, digest)) = known.filter(|&(size, modified, _)| (size, modified) == stamp) {
+    let key = format!("{}\n{algorithm}", path.to_string_lossy().to_lowercase());
+    if let Some(digest) = KNOWN_HASHES.get(&key, stamp) {
         return Ok(Some(digest));
     }
     let digest = hash_anew(path, algorithm, lane)?;
     if let Some(digest) = &digest {
-        let mut known = KNOWN_HASHES.lock().unwrap();
-        let known = known.get_or_insert_default();
-        if known.len() > MOST_KNOWN_HASHES {
-            known.clear();
-        }
-        known.insert(key, (stamp.0, stamp.1, digest.clone()));
+        KNOWN_HASHES.put(key, stamp, digest.clone());
     }
     Ok(digest)
 }

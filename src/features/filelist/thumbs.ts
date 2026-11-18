@@ -1,7 +1,8 @@
 import type { Thumb } from "../../api";
 
-// Shared by all lists, because a tab or a split pane often shows the same files.
-const MAX_BYTES = 64 * 1024 * 1024;
+// Shared by all lists, because a tab or a split pane often shows the same files. Big tiles keep
+// sharper pictures, a few MB each.
+export const MAX_BYTES = 160 * 1024 * 1024;
 /** What a file with no picture costs, which is only its place in the cache. */
 const NO_PICTURE_BYTES = 64;
 const AT_ONCE = 4;

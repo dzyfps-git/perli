@@ -7,7 +7,7 @@ use std::fs::File;
 use std::hash::{Hash, Hasher};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::folder::{self, Entry, Found, Sight};
@@ -21,12 +21,8 @@ const GOING_GAP: Duration = Duration::from_millis(400);
 
 type Candidate = (Entry, Arc<[u16]>);
 
-/// A size and a time, and the first-bytes fingerprint of the file that had them.
-type Head = (u64, u64, u64);
-/// Fingerprints worked out before, by lowercase path, so a look again reads only files that changed.
-static KNOWN_HEADS: Mutex<Option<HashMap<String, Head>>> = Mutex::new(None);
-/// Past this many, the fingerprints known start over.
-const MOST_KNOWN_HEADS: usize = 200_000;
+/// First-bytes fingerprints worked out before, by lowercase path.
+static KNOWN_HEADS: preview::Known<u64> = preview::Known::new(200_000);
 
 /// The files under `folders` (only in them, unless `deep`) that have the same content as another,
 /// in sets: the set that wastes the most room first, and the oldest file of each set first. Empty
@@ -108,8 +104,7 @@ fn split_by<K: Hash + Eq>(files: Vec<Candidate>, key: impl Fn(&Candidate) -> Opt
 /// worked out before for the same size and time is given at once.
 fn head_of(path: &Path, size: u64, modified: u64) -> Option<u64> {
     let key = path.to_string_lossy().to_lowercase();
-    let known = KNOWN_HEADS.lock().unwrap_or_else(PoisonError::into_inner).as_ref().and_then(|known| known.get(&key).copied());
-    if let Some((_, _, print)) = known.filter(|&(was_size, was_modified, _)| (was_size, was_modified) == (size, modified)) {
+    if let Some(print) = KNOWN_HEADS.get(&key, (size, modified)) {
         return Some(print);
     }
     let mut head = Vec::with_capacity(HEAD);
@@ -117,12 +112,7 @@ fn head_of(path: &Path, size: u64, modified: u64) -> Option<u64> {
     let mut hasher = DefaultHasher::new();
     head.hash(&mut hasher);
     let print = hasher.finish();
-    let mut known = KNOWN_HEADS.lock().unwrap_or_else(PoisonError::into_inner);
-    let known = known.get_or_insert_default();
-    if known.len() > MOST_KNOWN_HEADS {
-        known.clear();
-    }
-    known.insert(key, (size, modified, print));
+    KNOWN_HEADS.put(key, (size, modified), print);
     Some(print)
 }
 
