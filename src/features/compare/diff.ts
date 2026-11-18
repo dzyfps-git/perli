@@ -122,8 +122,9 @@ export type Open = readonly [boolean, boolean];
 /**
  * Lines of `a` and `b` in order, each marked same, gone or new. `key` says when two lines count as
  * one. A last line with no ending (`open`) never counts as one with a last line that has one.
+ * `budget` is how long, in ms, the search may look for the shortest way.
  */
-export function diffLines(a: string[], b: string[], key: (line: string) => string = (line) => line, open: Open = [false, false]) {
+export function diffLines(a: string[], b: string[], key: (line: string) => string = (line) => line, open: Open = [false, false], budget = BUDGET_MS) {
   const keysA = a.map(key);
   const keysB = b.map(key);
   // No line holds a line ending, so one on the key marks the open end and matches nothing else.
@@ -135,7 +136,7 @@ export function diffLines(a: string[], b: string[], key: (line: string) => strin
   const keptA = keysA.flatMap((line, at) => (inB.has(line) ? [at] : []));
   const keptB = keysB.flatMap((line, at) => (inA.has(line) ? [at] : []));
   const found: Line[] = [];
-  deadline = performance.now() + BUDGET_MS;
+  deadline = performance.now() + budget;
   edits(keptA.map((at) => keysA[at]), keptB.map((at) => keysB[at]), 0, keptA.length, 0, keptB.length, found);
   // Back in place, with the lines set aside where they were.
   const lines: Line[] = [];

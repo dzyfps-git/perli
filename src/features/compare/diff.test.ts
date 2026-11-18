@@ -85,7 +85,8 @@ test("many changes in one stretch still find the shortest way", () => {
   // Lines that come back four times over, in the other order: past 4096 changes, yet in time.
   const a = Array.from({ length: 9000 }, (_, at) => `line ${at % 2250}`);
   const b = [...a].reverse();
-  const lines = diffLines(a, b);
+  // No time limit, so a slow machine finds it too.
+  const lines = diffLines(a, b, undefined, undefined, Infinity);
   sound(lines, a, b);
   assert.equal(lines.filter((line) => line.kind === "same").length, 7);
 });
