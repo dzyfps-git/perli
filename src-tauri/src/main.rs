@@ -11,6 +11,7 @@ mod drag;
 mod folder;
 mod fonts;
 mod git;
+mod index;
 mod jobs;
 mod launch;
 mod mail;
@@ -1032,6 +1033,22 @@ fn resume_job(id: u64, jobs: State<'_, Jobs>) {
 #[tauri::command]
 fn set_job_options(verify: bool, one_per_drive: bool, jobs: State<'_, Jobs>) {
     jobs.set_options(verify, one_per_drive);
+}
+
+/// The whole-PC index as the user set it, which every window hands over.
+#[tauri::command]
+fn set_index_options(options: index::Options) {
+    index::set_options(options);
+}
+
+#[tauri::command]
+async fn index_status() -> Result<index::Status, String> {
+    blocking(|| Ok(index::status())).await
+}
+
+#[tauri::command]
+async fn rebuild_index() -> Result<(), String> {
+    blocking(index::rebuild).await
 }
 
 #[tauri::command]
@@ -2758,6 +2775,9 @@ fn main() {
             clipboard_has_files,
             bin_usage,
             set_job_options,
+            set_index_options,
+            index_status,
+            rebuild_index,
             start_job_now,
             take_sweep_report,
             rows,

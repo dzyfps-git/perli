@@ -6,6 +6,7 @@ import {
   clipboardCanPaste,
   clipboardHasFiles,
   setJobOptions,
+  setIndexOptions,
   takeSweepReport,
   clipboardText,
   deleteTag,
@@ -140,6 +141,7 @@ import {
 } from "./features/filelist/prefs";
 import { SelectPattern } from "./features/filelist/SelectPattern";
 import { COPIES_QUERY, FLAT_QUERY, type FolderView, type RowAt } from "./features/navigation/folderView";
+import { indexOptions } from "./features/settings/indexPrefs";
 import { BIN_PATH, isBin, isDriveRoot, isArchiveName, join, parentOf, baseName, relativeTo, samePath, type Crumb } from "./features/navigation/path";
 import { Palette, type Command } from "./features/palette/Palette";
 import { wordsFor, type Verb } from "./features/palette/words";
@@ -565,6 +567,7 @@ export function App() {
   }
 
   createEffect(() => setJobOptions(verifyCopies(), onePerDrive()).catch(console.error));
+  createEffect(() => setIndexOptions(indexOptions()).catch(console.error));
 
   createEffect(() => {
     const session = keepSession() ? tabs.session() : undefined;

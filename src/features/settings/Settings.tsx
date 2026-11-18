@@ -65,6 +65,7 @@ import { bookmarksCompact, setBookmarksCompact, setSidebarOpen, sidebarOpen } fr
 import { rememberRecent, setRememberRecent } from "../reach/reach";
 import { TagSettings } from "../tags/TagSettings";
 import { IconSettings } from "./IconSettings";
+import { IndexSettings } from "./IndexSettings";
 import {
   accent,
   accentColors,
@@ -135,6 +136,7 @@ const SECTIONS = [
   { id: "look", label: "Look", icon: "" },
   { id: "files", label: "Files", icon: "" },
   { id: "sidebar", label: "Sidebar", icon: "" },
+  { id: "index", label: "Search index", icon: "\uE721" },
   { id: "tags", label: "Tags", icon: "" },
   { id: "viewers", label: "Viewers", icon: "" },
   { id: "icons", label: "Icons", icon: "" },
@@ -886,6 +888,15 @@ export function Settings(props: {
               checked={rememberRecent()}
               onChange={setRememberRecent}
             />
+          </section>
+
+          <section
+            class="settings-section"
+            data-section="index"
+            data-words="search index find every file drive drives pc fast instant battery network leave out skip exclude rebuild"
+          >
+            <h3>Search index</h3>
+            <IndexSettings open={props.open} />
           </section>
 
           <section class="settings-section" data-section="tags" data-words="label color">

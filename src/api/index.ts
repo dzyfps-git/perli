@@ -658,6 +658,35 @@ export const resumeJob = (id: number) => invoke<void>("resume_job", { id });
 export const cancelJob = (id: number) => invoke<void>("cancel_job", { id });
 export const startJobNow = (id: number) => invoke<void>("start_job_now", { id });
 export const setJobOptions = (verify: boolean, onePerDrive: boolean) => invoke<void>("set_job_options", { verify, onePerDrive });
+
+/** The whole-PC index as the user set it. */
+export interface IndexOptions {
+  on: boolean;
+  paused: boolean;
+  /** Wait while the PC runs on its battery. */
+  battery: boolean;
+  network: boolean;
+  /** Folders left out, with all they hold. */
+  skip: string[];
+}
+
+export interface IndexStatus {
+  state: "off" | "waiting" | "walking" | "ready" | "paused" | "battery";
+  /** Files and folders listed. */
+  files: number;
+  folders: number;
+  /** What the list takes on disk. */
+  bytes: number;
+  /** When the last look through a drive ended, in ms. */
+  walked?: number | null;
+  /** What the look under way has listed so far. */
+  listed: number;
+  drives: string[];
+}
+
+export const setIndexOptions = (options: IndexOptions) => invoke<void>("set_index_options", { options });
+export const indexStatus = () => invoke<IndexStatus>("index_status");
+export const rebuildIndex = () => invoke<void>("rebuild_index");
 export const takeSweepReport = () => invoke<Swept>("take_sweep_report");
 
 /** `all` uses the same answer for every later case of this kind. */
