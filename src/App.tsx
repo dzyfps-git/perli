@@ -253,7 +253,11 @@ function isBrowserKey(event: KeyboardEvent, key: string) {
 /** The edge of the window is drawn once, as Perli starts. */
 const drawsEdge = !matchMedia("(prefers-reduced-motion: reduce)").matches;
 
-const isTyping = (event: Event) => event.target instanceof HTMLInputElement;
+const isTyping = (event: Event) =>
+  event.target instanceof HTMLInputElement ||
+  event.target instanceof HTMLTextAreaElement ||
+  event.target instanceof HTMLSelectElement ||
+  (event.target instanceof HTMLElement && event.target.isContentEditable);
 // A job's Delete key must only ever mean the files, never a focused button.
 const isInList = (event: Event) => (event.target as HTMLElement).classList?.contains("file-grid");
 /** Inputs that take typed text, whose right-click gives Perli's own Cut, Copy and Paste. */

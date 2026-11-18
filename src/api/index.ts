@@ -236,6 +236,8 @@ export type Task =
   | { kind: "extractZip"; path: string }
   /** A quick edit's text saved over its file. `seen` is what the preview said of it when read. */
   | { kind: "save"; path: string; text: string; seen?: string }
+  /** A filled-in PDF, staged by `stagePdf`, saved over its file. */
+  | { kind: "savePdf"; path: string; staged: number; seen?: string }
   /** Pictures by path, from a preview, or the selected rows. */
   | { kind: "picture"; paths?: string[]; selection?: Selection; edit: PictureEdit; keep?: PictureKeep }
   | { kind: "wallpaper"; path: string };
@@ -1226,6 +1228,19 @@ export function saveFrame(view: number, request: number, row: number, seconds: n
   body.set(new Uint8Array(png), HEAD);
   return invoke<string>("save_frame", body);
 }
+
+/** A filled-in PDF written beside its file as "name (filled).pdf". Answers the name it took. */
+export function savePdfCopy(path: string, pdf: Uint8Array) {
+  const name = new TextEncoder().encode(path);
+  const body = new Uint8Array(4 + name.length + pdf.length);
+  new DataView(body.buffer).setUint32(0, name.length, true);
+  body.set(name, 4);
+  body.set(pdf, 4 + name.length);
+  return invoke<string>("save_pdf_copy", body);
+}
+
+/** A filled-in PDF kept for a "savePdf" job to write over its file. Answers its ticket. */
+export const stagePdf = (pdf: Uint8Array) => invoke<number>("stage_pdf", pdf);
 
 /** One chapter of a book as safe HTML, by its name inside the archive. */
 export const bookChapter = (view: number, request: number, row: number, entry: string) =>

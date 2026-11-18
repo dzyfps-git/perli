@@ -12,6 +12,8 @@ function pdfFiles(): Plugin {
     ["cmaps", () => true],
     ["standard_fonts", () => true],
     ["wasm", (name) => name.endsWith("_nowasm_fallback.js") || name.startsWith("LICENSE")],
+    // The icons of notes left on a page.
+    ["web/images", (name) => name.startsWith("annotation-")],
   ];
   return {
     name: "pdf-files",

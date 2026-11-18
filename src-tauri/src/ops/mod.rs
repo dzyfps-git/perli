@@ -30,7 +30,7 @@ use windows::Win32::Foundation::E_FAIL;
 pub use archive::{safe as safe_relative, ticks_of as zip_ticks};
 pub use bin::{limit as bin_limit, read as read_bin, BinItem};
 pub use incoming::{offers_files, Incoming};
-pub use names::{check as check_name, check_rename, check_renames};
+pub use names::{check as check_name, check_rename, check_renames, free as free_name};
 pub use replace::{seen, sweep as sweep_kept, Seen};
 pub use shell::{shell_item, Com};
 pub use wallpaper::shown as wallpaper_shown;

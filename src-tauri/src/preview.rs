@@ -423,6 +423,54 @@ pub fn beside_text(path: &Path, extension: &str) -> Option<String> {
 }
 
 const FRAME_BYTES: usize = 64 * 1024 * 1024;
+const PDF_BYTES: usize = 1024 * 1024 * 1024;
+
+/// A filled-in PDF waiting for the job that writes it over its file. Only the latest is kept.
+static STAGED_PDF: Mutex<Option<(u64, Vec<u8>)>> = Mutex::new(None);
+static STAGED_TICKETS: AtomicU64 = AtomicU64::new(0);
+
+fn check_pdf(pdf: &[u8]) -> Result<(), String> {
+    match pdf.starts_with(b"%PDF-") && pdf.len() <= PDF_BYTES {
+        true => Ok(()),
+        false => Err("Only a PDF can be saved here".into()),
+    }
+}
+
+/// Keeps a filled-in PDF for the job that saves it over its file, and gives its ticket.
+pub fn stage_pdf(pdf: Vec<u8>) -> Result<u64, String> {
+    check_pdf(&pdf)?;
+    let ticket = STAGED_TICKETS.fetch_add(1, Ordering::Relaxed) + 1;
+    *STAGED_PDF.lock().unwrap_or_else(PoisonError::into_inner) = Some((ticket, pdf));
+    Ok(ticket)
+}
+
+/// The PDF staged under `ticket`, taken out.
+pub fn take_staged_pdf(ticket: u64) -> Result<Vec<u8>, String> {
+    let mut staged = STAGED_PDF.lock().unwrap_or_else(PoisonError::into_inner);
+    match staged.take() {
+        Some((held, pdf)) if held == ticket => Ok(pdf),
+        other => {
+            *staged = other;
+            Err("The filled-in PDF is gone. Save it again.".into())
+        }
+    }
+}
+
+/// Writes a filled-in PDF beside the one it came from, as "name (filled).pdf", and says the name.
+pub fn save_pdf_copy(original: &Path, pdf: &[u8]) -> Result<String, String> {
+    check_pdf(pdf)?;
+    let folder = original.parent().ok_or("The PDF has no folder")?;
+    let stem = original.file_stem().unwrap_or_default().to_string_lossy();
+    let path = crate::ops::free_name(folder, &format!("{stem} (filled)"), ".pdf");
+    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&path).map_err(|error| error.to_string())?;
+    // Half a copy is no copy.
+    std::io::Write::write_all(&mut file, pdf).map_err(|error| {
+        drop(file);
+        let _ = std::fs::remove_file(&path);
+        error.to_string()
+    })?;
+    Ok(path.file_name().unwrap_or_default().to_string_lossy().into_owned())
+}
 
 /// Saves a frame of a film as a PNG beside it, named after the film and the moment, and gives
 /// the new file's name. A file already there is never written over.
@@ -878,6 +926,26 @@ fn hash_anew(path: &Path, algorithm: &str, lane: u32) -> std::io::Result<Option<
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_filled_pdf_lands_beside_its_own_and_a_staged_one_waits_for_its_ticket() {
+        let folder = std::env::temp_dir().join(format!("perli-pdf-save-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let original = folder.join("form.pdf");
+        std::fs::write(&original, b"%PDF-1.7 original").unwrap();
+
+        assert_eq!(super::save_pdf_copy(&original, b"%PDF-1.7 filled").unwrap(), "form (filled).pdf");
+        assert_eq!(std::fs::read(folder.join("form (filled).pdf")).unwrap(), b"%PDF-1.7 filled");
+        assert_ne!(super::save_pdf_copy(&original, b"%PDF-1.7 again").unwrap(), "form (filled).pdf", "a second copy takes a name of its own");
+        assert!(super::save_pdf_copy(&original, b"not a pdf").is_err());
+        assert_eq!(std::fs::read(&original).unwrap(), b"%PDF-1.7 original", "the original stays as it was");
+
+        let ticket = super::stage_pdf(b"%PDF-1.7 over".to_vec()).unwrap();
+        assert!(super::take_staged_pdf(ticket + 1).is_err(), "another ticket takes nothing");
+        assert_eq!(super::take_staged_pdf(ticket).unwrap(), b"%PDF-1.7 over");
+        assert!(super::take_staged_pdf(ticket).is_err(), "taken once");
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
     #[test]
     fn a_shift_jis_piece_never_ends_halfway_through_a_letter() {
         // "日本" in Shift-JIS is 93 FA 96 7B, each letter two bytes.

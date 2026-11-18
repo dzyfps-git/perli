@@ -2,11 +2,14 @@ import * as pdfjs from "pdfjs-dist";
 import worker from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { batch, createEffect, createMemo, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
+import { fileSeen, openLink, savePdfCopy, stagePdf } from "../../api";
+import { ConfirmDelete } from "../fileops/ConfirmDelete";
 import { saved, stored } from "../filelist/prefs";
 import { findIn, scrollToRange } from "./FindBar";
 import { Minimap } from "./Minimap";
 import { minimapShown, setMinimapShown } from "./viewerPrefs";
 import { seenPart, type ViewRect } from "./zoomView";
+import "./pdfFields.css";
 
 pdfjs.GlobalWorkerOptions.workerSrc = worker;
 
@@ -21,6 +24,8 @@ const ICON_NIGHT = "";
 const ICON_COPY = "";
 const ICON_ZOOM_IN = "";
 const ICON_ZOOM_OUT = "";
+
+const ICON_CLEAR = "\uE75C";
 
 /** pdf.js's own files: character maps for Asian text, the 14 standard fonts, and the image
  *  decoders it uses in place of WebAssembly, which the window's security rules leave out. */
@@ -40,6 +45,12 @@ const COPY_SCALE = 2;
 const DONE_MS = 1400;
 const MOST_PLACES = 200;
 const MOST_MATCHES = 5000;
+/** Places left by following links, kept to come back to. */
+const MOST_BACKS = 50;
+/** How long a word on a save or a link stays. */
+const TOLD_MS = 6000;
+/** Links that may open outside, once the user says so. */
+const WEB = /^(https?:|mailto:)/i;
 /** Paper sizes by name, in millimetres, short side first. */
 const PAPERS: [string, number, number][] = [
   ["A3", 297, 420],
@@ -71,9 +82,12 @@ export function paperName(width: number, height: number) {
   return named ? named[0] : `${Math.round((width * 25.4) / 72)} × ${Math.round((height * 25.4) / 72)} mm`;
 }
 
+/** A place in the PDF: a name it gives, or the place itself. */
+type Dest = string | unknown[] | null;
+
 interface Heading {
   title: string;
-  dest: string | unknown[] | null;
+  dest: Dest;
   items: Heading[];
 }
 
@@ -88,12 +102,15 @@ export interface PdfViewProps {
   open: () => Promise<string>;
   keys: (handler: ((event: KeyboardEvent) => boolean) | undefined) => void;
   note: (text: string | undefined) => void;
+  /** Writes a filled-in PDF, staged by `stagePdf`, over the file as a job with an Undo. Says whether it went. */
+  saveOver: (staged: number, seen: string | undefined) => Promise<boolean>;
 }
 
 /**
  * A PDF, page under page: a strip of the pages or the document's own outline beside it, find
  * across every page, text to select, fit to the width or the page, two pages side by side, night
- * pages, the place kept for next time, and a page copied as a picture.
+ * pages, the place kept for next time, and a page copied as a picture. Its links work, and its
+ * form fields fill in, saved as a copy beside it or over it.
  */
 export function PdfView(live: PdfViewProps) {
   const props = { ...live };
@@ -117,6 +134,21 @@ export function PdfView(live: PdfViewProps) {
   const [copied, setCopied] = createSignal(false);
   /** Bumped as the page scrolls, for the map. */
   const [moved, setMoved] = createSignal(0);
+  /** Fields filled in since the file was read or last saved, and since it was read at all. */
+  const [changed, setChanged] = createSignal(false);
+  const [edited, setEdited] = createSignal(false);
+  const [saving, setSaving] = createSignal(false);
+  /** A word on the last save or link. */
+  const [told, setTold] = createSignal<string>();
+  /** A web link waiting for the user to say it may open. */
+  const [web, setWeb] = createSignal<string>();
+  /** Places left by following links, to come back to with Alt+Left. */
+  const [backs, setBacks] = createSignal<{ at: number; top: number }[]>([]);
+  /** Bumped to draw every page's fields afresh. */
+  const [fieldsRound, setFieldsRound] = createSignal(0);
+  /** How the file stood when read, so a save over it asks if it changed since. */
+  let readAs: string | undefined;
+  let toldTimer: number | undefined;
   const savedPage = places()[props.path] ?? 0;
 
   // Each page draws itself while it is near the view.
@@ -174,6 +206,11 @@ export function PdfView(live: PdfViewProps) {
     const opened = await task.promise;
     if (gone) return;
     setLocked(undefined);
+    (opened.annotationStorage as unknown as { onSetModified: () => void }).onSetModified = () => batch(() => (setChanged(true), setEdited(true)));
+    void fileSeen(props.path).then(
+      (stamp) => (readAs = stamp ?? undefined),
+      () => {},
+    );
     const first = (await opened.getPage(1)).getViewport({ scale: 1 });
     batch(() => {
       setSizes(Array.from({ length: opened.numPages }, () => ({ width: first.width, height: first.height })));
@@ -203,6 +240,7 @@ export function PdfView(live: PdfViewProps) {
     props.keys(undefined);
     props.note(undefined);
     closeFind();
+    clearTimeout(toldTimer);
     void task?.destroy();
   });
 
@@ -291,6 +329,8 @@ export function PdfView(live: PdfViewProps) {
     let box!: HTMLDivElement;
     let canvas!: HTMLCanvasElement;
     let text!: HTMLDivElement;
+    let fieldsBox!: HTMLDivElement;
+    let fields: pdfjs.AnnotationLayer | undefined;
     const [close, setClose] = createSignal(false);
     let drawing: pdfjs.RenderTask | undefined;
     let layer: pdfjs.TextLayer | undefined;
@@ -331,6 +371,8 @@ export function PdfView(live: PdfViewProps) {
       drawnAt = shown;
       canvases.set(at, canvas);
       setMoved(moved() + 1);
+      await drawFields(proxy, viewport, mine).catch(console.error);
+      if (mine !== ticket) return;
       text.replaceChildren();
       layer = new pdfjs.TextLayer({ textContentSource: proxy.streamTextContent(), container: text, viewport });
       await layer.render().catch(() => {});
@@ -338,6 +380,46 @@ export function PdfView(live: PdfViewProps) {
         textLayers.set(at, text);
         paintFound();
       }
+    }
+
+    /** The page's links and form fields: made once while the page is near, then moved with each zoom. */
+    async function drawFields(proxy: pdfjs.PDFPageProxy, viewport: pdfjs.PageViewport, mine: number) {
+      const fitted = viewport.clone({ dontFlip: true });
+      if (fields) return fields.update({ viewport: fitted } as Parameters<pdfjs.AnnotationLayer["update"]>[0]);
+      const annotations = await proxy.getAnnotations({ intent: "display" });
+      if (gone || !close() || mine !== ticket || fields || !annotations.length) return;
+      const storage = doc()!.annotationStorage;
+      fields = new pdfjs.AnnotationLayer({
+        div: fieldsBox,
+        page: proxy,
+        viewport: fitted,
+        linkService: links,
+        annotationStorage: storage,
+        accessibilityManager: null,
+        annotationCanvasMap: null,
+        annotationEditorUIManager: null,
+        structTreeLayer: null,
+        commentManager: null,
+      });
+      // ponytail: no fieldObjects or scripting, so a PDF's own Reset button and field scripts do
+      // nothing; Clear changes covers the reset.
+      await fields.render({
+        annotations,
+        viewport: fitted,
+        div: fieldsBox,
+        page: proxy,
+        linkService: links as never,
+        annotationStorage: storage,
+        imageResourcesPath: `${FILES}web/images/`,
+        renderForms: true,
+        enableScripting: false,
+      });
+      tidyFields(fieldsBox);
+    }
+
+    function forgetFields() {
+      fields = undefined;
+      fieldsBox.replaceChildren();
     }
 
     function forget() {
@@ -348,6 +430,7 @@ export function PdfView(live: PdfViewProps) {
       layer?.cancel();
       canvas.width = canvas.height = 0;
       text.replaceChildren();
+      forgetFields();
       canvases.delete(at);
       textLayers.delete(at);
       drawnAt = 0;
@@ -368,12 +451,26 @@ export function PdfView(live: PdfViewProps) {
       if (!close()) return forget();
       if (shownAt !== drawnAt) void draw(shownAt).catch(console.error);
     });
+    // Fields put back to what the file holds are drawn again from it.
+    createEffect(
+      on(
+        fieldsRound,
+        () => {
+          forgetFields();
+          const mine = ticket;
+          if (drawnAt) void doc()!.getPage(at + 1).then((proxy) => drawFields(proxy, proxy.getViewport({ scale: drawnAt }), mine)).catch(console.error);
+        },
+        { defer: true },
+      ),
+    );
 
     return (
       <div
         ref={box}
         class="pdf-page"
         data-page={at}
+        // A middle click on a link would open a window of its own.
+        onAuxClick={(event) => (event.target as HTMLElement).closest("a") && event.preventDefault()}
         style={{
           width: `${sizeOf(at).width * scale()}px`,
           height: `${sizeOf(at).height * scale()}px`,
@@ -383,6 +480,7 @@ export function PdfView(live: PdfViewProps) {
       >
         <canvas ref={canvas} aria-label={`Page ${at + 1}`} />
         <div ref={text} class="textLayer" />
+        <div ref={fieldsBox} class="annotationLayer" />
       </div>
     );
   }
@@ -415,18 +513,146 @@ export function PdfView(live: PdfViewProps) {
   let thumbs: HTMLDivElement | undefined;
   createEffect(on(current, (at) => side() === "pages" && thumbs?.children[at]?.scrollIntoView({ block: "nearest" })));
 
-  /** Where an outline heading points: its page, and how far down it, in points. */
-  async function openHeading(heading: Heading) {
+  /** Where a place in the PDF is: its page, and how far down it, in points. */
+  async function placeOf(dest: Dest) {
     const opened = doc();
-    if (!opened || !heading.dest) return;
-    const dest = typeof heading.dest === "string" ? await opened.getDestination(heading.dest) : heading.dest;
-    if (!dest?.length) return;
-    const target = dest[0];
+    if (!opened || !dest) return;
+    const found = typeof dest === "string" ? await opened.getDestination(dest) : dest;
+    if (!found?.length) return;
+    const target = found[0];
     const at = typeof target === "number" ? target : await opened.getPageIndex(target as Parameters<typeof opened.getPageIndex>[0]);
     // An "XYZ" place gives how high on the page, from its foot.
-    const kind = (dest[1] as { name?: string } | undefined)?.name;
-    const y = kind === "XYZ" || kind === "FitH" || kind === "FitBH" ? (kind === "XYZ" ? dest[3] : dest[2]) : null;
-    go(at, typeof y === "number" ? Math.max(sizeOf(at).height - y, 0) : 0);
+    const kind = (found[1] as { name?: string } | undefined)?.name;
+    const y = kind === "XYZ" || kind === "FitH" || kind === "FitBH" ? (kind === "XYZ" ? found[3] : found[2]) : null;
+    return { at, top: typeof y === "number" ? Math.max(sizeOf(at).height - y, 0) : 0 };
+  }
+
+  async function openHeading(heading: Heading) {
+    const place = await placeOf(heading.dest);
+    if (place) go(place.at, place.top);
+  }
+
+  /** Where the view is, as `go` takes it: the page being read, and how far down it in points. */
+  function here() {
+    const page = pageElement(current());
+    return { at: current(), top: page ? Math.max((scroller.scrollTop - page.offsetTop + PAD) / scale(), 0) : 0 };
+  }
+
+  /** Goes to a place a link leads to, keeping the place left for Alt+Left. */
+  function leap(at: number, top = 0) {
+    setBacks([...backs(), here()].slice(-MOST_BACKS));
+    go(at, top);
+  }
+
+  function goBack() {
+    const last = backs().at(-1);
+    if (!last) return false;
+    setBacks(backs().slice(0, -1));
+    go(last.at, last.top);
+    return true;
+  }
+
+  function tell(text: string) {
+    clearTimeout(toldTimer);
+    setTold(text);
+    toldTimer = window.setTimeout(() => setTold(undefined), TOLD_MS);
+  }
+
+  /** What pdf.js's links do here: go to a place in this PDF, or open a web page once the user says so. */
+  const links = {
+    externalLinkEnabled: true,
+    isInPresentationMode: false,
+    rotation: 0,
+    get pagesCount() {
+      return count();
+    },
+    get page() {
+      return current() + 1;
+    },
+    addLinkAttributes(link: HTMLAnchorElement, url: string) {
+      link.href = "#";
+      link.dataset.tip = WEB.test(url) ? url : `${url}\nThis kind of link doesn't open from a preview`;
+      link.onclick = () => {
+        if (WEB.test(url)) setWeb(url);
+        else tell("This kind of link doesn't open from a preview");
+        return false;
+      };
+    },
+    // The place rides in the link, so its page can show on hover.
+    getDestinationHash: (dest: Dest) => `#to:${encodeURIComponent(JSON.stringify(dest))}`,
+    getAnchorUrl: () => "#",
+    goToDestination: (dest: Dest) =>
+      void placeOf(dest).then((place) => place && leap(place.at, place.top), console.error),
+    goToPage: (page: number) => leap(page - 1),
+    executeNamedAction(action: string) {
+      const to = ({ NextPage: current() + 1, PrevPage: current() - 1, FirstPage: 0, LastPage: count() - 1 } as Record<string, number>)[action];
+      if (to !== undefined) leap(to);
+      else if (action === "GoBack") goBack();
+    },
+    executeSetOCGState() {},
+  };
+
+  /** pdf.js's own hover text moves to Perli's, and each link to a place in the PDF says its page. */
+  function tidyFields(box: HTMLElement) {
+    for (const tipped of box.querySelectorAll("[title]")) {
+      tipped.setAttribute("data-tip", tipped.getAttribute("title")!);
+      tipped.removeAttribute("title");
+    }
+    for (const link of box.querySelectorAll<HTMLAnchorElement>('a[href^="#to:"]')) {
+      const dest = JSON.parse(decodeURIComponent(link.getAttribute("href")!.slice(4))) as Dest;
+      void placeOf(dest).then(
+        (place) => place && (link.dataset.tip = [link.dataset.tip, `Page ${place.at + 1}`].filter(Boolean).join("\n")),
+        () => {},
+      );
+    }
+  }
+
+  /** The fields as filled in, written as a copy beside the file: "name (filled).pdf". */
+  async function saveCopy() {
+    const opened = doc();
+    if (!opened || saving()) return;
+    setSaving(true);
+    try {
+      const name = await savePdfCopy(props.path, await opened.saveDocument());
+      opened.annotationStorage.resetModified();
+      setChanged(false);
+      tell(`Saved as ${name}`);
+    } catch (reason) {
+      tell(`Not saved: ${reason instanceof Error ? reason.message : reason}`);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  /** The fields as filled in, written over the file itself, as a job with an Undo. */
+  async function saveOver() {
+    const opened = doc();
+    if (!opened || saving()) return;
+    setSaving(true);
+    try {
+      if (!(await props.saveOver(await stagePdf(await opened.saveDocument()), readAs))) return;
+      opened.annotationStorage.resetModified();
+      batch(() => (setChanged(false), setEdited(false)));
+      readAs = (await fileSeen(props.path).catch(() => null)) ?? undefined;
+      tell("Saved over the original. Undo puts it back.");
+    } catch (reason) {
+      tell(`Not saved: ${reason instanceof Error ? reason.message : reason}`);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  /** Every field back to what the file holds. */
+  function clearChanges() {
+    const storage = doc()?.annotationStorage;
+    if (!storage) return;
+    for (const [key] of [...storage]) storage.remove(key as string);
+    storage.resetModified();
+    batch(() => {
+      setChanged(false);
+      setEdited(false);
+      setFieldsRound(fieldsRound() + 1);
+    });
   }
 
   function Headings(list: { items: Heading[] }) {
@@ -576,6 +802,8 @@ export function PdfView(live: PdfViewProps) {
     const key = event.key;
     if (event.ctrlKey && key.toLowerCase() === "f") return openFind(), true;
     if (key === "F3" && finding()) return pick(chosen() + (event.shiftKey ? -1 : 1)), true;
+    if (event.altKey && !event.ctrlKey && key === "ArrowLeft") return goBack();
+    if (event.ctrlKey && key.toLowerCase() === "s" && changed()) return void saveCopy(), true;
     if (event.target === findInput) {
       if (key === "Enter") pick(chosen() + (event.shiftKey ? -1 : 1));
       else if (key === "Escape") closeFind();
@@ -583,7 +811,7 @@ export function PdfView(live: PdfViewProps) {
       return true;
     }
     if (event.target === pageInput) return false;
-    if (event.ctrlKey || event.altKey || event.target instanceof HTMLInputElement) return false;
+    if (event.ctrlKey || event.altKey || (event.target as HTMLElement).matches("input, textarea, select")) return false;
     const lower = key.toLowerCase();
     if (key === "ArrowLeft") go(current() - (spread() ? 2 : 1));
     else if (key === "ArrowRight") go(current() + (spread() ? 2 : 1));
@@ -645,6 +873,19 @@ export function PdfView(live: PdfViewProps) {
       </Show>
       <div class="pdf-main">
         <div class="preview-tools pdf-tools" role="toolbar" aria-label="PDF">
+          <Show when={changed()}>
+            <button class="zoom-chip pdf-save" disabled={saving()} aria-keyshortcuts="Control+S" data-tip="Keeps the original as it was" onClick={() => void saveCopy()}>
+              Save a filled copy
+            </button>
+            <button class="zoom-chip" disabled={saving()} data-tip="Undo puts the original back" onClick={() => void saveOver()}>
+              Save over the original
+            </button>
+          </Show>
+          <Show when={edited()}>
+            <button class="strip-icon" aria-label="Clear changes" data-tip="Puts every field back to what the file holds" onClick={clearChanges}>
+              {ICON_CLEAR}
+            </button>
+          </Show>
           <Show when={finding()}>
             <div class="find-bar" role="search">
               <input
@@ -770,6 +1011,32 @@ export function PdfView(live: PdfViewProps) {
           <button class="player-resume pdf-resume" onClick={() => go(offer())}>
             Resume at page {offer() + 1}
           </button>
+        </Show>
+        <Show when={!offer() && backs().at(-1)} keyed>
+          {(last) => (
+            <button class="player-resume pdf-resume" aria-keyshortcuts="Alt+ArrowLeft" onClick={goBack}>
+              Back to page {last.at + 1}
+            </button>
+          )}
+        </Show>
+        <Show when={told()}>
+          <p class="player-resume pdf-told" role="status">
+            {told()}
+          </p>
+        </Show>
+        <Show when={web()} keyed>
+          {(url) => (
+            <ConfirmDelete
+              request={{
+                title: "Open this link?",
+                note: url,
+                confirmLabel: "Open",
+                safe: true,
+                confirm: () => void openLink(url).catch((reason) => tell(String(reason))),
+              }}
+              onClose={() => setWeb(undefined)}
+            />
+          )}
         </Show>
         {/* A new page being read brings a new map. */}
         <Show when={mapped() ? current() + 1 : undefined} keyed>

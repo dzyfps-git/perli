@@ -290,6 +290,8 @@ enum Task {
     Empty,
     /// A quick edit's text saved over `path`. `seen` is how the file stood when it was read.
     Save { path: PathBuf, text: String, seen: Option<String> },
+    /// A filled-in PDF, staged under `staged`, saved over `path`.
+    SavePdf { path: PathBuf, staged: u64, seen: Option<String> },
     /// Pictures by path, from a preview, or the selected rows.
     Picture {
         #[serde(default)]
@@ -450,6 +452,10 @@ impl Task {
                 refuse_zipped(std::slice::from_ref(&path))?;
                 let bytes = preview::encoded(&path, &text)?;
                 Job::Save { path, bytes, read: seen.as_deref().and_then(preview::parse_seen) }
+            }
+            Self::SavePdf { path, staged, seen } => {
+                refuse_zipped(std::slice::from_ref(&path))?;
+                Job::Save { path, bytes: preview::take_staged_pdf(staged)?, read: seen.as_deref().and_then(preview::parse_seen) }
             }
             Self::Picture { mut paths, selection, edit, keep } => {
                 if let Some(selection) = &selection {
@@ -1787,6 +1793,31 @@ fn save_frame(request: tauri::ipc::Request<'_>, views: State<'_, Views>) -> Resu
     preview::save_frame(&path, float(16).max(0.0) as u64, &body[HEAD..])
 }
 
+const NO_PDF: &str = "The filled-in PDF didn't come through";
+
+/// A filled-in PDF saved as a copy beside its file. The body is the length of the file's path as
+/// a little-endian u32, the path in UTF-8, then the PDF.
+#[tauri::command]
+async fn save_pdf_copy(request: tauri::ipc::Request<'_>) -> Result<String, String> {
+    let tauri::ipc::InvokeBody::Raw(body) = request.body() else {
+        return Err(NO_PDF.into());
+    };
+    let length = body.get(..4).map_or(usize::MAX, |head| u32::from_le_bytes(head.try_into().unwrap()) as usize);
+    let path = body.get(4..4usize.saturating_add(length)).and_then(|path| std::str::from_utf8(path).ok()).map(PathBuf::from).ok_or(NO_PDF)?;
+    refuse_zipped(std::slice::from_ref(&path))?;
+    let pdf = body[4 + length..].to_vec();
+    blocking(move || preview::save_pdf_copy(&path, &pdf)).await
+}
+
+/// A filled-in PDF, the body, kept for the job that saves it over its file. Answers its ticket.
+#[tauri::command]
+async fn stage_pdf(request: tauri::ipc::Request<'_>) -> Result<u64, String> {
+    let tauri::ipc::InvokeBody::Raw(body) = request.body() else {
+        return Err(NO_PDF.into());
+    };
+    preview::stage_pdf(body.to_vec())
+}
+
 /// The file a player asks for: a row of the list, or a path, for a song that plays on after its
 /// list has gone. One inside a ZIP is taken out first, as a player needs a real file.
 async fn media_path(views: &Views, view: u32, request: u64, row: u32, path: Option<PathBuf>) -> Result<PathBuf, String> {
@@ -2797,6 +2828,8 @@ fn main() {
             mini::mini_take,
             mini::mini_fit,
             save_frame,
+            save_pdf_copy,
+            stage_pdf,
             picture_file,
             preview_row,
             archive_picture,

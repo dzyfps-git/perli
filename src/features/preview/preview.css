@@ -3953,6 +3953,20 @@ th[aria-sort="descending"] .table-sort::after {
   translate: -50% 0;
 }
 
+.pdf-told {
+  position: absolute;
+  top: calc(var(--space-4) + 32px);
+  left: 50%;
+  margin: 0;
+  translate: -50% 0;
+  pointer-events: none;
+}
+
+/* Fields turn with the night pages, so their text stays light on dark. */
+.pdf-scroll[data-night] .annotationLayer {
+  filter: invert(0.88) hue-rotate(180deg);
+}
+
 /* pdf.js's text over each page: clear, there only to be selected and found. */
 .textLayer {
   position: absolute;

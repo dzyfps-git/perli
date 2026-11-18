@@ -259,6 +259,12 @@ export function QuickPreview(props: {
     }
   }
 
+  /** A filled-in PDF over its file, as a job with an Undo. Says whether it went. */
+  async function savePdfOver(path: string, staged: number, seen: string | undefined) {
+    const end = await runJob({ kind: "savePdf", path, staged, seen }, props.at.view);
+    return !!end && !end.cancelled && end.failed.length === 0;
+  }
+
   /** A whole file the view can edit in place, saved through a job. */
   function editable(item: Row, seen: string | undefined): EditTarget | undefined {
     if (!seen) return undefined;
@@ -584,7 +590,8 @@ export function QuickPreview(props: {
 
   function onBodyClick(event: MouseEvent) {
     const link = (event.target as HTMLElement).closest("a");
-    if (!link) return;
+    // A link a view handled itself, such as one inside a PDF, is left to it.
+    if (!link || event.defaultPrevented) return;
     event.preventDefault();
     const href = link.getAttribute("href");
     if (href) openLink(href).catch((reason) => setFailure(String(reason)));
@@ -613,7 +620,7 @@ export function QuickPreview(props: {
     const key = event.key;
     const target = event.target as HTMLElement;
     // A slider takes its own arrow keys.
-    if (key.startsWith("Arrow") && target.matches("input")) return;
+    if (key.startsWith("Arrow") && target.matches("input, select")) return;
     // Enter and Space press a focused button, such as Open with or Copy path.
     if ((key === "Enter" || key === " ") && target.closest("button, summary, a[href]")) return;
     if (viewKeys?.(event)) {
@@ -621,7 +628,7 @@ export function QuickPreview(props: {
       return;
     }
     // Typing in a view's box, such as Find, is left alone. Beside the list, the list has the rest.
-    if (props.docked || target.matches("input:not([type=range]), textarea")) return;
+    if (props.docked || target.matches("input:not([type=range]), textarea, select")) return;
     if (key === "ArrowLeft" || key === "ArrowUp") step(-1);
     else if (key === "ArrowRight" || key === "ArrowDown") step(1);
     else if (key === " ") {
@@ -763,7 +770,12 @@ export function QuickPreview(props: {
               {preview.kind === "parquet" && <ParquetView {...streamed(row()!)} />}
               {preview.kind === "font" && <FontView {...font(preview.faces)} />}
               {preview.kind === "mail" && <MailView {...mail(row()!, preview)} />}
-              {preview.kind === "pdf" && <PdfView path={pathOf(row()!)} {...streamed(row()!)} note={setNote} />}
+              {preview.kind === "pdf" && <PdfView
+                  path={pathOf(row()!)}
+                  {...streamed(row()!)}
+                  note={setNote}
+                  saveOver={(staged, seen) => savePdfOver(pathOf(row()!), staged, seen)}
+                />}
             </>
           )}
         </Show>
