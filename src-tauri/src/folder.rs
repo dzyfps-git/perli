@@ -471,6 +471,47 @@ impl Found {
         self.push(entry, location);
     }
 
+    /// A look for copies done again keeps what was shown where it was: sets already shown keep
+    /// their places, a set's rows keep their order with new ones after them, and new sets come
+    /// after every old one, biggest waste first as found. So a change moves only what it changed.
+    pub fn keep_copies_order(&mut self, before: &Found) {
+        if self.sets.len() != self.entries.len() {
+            return;
+        }
+        let key = |found: &Found, at: usize| {
+            let (location, name) = (&found.locations[at], &found.entries[at].name);
+            let mut path = location[..location.len() - 1].to_vec();
+            path.push(u16::from(b'\\'));
+            path.extend_from_slice(&name[..name.len() - 1]);
+            path
+        };
+        let was: HashMap<Vec<u16>, usize> = (0..before.len()).map(|at| (key(before, at), at)).collect();
+        let old_at: Vec<Option<usize>> = (0..self.len()).map(|at| was.get(&key(self, at)).copied()).collect();
+        let mut first = HashMap::<u32, usize>::new();
+        for (at, old) in old_at.iter().enumerate() {
+            if let Some(&old) = old.as_ref() {
+                let place = first.entry(self.sets[at]).or_insert(old);
+                *place = (*place).min(old);
+            }
+        }
+        let mut order: Vec<usize> = (0..self.len()).collect();
+        order.sort_by_key(|&at| (first.get(&self.sets[at]).copied().unwrap_or(usize::MAX), self.sets[at], old_at[at].unwrap_or(usize::MAX), at));
+        // Sets are numbered by their places, which is how they group.
+        let mut numbers = HashMap::<u32, u32>::new();
+        let sets = order
+            .iter()
+            .map(|&at| {
+                let next = numbers.len() as u32;
+                *numbers.entry(self.sets[at]).or_insert(next)
+            })
+            .collect();
+        let mut tags = std::mem::take(&mut self.tags);
+        self.tags = order.iter().enumerate().filter_map(|(new, &at)| Some((new as u32, tags.remove(&(at as u32))?))).collect();
+        self.entries = order.iter().map(|&at| self.entries[at].clone()).collect();
+        self.locations = order.iter().map(|&at| self.locations[at].clone()).collect();
+        self.sets = sets;
+    }
+
     /// Moves all of `other`'s rows to the end of this one.
     /// Reads the tags of the rows pushed since `from`, which are all in `folder`. A search shows
     /// tags on its rows the way the folder does.
@@ -1430,6 +1471,30 @@ pub fn subfolders(path: &Path, sight: Sight, files: bool) -> std::io::Result<Vec
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn copies_found_again_stay_where_they_were() {
+        let row = |name: &str| Entry::from_find_data(&crate::index::find_data(name, 0x20, 1, 0, 0)).unwrap();
+        let here: Arc<[u16]> = null_terminated(Path::new(r"C:\Here")).into();
+        let make = |rows: &[(&str, u32)]| {
+            let mut found = Found::default();
+            for &(name, set) in rows {
+                found.push_copy(row(name), here.clone(), set);
+            }
+            found
+        };
+        let before = make(&[("a", 0), ("b", 0), ("x", 1), ("y", 1)]);
+        // Found again: x and y now waste the most, a third copy of a came, and a new set began.
+        let mut again = make(&[("y", 0), ("x", 0), ("new1", 1), ("new2", 1), ("c", 2), ("a", 2), ("b", 2)]);
+        again.keep_copies_order(&before);
+        assert_eq!(
+            again.sets_and_names(),
+            [(0, "a"), (0, "b"), (0, "c"), (1, "x"), (1, "y"), (2, "new1"), (2, "new2")].map(|(set, name)| (set, name.to_string()))
+        );
+        let mut first = make(&[("p", 0), ("q", 0)]);
+        first.keep_copies_order(&Found::default());
+        assert_eq!(first.sets_and_names(), [(0, "p".to_string()), (0, "q".to_string())], "a first look keeps its own order");
+    }
+
     use super::*;
     use std::fs;
     use std::time::{Duration, SystemTime};

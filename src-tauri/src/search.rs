@@ -569,8 +569,10 @@ impl Searches {
             let search = Arc::new(Search::new(shown.clone(), usize::MAX));
             self.all().insert(view, search.clone());
             let (deep, sight) = (asked.scope != Scope::Folder, order.sight());
+            let before = shown.clone();
             thread::spawn(move || {
-                let found = copies::find(&folders, deep, sight, COPIES_LANE | view, &|| search.stopped(), &|| report(Walk::Going));
+                let mut found = copies::find(&folders, deep, sight, COPIES_LANE | view, &|| search.stopped(), &|| report(Walk::Going));
+                found.keep_copies_order(&before);
                 if !search.stopped() {
                     *search.found() = found;
                     report(Walk::Done);
