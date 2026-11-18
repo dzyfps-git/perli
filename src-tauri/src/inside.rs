@@ -70,12 +70,12 @@ pub(crate) fn reason(error: ZipError) -> String {
 const DAMAGED_LOCKED: &str = "This file is damaged in the archive. The password is right.";
 
 /// A wrong ZipCrypto password passes its one-byte check about once in 256 tries, and then the
-/// file reads as garbage: a broken compressed stream, or a checksum that does not match. A right
+/// file reads as garbage: a broken or cut-short compressed stream, or a checksum that does not match. A right
 /// password on a damaged file reads the same way, so another locked file of the archive tells
 /// them apart: if the password reads that one whole, it is right.
 pub(crate) fn read_failed(error: std::io::Error, path: &Path, name: &str, password: Option<&str>) -> String {
-    use std::io::ErrorKind::{InvalidData, InvalidInput};
-    match password.filter(|_| matches!(error.kind(), InvalidData | InvalidInput)) {
+    use std::io::ErrorKind::{InvalidData, InvalidInput, UnexpectedEof};
+    match password.filter(|_| matches!(error.kind(), InvalidData | InvalidInput | UnexpectedEof)) {
         Some(password) if opens_another(path, name, password) => DAMAGED_LOCKED.into(),
         Some(_) => WRONG_PASSWORD.into(),
         None => error.to_string(),
@@ -1002,10 +1002,14 @@ pub(crate) mod tests {
         assert_eq!(list.iter().map(|entry| entry.locked).collect::<Vec<_>>(), [true, false]);
         assert!(text(&path, "secret.txt", None).is_err());
         assert_eq!(text(&path, "secret.txt", Some("open sesame")).unwrap().as_deref(), Some("treasure"));
-        // Some wrong passwords get past the one-byte check, and the checksum has to catch them.
+        // Some wrong passwords get past the one-byte check, and the garbage they read must still
+        // say wrong password: a broken stream, one cut short, or a checksum that does not match.
         let mut zip = open(&path).unwrap();
-        let lucky = (0..5000).map(|n| format!("wrong {n}")).find(|tried| zip.by_name_decrypt("secret.txt", tried.as_bytes()).is_ok()).unwrap();
-        assert_eq!(text(&path, "secret.txt", Some(&lucky)), Err(WRONG_PASSWORD.to_string()));
+        let lucky: Vec<String> = (0..20000).map(|n| format!("wrong {n}")).filter(|tried| zip.by_name_decrypt("secret.txt", tried.as_bytes()).is_ok()).collect();
+        assert!(!lucky.is_empty());
+        for tried in &lucky {
+            assert_eq!(text(&path, "secret.txt", Some(tried)), Err(WRONG_PASSWORD.to_string()), "{tried}");
+        }
         assert_eq!(text(&path, "secret.txt", Some("nope")), Err(WRONG_PASSWORD.to_string()));
         assert_eq!(test(&path, None).unwrap(), Tested { sound: 1, damaged: vec![], locked: 1 });
         assert_eq!(test(&path, Some("open sesame")).unwrap(), Tested { sound: 2, damaged: vec![], locked: 0 });
