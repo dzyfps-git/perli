@@ -853,6 +853,10 @@ export const compareSummary = (view: number, request: number, other: number, oth
 export const compareSettle = (view: number, request: number, other: number, otherRequest: number, content: boolean) =>
   invoke<number>("compare_settle", { view, request, other, otherRequest, content });
 
+/** Walks compared folders already known again for a while, for what changed deeper down. How many changed. */
+export const compareFreshen = (view: number, request: number, other: number, otherRequest: number, content: boolean) =>
+  invoke<number>("compare_freshen", { view, request, other, otherRequest, content });
+
 /** Stops learning for two panes' marks, as their compare ended. */
 export const compareStop = (view: number, other: number) => invoke<void>("compare_stop", { view, other });
 

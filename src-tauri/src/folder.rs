@@ -1200,6 +1200,21 @@ impl Listing {
             .collect()
     }
 
+    /// The shown folders that have a folder twin, for `compare::freshen` to walk again.
+    pub fn folder_twins(&self, other: &Listing) -> Vec<compare::Pair> {
+        let twins = other.twins();
+        self.visible
+            .iter()
+            .map(|&entry| entry as usize)
+            .filter(|&entry| self.entries[entry].is_dir)
+            .filter_map(|entry| {
+                let &twin = twins.get(&lowered(&self.entries[entry]))?;
+                let pair = compare::Pair { mine: self.side(entry), theirs: other.side(twin), folder: true };
+                other.entries[twin].is_dir.then_some(pair)
+            })
+            .collect()
+    }
+
     pub fn sight(&self) -> Sight {
         self.order.sight()
     }
@@ -2327,6 +2342,31 @@ mod tests {
         }
         let searched = Listing::searched(found, Order::default());
         assert_eq!(searched.compared(&right, false), [mark(Mark::None)]);
+    }
+
+    #[test]
+    fn a_file_edited_deep_inside_compared_folders_shows_once_they_are_walked_again() {
+        let (mine, theirs) = (TempFolder::new("fresh-mine"), TempFolder::new("fresh-theirs"));
+        let put = |folder: &TempFolder, name: &str, text: &str, seconds: u64| {
+            let path = folder.0.join(name);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, text).unwrap();
+            set_modified(&path, seconds);
+        };
+        put(&mine, "box/inner/a.txt", "a", 1_000_000);
+        put(&theirs, "box/inner/a.txt", "a", 1_000_000);
+        let read = |folder: &TempFolder| Listing::read(folder.0.to_str().unwrap(), Order::default()).unwrap();
+        let (left, right) = (read(&mine), read(&theirs));
+        compare::settle(left.unsettled(&right, false), false, Sight::default(), (905, 906), compare::round(905, 906));
+        assert_eq!(left.compared(&right, false), [Mark::Same as u8]);
+        // Edited in place, two folders down: the time of the folder shown doesn't change.
+        put(&mine, "box/inner/a.txt", "b", 3_000_000);
+        assert_eq!(left.compared(&right, false), [Mark::Same as u8], "what is known holds meanwhile");
+        let freshen = || compare::freshen(left.folder_twins(&right), false, Sight::default(), (905, 906), compare::round(905, 906));
+        assert_eq!(freshen(), 1);
+        assert_eq!(left.compared(&right, false), [Mark::Newer as u8]);
+        assert_eq!(right.compared(&left, false), [Mark::Older as u8], "and the other way round");
+        assert_eq!(freshen(), 0, "nothing more changed");
     }
 
     #[test]

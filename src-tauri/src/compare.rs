@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering::SeqCst};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering::SeqCst};
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -11,9 +11,6 @@ use crate::folder::{Entry, Mark, Sight};
 use crate::ops::sys::{self, Stat};
 use crate::preview;
 
-/// A walk past this many entries on its two sides together gives up: no mark beats a long wait.
-// ponytail: such a folder shows no mark at all; a "too big to tell" word would say why.
-const MOST_ENTRIES: usize = 200_000;
 /// How many of what sets two folders apart are kept to name.
 const MOST_NAMES: usize = 12;
 /// How long one round of settling runs before the marks show what it learned.
@@ -57,10 +54,16 @@ pub struct Pair {
 type Key = (String, String, bool);
 type Known<K, V> = Mutex<Option<HashMap<K, V>>>;
 /// Folder pairs walked already, with the folders' times then. A folder's time changes when
-/// something right inside it does.
-// ponytail: a change deeper down leaves a folder's time be, so its mark holds until compare is
-// turned off and on again.
+/// something right inside it does, and `freshen` walks them again now and then for a change
+/// deeper down.
 static FOLDERS: Known<Key, (u64, u64, Insides)> = Mutex::new(None);
+/// Walks a round's time ran out on, with the folders' times they started at, for the next round
+/// to carry on. However big the folders, the marks never wait on one long walk.
+static WALKS: Known<Key, ([u64; 2], Walk)> = Mutex::new(None);
+/// Walks again of folder pairs already known, which `freshen` carries from round to round.
+static REWALKS: Known<Key, Walk> = Mutex::new(None);
+/// Which shown pair `freshen` looks at next.
+static NEXT_FRESH: AtomicUsize = AtomicUsize::new(0);
 /// File pairs read already, with their sizes and times then: the same content or not, or None
 /// for a pair that couldn't be read.
 static CONTENTS: Known<(String, String), ([u64; 4], Option<bool>)> = Mutex::new(None);
@@ -128,11 +131,16 @@ pub fn round(one: u32, two: u32) -> u64 {
 
 /// Works through `pairs` for a while, learning what the marks of panes `one` and `two` wait on,
 /// and says how many it settled: none once a newer round of theirs has taken over.
-pub fn settle(pairs: Vec<Pair>, content: bool, sight: Sight, (one, two): (u32, u32), round: u64) -> usize {
+pub fn settle(mut pairs: Vec<Pair>, content: bool, sight: Sight, (one, two): (u32, u32), round: u64) -> usize {
     let started = Instant::now();
     let key = panes(one, two);
     let live = || ROUNDS.lock().unwrap_or_else(PoisonError::into_inner).as_ref().and_then(|rounds| rounds.get(&key)) == Some(&round);
     let lane = LANES - (key.0.wrapping_mul(31) ^ key.1) % 0x10000;
+    let walk_key = |pair: &Pair| (lower(&pair.mine.path), lower(&pair.theirs.path), content);
+    // A walk carried over from an earlier round goes last, so the pairs around it settle first.
+    if let Some(walks) = WALKS.lock().unwrap_or_else(PoisonError::into_inner).as_ref() {
+        pairs.sort_by_key(|pair| pair.folder && walks.contains_key(&walk_key(pair)));
+    }
     let mut settled = 0;
     for pair in pairs {
         if !live() || started.elapsed() > ROUND {
@@ -140,17 +148,21 @@ pub fn settle(pairs: Vec<Pair>, content: bool, sight: Sight, (one, two): (u32, u
         }
         let (mine, theirs) = (lower(&pair.mine.path), lower(&pair.theirs.path));
         if pair.folder {
-            let walked = walk(&pair.mine.path, &pair.theirs.path, content, sight, lane, &live);
+            let times = [pair.mine.modified, pair.theirs.modified];
+            let carried = WALKS.lock().unwrap_or_else(PoisonError::into_inner).get_or_insert_default().remove(&walk_key(&pair));
+            let mut walk = carried.filter(|(at, _)| *at == times).map_or_else(Walk::new, |(_, walk)| walk);
             // A checksum a newer round cut short reads as no content at all.
-            let Some(insides) = walked.filter(|_| live()) else { break };
-            let mirrored = Insides { mark: mirror(insides.mark), ..insides.clone() };
-            let mut known = FOLDERS.lock().unwrap_or_else(PoisonError::into_inner);
-            let known = known.get_or_insert_default();
-            if known.len() > MOST_KNOWN {
-                known.clear();
+            match walk.go(&pair.mine.path, &pair.theirs.path, content, sight, lane, &live, started) {
+                Some(true) if live() => {}
+                Some(false) => {
+                    WALKS.lock().unwrap_or_else(PoisonError::into_inner).get_or_insert_default().insert(walk_key(&pair), (times, walk));
+                    // Further along, so the marks ask again.
+                    settled += 1;
+                    break;
+                }
+                _ => break,
             }
-            known.insert((mine.clone(), theirs.clone(), content), (pair.mine.modified, pair.theirs.modified, insides));
-            known.insert((theirs, mine, content), (pair.theirs.modified, pair.mine.modified, mirrored));
+            learn(mine, theirs, content, times, walk.insides());
         } else {
             let same = same_content(&pair.mine, &pair.theirs, lane);
             if !live() {
@@ -168,6 +180,58 @@ pub fn settle(pairs: Vec<Pair>, content: bool, sight: Sight, (one, two): (u32, u
         settled += 1;
     }
     settled
+}
+
+/// Keeps what two folders were found to hold, both ways round.
+fn learn(mine: String, theirs: String, content: bool, [a, b]: [u64; 2], insides: Insides) {
+    let mirrored = Insides { mark: mirror(insides.mark), ..insides.clone() };
+    let mut known = FOLDERS.lock().unwrap_or_else(PoisonError::into_inner);
+    let known = known.get_or_insert_default();
+    if known.len() > MOST_KNOWN {
+        known.clear();
+    }
+    known.insert((mine.clone(), theirs.clone(), content), (a, b, insides));
+    known.insert((theirs, mine, content), (b, a, mirrored));
+}
+
+/// Walks shown folder pairs already known again, for a while, as a folder's time misses what
+/// changes deeper down, such as a file edited in place. What is known holds until a walk is done,
+/// so no mark goes back to waiting. How many pairs it found changed, for the marks to be asked for
+/// again. A round of `settle` takes over from it.
+pub fn freshen(pairs: Vec<Pair>, content: bool, sight: Sight, (one, two): (u32, u32), round: u64) -> usize {
+    let started = Instant::now();
+    let key = panes(one, two);
+    let live = || ROUNDS.lock().unwrap_or_else(PoisonError::into_inner).as_ref().and_then(|rounds| rounds.get(&key)) == Some(&round);
+    let lane = LANES - (key.0.wrapping_mul(31) ^ key.1) % 0x10000;
+    let pairs: Vec<Pair> = pairs.into_iter().filter(|pair| pair.folder && folders(&pair.mine, &pair.theirs, content).is_some()).collect();
+    let (count, first) = (pairs.len(), NEXT_FRESH.load(SeqCst));
+    let mut changed = 0;
+    for at in (0..count).map(|step| (first + step) % count.max(1)) {
+        if !live() || started.elapsed() > ROUND {
+            break;
+        }
+        let pair = &pairs[at];
+        let (mine, theirs) = (lower(&pair.mine.path), lower(&pair.theirs.path));
+        let walk_key = (mine.clone(), theirs.clone(), content);
+        let carried = REWALKS.lock().unwrap_or_else(PoisonError::into_inner).get_or_insert_default().remove(&walk_key);
+        let mut walk = carried.unwrap_or_else(Walk::new);
+        match walk.go(&pair.mine.path, &pair.theirs.path, content, sight, lane, &live, started) {
+            Some(true) if live() => {}
+            Some(false) => {
+                REWALKS.lock().unwrap_or_else(PoisonError::into_inner).get_or_insert_default().insert(walk_key, walk);
+                NEXT_FRESH.store(at, SeqCst);
+                return changed;
+            }
+            _ => return changed,
+        }
+        NEXT_FRESH.store(at + 1, SeqCst);
+        let insides = walk.insides();
+        if folders(&pair.mine, &pair.theirs, content).is_some_and(|known| known != insides) {
+            learn(mine, theirs, content, [pair.mine.modified, pair.theirs.modified], insides);
+            changed += 1;
+        }
+    }
+    changed
 }
 
 /// How the other side of a pair stands against this one.
@@ -209,62 +273,84 @@ fn listed(folder: &Path, sight: Sight) -> HashMap<String, Item> {
     items
 }
 
-/// Everything under two folders, side by side. Only on this side reads as newer and only on that
-/// side as older, as Copy over would see it: what all leans one way makes the folder lean that way.
-/// Links to folders aren't walked into. None once `live` says to stop.
-fn walk(mine: &Path, theirs: &Path, content: bool, sight: Sight, lane: u32, live: &dyn Fn() -> bool) -> Option<Insides> {
-    let (mut newer, mut older, mut count, mut names) = (false, false, 0, Vec::new());
-    let mut note = |inside: &Path, mark: Mark| {
+/// Everything under two folders, side by side, walked a round at a time. Only on this side reads
+/// as newer and only on that side as older, as Copy over would see it: what all leans one way makes
+/// the folder lean that way. Links to folders aren't walked into.
+struct Walk {
+    newer: bool,
+    older: bool,
+    count: u32,
+    names: Vec<String>,
+    /// Folders inside, by their path from the two, still to walk.
+    todo: Vec<PathBuf>,
+}
+
+impl Walk {
+    fn new() -> Self {
+        Self { newer: false, older: false, count: 0, names: Vec::new(), todo: vec![PathBuf::new()] }
+    }
+
+    fn note(&mut self, inside: &Path, mark: Mark) {
         match mark {
             Mark::Same | Mark::None | Mark::Pending => return,
-            Mark::Newer | Mark::Only => newer = true,
-            Mark::Older => older = true,
-            Mark::Differs => (newer, older) = (true, true),
+            Mark::Newer | Mark::Only => self.newer = true,
+            Mark::Older => self.older = true,
+            Mark::Differs => (self.newer, self.older) = (true, true),
         }
-        count += 1;
-        if names.len() < MOST_NAMES {
-            names.push(inside.to_string_lossy().into_owned());
-        }
-    };
-    let mut seen = 0;
-    let mut below = vec![PathBuf::new()];
-    while let Some(relative) = below.pop() {
-        if !live() {
-            return None;
-        }
-        let (a, b) = (listed(&mine.join(&relative), sight), listed(&theirs.join(&relative), sight));
-        seen += a.len() + b.len();
-        if seen > MOST_ENTRIES {
-            return Some(Insides { mark: Mark::None, count: 0, names: Vec::new() });
-        }
-        let mut sorted: Vec<(&String, &Item)> = a.iter().collect();
-        sorted.sort_by(|x, y| x.0.cmp(y.0));
-        for (key, x) in sorted {
-            let inside = relative.join(&x.name);
-            match b.get(key) {
-                None => note(&inside, Mark::Only),
-                Some(y) if x.dir != y.dir => note(&inside, Mark::Differs),
-                Some(y) if x.dir => {
-                    if !x.link && !y.link {
-                        below.push(inside);
-                    }
-                }
-                Some(y) => note(&inside, lean(&x.side, &y.side, content, || Some(same_content(&x.side, &y.side, lane)))),
-            }
-        }
-        for (key, y) in &b {
-            if !a.contains_key(key) {
-                note(&relative.join(&y.name), Mark::Older);
-            }
+        self.count += 1;
+        if self.names.len() < MOST_NAMES {
+            self.names.push(inside.to_string_lossy().into_owned());
         }
     }
-    let mark = match (newer, older) {
-        (false, false) => Mark::Same,
-        (true, false) => Mark::Newer,
-        (false, true) => Mark::Older,
-        (true, true) => Mark::Differs,
-    };
-    Some(Insides { mark, count, names })
+
+    /// Walks on: true once done, false when the round that began at `started` is up, which always
+    /// leaves one folder further along. None once `live` says to stop.
+    #[allow(clippy::too_many_arguments)]
+    fn go(&mut self, mine: &Path, theirs: &Path, content: bool, sight: Sight, lane: u32, live: &dyn Fn() -> bool, started: Instant) -> Option<bool> {
+        let mut first = true;
+        while let Some(relative) = self.todo.pop() {
+            if !live() {
+                return None;
+            }
+            if !first && started.elapsed() > ROUND {
+                self.todo.push(relative);
+                return Some(false);
+            }
+            first = false;
+            let (a, b) = (listed(&mine.join(&relative), sight), listed(&theirs.join(&relative), sight));
+            let mut sorted: Vec<(&String, &Item)> = a.iter().collect();
+            sorted.sort_by(|x, y| x.0.cmp(y.0));
+            for (key, x) in sorted {
+                let inside = relative.join(&x.name);
+                match b.get(key) {
+                    None => self.note(&inside, Mark::Only),
+                    Some(y) if x.dir != y.dir => self.note(&inside, Mark::Differs),
+                    Some(y) if x.dir => {
+                        if !x.link && !y.link {
+                            self.todo.push(inside);
+                        }
+                    }
+                    Some(y) => self.note(&inside, lean(&x.side, &y.side, content, || Some(same_content(&x.side, &y.side, lane)))),
+                }
+            }
+            for (key, y) in &b {
+                if !a.contains_key(key) {
+                    self.note(&relative.join(&y.name), Mark::Older);
+                }
+            }
+        }
+        Some(true)
+    }
+
+    fn insides(self) -> Insides {
+        let mark = match (self.newer, self.older) {
+            (false, false) => Mark::Same,
+            (true, false) => Mark::Newer,
+            (false, true) => Mark::Older,
+            (true, true) => Mark::Differs,
+        };
+        Insides { mark, count: self.count, names: self.names }
+    }
 }
 
 #[cfg(test)]
@@ -286,5 +372,31 @@ mod tests {
         assert_eq!(lean(&side("x:/a", 3, 200), &b, true, || Some(Some(true))), Mark::Same, "same bytes, whatever the time");
         assert_eq!(lean(&a, &b, true, || Some(None)), Mark::Same, "unreadable falls back on time and size");
         assert_eq!(mirror(Mark::Newer), Mark::Older);
+    }
+
+    #[test]
+    fn a_walk_whose_round_is_up_carries_on_a_folder_at_a_time() {
+        let root = std::env::temp_dir().join(format!("perli-walk-{}", std::process::id()));
+        for side in ["a", "b"] {
+            for folder in ["one", "one/deep", "two"] {
+                std::fs::create_dir_all(root.join(side).join(folder)).unwrap();
+            }
+        }
+        std::fs::write(root.join("a").join(r"one\deep\new.txt"), "x").unwrap();
+        let (a, b) = (root.join("a"), root.join("b"));
+        let live = || true;
+        let long_ago = Instant::now().checked_sub(ROUND * 2).unwrap();
+        let mut walk = Walk::new();
+        let mut rounds = 1;
+        while walk.go(&a, &b, false, Sight::default(), LANES, &live, long_ago) == Some(false) {
+            rounds += 1;
+        }
+        assert_eq!(rounds, 4, "the top, two, one and deep, each in a round of its own");
+        let insides = walk.insides();
+        assert_eq!((insides.mark, insides.count, insides.names), (Mark::Newer, 1, vec![r"one\deep\new.txt".to_string()]));
+        let mut whole = Walk::new();
+        assert_eq!(whole.go(&a, &b, false, Sight::default(), LANES, &live, Instant::now()), Some(true));
+        assert_eq!(whole.insides().count, 1);
+        let _ = std::fs::remove_dir_all(root);
     }
 }

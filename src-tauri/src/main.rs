@@ -2317,6 +2317,15 @@ async fn compare_settle(view: u32, request: u64, other: u32, other_request: u64,
     blocking(move || Ok(compare::settle(pairs, content, sight, (view, other), round))).await
 }
 
+/// Walks compared folders already known again, for a while, for what changed deeper down. How many
+/// pairs it found changed, for the marks to be asked for again.
+#[tauri::command]
+async fn compare_freshen(view: u32, request: u64, other: u32, other_request: u64, content: bool, views: State<'_, Views>) -> Result<usize, String> {
+    let (pairs, sight) = compared_pair(&views, (view, request), (other, other_request), |mine, theirs| (mine.folder_twins(theirs), mine.sight()))?;
+    let round = compare::round(view, other);
+    blocking(move || Ok(compare::freshen(pairs, content, sight, (view, other), round))).await
+}
+
 /// The first of `names` among a view's rows, in any case: which of them, and its row. Compared
 /// panes scroll together by it.
 #[tauri::command]
@@ -2918,6 +2927,7 @@ fn main() {
             stop_map,
             drop_choices,
             measure_drop,
+            compare_freshen,
             forget_drop,
             own_templates,
             templates_folder,
