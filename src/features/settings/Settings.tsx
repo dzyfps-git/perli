@@ -943,9 +943,14 @@ export function Settings(props: {
               opened in still uses it.
             </p>
             <div class="settings-chips settings-cache">
-              <span class="settings-cache-size" role="status" data-empty={!cacheSize() || undefined}>
-                {cacheSize() === undefined ? "Adding up…" : cacheSize() ? `${formatSize(cacheSize()!)} taken out` : "Nothing taken out"}
-              </span>
+              {/* A new size is a new line, so it settles in again each time it changes. */}
+              <For each={[cacheSize() === undefined ? "Adding up…" : cacheSize() ? `${formatSize(cacheSize()!)} taken out` : "Nothing taken out"]}>
+                {(text) => (
+                  <span class="settings-cache-size" role="status" data-empty={!cacheSize() || undefined}>
+                    {text}
+                  </span>
+                )}
+              </For>
               <button class="settings-chip" disabled={!cacheSize()} onClick={() => void clearCache()}>
                 Clear
               </button>
