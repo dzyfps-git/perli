@@ -1458,11 +1458,14 @@ impl ShellTarget {
             Self::Rows { selection } => {
                 menus::Target::Items(on_disk(views.read(&selection, folder::Listing::paths)?).await?)
             }
-            // ponytail: one inside another stands for the outermost, a menu of its own when asked for.
-            Self::Folder { path } => match zipped::outer(Path::new(&path)) {
-                Some(archive) => menus::Target::Items(vec![archive]),
-                None => menus::Target::Folder(path.into()),
-            },
+            // One inside another stands for the innermost, taken out first.
+            Self::Folder { path } => {
+                let shown = PathBuf::from(&path);
+                match blocking(move || zipped::innermost(&shown).transpose()).await? {
+                    Some(archive) => menus::Target::Items(vec![archive]),
+                    None => menus::Target::Folder(path.into()),
+                }
+            }
             Self::Paths { paths } => menus::Target::Items(on_disk(paths).await?),
         })
     }

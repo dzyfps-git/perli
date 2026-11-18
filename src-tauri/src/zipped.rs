@@ -110,6 +110,13 @@ fn nested(archive: &Path, parent: &[&str], name: &str) -> Result<Option<PathBuf>
     real_in(archive, &inner).map(Some)
 }
 
+/// The archive a folder shown inside archives stands for, as in its menu: the innermost one it is
+/// in, taken out of any it sits in. `None` outside an archive.
+pub fn innermost(path: &Path) -> Option<Result<PathBuf, String>> {
+    let shown = opened(path)?.levels.pop()?;
+    Some(real(&shown))
+}
+
 /// The outermost archive a path is in, a real file.
 pub fn outer(path: &Path) -> Option<PathBuf> {
     first_split(path).map(|(archive, _)| archive)
@@ -613,6 +620,8 @@ mod tests {
         // A folder with an archive's name stays a folder.
         assert_eq!(split(&outer.join("x.zip").join("y.txt")), Some((outer.clone(), "x.zip/y.txt".into())));
         assert_eq!(opened(&outer.join("X.ZIP")).unwrap().levels.len(), 1);
+        assert_eq!(innermost(&nested.join("docs")).unwrap().unwrap(), cached, "the folder's menu is the inner archive's");
+        assert_eq!(innermost(&outer.join("x.zip")).unwrap().unwrap(), outer, "a folder named like an archive isn't one");
 
         let listing = crate::folder::Listing::read(&nested.to_string_lossy(), crate::folder::Order::default()).unwrap();
         assert_eq!(listing.names(&[0]), ["docs"]);
