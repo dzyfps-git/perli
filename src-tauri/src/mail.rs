@@ -22,6 +22,8 @@ pub struct Mail {
     /// FILETIME ticks, or 0 when the mail doesn't say.
     pub date: u64,
     pub body: String,
+    /// A mail written only in HTML, which shows as it was laid out. Empty when it has plain text.
+    pub html: String,
     pub attachments: Vec<Attachment>,
 }
 
@@ -92,6 +94,7 @@ fn eml(bytes: &[u8], with_data: bool) -> (Mail, Vec<Bytes>) {
     let field = |name: &str| words(header(&headers, name).unwrap_or_default());
     let mut found = Found::default();
     walk(bytes, &mut found, with_data, 0);
+    let html = if found.plain.is_none() { found.html.clone().unwrap_or_default() } else { String::new() };
     let body = found.plain.or_else(|| found.html.as_deref().map(html_text)).unwrap_or_default();
     let mail = Mail {
         subject: field("subject"),
@@ -100,6 +103,7 @@ fn eml(bytes: &[u8], with_data: bool) -> (Mail, Vec<Bytes>) {
         cc: field("cc"),
         date: header(&headers, "date").and_then(date).unwrap_or(0),
         body: body.trim_end().to_string(),
+        html,
         attachments: found.attachments,
     };
     (mail, found.data.into_iter().map(Some).collect())
@@ -179,24 +183,48 @@ fn header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
     headers.iter().find(|(key, _)| key == name).map(|(_, value)| value.as_str())
 }
 
-/// A `key=value` after the first `;` of a header, quoted or not. `key*=utf-8''text` is read too.
-// ponytail: a value split into `key*0=`, `key*1=` pieces gives only its first piece's name back.
+/// A `key=value` after the first `;` of a header, quoted or not. RFC 2231's `key*=utf-8''text` is
+/// read too, and so is a long value split into `key*0*=`, `key*1=` pieces, in their order.
 fn param(value: &str, key: &str) -> Option<String> {
-    value.split(';').skip(1).find_map(|pair| {
-        let (name, text) = pair.split_once('=')?;
+    let mut pieces: Vec<(u32, bool, &str)> = Vec::new();
+    for pair in value.split(';').skip(1) {
+        let Some((name, text)) = pair.split_once('=') else { continue };
         let name = name.trim().to_ascii_lowercase();
         let text = text.trim().trim_matches('"');
         if name == key {
             return Some(text.to_string());
         }
-        let extended = name.strip_prefix(key)?;
-        if extended != "*" && extended != "*0*" {
-            return None;
+        let Some(extended) = name.strip_prefix(key).and_then(|rest| rest.strip_prefix('*')) else { continue };
+        if extended.is_empty() {
+            let (charset, rest) = text.split_once('\'')?;
+            let (_, encoded) = rest.split_once('\'')?;
+            return Some(decode(&percent(encoded.as_bytes()), charset));
         }
-        let (charset, rest) = text.split_once('\'')?;
-        let (_, encoded) = rest.split_once('\'')?;
-        Some(decode(&percent(encoded.as_bytes()), charset))
-    })
+        let (number, encoded) = extended.strip_suffix('*').map_or((extended, false), |number| (number, true));
+        if let Ok(number) = number.parse() {
+            pieces.push((number, encoded, text));
+        }
+    }
+    pieces.sort_by_key(|&(number, ..)| number);
+    if pieces.first()?.0 != 0 {
+        return None;
+    }
+    // Only the first piece says which characters the pieces spell in.
+    let mut charset = "";
+    let mut bytes = Vec::new();
+    for (number, encoded, mut text) in pieces {
+        if number == 0 && encoded {
+            let (set, rest) = text.split_once('\'')?;
+            charset = set;
+            text = rest.split_once('\'')?.1;
+        }
+        if encoded {
+            bytes.extend(percent(text.as_bytes()));
+        } else {
+            bytes.extend_from_slice(text.as_bytes());
+        }
+    }
+    Some(if charset.is_empty() { String::from_utf8_lossy(&bytes).into_owned() } else { decode(&bytes, charset) })
 }
 
 /// The parts of a multipart body, each without the line break before the next boundary.
@@ -498,9 +526,11 @@ fn outlook(path: &Path, with_data: bool) -> std::io::Result<(Mail, Vec<Bytes>)> 
         _ => address,
     };
     let mut body = text(&mut file, "", "1000").unwrap_or_default();
+    let mut html = String::new();
     if body.trim().is_empty() {
-        let html = binary(&mut file, "/__substg1.0_10130102").or_else(|| text(&mut file, "", "1013").map(String::into_bytes));
-        body = html.map(|html| html_text(&String::from_utf8_lossy(&html))).unwrap_or_default();
+        let found = binary(&mut file, "/__substg1.0_10130102").or_else(|| text(&mut file, "", "1013").map(String::into_bytes));
+        html = found.map(|found| String::from_utf8_lossy(&found).into_owned()).unwrap_or_default();
+        body = html_text(&html);
     }
     let date = properties(&mut file, "/__properties_version1.0", 32, &[0x0039_0040, 0x0E06_0040]);
     let folders: Vec<String> = file
@@ -538,6 +568,7 @@ fn outlook(path: &Path, with_data: bool) -> std::io::Result<(Mail, Vec<Bytes>)> 
         cc: text(&mut file, "", "0E03").unwrap_or_default(),
         date: date.unwrap_or(0),
         body: body.replace("\r\n", "\n").trim_end().to_string(),
+        html,
         attachments,
     };
     Ok((mail, data))
@@ -680,6 +711,16 @@ LjQK\r\n\
         let mail = b"Content-Type: text/html; charset=windows-1252\n\n<html><head><style>p{}</style></head><body><p>Hi &amp; bye</p><p>Na\xefve<br>end</p></body></html>";
         let (mail, _) = eml(mail, false);
         assert_eq!(mail.body, "Hi & bye\n\nNa\u{ef}ve\nend");
+        assert!(mail.html.contains("<p>Hi &amp; bye</p>"), "and shows as it was laid out");
+    }
+
+    #[test]
+    fn a_long_attachment_name_comes_together_from_its_pieces() {
+        let disposition = "attachment; filename*1=\"de \"; filename*0*=utf-8''Relat%C3%B3rio%20; filename*2*=2026%2Epdf";
+        assert_eq!(param(disposition, "filename").as_deref(), Some("Relatório de 2026.pdf"));
+        assert_eq!(param("attachment; filename*0=\"a\"; filename*1=\"b.txt\"", "filename").as_deref(), Some("ab.txt"));
+        assert_eq!(param("attachment; filename*1=late.txt", "filename"), None, "no first piece, no name");
+        assert_eq!(param("inline; name=plain.txt", "name").as_deref(), Some("plain.txt"));
     }
 
     #[test]

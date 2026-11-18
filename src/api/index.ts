@@ -1146,6 +1146,8 @@ export interface Mail {
   cc: string;
   date: number;
   body: string;
+  /** A mail written only in HTML, which shows as it was laid out. Empty when it has plain text. */
+  html: string;
   attachments: { name: string; size: number }[];
 }
 

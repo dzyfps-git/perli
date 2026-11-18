@@ -3595,6 +3595,21 @@ th[aria-sort="descending"] .table-sort::after {
   color: var(--text-muted);
 }
 
+/* An HTML mail, on the white it was written for, scrolling on its own. */
+.mail-html {
+  flex: 1;
+  width: 100%;
+  min-height: 240px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: #fff;
+  animation: details-in var(--motion-slide);
+}
+
+.mail-as-text {
+  align-self: flex-start;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .mail-view,
   .mail-attachment,
