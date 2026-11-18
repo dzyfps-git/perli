@@ -812,6 +812,9 @@ export interface GitStatus {
 /** `fresh` asks git past what it said for the same index and rows. */
 export const gitStatus = (folder: string, fresh = false) => invoke<GitStatus | null>("git_status", { folder, fresh });
 
+/** Git asked again, for what changed deep inside `folder`. Null while it isn't time yet. */
+export const gitRecheck = (folder: string) => invoke<GitStatus | null>("git_recheck", { folder });
+
 /** How a row stands against the other pane's row of the same name, in the order of `folder::Mark`.
  *  Pending is a folder whose insides, or a file whose bytes, are still being compared. */
 export const MARKS = ["none", "only", "newer", "older", "differs", "same", "pending"] as const;

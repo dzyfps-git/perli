@@ -2271,6 +2271,12 @@ async fn git_status(folder: String, fresh: bool) -> Result<Option<git::Status>, 
     blocking(move || Ok(git::status(Path::new(&folder), fresh))).await
 }
 
+/// Git asked again for `folder`, for what changed deep inside it, or nothing while it isn't time.
+#[tauri::command]
+async fn git_recheck(folder: String) -> Result<Option<git::Status>, String> {
+    blocking(move || Ok(git::recheck(Path::new(&folder)))).await
+}
+
 /// The two listings of compared panes, as `work` needs them.
 fn compared_pair<T>(views: &Views, one: (u32, u64), two: (u32, u64), work: impl FnOnce(&folder::Listing, &folder::Listing) -> T) -> Result<T, String> {
     let views = views.0.read().unwrap_or_else(|error| error.into_inner());
@@ -2927,6 +2933,7 @@ fn main() {
             stop_map,
             drop_choices,
             measure_drop,
+            git_recheck,
             compare_freshen,
             forget_drop,
             own_templates,

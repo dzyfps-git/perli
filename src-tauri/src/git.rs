@@ -8,6 +8,7 @@ use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use windows::Win32::System::Threading::CREATE_NO_WINDOW;
@@ -39,13 +40,16 @@ pub struct Status {
 static KNOWN: Mutex<Option<HashMap<String, (u64, Status)>>> = Mutex::new(None);
 /// Past this many folders, the reads kept start over.
 const MOST_KNOWN: usize = 256;
+/// When git last read each folder, by lowercase path, and how long it took.
+static ASKED: Mutex<Option<HashMap<String, (Instant, Duration)>>> = Mutex::new(None);
+/// `recheck` waits this many times as long as git last took, so asking again costs at most about
+/// one part in this many of the time, and never less than `RECHECK_GAP`.
+const RECHECK_SHARE: u32 = 20;
+const RECHECK_GAP: Duration = Duration::from_secs(5);
 
 /// The status of `folder`'s rows, or none outside a repository or without git. A read is kept
-/// while the repository's index and HEAD and the folder's own rows stay as they were, so a huge
-/// repository is asked once; `fresh` asks git anyway.
-/// ponytail: an edit deep inside a subfolder changes none of that, so the subfolder's mark waits
-/// for F5 or the next change to the index, and a push for F5. Watching every folder below would
-/// cost a look a second each.
+/// while the repository's index, HEAD and remote branches and the folder's own rows stay as they
+/// were, so a huge repository is asked once; `fresh` asks git anyway.
 pub fn status(folder: &Path, fresh: bool) -> Option<Status> {
     // Most folders are in no repository, and finding that out needs no git.
     let root = repository(folder)?;
@@ -60,6 +64,7 @@ pub fn status(folder: &Path, fresh: bool) -> Option<Status> {
             return Some(status.clone());
         }
     }
+    let started = Instant::now();
     let output = Command::new("git")
         .args(["status", "--porcelain=v1", "-z", "--branch", "--ignored", "--untracked-files=normal", "--", "."])
         .current_dir(folder)
@@ -68,6 +73,12 @@ pub fn status(folder: &Path, fresh: bool) -> Option<Status> {
         .creation_flags(CREATE_NO_WINDOW.0)
         .output()
         .ok()?;
+    let mut asked = ASKED.lock().unwrap_or_else(PoisonError::into_inner);
+    let asked = asked.get_or_insert_default();
+    if asked.len() >= MOST_KNOWN {
+        asked.clear();
+    }
+    asked.insert(key.clone(), (Instant::now(), started.elapsed()));
     let status = output.status.success().then(|| parse(&output.stdout, &prefix))?;
     if let Some(ground) = ground {
         let mut known = KNOWN.lock().unwrap_or_else(PoisonError::into_inner);
@@ -80,28 +91,56 @@ pub fn status(folder: &Path, fresh: bool) -> Option<Status> {
     Some(status)
 }
 
+/// Git asked again for `folder`, as an edit deep inside a subfolder changes nothing a look at the
+/// folder sees. None while it isn't time yet: git has to have been quiet for a while, the longer
+/// the slower it was last time, so a huge repository is asked seldom.
+pub fn recheck(folder: &Path) -> Option<Status> {
+    let key = folder.to_string_lossy().to_lowercase();
+    let asked = ASKED.lock().unwrap_or_else(PoisonError::into_inner).as_ref().and_then(|asked| asked.get(&key).copied());
+    if !due(asked) {
+        return None;
+    }
+    status(folder, true)
+}
+
+/// Whether git, last asked at a time and taking so long, may be asked again.
+fn due(asked: Option<(Instant, Duration)>) -> bool {
+    asked.is_none_or(|(at, took)| at.elapsed() >= (took * RECHECK_SHARE).max(RECHECK_GAP))
+}
+
 fn repository(folder: &Path) -> Option<&Path> {
     folder.ancestors().find(|folder| folder.join(".git").exists())
 }
 
-/// What git's marks on `folder` change with, to watch: its repository's index and HEAD. Nothing
+/// What git's marks on `folder` change with, to watch: its repository's index and HEAD, and its
+/// remote branches, which a push or a fetch moves on for the ahead and behind counts. Nothing
 /// outside a repository, or where `.git` is a file, as in a worktree.
 pub fn watched(folder: &Path) -> Vec<PathBuf> {
     let Some(git) = repository(folder).map(|root| root.join(".git")).filter(|git| git.is_dir()) else { return Vec::new() };
-    vec![git.join("index"), git.join("HEAD")]
+    vec![git.join("index"), git.join("HEAD"), git.join("packed-refs"), git.join("refs").join("remotes")]
 }
 
-/// What a read of `folder` stands on: the sizes and times of its repository's index and HEAD,
-/// and of the folder's own rows. None when either file is missing, and the read goes unkept.
+/// What a read of `folder` stands on: the sizes and times of what `watched` gives, and of the
+/// folder's own rows. Git updates a remote branch by renaming a new file over it, which moves on
+/// the time of the remote's folder, seen in the listing of `refs/remotes`. None when the index or
+/// HEAD is missing, and the read goes unkept.
 fn ground(root: &Path, folder: &Path) -> Option<u64> {
     let mut hasher = DefaultHasher::new();
     let files = watched(root);
     if files.is_empty() {
         return None;
     }
-    for file in files {
-        let stat = sys::stat(&file).ok()??;
-        (stat.size, stat.modified).hash(&mut hasher);
+    for (at, file) in files.iter().enumerate() {
+        let stat = sys::stat(file).ok().flatten();
+        match stat {
+            None if at < 2 => return None,
+            Some(stat) if stat.is_dir() => {
+                for (name, stat) in sys::read_dir(file).ok()? {
+                    (name, stat.size, stat.modified).hash(&mut hasher);
+                }
+            }
+            stat => stat.map(|stat| (stat.size, stat.modified)).hash(&mut hasher),
+        }
     }
     for (name, stat) in sys::read_dir(folder).ok()? {
         (name, stat.size, stat.modified, stat.is_dir()).hash(&mut hasher);
@@ -191,7 +230,21 @@ mod tests {
         assert_ne!(with_file, before);
         std::fs::write(root.join(".git").join("index"), "two!").unwrap();
         assert_ne!(ground(&root, &root).unwrap(), with_file);
-        assert_eq!(watched(&root.join("deeper")), [root.join(".git").join("index"), root.join(".git").join("HEAD")]);
+        let git = root.join(".git");
+        assert_eq!(watched(&root.join("deeper")), [git.join("index"), git.join("HEAD"), git.join("packed-refs"), git.join("refs").join("remotes")]);
+
+        // A push moves the remote branch on as git does it, by renaming a new file over it.
+        let origin = git.join("refs").join("remotes").join("origin");
+        std::fs::create_dir_all(&origin).unwrap();
+        std::fs::write(origin.join("main"), "aaaa\n").unwrap();
+        let fetched = ground(&root, &root).unwrap();
+        assert_eq!(ground(&root, &root), Some(fetched));
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(origin.join("main.lock"), "bbbb\n").unwrap();
+        std::fs::rename(origin.join("main.lock"), origin.join("main")).unwrap();
+        assert_ne!(ground(&root, &root).unwrap(), fetched, "the ahead count is asked for again");
+        std::fs::write(git.join("packed-refs"), "# pack-refs\n").unwrap();
+        assert!(ground(&root, &root).is_some(), "packed branches are watched when there are some");
 
         // A worktree's .git is a file that says where the repository is, and its reads go unkept.
         let tree = root.join("tree");
@@ -200,6 +253,16 @@ mod tests {
         assert_eq!(ground(&tree, &tree), None);
         assert!(watched(&tree).is_empty());
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn git_is_asked_again_only_once_it_has_been_quiet_long_enough() {
+        let ago = |seconds: u64, took: u64| Some((Instant::now() - Duration::from_secs(seconds), Duration::from_millis(took)));
+        assert!(due(None), "never asked");
+        assert!(!due(ago(0, 1)), "asked a moment ago");
+        assert!(due(ago(6, 1)), "a quick git is asked every few seconds");
+        assert!(!due(ago(6, 400)), "a slow one waits twenty times as long as it took");
+        assert!(due(ago(9, 400)));
     }
 
     #[test]
