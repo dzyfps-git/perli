@@ -9,58 +9,101 @@ export interface Line {
   b?: number;
 }
 
-/** Past this many changes, the middle that differs is shown as all gone, then all new. */
-const MOST_EDITS = 4000;
+/**
+ * Past this many changes in one stretch the search stops and splits where it got furthest, as GNU
+ * diff does: a few more lines may show as changed than had to, but a compare never stalls.
+ */
+const COSTLY = 4096;
 
-/** The shortest way from `a` to `b` (Myers), as lines kept, gone and new, in order. */
-function edits<T>(a: T[], b: T[], from: number, to: number, lines: Line[], offA: number, offB: number) {
-  const n = from;
-  const m = to;
-  const middle = n + m;
-  const zero = middle + 1;
-  const v = new Int32Array(2 * middle + 3);
-  /** Where each line of changes reached, by diagonal, for walking back. */
-  const trace: Int32Array[] = [];
-  let found = -1;
-  for (let d = 0; d <= Math.min(middle, MOST_EDITS) && found < 0; d++) {
+/**
+ * The shortest way from a[aLo, aHi) to b[bLo, bHi), as lines kept, gone and new, onto `lines` in
+ * order. Myers' linear-space way: find the middle stretch of the shortest path, then each side.
+ */
+function edits<T>(a: T[], b: T[], aLo: number, aHi: number, bLo: number, bHi: number, lines: Line[]) {
+  // Lines alike at either end are kept as they are.
+  while (aLo < aHi && bLo < bHi && a[aLo] === b[bLo]) lines.push({ kind: "same", a: aLo++, b: bLo++ });
+  let tail = 0;
+  while (aLo < aHi - tail && bLo < bHi - tail && a[aHi - 1 - tail] === b[bHi - 1 - tail]) tail++;
+  aHi -= tail;
+  bHi -= tail;
+  if (aLo === aHi) for (let y = bLo; y < bHi; y++) lines.push({ kind: "new", b: y });
+  else if (bLo === bHi) for (let x = aLo; x < aHi; x++) lines.push({ kind: "gone", a: x });
+  else {
+    const [x, y, u, v] = middle(a, b, aLo, aHi, bLo, bHi);
+    edits(a, b, aLo, x, bLo, y, lines);
+    for (let at = 0; at < u - x; at++) lines.push({ kind: "same", a: x + at, b: y + at });
+    edits(a, b, u, aHi, v, bHi, lines);
+  }
+  for (let at = 0; at < tail; at++) lines.push({ kind: "same", a: aHi + at, b: bHi + at });
+}
+
+/**
+ * The middle stretch of the shortest way through two runs that differ at both ends, as [x, y]
+ * where it starts and [u, v] where it ends: searched for from the start and from the end at once,
+ * until the two searches meet.
+ */
+function middle<T>(a: T[], b: T[], aLo: number, aHi: number, bLo: number, bHi: number): [number, number, number, number] {
+  const n = aHi - aLo;
+  const m = bHi - bLo;
+  const delta = n - m;
+  const odd = (delta & 1) !== 0;
+  const most = Math.min(Math.ceil((n + m) / 2), COSTLY);
+  const zero = most + 1;
+  /** How far along a each diagonal the search from the start got, and the one from the end. */
+  const ahead = new Int32Array(2 * most + 3);
+  const behind = new Int32Array(2 * most + 3);
+  for (let d = 0; d <= most; d++) {
     for (let k = -d; k <= d; k += 2) {
-      const down = k === -d || (k !== d && v[zero + k - 1] < v[zero + k + 1]);
-      let x = down ? v[zero + k + 1] : v[zero + k - 1] + 1;
+      let x = k === -d || (k !== d && ahead[zero + k - 1] < ahead[zero + k + 1]) ? ahead[zero + k + 1] : ahead[zero + k - 1] + 1;
       let y = x - k;
-      while (x < n && y < m && a[offA + x] === b[offB + y]) {
+      const [x0, y0] = [x, y];
+      while (x < n && y < m && a[aLo + x] === b[bLo + y]) {
         x++;
         y++;
       }
-      v[zero + k] = x;
-      if (x >= n && y >= m) found = d;
+      ahead[zero + k] = x;
+      // The diagonal the search from the end sees this one as.
+      const other = delta - k;
+      if (odd && other >= 1 - d && other <= d - 1 && x + behind[zero + other] >= n) return [aLo + x0, bLo + y0, aLo + x, bLo + y];
     }
-    trace.push(v.slice(zero - d, zero + d + 1));
+    for (let k = -d; k <= d; k += 2) {
+      let x = k === -d || (k !== d && behind[zero + k - 1] < behind[zero + k + 1]) ? behind[zero + k + 1] : behind[zero + k - 1] + 1;
+      let y = x - k;
+      const [x0, y0] = [x, y];
+      while (x < n && y < m && a[aHi - 1 - x] === b[bHi - 1 - y]) {
+        x++;
+        y++;
+      }
+      behind[zero + k] = x;
+      const other = delta - k;
+      if (!odd && other >= -d && other <= d && x + ahead[zero + other] >= n) return [aHi - x, bHi - y, aHi - x0, bHi - y0];
+    }
   }
-  if (found < 0) {
-    // ponytail: past MOST_EDITS changes the middle shows as one block; a linear-space Myers would split it finely.
-    for (let x = 0; x < n; x++) lines.push({ kind: "gone", a: offA + x });
-    for (let y = 0; y < m; y++) lines.push({ kind: "new", b: offB + y });
-    return;
+  // Too many changes to finish: split where the search from the start got furthest, so each side
+  // is smaller. All gone, then all new, if it got nowhere.
+  let [bestX, bestY] = [0, 0];
+  for (let k = -most; k <= most; k += 2) {
+    const x = ahead[zero + k];
+    const y = x - k;
+    if (x <= n && y >= 0 && y <= m && x + y > bestX + bestY && x + y < n + m) [bestX, bestY] = [x, y];
   }
-  const out: Line[] = [];
-  let x = n;
-  let y = m;
-  for (let d = found; d > 0; d--) {
-    const before = trace[d - 1];
-    const at = (k: number) => before[k + d - 1];
-    const k = x - y;
-    const down = k === -d || (k !== d && at(k - 1) < at(k + 1));
-    const backK = down ? k + 1 : k - 1;
-    const backX = at(backK);
-    const backY = backX - backK;
-    const startX = down ? backX : backX + 1;
-    while (x > startX) out.push({ kind: "same", a: offA + --x, b: offB + --y });
-    if (down) out.push({ kind: "new", b: offB + --y });
-    else out.push({ kind: "gone", a: offA + --x });
+  if (bestX + bestY === 0) [bestX, bestY] = [n, 0];
+  return [aLo + bestX, bLo + bestY, aLo + bestX, bLo + bestY];
+}
+
+/** Within each run of changes the gone lines come first, the way `diff -u` writes them. */
+function goneFirst(lines: Line[]) {
+  for (let at = 0; at < lines.length; ) {
+    let end = at;
+    while (end < lines.length && lines[end].kind !== "same") end++;
+    if (end > at) {
+      const run = lines.slice(at, end);
+      let put = at;
+      for (const line of run) if (line.kind === "gone") lines[put++] = line;
+      for (const line of run) if (line.kind === "new") lines[put++] = line;
+    }
+    at = Math.max(end, at + 1);
   }
-  while (x > 0) out.push({ kind: "same", a: offA + --x, b: offB + --y });
-  // One by one: spreading a long run into push's arguments overflows the stack.
-  for (let at = out.length - 1; at >= 0; at--) lines.push(out[at]);
 }
 
 /** Which of two texts end with no line ending after their last line. */
@@ -76,14 +119,9 @@ export function diffLines(a: string[], b: string[], key: (line: string) => strin
   // No line holds a line ending, so one on the key marks the open end and matches nothing else.
   if (open[0] && keysA.length) keysA[keysA.length - 1] += "\n";
   if (open[1] && keysB.length) keysB[keysB.length - 1] += "\n";
-  let start = 0;
-  while (start < a.length && start < b.length && keysA[start] === keysB[start]) start++;
-  let end = 0;
-  while (end < a.length - start && end < b.length - start && keysA[a.length - 1 - end] === keysB[b.length - 1 - end]) end++;
   const lines: Line[] = [];
-  for (let at = 0; at < start; at++) lines.push({ kind: "same", a: at, b: at });
-  edits(keysA, keysB, a.length - start - end, b.length - start - end, lines, start, start);
-  for (let at = end; at > 0; at--) lines.push({ kind: "same", a: a.length - at, b: b.length - at });
+  edits(keysA, keysB, 0, a.length, 0, b.length, lines);
+  goneFirst(lines);
   return lines;
 }
 

@@ -31,6 +31,56 @@ test("the shortest way through keeps every line the two texts share", () => {
   );
 });
 
+/** How many lines the two share at most, the slow sure way. */
+function common(a: string[], b: string[]) {
+  const row = new Array<number>(b.length + 1).fill(0);
+  for (const line of a) {
+    let diagonal = 0;
+    for (let at = 1; at <= b.length; at++) {
+      const above = row[at];
+      row[at] = line === b[at - 1] ? diagonal + 1 : Math.max(row[at], row[at - 1]);
+      diagonal = above;
+    }
+  }
+  return row[b.length];
+}
+
+/** Every line of each text once, in order, and the kept ones alike. */
+function sound(lines: Line[], a: string[], b: string[]) {
+  for (const line of lines) if (line.kind === "same") assert.equal(a[line.a!], b[line.b!]);
+  assert.deepEqual(lines.filter((line) => line.kind !== "new").map((line) => line.a), a.map((_, at) => at));
+  assert.deepEqual(lines.filter((line) => line.kind !== "gone").map((line) => line.b), b.map((_, at) => at));
+}
+
+test("the middle-out search keeps as many lines as can be kept", () => {
+  let seed = 7;
+  const next = () => (seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648;
+  for (let round = 0; round < 400; round++) {
+    const text = () => Array.from({ length: Math.floor(next() * 24) }, () => "abcd"[Math.floor(next() * 4)]);
+    const [a, b] = [text(), text()];
+    const lines = diffLines(a, b);
+    sound(lines, a, b);
+    assert.equal(lines.filter((line) => line.kind === "same").length, common(a, b), `${a.join("")} / ${b.join("")}`);
+  }
+});
+
+test("a long file with thousands of changes still marks only the lines that changed", () => {
+  const a = Array.from({ length: 30_000 }, (_, at) => `line ${at}`);
+  const b = a.map((line, at) => (at % 6 === 3 ? `${line} changed` : line));
+  const lines = diffLines(a, b);
+  sound(lines, a, b);
+  assert.equal(lines.filter((line) => line.kind === "gone").length, 5000);
+  assert.equal(lines.filter((line) => line.kind === "new").length, 5000);
+});
+
+test("two long files with nothing alike are all gone then all new, without stalling", () => {
+  const a = Array.from({ length: 20_000 }, (_, at) => `a ${at}`);
+  const b = Array.from({ length: 20_000 }, (_, at) => `b ${at}`);
+  const lines = diffLines(a, b);
+  sound(lines, a, b);
+  assert.equal(lines.filter((line) => line.kind === "same").length, 0);
+});
+
 test("spaces can be set aside", () => {
   const a = ["if (x)  {", "\treturn;"];
   const b = ["if (x) {", "  return;  "];
