@@ -263,3 +263,14 @@ export function groupedMove(key: string, focused: number, groups: Gathered[], pe
   }
   return focused;
 }
+
+/**
+ * The rows a compared pane offers the other to line up by, best first: those from `first` on
+ * down, then those above, `reach` of each. A row on one side only has no twin, so a run of them
+ * at the top still finds one further on.
+ */
+export function rowsAround(first: number, count: number, reach: number) {
+  const below = Array.from({ length: Math.max(0, Math.min(count, first + reach) - first) }, (_, step) => first + step);
+  const above = Array.from({ length: Math.min(first, reach) }, (_, step) => first - 1 - step);
+  return [...below, ...above];
+}

@@ -1,8 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { besidePoint, groupedMove, justifiedPlaces, moveTarget, placesOf } from "./layout.ts";
+import { besidePoint, groupedMove, justifiedPlaces, moveTarget, placesOf, rowsAround } from "./layout.ts";
 
 const list = { count: 100, perRow: 1, pageRows: 10 };
+
+test("a compared pane offers the rows below its top first, then those above", () => {
+  assert.deepEqual(rowsAround(5, 100, 3), [5, 6, 7, 4, 3, 2]);
+  assert.deepEqual(rowsAround(1, 3, 5), [1, 2, 0], "as far as there are rows");
+  assert.deepEqual(rowsAround(0, 0, 5), []);
+});
 const grid = { count: 10, perRow: 4, pageRows: 2 };
 
 test("list keys move by rows and clamp to the ends", () => {
