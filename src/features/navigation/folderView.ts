@@ -592,8 +592,9 @@ export function createFolderView(id: number, saved?: SavedPane, fixed?: Filter) 
   /** Opens again what failed: the folder that wouldn't open, or else the one shown. */
   const retry = () => (failedAt ? open(failedAt) : refresh());
 
-  /** Also retries a saved folder that failed to open. */
+  /** Also retries a saved folder that failed to open, and asks git afresh. */
   async function refresh() {
+    gitFresh = true;
     if (query()) return reload();
     const target = path();
     if (target) await load(target);
@@ -633,13 +634,20 @@ export function createFolderView(id: number, saved?: SavedPane, fixed?: Filter) 
     }
   }
 
-  // Each read asks git again, so a save or a commit shows on the next reload.
+  /** F5 asks git past what it said for the same index and rows. */
+  let gitFresh = false;
+  // Each read asks git, which answers from its last read while the repository's index and HEAD
+  // and the folder's own rows stay the same. A commit changes the index, which is watched.
   const [gitRead] = createResource(
     () => {
       const shown = folder();
       return gitBadges() && shown && !query() && !shown.archive && !isBin(shown.path) ? shown : undefined;
     },
-    async (shown) => ({ path: shown.path, status: await gitStatus(shown.path).catch(() => null) }),
+    async (shown) => {
+      const fresh = gitFresh;
+      gitFresh = false;
+      return { path: shown.path, status: await gitStatus(shown.path, fresh).catch(() => null) };
+    },
   );
   /** What git says of the folder on show, kept through a reload so the marks don't blink. */
   const git = createMemo(() => {

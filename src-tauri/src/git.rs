@@ -1,12 +1,18 @@
 //! What git says about the rows of a folder in a repository: changed, added, new or ignored,
 //! and the branch. It asks `git.exe`, so a computer without git shows no marks.
 
+use std::collections::hash_map::DefaultHasher;
+use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::os::windows::process::CommandExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Mutex, PoisonError};
 
 use serde::Serialize;
 use windows::Win32::System::Threading::CREATE_NO_WINDOW;
+
+use crate::ops::sys;
 
 /// How a row stands in git, weakest first, so a folder shows the strongest of what it holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -20,7 +26,7 @@ pub enum Mark {
     Conflict,
 }
 
-#[derive(Debug, Default, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct Status {
     pub branch: String,
     pub ahead: u32,
@@ -29,13 +35,31 @@ pub struct Status {
     pub marks: Vec<(String, Mark)>,
 }
 
-/// The status of `folder`'s rows, or none outside a repository or without git.
-/// ponytail: one `git status` a read, which a huge repository makes slow; a cache by index time
-/// would spare it.
-pub fn status(folder: &Path) -> Option<Status> {
+/// Reads kept by lowercase folder, each with the ground it stood on.
+static KNOWN: Mutex<Option<HashMap<String, (u64, Status)>>> = Mutex::new(None);
+/// Past this many folders, the reads kept start over.
+const MOST_KNOWN: usize = 256;
+
+/// The status of `folder`'s rows, or none outside a repository or without git. A read is kept
+/// while the repository's index and HEAD and the folder's own rows stay as they were, so a huge
+/// repository is asked once; `fresh` asks git anyway.
+/// ponytail: an edit deep inside a subfolder changes none of that, so the subfolder's mark waits
+/// for F5 or the next change to the index, and a push for F5. Watching every folder below would
+/// cost a look a second each.
+pub fn status(folder: &Path, fresh: bool) -> Option<Status> {
     // Most folders are in no repository, and finding that out needs no git.
-    let root = folder.ancestors().find(|folder| folder.join(".git").exists())?;
+    let root = repository(folder)?;
     let prefix = folder.strip_prefix(root).ok()?.to_string_lossy().replace('\\', "/");
+    let key = folder.to_string_lossy().to_lowercase();
+    // Taken before git reads, so a change while it reads leaves a ground that no longer holds.
+    let ground = ground(root, folder);
+    if !fresh {
+        let known = KNOWN.lock().unwrap_or_else(PoisonError::into_inner);
+        let kept = known.as_ref().and_then(|known| known.get(&key)).filter(|(stood, _)| Some(*stood) == ground);
+        if let Some((_, status)) = kept {
+            return Some(status.clone());
+        }
+    }
     let output = Command::new("git")
         .args(["status", "--porcelain=v1", "-z", "--branch", "--ignored", "--untracked-files=normal", "--", "."])
         .current_dir(folder)
@@ -44,7 +68,45 @@ pub fn status(folder: &Path) -> Option<Status> {
         .creation_flags(CREATE_NO_WINDOW.0)
         .output()
         .ok()?;
-    output.status.success().then(|| parse(&output.stdout, &prefix))
+    let status = output.status.success().then(|| parse(&output.stdout, &prefix))?;
+    if let Some(ground) = ground {
+        let mut known = KNOWN.lock().unwrap_or_else(PoisonError::into_inner);
+        let known = known.get_or_insert_default();
+        if known.len() >= MOST_KNOWN {
+            known.clear();
+        }
+        known.insert(key, (ground, status.clone()));
+    }
+    Some(status)
+}
+
+fn repository(folder: &Path) -> Option<&Path> {
+    folder.ancestors().find(|folder| folder.join(".git").exists())
+}
+
+/// What git's marks on `folder` change with, to watch: its repository's index and HEAD. Nothing
+/// outside a repository, or where `.git` is a file, as in a worktree.
+pub fn watched(folder: &Path) -> Vec<PathBuf> {
+    let Some(git) = repository(folder).map(|root| root.join(".git")).filter(|git| git.is_dir()) else { return Vec::new() };
+    vec![git.join("index"), git.join("HEAD")]
+}
+
+/// What a read of `folder` stands on: the sizes and times of its repository's index and HEAD,
+/// and of the folder's own rows. None when either file is missing, and the read goes unkept.
+fn ground(root: &Path, folder: &Path) -> Option<u64> {
+    let mut hasher = DefaultHasher::new();
+    let files = watched(root);
+    if files.is_empty() {
+        return None;
+    }
+    for file in files {
+        let stat = sys::stat(&file).ok()??;
+        (stat.size, stat.modified).hash(&mut hasher);
+    }
+    for (name, stat) in sys::read_dir(folder).ok()? {
+        (name, stat.size, stat.modified, stat.is_dir()).hash(&mut hasher);
+    }
+    Some(hasher.finish())
 }
 
 /// Reads `git status --porcelain=v1 -z --branch` for the folder at `prefix` in the repository.
@@ -113,6 +175,32 @@ fn read_branch(line: &str, status: &mut Status) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_read_stands_while_the_index_head_and_rows_stay() {
+        let root = std::env::temp_dir().join(format!("perli-git-ground-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::write(root.join(".git").join("index"), "one").unwrap();
+        std::fs::write(root.join(".git").join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        let before = ground(&root, &root).unwrap();
+        assert_eq!(ground(&root, &root), Some(before));
+
+        std::fs::write(root.join("new.txt"), "x").unwrap();
+        let with_file = ground(&root, &root).unwrap();
+        assert_ne!(with_file, before);
+        std::fs::write(root.join(".git").join("index"), "two!").unwrap();
+        assert_ne!(ground(&root, &root).unwrap(), with_file);
+        assert_eq!(watched(&root.join("deeper")), [root.join(".git").join("index"), root.join(".git").join("HEAD")]);
+
+        // A worktree's .git is a file that says where the repository is, and its reads go unkept.
+        let tree = root.join("tree");
+        std::fs::create_dir(&tree).unwrap();
+        std::fs::write(tree.join(".git"), "gitdir: elsewhere").unwrap();
+        assert_eq!(ground(&tree, &tree), None);
+        assert!(watched(&tree).is_empty());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 
     #[test]
     fn rows_take_the_strongest_mark_of_what_they_hold_and_the_branch_its_counts() {

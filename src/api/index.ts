@@ -775,7 +775,8 @@ export interface GitStatus {
 }
 
 /** What git says of `folder`'s rows and its branch, or null outside a repository or without git. */
-export const gitStatus = (folder: string) => invoke<GitStatus | null>("git_status", { folder });
+/** `fresh` asks git past what it said for the same index and rows. */
+export const gitStatus = (folder: string, fresh = false) => invoke<GitStatus | null>("git_status", { folder, fresh });
 
 /** How a row stands against the other pane's row of the same name, in the order of `folder::Mark`.
  *  Pending is a folder whose insides, or a file whose bytes, are still being compared. */

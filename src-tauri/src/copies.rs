@@ -7,7 +7,7 @@ use std::fs::File;
 use std::hash::{Hash, Hasher};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use crate::folder::{self, Entry, Found, Sight};
@@ -20,6 +20,13 @@ const HEAD: usize = 64 * 1024;
 const GOING_GAP: Duration = Duration::from_millis(400);
 
 type Candidate = (Entry, Arc<[u16]>);
+
+/// A size and a time, and the first-bytes fingerprint of the file that had them.
+type Head = (u64, u64, u64);
+/// Fingerprints worked out before, by lowercase path, so a look again reads only files that changed.
+static KNOWN_HEADS: Mutex<Option<HashMap<String, Head>>> = Mutex::new(None);
+/// Past this many, the fingerprints known start over.
+const MOST_KNOWN_HEADS: usize = 200_000;
 
 /// The files under `folders` (only in them, unless `deep`) that have the same content as another,
 /// in sets: the set that wastes the most room first, and the oldest file of each set first. Empty
@@ -64,7 +71,7 @@ pub fn find(folders: &[PathBuf], deep: bool, sight: Sight, lane: u32, stopped: &
     let path_of = |(entry, location): &Candidate| path_in(location).join(entry.file_name());
     let mut sets: Vec<(u64, Vec<Candidate>)> = Vec::new();
     for (size, files) in by_size.into_iter().filter(|(_, files)| files.len() > 1) {
-        for alike in split_by(files, |file| head_of(&path_of(file))) {
+        for alike in split_by(files, |file| head_of(&path_of(file), file.0.size(), file.0.modified())) {
             if stopped() {
                 return Found::default();
             }
@@ -97,13 +104,26 @@ fn split_by<K: Hash + Eq>(files: Vec<Candidate>, key: impl Fn(&Candidate) -> Opt
     groups.into_values().filter(|group| group.len() > 1).collect()
 }
 
-/// A quick fingerprint of the file's first bytes. Only a sorting step: the checksum decides.
-fn head_of(path: &Path) -> Option<u64> {
+/// A quick fingerprint of the file's first bytes. Only a sorting step: the checksum decides. One
+/// worked out before for the same size and time is given at once.
+fn head_of(path: &Path, size: u64, modified: u64) -> Option<u64> {
+    let key = path.to_string_lossy().to_lowercase();
+    let known = KNOWN_HEADS.lock().unwrap_or_else(PoisonError::into_inner).as_ref().and_then(|known| known.get(&key).copied());
+    if let Some((_, _, print)) = known.filter(|&(was_size, was_modified, _)| (was_size, was_modified) == (size, modified)) {
+        return Some(print);
+    }
     let mut head = Vec::with_capacity(HEAD);
     File::open(path).ok()?.take(HEAD as u64).read_to_end(&mut head).ok()?;
     let mut hasher = DefaultHasher::new();
     head.hash(&mut hasher);
-    Some(hasher.finish())
+    let print = hasher.finish();
+    let mut known = KNOWN_HEADS.lock().unwrap_or_else(PoisonError::into_inner);
+    let known = known.get_or_insert_default();
+    if known.len() > MOST_KNOWN_HEADS {
+        known.clear();
+    }
+    known.insert(key, (size, modified, print));
+    Some(print)
 }
 
 fn path_in(location: &[u16]) -> PathBuf {
@@ -115,6 +135,17 @@ mod tests {
     use std::fs;
 
     use super::*;
+
+    #[test]
+    fn a_first_bytes_print_is_read_again_only_for_a_new_size_or_time() {
+        let file = std::env::temp_dir().join(format!("perli-copies-head-{}.bin", std::process::id()));
+        fs::write(&file, "first").unwrap();
+        let print = head_of(&file, 5, 1).unwrap();
+        fs::write(&file, "other").unwrap();
+        assert_eq!(head_of(&file, 5, 1), Some(print), "the same size and time give the print known");
+        assert_ne!(head_of(&file, 5, 2), Some(print), "a new time reads the file again");
+        fs::remove_file(&file).unwrap();
+    }
 
     #[test]
     fn copies_come_in_sets_biggest_waste_first_and_the_rest_stay_out() {

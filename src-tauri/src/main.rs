@@ -831,7 +831,9 @@ fn watch_of(path: &str, expanded: &[String]) -> Option<Watch> {
     let resolved = PathBuf::from(folder::resolve(path).ok().filter(|_| path != folder::BIN_PATH)?);
     // A ZIP changes as one file, in the folder it sits in.
     let watched = zipped::outer(&resolved).map_or(resolved, |archive| ops::sys::parent(&archive));
-    Some(Watch::new(std::iter::once(watched).chain(expanded.iter().map(PathBuf::from))))
+    // A commit, a stage or a switch of branch changes git's marks with no row changing.
+    let git = git::watched(&watched);
+    Some(Watch::new(std::iter::once(watched).chain(expanded.iter().map(PathBuf::from)).chain(git)))
 }
 
 /// Puts the shown folder in a new order as a new snapshot, the same way an open would.
@@ -2212,8 +2214,9 @@ fn rows_where(view: u32, request: u64, filter: folder::Filter, views: State<'_, 
 
 /// What git says of `folder`'s rows and its branch, or nothing outside a repository.
 #[tauri::command]
-async fn git_status(folder: String) -> Result<Option<git::Status>, String> {
-    blocking(move || Ok(git::status(Path::new(&folder)))).await
+/// `fresh` asks git past what it said for the same index and rows.
+async fn git_status(folder: String, fresh: bool) -> Result<Option<git::Status>, String> {
+    blocking(move || Ok(git::status(Path::new(&folder), fresh))).await
 }
 
 /// The two listings of compared panes, as `work` needs them.
