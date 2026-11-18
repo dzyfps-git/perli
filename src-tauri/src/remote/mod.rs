@@ -7,8 +7,11 @@
 mod dropbox;
 mod gdrive;
 pub mod http;
+
+/// Why a job that changes files in place refuses cloud ones.
+pub const ON_THIS_PC: &str = "This works on files on this PC. Copy them here first.";
 mod onedrive;
-mod s3;
+pub mod s3;
 
 use std::collections::HashMap;
 use std::fs;
@@ -307,6 +310,24 @@ pub fn add_place(kind: Kind, name: &str, account: String, s3: Option<s3::Setup>,
     Ok(place)
 }
 
+/// Adds an S3 bucket once a look at it works, so a wrong key or name shows now.
+pub fn add_s3(setup: s3::Setup, secret: &str, name: &str) -> Result<Place, String> {
+    s3::S3::new(setup.clone(), secret.to_string()).list("")?;
+    let account = setup.bucket.clone();
+    add_place(Kind::S3, name, account, Some(setup), secret)
+}
+
+/// Signs in to a service in the browser and adds the place it opens.
+pub fn sign_in(kind: Kind) -> Result<Place, String> {
+    let ((account, refresh), name) = match kind {
+        Kind::OneDrive => (onedrive::OneDrive::sign_in()?, "OneDrive"),
+        Kind::Dropbox => (dropbox::Dropbox::sign_in()?, "Dropbox"),
+        Kind::Google => (gdrive::Google::sign_in()?, "Google Drive"),
+        Kind::S3 => return Err("S3 storage opens with a key, not a sign-in".into()),
+    };
+    add_place(kind, name, account, None, &refresh)
+}
+
 pub fn rename_place(id: &str, name: &str) -> Result<Place, String> {
     let fresh = free_place_name(name);
     let mut all = places();
@@ -398,6 +419,25 @@ pub fn forget(paths: &[PathBuf]) {
 /// The rows of the cloud root: every place, as a folder.
 pub fn place_items() -> Vec<Item> {
     places().into_iter().map(|place| Item { name: place.name, folder: true, note: place.account, ..Item::default() }).collect()
+}
+
+/// What a cloud folder holds, each with whether it is kept on this PC: the places at the top,
+/// else the folder's own, read again when `fresh`. `None` outside the cloud.
+pub fn rows(path: &Path, fresh: bool) -> Option<Result<Vec<(Item, bool)>, String>> {
+    if !is_remote(path) {
+        return None;
+    }
+    let Some(found) = at(path) else {
+        return Some(Ok(place_items().into_iter().map(|item| (item, false)).collect()));
+    };
+    Some(found.and_then(|at| {
+        let items = listed(&at, &at.inner, fresh)?;
+        let kept = |item: &Item| {
+            let child = At { place: at.place.clone(), service: at.service.clone(), inner: join(&at.inner, &item.name) };
+            !item.folder && offline_slot(&child).is_some_and(|slot| slot.join(".version").exists())
+        };
+        Ok(items.iter().map(|item| (item.clone(), kept(item))).collect())
+    }))
 }
 
 fn hashed(text: &str) -> u64 {
@@ -513,18 +553,23 @@ fn take_down_folder(at: &At, inner: &str, target: &Path) -> Result<(), String> {
     Ok(())
 }
 
-pub fn real_all(paths: &[PathBuf]) -> Option<Result<Vec<PathBuf>, String>> {
-    if !paths.iter().any(|path| is_remote(path)) {
-        return None;
-    }
-    Some(paths.iter().map(|path| real(path).unwrap_or_else(|| Ok(path.clone()))).collect())
-}
+/// Pictures at most this big come down whole for their row's picture where the service makes none.
+const SMALL_PICTURE: u64 = 8 * 1024 * 1024;
 
-/// A picture of a file, from the service where it makes them.
-pub fn thumbnail(path: &Path, edge: u32) -> Option<Vec<u8>> {
-    let at = at(path)?.ok()?;
-    let item = at.item().ok()?;
-    at.service.thumbnail(&at.inner, &item, edge).ok().flatten()
+/// A row's picture, `edge` pixels on its longest side, in the form `thumbs::read` gives, or empty
+/// for none: the service's own, else a small picture's whole file.
+pub fn picture(path: &Path, edge: u32) -> Vec<u8> {
+    let Some(Ok(at)) = at(path) else { return Vec::new() };
+    let Ok(item) = at.item() else { return Vec::new() };
+    if item.folder {
+        return Vec::new();
+    }
+    let made = at.service.thumbnail(&at.inner, &item, edge).ok().flatten();
+    let small = || {
+        let fits = crate::inside::is_picture(&item.name) && item.size <= SMALL_PICTURE;
+        fits.then(|| real(path)?.ok()).flatten().and_then(|file| fs::read(file).ok())
+    };
+    made.or_else(small).and_then(|bytes| crate::inside::decode(&bytes, edge).ok()).unwrap_or_default()
 }
 
 /// What a place tells of itself: its space, and whether a delete can be undone.

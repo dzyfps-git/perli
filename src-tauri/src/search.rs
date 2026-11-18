@@ -493,6 +493,36 @@ fn in_zip(archive: &Path, inner: &str, shown: &Path, asked: &Asked) -> Result<Fo
     Ok(found)
 }
 
+/// The names in a cloud folder that hold the query. A scope wider than the folder asks the
+/// service's own search, as a walk would take a request for each folder.
+fn in_cloud(shown: &Path, asked: &Asked) -> Result<Found> {
+    let failed = |message: String| windows::core::Error::new(windows::Win32::Foundation::E_FAIL, message);
+    let query = Query::new(&asked.query);
+    // ponytail: every file of a cloud place means this folder's alone; walk the place if wanted.
+    let items: Vec<(PathBuf, crate::remote::Item, bool)> = if asked.scope == Scope::Folder || query.every_file {
+        let rows = crate::remote::rows(shown, false).unwrap_or_else(|| Ok(Vec::new())).map_err(failed)?;
+        rows.into_iter().map(|(item, kept)| (shown.join(&item.name), item, kept)).collect()
+    } else {
+        let found = crate::remote::search(shown, &asked.query).map_err(failed)?;
+        found.into_iter().map(|(path, item)| {
+            let kept = crate::remote::is_offline(&path);
+            (path, item, kept)
+        }).collect()
+    };
+    let mut found = Found::default();
+    let mut locations = HashMap::<PathBuf, Arc<[u16]>>::new();
+    for (path, item, kept) in items {
+        let parent = sys::parent(&path);
+        let entry = Entry::from_remote(&item, kept);
+        if !query.is_in(&entry, &parent) {
+            continue;
+        }
+        let location = locations.entry(parent.clone()).or_insert_with(|| folder::null_terminated(&parent).into());
+        found.push(entry, location.clone());
+    }
+    Ok(found)
+}
+
 /// A filter can leave so few rows that scrolling never asks for more. Groups count every row
 /// they hold, and a folded one shows none, so scrolling can't ask for those either.
 fn needs_every_row(order: &Order) -> bool {
@@ -580,8 +610,9 @@ impl Searches {
             });
             return Ok(Listing::searched(shown, order));
         }
-        if let Some(zip) = zipped::opened(&shown_folder) {
-            let found = in_zip(&zip.archive, &zip.inner, &shown_folder, &asked)?;
+        let cloud = crate::remote::is_remote(&shown_folder).then(|| in_cloud(&shown_folder, &asked));
+        if let Some(found) = cloud.or_else(|| zipped::opened(&shown_folder).map(|zip| in_zip(&zip.archive, &zip.inner, &shown_folder, &asked))) {
+            let found = found?;
             self.stop(view);
             self.all().insert(view, Arc::new(Search::new(found.clone(), usize::MAX)));
             report(Walk::Done);

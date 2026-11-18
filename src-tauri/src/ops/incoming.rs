@@ -223,6 +223,9 @@ fn contents(data: &IDataObject, index: usize) -> Result<Contents> {
 
 impl Run<'_> {
     pub(super) fn receive(&mut self, mut incoming: Incoming, folder: &Path) -> Flow {
+        if crate::remote::is_remote(folder) {
+            return self.refuse(folder, "Drop these on a folder on this PC first, then copy them up from there");
+        }
         let data = match incoming.open() {
             Ok(data) => data,
             Err(error) => return self.refuse(folder, &error.message()),

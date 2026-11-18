@@ -120,7 +120,7 @@ const CANCELLED: WIN32_ERROR = WIN32_ERROR(u32::MAX);
 
 /// True for `\\server` with no share after it.
 pub fn is_server(path: &str) -> bool {
-    path.strip_prefix(r"\\").is_some_and(|rest| !rest.is_empty() && !rest.contains('\\'))
+    path.strip_prefix(r"\\").is_some_and(|rest| !rest.is_empty() && !rest.contains('\\')) && !is_cloud(path)
 }
 
 /// The folders `server` (`\\server`) shares, by name, and whether each is one Explorer keeps
@@ -164,9 +164,14 @@ fn remote_of(path: &str) -> Option<String> {
     Some(format!(r"\\{server}\{share}"))
 }
 
+/// Perli's cloud places look like a server's shares but are no server.
+fn is_cloud(path: &str) -> bool {
+    crate::remote::is_remote(std::path::Path::new(path))
+}
+
 /// True for a share path or a mapped drive, where asking the disk can hang on an offline server.
 pub fn is_remote(path: &str) -> bool {
-    path.starts_with(r"\\") || mapped_drive(path).is_some()
+    (path.starts_with(r"\\") && !is_cloud(path)) || mapped_drive(path).is_some()
 }
 
 /// The `Z:` of a path on a mapped drive.

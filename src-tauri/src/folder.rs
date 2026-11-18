@@ -18,7 +18,7 @@ use windows::Win32::Storage::FileSystem::{
 use windows::Win32::UI::Shell::{PathMatchSpecW, StrCmpLogicalW};
 
 use crate::ops::{self, BinItem};
-use crate::{compare, network, shell, sizes, tags, zipped};
+use crate::{compare, network, remote, shell, sizes, tags, zipped};
 
 /// Stands for the Recycle Bin, which has no folder of its own to open.
 pub const BIN_PATH: &str = "shell:RecycleBinFolder";
@@ -348,6 +348,22 @@ impl Entry {
         }
     }
 
+    /// A row of a cloud folder. A file not kept on this PC shows as one in the cloud.
+    pub fn from_remote(item: &remote::Item, kept: bool) -> Self {
+        Self {
+            name: null_terminated(item.name.as_ref()).into(),
+            size: item.size,
+            modified: item.modified,
+            created: item.modified,
+            is_dir: item.folder,
+            hidden: false,
+            system: false,
+            cloud: !item.folder && !kept,
+            pinned: kept,
+            custom: false,
+        }
+    }
+
     /// A server's shares have no dates or size to show.
     fn from_share((name, out_of_sight): (String, bool)) -> Self {
         Self {
@@ -621,6 +637,11 @@ impl Listing {
             return Self::read_bin(order);
         }
         let full = resolve(path)?;
+        if let Some(rows) = remote::rows(Path::new(&full), true) {
+            let rows = rows.map_err(|message| windows::core::Error::new(windows::Win32::Foundation::E_FAIL, message))?;
+            let entries = rows.iter().map(|(item, kept)| Entry::from_remote(item, *kept)).collect();
+            return Ok(Self { folder: full.into(), entries: Arc::new(entries), ..Self::default() }.arrange(order));
+        }
         if let Some(zip) = zipped::opened(Path::new(&full)) {
             return Self::read_zip(full, zip, order);
         }
@@ -1457,7 +1478,13 @@ pub fn pictures_in(folder: &Path, most: usize) -> Vec<PathBuf> {
 pub fn subfolders(path: &Path, sight: Sight, files: bool) -> std::io::Result<Vec<(String, bool)>> {
     use std::os::windows::fs::MetadataExt;
 
-    let mut found: Vec<(Box<[u16]>, bool)> = if let Some(zip) = zipped::opened(path) {
+    let mut found: Vec<(Box<[u16]>, bool)> = if let Some(rows) = remote::rows(path, false) {
+        rows.map_err(std::io::Error::other)?
+            .into_iter()
+            .filter(|(item, _)| files || item.folder)
+            .map(|(item, _)| (null_terminated(item.name.as_ref()), item.folder))
+            .collect()
+    } else if let Some(zip) = zipped::opened(path) {
         let (nodes, _) = zipped::list(&zip.archive, &zip.inner, false).map_err(std::io::Error::other)?;
         nodes
             .into_iter()

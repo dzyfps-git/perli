@@ -3,6 +3,7 @@
 
 mod archive;
 mod bin;
+mod cloud;
 mod edits;
 mod incoming;
 mod names;
@@ -453,6 +454,9 @@ impl<'a> Run<'a> {
 
     fn rename(&mut self, path: &Path, name: &str) -> Flow {
         self.add_total(1, 0);
+        if crate::remote::is_remote(path) {
+            return self.cloud_moves(vec![(path.to_path_buf(), path.with_file_name(name))]);
+        }
         self.rename_to(path, &path.with_file_name(name), true)?;
         self.step(1, 0);
         Ok(())
@@ -477,6 +481,9 @@ impl<'a> Run<'a> {
     }
 
     fn new_item(&mut self, folder: &Path, directory: bool) -> Flow {
+        if crate::remote::is_remote(folder) {
+            return self.cloud_new(folder, directory);
+        }
         self.add_total(1, 0);
         let target = names::new_item(folder, directory);
         let elevated = Elevated::New {
@@ -548,6 +555,9 @@ impl<'a> Run<'a> {
     }
 
     fn shortcuts(&mut self, sources: &[PathBuf], folder: &Path) -> Flow {
+        if crate::remote::is_remote(folder) {
+            return self.refuse(folder, crate::remote::ON_THIS_PC);
+        }
         self.add_total(sources.len() as u64, 0);
         for source in sources {
             // A drive has no name of its own to go by.

@@ -139,6 +139,8 @@ pub fn limit() -> Option<u64> {
 impl Run<'_> {
     /// Puts items back where they came from, with the usual conflict answers.
     pub(super) fn restore(&mut self, items: Vec<(PathBuf, PathBuf)>) -> Flow {
+        let (cloud, items): (Vec<_>, Vec<_>) = items.into_iter().partition(|(item, _)| super::cloud::is_cloud_token(item));
+        self.cloud_restore(cloud)?;
         let mark = self.done.len();
         let moved = self.move_all(items.clone());
         for record in &mut self.done[mark..] {
