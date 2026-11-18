@@ -1387,6 +1387,8 @@ export interface SongInfo {
   longest: number;
   /** When the last note ends, in seconds. 0 for a song with no notes. */
   end: number;
+  /** Notes past what fits in the memory free, which still play but don't show. */
+  leftOut: number;
   overview: Overview;
   /** The notes that may sound from `from` to `to` seconds, in order of start. A big song has
    *  millions, so they come a stretch at a time. */

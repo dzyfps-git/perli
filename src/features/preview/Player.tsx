@@ -617,6 +617,9 @@ export function Player(live: PlayerProps) {
       <Show when={subtitle()}>
         <div class="player-sub">{subtitle()}</div>
       </Show>
+      <Show when={song()?.leftOut}>
+        {(count) => <div class="player-sub">{`${count().toLocaleString()} notes play but don't show, as there isn't the memory free for them`}</div>}
+      </Show>
       <Show
         when={midi && song()?.channels.length}
         fallback={
