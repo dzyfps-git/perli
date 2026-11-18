@@ -98,7 +98,8 @@ fn opens_another(path: &Path, name: &str, password: &str) -> bool {
 }
 
 /// One entry's data, opened with the password if it has one. Zstandard, which the zip crate reads
-/// only through the C zstd library, is read here through ruzstd and checked against its CRC.
+/// only through the C zstd library, is read here through ruzstd and checked against its CRC, and a
+/// locked one is unlocked here first.
 pub(crate) fn data<'a>(zip: &'a mut Zip, index: usize, password: Option<&str>) -> Result<Box<dyn Read + 'a>, ZipError> {
     let (method, locked) = zip.by_index_data(index).map(|entry| (entry.compression(), entry.encrypted()))?;
     if method != zip::CompressionMethod::ZSTD {
@@ -108,13 +109,15 @@ pub(crate) fn data<'a>(zip: &'a mut Zip, index: usize, password: Option<&str>) -
         }?;
         return Ok(Box::new(file));
     }
-    // ponytail: a locked Zstandard file would need the zip crate's own zstd and its C library.
-    // No common tool writes one; read it through that crate if one turns up.
-    if locked {
-        return Err(ZipError::UnsupportedArchive("Perli can't read a locked file squeezed with Zstandard"));
-    }
     let raw = zip.by_index_raw(index)?;
     let want = raw.crc32();
+    if locked {
+        let password = password.ok_or(ZipError::UnsupportedArchive(ZipError::PASSWORD_REQUIRED))?;
+        let (extra, length, time) = (raw.extra_data().unwrap_or_default(), raw.compressed_size(), raw.last_modified().map_or(0, |time| time.timepart()));
+        let (squeezed, keeps_crc) = crate::unlock::unlocked(raw, length, &extra, password.as_bytes(), want, time)?;
+        let from = packs::Zstd::new(std::io::BufReader::new(squeezed));
+        return Ok(if keeps_crc { Box::new(Checked { from, sum: flate2::Crc::new(), want }) } else { Box::new(from) });
+    }
     Ok(Box::new(Checked { from: packs::Zstd::new(std::io::BufReader::new(raw)), sum: flate2::Crc::new(), want }))
 }
 
@@ -1155,6 +1158,42 @@ pub(crate) mod tests {
         }
         std::fs::write(&path, bytes).unwrap();
         path
+    }
+
+    #[test]
+    fn a_locked_zstandard_file_reads_with_its_password() {
+        use ruzstd::encoding::{compress_to_vec, CompressionLevel};
+        let words = "locked and squeezed, ".repeat(40);
+        let squeezed = compress_to_vec(words.as_bytes(), CompressionLevel::Fastest);
+        let path = std::env::temp_dir().join(format!("perli-inside-{}-locked-zstd.zip", std::process::id()));
+        let mut zip = ZipWriter::new(File::create(&path).unwrap());
+        let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored).with_aes_encryption(zip::AesMode::Aes256, "pw");
+        zip.start_file("a.txt", options).unwrap();
+        zip.write_all(&squeezed).unwrap();
+        zip.finish().unwrap();
+        // Marked as Zstandard in the AES field, with the file's own size and CRC.
+        let mut bytes = std::fs::read(&path).unwrap();
+        let mut crc = flate2::Crc::new();
+        crc.update(words.as_bytes());
+        let central = bytes.windows(4).position(|four| four == b"PK\x01\x02").unwrap();
+        for (at, sums) in [(0, 14), (central, 16)] {
+            if bytes[at + sums..at + sums + 4] != [0; 4] {
+                bytes[at + sums..at + sums + 4].copy_from_slice(&crc.sum().to_le_bytes());
+            }
+            bytes[at + sums + 8..at + sums + 12].copy_from_slice(&(words.len() as u32).to_le_bytes());
+        }
+        let fields: Vec<usize> = bytes.windows(4).enumerate().filter(|(_, four)| *four == [0x01, 0x99, 0x07, 0x00]).map(|(at, _)| at).collect();
+        assert_eq!(fields.len(), 2);
+        for at in fields {
+            bytes[at + 9..at + 11].copy_from_slice(&93u16.to_le_bytes());
+        }
+        std::fs::write(&path, bytes).unwrap();
+
+        assert_eq!(entries(&path).unwrap().entries[0].method.as_deref(), Some("Zstandard"));
+        assert_eq!(text(&path, "a.txt", Some("pw")).unwrap().as_deref(), Some(words.as_str()));
+        assert!(text(&path, "a.txt", Some("wrong")).is_err());
+        assert_eq!(test(&path, Some("pw")).unwrap(), Tested { sound: 1, damaged: vec![], locked: 0 });
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

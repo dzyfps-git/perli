@@ -25,6 +25,11 @@ sevenz-rust2 = { version = "0.25", default-features = false, features = ["aes256
 lzma-rust2 = { version = "0.25", default-features = false, features = ["std", "xz"] }
 bzip2 = "0.6"
 ruzstd = "0.9"
+# Already in through the zip crate; Perli unlocks a locked Zstandard entry with them itself.
+aes = "0.9"
+hmac = "0.13"
+pbkdf2 = "0.13"
+sha1 = "0.11"
 tar = "0.4"
 cab = "0.6"
 # `zip` leaves the backend open. This is the one already in the tree.

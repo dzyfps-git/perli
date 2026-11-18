@@ -41,6 +41,7 @@ mod tags;
 mod tearoff;
 mod templates;
 mod thumbs;
+mod unlock;
 mod watch;
 mod zipped;
 
