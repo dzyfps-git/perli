@@ -776,19 +776,19 @@ fn a_copy_lists_what_it_skipped_after_a_problem_for_a_later_try() {
     drop(held);
 }
 
-/// Takes away the user's right to list `folder` until dropped.
-struct Unlistable(PathBuf);
+/// Takes away one of the user's rights on `folder` until dropped, such as `RD` to list it.
+struct Denied(PathBuf);
 
-impl Unlistable {
-    fn new(folder: &Path) -> Self {
+impl Denied {
+    fn new(folder: &Path, right: &str) -> Self {
         let user = std::env::var("USERNAME").unwrap();
-        let denied = Command::new("icacls").arg(folder).args(["/deny", &format!("{user}:(RD)")]).output().unwrap();
+        let denied = Command::new("icacls").arg(folder).args(["/deny", &format!("{user}:({right})")]).output().unwrap();
         assert!(denied.status.success(), "{denied:?}");
         Self(folder.to_path_buf())
     }
 }
 
-impl Drop for Unlistable {
+impl Drop for Denied {
     fn drop(&mut self) {
         let user = std::env::var("USERNAME").unwrap();
         let _ = Command::new("icacls").arg(&self.0).args(["/remove:d", &user]).output();
@@ -801,7 +801,7 @@ fn a_folder_that_cant_be_listed_is_listed_as_skipped() {
     sandbox.file(r"from\tree\fine.txt", "y");
     let closed = sandbox.folder(r"from\tree\closed");
     let to = sandbox.folder("to");
-    let held = Unlistable::new(&closed);
+    let held = Denied::new(&closed, "RD");
 
     let outcome = run_with(Job::Copy { sources: vec![sandbox.path(r"from\tree")], folder: to.clone() }, &Script::always(Answer::Skip));
     drop(held);
@@ -2221,6 +2221,37 @@ fn a_folder_template_lands_whole_with_its_names_filled_in_and_undo_takes_it_all(
     let undone = undo(outcome);
     assert!(!made.exists());
     purge(&undone);
+}
+
+/// Windows copies a part that needs admin rights as it finds it, so it gets one with the names
+/// filled in. Nothing here runs what was handed over, which would ask UAC for real.
+#[test]
+fn a_folder_template_handed_over_for_admin_rights_keeps_its_names_filled_in() {
+    let sandbox = Sandbox::new();
+    let folder = sandbox.folder("here");
+    let source = sandbox.folder("Trip {date}");
+    fs::create_dir_all(source.join("{name} photos")).unwrap();
+    fs::write(source.join("{name} photos").join("plan {date}.txt"), "plan").unwrap();
+    let tokens = vec![("{date}".to_string(), "2026-03-05".to_string()), ("{name}".to_string(), "Rome".to_string())];
+    let closed = Denied::new(&folder, "AD");
+    let script = Script::answering(&[Answer::Elevate]);
+    let control = Arc::new(Control::default());
+    let mut run = Run::new(&script, &control);
+    let target = folder.join("Trip 2026-03-05");
+
+    assert!(run.new_tree(&source, target.clone(), tokens).is_ok());
+
+    let [Elevated::Copy { source: staged, target: handed, .. }] = run.elevated.as_slice() else {
+        panic!("the folder goes to Windows whole");
+    };
+    assert_eq!(handed, &target);
+    assert_eq!(staged.file_name(), target.file_name());
+    assert_eq!(read(&staged.join("Rome photos").join("plan 2026-03-05.txt")), "plan");
+    let staged = staged.clone();
+    run.unstage();
+    assert!(!staged.exists(), "the filled-in copy goes with the job");
+    assert!(source.join("{name} photos").exists(), "the template stays as it is");
+    drop(closed);
 }
 
 /// The file a shortcut opens, by name, because the shell spells out a temp folder in 8.3 form.

@@ -371,6 +371,9 @@ struct Run<'a> {
     tally: (u64, u64),
     /// Filled in on the names a folder template copies, such as `{date}`. Empty for any other copy.
     tokens: Vec<(String, String)>,
+    /// Temp folders holding template parts with their names filled in, for Windows to copy with
+    /// admin rights. They go once the job ends.
+    staged: Vec<PathBuf>,
 }
 
 impl<'a> Run<'a> {
@@ -391,6 +394,13 @@ impl<'a> Run<'a> {
             temp_folders: HashSet::new(),
             tally: (0, 0),
             tokens: Vec::new(),
+            staged: Vec::new(),
+        }
+    }
+
+    fn unstage(&mut self) {
+        for stage in self.staged.drain(..) {
+            let _ = std::fs::remove_dir_all(stage);
         }
     }
 
@@ -832,6 +842,7 @@ pub fn run(job: Job, host: &dyn Host, control: &Arc<Control>) -> Outcome {
     // A restore or an undo lists what it skipped, but has no "try again" of its own.
     let retries = matches!(job, Job::Copy { .. } | Job::Move { .. });
     let worked = run.job(job).and_then(|()| run.finish_elevated());
+    run.unstage();
     let mut outcome = run.finish(worked.is_err() || control.cancelled());
     outcome.retries = retries;
     outcome
