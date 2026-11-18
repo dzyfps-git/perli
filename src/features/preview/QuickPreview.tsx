@@ -49,6 +49,7 @@ import { typeText } from "../filelist/typeNames";
 import type { FolderView } from "../navigation/folderView";
 import { archiveKind, isArchiveName, join, parentOf, resolveRelative } from "../navigation/path";
 import { languageOf } from "./highlight";
+import { sameFile } from "./reshow";
 import { tableDelimiter } from "./table";
 import { neighbours, pictureKeep, previewSize, setNeighbours, setPreviewSize } from "./viewerPrefs";
 import { previewWidth } from "../filelist/prefs";
@@ -104,6 +105,12 @@ const PictureView = lazy(() => import("./PictureView").then((module) => ({ defau
 const DatabaseView = lazy(() => import("./DatabaseView").then((module) => ({ default: module.DatabaseView })));
 const ParquetView = lazy(() => import("./ParquetView").then((module) => ({ default: module.ParquetView })));
 const FontView = lazy(() => import("./FontView").then((module) => ({ default: module.FontView })));
+/**
+ * Views that read by path, or by what they opened at the start, so they outlive the folder's rows.
+ * ponytail: the others read by the rows they were shown from, which a reload drops, so they open
+ * afresh; they could stay too if each kept its place up to date.
+ */
+const KEPT_ACROSS_RELOADS = new Set(["mail", "pdf"]);
 const MailView = lazy(() => import("./MailView").then((module) => ({ default: module.MailView })));
 const PdfView = lazy(() => import("./PdfView").then((module) => ({ default: module.PdfView })));
 const VideoView = lazy(() => import("./VideoView").then((module) => ({ default: module.VideoView })));
@@ -214,7 +221,8 @@ export function QuickPreview(props: {
 
   const folderOf = (item: Row) => item.location || props.at.folder;
   const pathOf = (item: Row) => join(folderOf(item), item.name);
-  async function show(at: number) {
+  /** Shows the row at `at`. A folder reload that leaves the same mail or PDF there keeps its view, unless `fresh`. */
+  async function show(at: number, fresh = false) {
     const mine = ++ticket;
     setFailure(undefined);
     setFetching(false);
@@ -223,6 +231,8 @@ export function QuickPreview(props: {
     try {
       const [found] = await fetchRows(view, snapshot, at, 1);
       if (mine !== ticket) return;
+      // Left alone, even by a new row object, which the views read: a filled form and a note stay.
+      if (!fresh && !hold && KEPT_ACROSS_RELOADS.has(shown()?.kind ?? "") && sameFile(row(), found, pathOf)) return;
       const held = hold && found && row() && pathOf(found) === pathOf(row()!) ? hold : undefined;
       setRow(found);
       if (!held) setShown(undefined);
@@ -248,7 +258,7 @@ export function QuickPreview(props: {
     try {
       await keepOnDevice({ view, request: shot, rows: [at] }, true);
       for (let tries = 0; tries < FETCH_TRIES && mine === ticket; tries++) {
-        if ((await previewRow(view, shot, at)).kind !== "cloud") return void (mine === ticket && show(at));
+        if ((await previewRow(view, shot, at)).kind !== "cloud") return void (mine === ticket && show(at, true));
         await new Promise((done) => setTimeout(done, FETCH_POLL_MS));
       }
       if (mine === ticket) setFailure("It is still downloading. Try again in a moment.");
@@ -278,7 +288,7 @@ export function QuickPreview(props: {
         return !!end && !end.cancelled && end.failed.length === 0;
       },
       hold: (handler) => (hold = handler),
-      refresh: () => void show(index()),
+      refresh: () => void show(index(), true),
     };
   }
 
@@ -323,7 +333,6 @@ export function QuickPreview(props: {
 
   /** Attachments land beside the mail, or in a folder picked for them, as one job with an Undo. */
   function mail(item: Row, preview: Mail): MailViewProps {
-    const { view } = props.at;
     const path = pathOf(item);
     const folder = folderOf(item);
     return {
@@ -335,7 +344,8 @@ export function QuickPreview(props: {
         const title = only === undefined ? "Save attachments to" : "Save attachment to";
         const into = picker ? (await picker.pick({ mode: "folder", title, purpose: "folders", start: folder }))?.path : folder;
         if (!into) return false;
-        const end = await runJob({ kind: "saveAttachments", path: from, folder: into, only }, view);
+        // No view to select what lands: the preview follows the selection, and must stay on the mail.
+        const end = await runJob({ kind: "saveAttachments", path: from, folder: into, only });
         return !!end && !end.cancelled && end.failed.length === 0;
       },
       keys: (handler) => (viewKeys = handler),
