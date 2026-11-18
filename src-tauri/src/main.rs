@@ -41,6 +41,7 @@ mod tables;
 mod tags;
 mod tearoff;
 mod templates;
+mod sync;
 mod thumbs;
 mod unlock;
 mod watch;
@@ -306,6 +307,12 @@ enum Task {
         keep: picture::Keep,
     },
     Wallpaper { path: PathBuf },
+    /// `scheduled` runs only if it is due.
+    Sync {
+        id: String,
+        #[serde(default)]
+        scheduled: bool,
+    },
 }
 
 impl Task {
@@ -489,6 +496,10 @@ impl Task {
                 refuse_zipped(std::slice::from_ref(&path))?;
                 Job::Wallpaper { picture: path }
             }
+            Self::Sync { id, scheduled } => match sync::take_run(&id, scheduled)? {
+                Some(pair) => Job::Sync { pair },
+                None => return Ok(None),
+            },
         };
         Ok(Some(job.into()))
     }
@@ -1779,10 +1790,25 @@ async fn bring_back(path: PathBuf, version: String) -> Result<(), String> {
     blocking(move || remote::bring_back(&path, &version)).await
 }
 
-/// Keeps cloud files on this PC, or lets them go back to the cloud alone.
 #[tauri::command]
-async fn keep_offline(paths: Vec<PathBuf>, keep: bool) -> Result<(), String> {
-    blocking(move || remote::keep_offline(&paths, keep)).await
+fn sync_pairs() -> Vec<sync::Pair> {
+    sync::pairs()
+}
+
+#[tauri::command]
+fn save_sync_pair(pair: sync::Pair) -> Result<sync::Pair, String> {
+    sync::save_pair(pair)
+}
+
+#[tauri::command]
+fn remove_sync_pair(id: String) -> Result<(), String> {
+    sync::remove_pair(&id)
+}
+
+/// What a run of the pair would do now, for the look before its first run.
+#[tauri::command]
+async fn sync_preview(pair: sync::Pair) -> Result<sync::Preview, String> {
+    blocking(move || sync::preview(&pair)).await
 }
 
 /// A picture a Markdown file points to, beside it on this PC.
@@ -2347,6 +2373,10 @@ async fn restore_tagged(files: Vec<(PathBuf, Vec<u32>)>) -> Result<usize, String
 #[tauri::command]
 async fn keep_on_device(selection: Selection, keep: bool, views: State<'_, Views>) -> Result<(), String> {
     let paths = views.read(&selection, folder::Listing::paths)?;
+    // Perli's own cloud places keep a copy here; a sync app's folders ask Windows.
+    if paths.iter().any(|path| remote::is_remote(path)) {
+        return blocking(move || remote::keep_offline(&paths, keep)).await;
+    }
     off_main(move || props::keep_on_device(&paths, keep)).await
 }
 
@@ -2878,7 +2908,10 @@ fn main() {
             share_link,
             cloud_versions,
             bring_back,
-            keep_offline,
+            sync_pairs,
+            save_sync_pair,
+            remove_sync_pair,
+            sync_preview,
             asks_waiting,
             save_session,
             forget_session,

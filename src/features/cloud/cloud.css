@@ -93,6 +93,12 @@
   animation: cloud-in var(--motion-slide) both;
 }
 
+.sync-lines {
+  max-height: 220px;
+  font-size: 0.9em;
+  overflow-wrap: anywhere;
+}
+
 .cloud-version-size,
 .cloud-settings-name {
   flex: 1;

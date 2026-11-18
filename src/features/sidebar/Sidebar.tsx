@@ -28,6 +28,8 @@ import { BIN_PATH, samePath } from "../navigation/path";
 import { movedTo, placeLabel } from "./placeLists";
 import { KIND_LABELS, placePath } from "../cloud/cloud";
 import { cloudPlaceList, readCloudPlaces } from "../cloud/cloudState";
+import { readSyncPairs, syncLabel, syncPairList } from "../sync/SyncSheet";
+import type { SyncPair } from "../../api";
 import { RecentFlyout } from "./RecentFlyout";
 import { showsSmart, type SmartFolder } from "../smart/smartList";
 import {
@@ -67,6 +69,7 @@ const ICON_NETWORK = "";
 const ICON_CLOUD = "";
 const ICON_LOCK = "\uE72E";
 const ICON_ADD = "\uE710";
+const ICON_SYNC = "\uE895";
 
 const FULL_SHARE = 0.9;
 /** How long a drive's bar takes to make its wave. */
@@ -230,6 +233,9 @@ export function Sidebar(props: {
   onEject: (root: string) => void;
   /** Opens the sheet that adds a cloud place of Perli's own. */
   onAddCloud: () => void;
+  onSync: (pair: SyncPair) => void;
+  onSyncMenu: (event: MouseEvent, pair: SyncPair) => void;
+  onNewSync: () => void;
   report: (failure: unknown) => void;
 }) {
   const [places, setPlaces] = createSignal<Places>();
@@ -368,6 +374,7 @@ export function Sidebar(props: {
   onMount(() => {
     readPlaces();
     void readCloudPlaces();
+    void readSyncPairs();
     readRecent();
     readBin();
     window.addEventListener("focus", onFocus);
@@ -651,6 +658,24 @@ export function Sidebar(props: {
             onMenu={() => undefined}
             onOpen={props.onAddCloud}
           />
+        </Section>
+      </Show>
+      <Show when={syncPairList().length}>
+        <Section id="sync" label="Sync">
+          <For each={syncPairList()}>
+            {(pair) => (
+              <Place
+                view={props.view}
+                path=""
+                label={syncLabel(pair)}
+                icon={ICON_SYNC}
+                about={`${pair.mirror ? "Mirror" : "Update"} from ${pair.from} to ${pair.to}${pair.ran ? `, last run ${new Date(pair.ran).toLocaleString()}` : ", not run yet"}`}
+                onOpen={() => props.onSync(pair)}
+                onMenu={(event) => props.onSyncMenu(event, pair)}
+              />
+            )}
+          </For>
+          <Place view={props.view} path="" label="New sync" icon={ICON_ADD} onMenu={() => undefined} onOpen={props.onNewSync} />
         </Section>
       </Show>
       <Show when={shownServers().length}>

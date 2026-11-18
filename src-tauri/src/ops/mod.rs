@@ -83,6 +83,8 @@ pub enum Job {
     Attachments { mail: PathBuf, folder: PathBuf, only: Option<usize> },
     /// One after another under one card, such as rows of two archives and a folder copied at once.
     Several { jobs: Vec<Job> },
+    /// A run of a sync pair: the two sides are compared first, then what differs goes over.
+    Sync { pair: crate::sync::Pair },
 }
 
 /// How hard a new archive squeezes its files.
@@ -442,6 +444,13 @@ impl<'a> Run<'a> {
             Job::Wallpaper { picture } => self.set_wallpaper(&picture),
             // ponytail: each part has the same share of the bar, as a part's total is known only once it
             // starts; weigh them by size if one dwarfs the others.
+            Job::Sync { pair } => {
+                let compared = self.attempt(&pair.from, None, |_| crate::sync::preview(&pair).map_err(|message| Error::new(E_FAIL, message.as_str())))?;
+                match compared.and_then(crate::sync::job) {
+                    Some(job) => self.job(job),
+                    None => Ok(()),
+                }
+            }
             Job::Several { jobs } => {
                 let parts = jobs.len() as u32;
                 jobs.into_iter().enumerate().try_for_each(|(part, job)| {

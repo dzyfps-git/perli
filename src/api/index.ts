@@ -240,7 +240,9 @@ export type Task =
   | { kind: "savePdf"; path: string; staged: number; seen?: string }
   /** Pictures by path, from a preview, or the selected rows. */
   | { kind: "picture"; paths?: string[]; selection?: Selection; edit: PictureEdit; keep?: PictureKeep }
-  | { kind: "wallpaper"; path: string };
+  | { kind: "wallpaper"; path: string }
+  /** `scheduled` runs only if it is due, so of several windows only one runs it. */
+  | { kind: "sync"; id: string; scheduled?: boolean };
 
 /** What a copy keeps of a photo's facts. A turn saved into the file keeps them all. */
 export interface PictureKeep {
@@ -513,6 +515,35 @@ export interface CloudVersion {
   /** FILETIME ticks. */
   modified: number;
 }
+
+/** Two folders kept alike from one side, either of which may be in the cloud. */
+export interface SyncPair {
+  /** Empty before it is saved. */
+  id: string;
+  from: string;
+  to: string;
+  /** Also takes away what `from` no longer has. */
+  mirror: boolean;
+  /** Names left alone on both sides, as `*.tmp; node_modules`. */
+  skip: string;
+  /** Minutes between runs while Perli is open. 0 is never. */
+  every: number;
+  /** When it last ran, in ms since 1970. 0 is never. */
+  ran: number;
+}
+
+export interface SyncPreview {
+  /** Each file or folder that goes over, with the folder it lands in. */
+  copies: [string, string][];
+  /** What goes to a bin first. */
+  removes: string[];
+  bytes: number;
+}
+
+export const syncPairs = () => invoke<SyncPair[]>("sync_pairs");
+export const saveSyncPair = (pair: SyncPair) => invoke<SyncPair>("save_sync_pair", { pair });
+export const removeSyncPair = (id: string) => invoke<void>("remove_sync_pair", { id });
+export const syncPreview = (pair: SyncPair) => invoke<SyncPreview>("sync_preview", { pair });
 
 export const cloudPlaces = () => invoke<CloudPlace[]>("cloud_places");
 export const addS3 = (setup: S3Setup, secret: string, name: string) => invoke<CloudPlace>("add_s3", { setup, secret, name });

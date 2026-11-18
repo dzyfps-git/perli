@@ -65,8 +65,19 @@ import {
   removePlace,
   shareLink,
   type CloudPlace,
+  type SyncPair,
 } from "./api";
 import { AddPlace, Versions } from "./features/cloud/CloudDialogs";
+import {
+  closeSync,
+  editingSync,
+  editSync,
+  forgetSync,
+  newSync,
+  readSyncPairs,
+  startSyncTimer,
+  SyncSheet,
+} from "./features/sync/SyncSheet";
 import { isPerliCloud, isPlaceRoot, placeName, placePath } from "./features/cloud/cloud";
 import { addingPlace, placeOf, readCloudPlaces, setAddingPlace } from "./features/cloud/cloudState";
 import { createFileActions } from "./features/fileops/actions";
@@ -802,6 +813,7 @@ export function App() {
             { label: "Search here", action: () => searchIn(view, path) },
             { label: "Find copies here", action: async () => void ((await view.open(path)) && findCopies(view)) },
             { label: "Copy path", action: () => quietly(copyFolderPath(path)) },
+            { label: "Sync this folder…", action: () => newSync(path) },
             {
               label: "New tabs open here",
               checked: newTabOpens() === "folder" && samePath(newTabFolder() ?? "", path),
@@ -822,6 +834,26 @@ export function App() {
     setMenu({ x: event.clientX, y: event.clientY, items });
   }
 
+  /** A sync runs as a job. One the timer asks for runs only if it is due. */
+  const runSync = (id: string, scheduled = false) =>
+    startJob({ kind: "sync", id, scheduled }, tabs.activeView().id)
+      .then(readSyncPairs)
+      .catch(scheduled ? console.error : jobs.report);
+  startSyncTimer(runSync);
+
+  function showSyncMenu(event: MouseEvent, pair: SyncPair) {
+    event.preventDefault();
+    const items: MenuItem[] = [
+      { label: "Run now", action: () => (pair.mirror ? editSync(pair) : runSync(pair.id)) },
+      { label: "Look first…", action: () => editSync({ ...pair, ran: 0 }) },
+      { label: "Edit…", action: () => editSync(pair) },
+      { label: "Open the source", divider: true, action: () => tabs.activeView().open(pair.from) },
+      { label: "Open the target", action: () => tabs.activeView().open(pair.to) },
+      { label: "Remove sync", divider: true, action: () => quietly(forgetSync(pair)) },
+    ];
+    setMenu({ x: event.clientX, y: event.clientY, items });
+  }
+
   /** A cloud place of Perli's own, or a folder in one. Windows knows nothing of them. */
   function showCloudFolderMenu(event: MouseEvent, view: FolderView, path: string) {
     const place = placeOf(path);
@@ -829,7 +861,12 @@ export function App() {
       { label: "Open", action: () => view.open(path) },
       { label: "Open in new tab", action: () => tabs.add([path]) },
       { label: "Open to side", action: () => tabs.openToSide(path) },
-      ...(placeName(path) ? [{ label: "Search here", action: () => searchIn(view, path) }] : []),
+      ...(placeName(path)
+        ? [
+            { label: "Search here", action: () => searchIn(view, path) },
+            { label: "Sync this folder…", action: () => newSync(path) },
+          ]
+        : []),
       ...(place && isPlaceRoot(path)
         ? [
             {
@@ -2640,6 +2677,9 @@ export function App() {
           onPlaces={setPlaces}
           onEject={jobs.eject}
           onAddCloud={() => setAddingPlace(true)}
+          onSync={(pair) => (pair.ran === 0 || pair.mirror ? editSync(pair) : runSync(pair.id))}
+          onSyncMenu={showSyncMenu}
+          onNewSync={() => newSync(tabs.activeView().folder()?.path ?? "")}
           report={jobs.report}
         />
         <MiniPlayer onOpen={() => void backToPlayer().catch(jobs.report)} />
@@ -2853,6 +2893,9 @@ export function App() {
             void tabs.activeView().open(placePath(place));
           }}
         />
+      </Show>
+      <Show when={editingSync()} keyed>
+        {(pair) => <SyncSheet pair={pair} onRun={(saved) => runSync(saved.id)} onClose={closeSync} />}
       </Show>
       <Show when={versioning()} keyed>
         {(ask) => <Versions path={ask.path} onBack={() => void ask.view.reload()} onClose={() => setVersioning(undefined)} />}

@@ -3,7 +3,7 @@ import { saved, stored } from "../filelist/prefs";
 import { cleanSmart, type SmartFolder } from "../smart/smartList";
 import { groupsOf, handedFrom, holds, lookIn, lookKey, moved, savedPaths, toggled, withGroup, withLook, type Groups, type Look, type Looks } from "./placeLists";
 
-export type SectionId = "pinned" | "places" | "smart" | "recent" | "tags" | "cloud" | "network" | "drives";
+export type SectionId = "pinned" | "places" | "smart" | "recent" | "tags" | "cloud" | "sync" | "network" | "drives";
 
 export const SECTIONS: { id: SectionId; label: string }[] = [
   { id: "pinned", label: "Pinned" },
@@ -12,6 +12,7 @@ export const SECTIONS: { id: SectionId; label: string }[] = [
   { id: "recent", label: "Recent" },
   { id: "tags", label: "Tags" },
   { id: "cloud", label: "Cloud" },
+  { id: "sync", label: "Sync" },
   { id: "network", label: "Network" },
   { id: "drives", label: "Drives" },
 ];
