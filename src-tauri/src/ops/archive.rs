@@ -183,7 +183,7 @@ impl<R: Read> Read for Counting<'_, '_, R> {
     }
 }
 
-/// A file that failed partway into a 7z, and why.
+/// A file that failed partway into a 7z or a TAR, and why.
 #[derive(Debug)]
 struct SevenSource(PathBuf, io::Error);
 
@@ -246,7 +246,7 @@ impl Run<'_> {
             sys::fill_new(&temp, |file| match format {
                 ArchiveFormat::Zip => run.write_archive(file, &nodes, files),
                 ArchiveFormat::SevenZ => run.write_seven(file, &nodes, level, password),
-                ArchiveFormat::Tar => run.write_tar(BufWriter::with_capacity(CHUNK, file), &nodes)?.flush(),
+                ArchiveFormat::Tar => run.write_tar_file(file, &nodes, None),
                 ArchiveFormat::TarGz => {
                     let squeeze = match level {
                         ZipLevel::Store => flate2::Compression::none(),
@@ -254,8 +254,7 @@ impl Run<'_> {
                         ZipLevel::Normal => flate2::Compression::default(),
                         ZipLevel::Best => flate2::Compression::best(),
                     };
-                    let gzip = flate2::write::GzEncoder::new(BufWriter::with_capacity(CHUNK, file), squeeze);
-                    run.write_tar(gzip, &nodes)?.finish()?.flush()
+                    run.write_tar_file(file, &nodes, Some(squeeze))
                 }
             })
         })?;
@@ -302,17 +301,17 @@ impl Run<'_> {
         Ok(opened)
     }
 
-    /// A 7z of `nodes`, each file packed on its own, so one can be read without the others. 7z's
-    /// writer can't take back what it wrote, so a file that fails partway starts the archive
-    /// again: without it for a skip, as a ZIP leaves it out, or with it once more for a retry.
-    fn write_seven(&mut self, file: &mut File, nodes: &[Node], level: ZipLevel, password: Option<&str>) -> io::Result<()> {
+    /// Writes an archive with `once` until no file fails partway. Neither 7z's writer nor TAR's
+    /// can take back what it wrote, so a file that fails partway starts the archive again:
+    /// without it for a skip, as a ZIP leaves it out, or with it once more for a retry.
+    fn again_without(&mut self, file: &mut File, mut once: impl FnMut(&mut Self, &mut File, &HashSet<PathBuf>) -> io::Result<()>) -> io::Result<()> {
         let (items, bytes) = (self.progress.items, self.progress.bytes);
         let mut left_out = HashSet::new();
         loop {
             (self.progress.items, self.progress.bytes) = (items, bytes);
             file.rewind()?;
             file.set_len(0)?;
-            let Err(error) = self.write_seven_once(file, nodes, level, password, &left_out) else { return Ok(()) };
+            let Err(error) = once(self, file, &left_out) else { return Ok(()) };
             if !error.get_ref().is_some_and(|inner| inner.is::<SevenSource>()) {
                 return Err(error);
             }
@@ -321,6 +320,22 @@ impl Run<'_> {
                 left_out.insert(path);
             }
         }
+    }
+
+    /// A 7z of `nodes`, each file packed on its own, so one can be read without the others.
+    fn write_seven(&mut self, file: &mut File, nodes: &[Node], level: ZipLevel, password: Option<&str>) -> io::Result<()> {
+        self.again_without(file, |run, file, left_out| run.write_seven_once(file, nodes, level, password, left_out))
+    }
+
+    /// A TAR of `nodes` in `file`, gzipped by `squeeze` if given.
+    fn write_tar_file(&mut self, file: &mut File, nodes: &[Node], squeeze: Option<flate2::Compression>) -> io::Result<()> {
+        self.again_without(file, |run, file, left_out| match squeeze {
+            None => run.write_tar(BufWriter::with_capacity(CHUNK, &mut *file), nodes, left_out)?.flush(),
+            Some(squeeze) => {
+                let gzip = flate2::write::GzEncoder::new(BufWriter::with_capacity(CHUNK, &mut *file), squeeze);
+                run.write_tar(gzip, nodes, left_out)?.finish()?.flush()
+            }
+        })
     }
 
     fn write_seven_once(&mut self, file: &mut File, nodes: &[Node], level: ZipLevel, password: Option<&str>, left_out: &HashSet<PathBuf>) -> io::Result<()> {
@@ -385,15 +400,15 @@ impl Run<'_> {
     }
 
     /// A TAR of `nodes` written to `to`, which comes back to be finished.
-    fn write_tar<W: Write>(&mut self, to: W, nodes: &[Node]) -> io::Result<W> {
+    fn write_tar<W: Write>(&mut self, to: W, nodes: &[Node], left_out: &HashSet<PathBuf>) -> io::Result<W> {
         let mut tar = tar::Builder::new(to);
         for (node, name) in self.tops_of(nodes).map_err(interrupted)? {
-            self.add_tar(&mut tar, node, name)?;
+            self.add_tar(&mut tar, node, name, left_out)?;
         }
         tar.into_inner()
     }
 
-    fn add_tar<W: Write>(&mut self, tar: &mut tar::Builder<W>, node: &Node, name: String) -> io::Result<()> {
+    fn add_tar<W: Write>(&mut self, tar: &mut tar::Builder<W>, node: &Node, name: String, left_out: &HashSet<PathBuf>) -> io::Result<()> {
         self.check().map_err(interrupted)?;
         if node.stat.is_link() {
             self.step(1, 0);
@@ -403,13 +418,24 @@ impl Run<'_> {
         header.set_mtime(unix_seconds(node.stat.modified));
         self.progress.current = node.path.to_string_lossy().into_owned();
         let Some(children) = &node.children else {
+            if left_out.contains(&node.path) {
+                self.progress.bytes += node.bytes;
+                self.step(1, 0);
+                return Ok(());
+            }
             let Some(source) = self.source(node)? else { return Ok(()) };
             header.set_size(node.stat.size);
             header.set_mode(0o644);
             let base = self.progress.bytes;
+            let mut failed = None;
+            let noted = Noted { from: source, failed: &mut failed };
             // A file that grew since it was measured goes in at the size its header says.
-            let counted = BufReader::with_capacity(CHUNK, Counting { run: self, from: source, base, read: 0 }).take(node.stat.size);
-            tar.append_data(&mut header, &name, counted)?;
+            let counted = BufReader::with_capacity(CHUNK, Counting { run: self, from: noted, base, read: 0 }).take(node.stat.size);
+            let appended = tar.append_data(&mut header, &name, counted);
+            if let Some(cause) = failed {
+                return Err(io::Error::other(SevenSource(node.path.clone(), cause)));
+            }
+            appended?;
             self.progress.bytes = base + node.bytes;
             self.step(1, 0);
             return Ok(());
@@ -420,7 +446,7 @@ impl Run<'_> {
         tar.append_data(&mut header, format!("{name}/"), io::empty())?;
         self.step(1, 0);
         for child in children {
-            self.add_tar(tar, child, format!("{name}/{}", name_of(child)))?;
+            self.add_tar(tar, child, format!("{name}/{}", name_of(child)), left_out)?;
         }
         Ok(())
     }
