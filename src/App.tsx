@@ -232,6 +232,8 @@ import { Tooltip } from "./ui/Tooltip";
 import "./ui/controls.css";
 
 const SAVE_DELAY_MS = 300;
+/** Windows closed within this long of each other were closed together, as the taskbar's Close all windows does. */
+const CLOSE_TOGETHER_MS = 800;
 /** How long a folder bound for its own window waits to hear which file to select there. */
 const WINDOW_WAIT_MS = 600;
 /** How long a window opened for a folder takes the file named for it after. */
@@ -609,10 +611,16 @@ export function App() {
   /**
    * Browser-style: a window closed while others stay open is forgotten, kept a while to reopen
    * unless its tabs went to another window. The last one keeps its tabs for the next start, and a
-   * Windows restart, which closes no window, keeps them all.
+   * Windows restart, which closes no window, keeps them all. So do windows closed all at once:
+   * each hides and looks again a moment later, and one with no other left in sight was among them.
    */
   async function leaveSession() {
     if (!keepSession() || (await otherWindows()).length === 0) return;
+    if (!leftWindow()) {
+      await getCurrentWindow().hide();
+      await new Promise((done) => setTimeout(done, CLOSE_TOGETHER_MS));
+      if ((await otherWindows()).length === 0) return;
+    }
     // Nothing may be written once the file is gone, which would bring it back.
     setKeepSession(false);
     await flushSession();
