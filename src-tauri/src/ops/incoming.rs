@@ -11,10 +11,10 @@ use windows::Win32::Foundation::{E_ABORT, E_FAIL, S_OK};
 use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_DIRECTORY;
 use windows::Win32::System::Com::Marshal::CoMarshalInterThreadInterfaceInStream;
 use windows::Win32::System::Com::StructuredStorage::{
-    CoGetInterfaceAndReleaseStream, CreateILockBytesOnHGlobal, ILockBytes, IStorage, StgCreateDocfileOnILockBytes,
+    CoGetInterfaceAndReleaseStream, IStorage, StgCreateDocfile,
 };
 use windows::Win32::System::Com::{
-    IBindCtx, IDataObject, IStream, DVASPECT_CONTENT, FORMATETC, STATFLAG_NONAME, STATSTG, STGC_DEFAULT, STGM_CREATE,
+    IBindCtx, IDataObject, IStream, DVASPECT_CONTENT, FORMATETC, STGC_DEFAULT, STGM_CREATE,
     STGM_READWRITE, STGM_SHARE_EXCLUSIVE, STREAM_SEEK_SET, TYMED, TYMED_HGLOBAL, TYMED_ISTORAGE, TYMED_ISTREAM,
 };
 use windows::Win32::System::DataExchange::RegisterClipboardFormatW;
@@ -150,39 +150,48 @@ impl Read for Stream {
     }
 }
 
-/// A storage written out as a compound file, the way a `.msg` sits on disk, read back in pieces.
+/// A storage written out as a compound file in the temp folder, the way a `.msg` sits on disk, so
+/// a mail with big attachments never sits whole in memory. The file goes when this does.
 struct Docfile {
-    bytes: ILockBytes,
-    at: u64,
-    size: u64,
+    file: std::fs::File,
+    path: PathBuf,
 }
 
 impl Read for Docfile {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        let size = (buffer.len() as u64).min(self.size.saturating_sub(self.at)).min(u64::from(u32::MAX)) as u32;
-        if size == 0 {
-            return Ok(0);
-        }
-        let mut count = 0;
-        let read = unsafe { self.bytes.ReadAt(self.at, buffer.as_mut_ptr().cast(), size, Some(&raw mut count)) };
-        read.map_err(|error| io::Error::other(error.message()))?;
-        self.at += u64::from(count);
-        Ok(count as usize)
+        self.file.read(buffer)
     }
 }
 
+impl Drop for Docfile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// Where a dropped storage is written out, a name of its own each time.
+pub(crate) fn docfile_path() -> PathBuf {
+    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let next = NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    std::env::temp_dir().join(format!("perli-drop-{}-{next}.msg", std::process::id()))
+}
+
 /// Copies a whole storage, such as a mail classic Outlook drags, into a compound file of its own.
-// ponytail: the copy sits in memory until it lands; a temp docfile if mails with huge attachments strain it.
 fn docfile(storage: &IStorage) -> Result<Docfile> {
-    unsafe {
-        let bytes = CreateILockBytesOnHGlobal(None, true)?;
-        let copy = StgCreateDocfileOnILockBytes(&bytes, STGM_CREATE | STGM_READWRITE | STGM_SHARE_EXCLUSIVE, 0)?;
-        storage.CopyTo(None, None, &copy)?;
-        copy.Commit(STGC_DEFAULT.0 as u32)?;
-        drop(copy);
-        let mut stat = STATSTG::default();
-        bytes.Stat(&raw mut stat, STATFLAG_NONAME.0 as u32)?;
-        Ok(Docfile { bytes, at: 0, size: stat.cbSize })
+    let path = docfile_path();
+    let written = unsafe {
+        StgCreateDocfile(&windows::core::HSTRING::from(path.as_os_str()), STGM_CREATE | STGM_READWRITE | STGM_SHARE_EXCLUSIVE, None).and_then(|copy| {
+            storage.CopyTo(None, None, &copy)?;
+            copy.Commit(STGC_DEFAULT.0 as u32)
+        })
+    };
+    let opened = written.and_then(|()| std::fs::File::open(&path).map_err(|error| Error::new(E_FAIL, error.to_string().as_str())));
+    match opened {
+        Ok(file) => Ok(Docfile { file, path }),
+        Err(error) => {
+            let _ = std::fs::remove_file(&path);
+            Err(error)
+        }
     }
 }
 
