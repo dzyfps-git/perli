@@ -107,7 +107,9 @@ export function lookIn(looks: Looks, path: string): Look | undefined {
   const own = looks[lookKey(path)];
   if (own?.color !== undefined || own?.icon !== undefined) return own;
   const from = handedFrom(looks, path);
-  return from ? { ...own, color: looks[from].color, icon: looks[from].icon } : own;
+  if (from) return { ...own, color: looks[from].color, icon: looks[from].icon };
+  // Kept plain with nothing of its own is no look at all, so the folder shows as any other.
+  return own?.cover !== undefined ? own : undefined;
 }
 
 /** `path` taken out of `list` and put back at `index` of what is left, as a drag drops it. */

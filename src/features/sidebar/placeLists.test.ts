@@ -70,7 +70,8 @@ test("a folder kept plain takes no look from above, nor do the folders inside it
   looks = withLook(looks, "C:\\Work\\Old", { plain: true });
   assert.equal(handedFrom(looks, "C:\\Work\\New"), "c:\\work");
   assert.equal(handedFrom(looks, "C:\\Work\\Old"), undefined);
-  assert.deepEqual(lookIn(looks, "C:\\Work\\Old"), { plain: true });
+  assert.equal(lookIn(looks, "C:\\Work\\Old"), undefined, "plain with nothing of its own shows no look");
+  assert.deepEqual(lookIn(withLook(looks, "C:\\Work\\Old", { cover: "C:\\a.jpg" }), "C:\\Work\\Old"), { plain: true, cover: "C:\\a.jpg" }, "its own cover still shows");
   assert.equal(lookIn(looks, "C:\\Work\\Old\\Deep"), undefined, "the folders inside stay plain too");
   looks = withLook(looks, "C:\\Work\\Old", { color: 4, inside: true });
   assert.deepEqual(lookIn(looks, "C:\\Work\\Old\\Deep"), { color: 4, icon: undefined }, "a plain folder can still hand its own look down");
