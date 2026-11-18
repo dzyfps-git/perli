@@ -456,7 +456,16 @@ export function App() {
     return tab.panes().length > 1 ? [{ label: "Compare with other pane", checked: tab.comparing(), action: () => tab.setComparing(!tab.comparing()) }] : [];
   };
   /** `from` is the path crumb whose menu this is. */
-  const [menu, setMenu] = createSignal<{ x: number; y: number; above?: number; items: MenuItem[]; from?: string; mount?: HTMLElement }>();
+  const [menu, setMenu] = createSignal<{
+    x: number;
+    y: number;
+    above?: number;
+    items: MenuItem[];
+    from?: string;
+    mount?: HTMLElement;
+    /** Runs as the menu closes, picked from or not. */
+    closed?: () => void;
+  }>();
   /** The settings are a tab of their own: it can exist without being the one in front. */
   const [settingsOpen, setSettingsOpen] = createSignal(false);
   const [settingsShown, setSettingsShown] = createSignal(false);
@@ -615,7 +624,7 @@ export function App() {
   const dragListener = followFileDrag(
     tabs.allViews,
     jobs.report,
-    (x, y, items) => setMenu({ x, y, items }),
+    (x, y, items, closed) => setMenu({ x, y, items, closed }),
     dropNoted,
     (folder) => void tabs.active().active().open(folder),
     setDeleting,
@@ -744,6 +753,7 @@ export function App() {
   function closeMenu() {
     const from = menu()?.from;
     if (from) crumbClosed = { path: from, at: performance.now() };
+    menu()?.closed?.();
     setMenu(undefined);
   }
 

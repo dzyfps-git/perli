@@ -16,6 +16,8 @@ export interface DeleteRequest {
   /** Nothing is lost, so the confirm button isn't red. */
   safe?: boolean;
   confirm: () => void;
+  /** Runs when the user says no, by Cancel, Esc or closing. */
+  cancel?: () => void;
 }
 
 /** Cancel holds the focus, and the confirm button waits until the user can see what they would lose. */
@@ -34,7 +36,9 @@ export function ConfirmDelete(props: { request: DeleteRequest; onClose: () => vo
     return `${items}, ${formatSize(size.bytes)}. This can't be undone.`;
   }
 
+  let confirmed = false;
   function confirm() {
+    confirmed = true;
     close();
     props.request.confirm();
   }
@@ -49,7 +53,10 @@ export function ConfirmDelete(props: { request: DeleteRequest; onClose: () => vo
   });
 
   return (
-    <dialog ref={dialog} class="settings confirm" aria-label={props.request.title} onClose={props.onClose}>
+    <dialog ref={dialog} class="settings confirm" aria-label={props.request.title} onClose={() => {
+        if (!confirmed) props.request.cancel?.();
+        props.onClose();
+      }}>
       <h2>{props.request.title}</h2>
       <p class="confirm-summary">{summary()}</p>
       <div class="confirm-buttons">

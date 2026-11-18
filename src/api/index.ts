@@ -1102,6 +1102,9 @@ export const dropChoices = (folder: string) => invoke<DropAction[]>("drop_choice
 /** The count and size of the drop that waits for an answer. */
 export const measureDrop = (id: number) => invoke<Measured>("measure_drop", { id });
 
+/** Lets go of a drop the user said no to, so its source hears at once that nothing came of it. */
+export const forgetDrop = (id: number) => invoke<void>("forget_drop", { id });
+
 /** Starts dragging the selected files to any app. Ends when the user lets go. */
 export const startDrag = (selection: Selection) => invoke<void>("start_drag", { selection });
 

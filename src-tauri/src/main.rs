@@ -2438,6 +2438,12 @@ async fn measure_drop(id: u64, drags: State<'_, Arc<Drags>>) -> Result<Measured,
     measure(drags.waiting(id)).await
 }
 
+/// Lets go of a drop the user said no to: a Shift-drop's delete or the right drop's menu.
+#[tauri::command]
+fn forget_drop(id: u64, drags: State<'_, Arc<Drags>>) {
+    drags.forget(id);
+}
+
 /// Whether Space is held, for a drag resting on a folder to open it at once. A drag holds the
 /// mouse and keys while it runs, so the page hears no key of its own.
 #[tauri::command]
@@ -2909,6 +2915,7 @@ fn main() {
             stop_map,
             drop_choices,
             measure_drop,
+            forget_drop,
             own_templates,
             templates_folder,
             subfolders,

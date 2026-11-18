@@ -136,9 +136,13 @@ impl Drags {
         dropped.filter(|dropped| dropped.incoming.is_none()).map_or_else(Vec::new, |dropped| dropped.paths)
     }
 
+    /// Lets go of drop `id` when the user said no to it, so a source such as Outlook hears at once
+    /// that nothing came of it. A newer drop stays.
+    pub fn forget(&self, id: u64) {
+        self.dropped.lock().unwrap_or_else(PoisonError::into_inner).take_if(|dropped| dropped.id == id);
+    }
+
     /// What the last drop can do on `folder`, for the user to pick from.
-    // ponytail: a dismissed menu leaves the drop waiting until the next one replaces it, which
-    // only ever holds a list of paths or a source that gave up its data.
     pub fn choices(&self, folder: &Path) -> Vec<DropAction> {
         let dropped = self.dropped.lock().unwrap_or_else(PoisonError::into_inner);
         let Some(dropped) = dropped.as_ref() else {
@@ -675,6 +679,16 @@ mod tests {
         assert!(drags.waiting(1).is_empty(), "the ask can't count the newer drop");
         assert!(drags.job(1, Path::new(BIN_PATH), Some(DropAction::Delete)).is_none());
         assert_eq!(drags.waiting(2), newer, "the newer drop still waits for its own answer");
+    }
+
+    #[test]
+    fn a_drop_said_no_to_is_let_go_and_a_newer_one_stays() {
+        let drags = dropped(on_c());
+        drags.forget(2);
+        assert_eq!(drags.waiting(1), on_c(), "another drop's no leaves this one");
+        drags.forget(1);
+        assert!(drags.waiting(1).is_empty());
+        assert!(drags.job(1, Path::new(BIN_PATH), Some(DropAction::Delete)).is_none(), "nothing left to delete");
     }
 
     /// Drops `paths` by hand, as Windows would have.
