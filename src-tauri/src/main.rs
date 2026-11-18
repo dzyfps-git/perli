@@ -30,6 +30,7 @@ mod preview;
 mod props;
 mod recent;
 mod registry;
+mod remote;
 mod search;
 mod session;
 mod shell;

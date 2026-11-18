@@ -1019,6 +1019,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b1f9e3d69d39e4862ffed03ed071a76f9a13ba1d9109d355b0f0aa6b15e393c4"
 dependencies = [
  "futures-core",
+ "futures-sink",
 ]
 
 [[package]]
@@ -2567,8 +2568,10 @@ dependencies = [
  "hmac",
  "lzma-rust2",
  "pbkdf2",
+ "percent-encoding",
  "pulldown-cmark",
  "quick-xml",
+ "reqwest",
  "rusqlite",
  "rustysynth",
  "ruzstd",
@@ -2576,6 +2579,7 @@ dependencies = [
  "serde_json",
  "sevenz-rust2",
  "sha1",
+ "sha2 0.11.1",
  "tar",
  "tauri",
  "tauri-build",
@@ -2583,6 +2587,7 @@ dependencies = [
  "tokio",
  "ttf-parser",
  "unrar-ng-sys",
+ "url",
  "uuid",
  "windows",
  "windows-core",
@@ -2914,6 +2919,7 @@ checksum = "16a1cfa75cc186dd73d5818e510e042e40927bccc9c236b061cea97e1eb08029"
 dependencies = [
  "base64 0.23.1",
  "bytes",
+ "futures-channel",
  "futures-core",
  "futures-util",
  "http",

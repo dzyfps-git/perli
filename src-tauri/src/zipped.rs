@@ -486,7 +486,7 @@ fn time_of(ticks: u64) -> Option<SystemTime> {
     Some(UNIX_EPOCH + Duration::from_nanos(ticks.checked_sub(UNIX_START)?.checked_mul(100)?))
 }
 
-fn cache_root() -> PathBuf {
+pub(crate) fn cache_root() -> PathBuf {
     static SWEPT: Mutex<Option<Instant>> = Mutex::new(None);
     let root = std::env::temp_dir().join(CACHE_FOLDER);
     let mut swept = SWEPT.lock().unwrap_or_else(PoisonError::into_inner);
