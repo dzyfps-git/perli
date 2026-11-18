@@ -2456,6 +2456,11 @@ export function App() {
     const { tab, view } = props;
     const activate = () => tab.activate(view);
     const [retrying, setRetrying] = createSignal(false);
+    // A folder that couldn't be read, such as a cloud place while offline, is read again as soon
+    // as the network is back.
+    const backOnline = () => view.error() && void view.retry();
+    window.addEventListener("online", backOnline);
+    onCleanup(() => window.removeEventListener("online", backOnline));
     return (
       <section
         class="pane"
@@ -2502,6 +2507,9 @@ export function App() {
           <Show when={view.error()}>
             <div class="message" role="alert">
               <p>{view.error()}</p>
+              <Show when={!navigator.onLine}>
+                <p class="settings-note">This PC is offline. Perli tries again by itself when the network is back.</p>
+              </Show>
               <button
                 class="job-choice"
                 disabled={retrying()}
