@@ -11,10 +11,12 @@ const SECONDS_PER_HOUR = 3600;
 
 const work = (bytes: number, items: number) => bytes + items * ITEM_WEIGHT;
 
-/** How far along a job is, from 0 to 1. */
+/** How far along a job is, from 0 to 1. Each part of a job of several has the same share. */
 export function fraction(progress: Progress) {
   const total = work(progress.totalBytes, progress.totalItems);
-  return total > 0 ? Math.min(1, work(progress.bytes, progress.items) / total) : 0;
+  const own = total > 0 ? Math.min(1, work(progress.bytes, progress.items) / total) : 0;
+  const parts = progress.parts ?? 0;
+  return parts > 1 ? ((progress.part ?? 0) + own) / parts : own;
 }
 
 export interface Rate {
@@ -37,12 +39,14 @@ export function nextRate(rate: Rate, progress: Progress, at: number): Rate {
     const reading = (change / elapsed) * 1000;
     return old === 0 ? reading : old + (reading - old) * SMOOTHING;
   };
+  // A new part of a job of several counts from nothing again.
+  const since = (now: number, before: number) => (now >= before ? now - before : now);
   return {
     at,
     bytes: progress.bytes,
     work: done,
-    speed: smooth(rate.speed, progress.bytes - rate.bytes),
-    pace: smooth(rate.pace, done - rate.work),
+    speed: smooth(rate.speed, since(progress.bytes, rate.bytes)),
+    pace: smooth(rate.pace, since(done, rate.work)),
   };
 }
 

@@ -157,6 +157,10 @@ pub struct Progress {
     pub items: u64,
     pub total_items: u64,
     pub current: String,
+    /// In a job of several parts, which one this is and how many there are. Each part counts
+    /// from nothing, and the bar gives each the same share. Both 0 in a job of one.
+    pub part: u32,
+    pub parts: u32,
 }
 
 /// What the job can do next. The UI shows one button for each it is offered.
@@ -425,9 +429,15 @@ impl<'a> Run<'a> {
             Job::Save { path, bytes, read } => self.save(&path, &bytes, read),
             Job::Picture { paths, edit, keep } => self.edit_pictures(&paths, edit, keep),
             Job::Wallpaper { picture } => self.set_wallpaper(&picture),
-            // ponytail: each part adds its total as it starts, so the bar steps back once per part;
-            // count all parts first if that reads as wrong.
-            Job::Several { jobs } => jobs.into_iter().try_for_each(|job| self.job(job)),
+            // ponytail: each part has the same share of the bar, as a part's total is known only once it
+            // starts; weigh them by size if one dwarfs the others.
+            Job::Several { jobs } => {
+                let parts = jobs.len() as u32;
+                jobs.into_iter().enumerate().try_for_each(|(part, job)| {
+                    self.progress = Progress { part: part as u32, parts, ..Progress::default() };
+                    self.job(job)
+                })
+            }
         }
     }
 

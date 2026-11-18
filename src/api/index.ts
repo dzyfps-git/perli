@@ -271,6 +271,9 @@ export interface Progress {
   items: number;
   totalItems: number;
   current: string;
+  /** In a job of several parts, which one this is and how many there are; both 0 otherwise. */
+  part?: number;
+  parts?: number;
 }
 
 export type Answer = "replace" | "keepBoth" | "merge" | "skip" | "retry" | "elevate" | "permanent" | "cancel";
