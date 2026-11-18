@@ -42,6 +42,23 @@ const FROM_ELSEWHERE: &[u8] = b"[ZoneTransfer]\r\nZoneId=3\r\n";
 
 /// The class Outlook gives a message's root storage.
 const MESSAGE: uuid::Uuid = uuid::Uuid::from_u128(0x0002_0D0B_0000_0000_C000_0000_0000_0046);
+/// Embedded objects Perli can make a file of, by their class, with the file's extension. Office
+/// 97 to 2003 documents are compound files of their own; later ones keep theirs in a "Package"
+/// stream.
+const OBJECTS: [(u128, &str); 9] = [
+    (0x0002_0906_0000_0000_C000_0000_0000_0046, "doc"),
+    (0x0002_0820_0000_0000_C000_0000_0000_0046, "xls"),
+    (0x0002_0821_0000_0000_C000_0000_0000_0046, "xls"),
+    (0x6481_8D10_4F9B_11CF_86EA_00AA_00B9_29E8, "ppt"),
+    (0x6481_8D11_4F9B_11CF_86EA_00AA_00B9_29E8, "ppt"),
+    (0xF475_4C9B_64F5_4B40_8AF4_6797_32AC_0607, "docx"),
+    (0x0002_0830_0000_0000_C000_0000_0000_0046, "xlsx"),
+    (0x0002_0832_0000_0000_C000_0000_0000_0046, "xlsm"),
+    (0xCF4F_55F4_8F87_4D47_80BB_5808_164B_B3F8, "pptx"),
+];
+/// A file packed into a mail as an object, and a Paint picture.
+const PACKAGE: u128 = 0x0003_000C_0000_0000_C000_0000_0000_0046;
+const PAINT: u128 = 0x0003_000A_0000_0000_C000_0000_0000_0046;
 
 /// What the preview shows of a mail.
 pub fn read(path: &Path) -> Result<Mail, String> {
@@ -402,8 +419,8 @@ fn paged(bytes: &[u8], page: u32) -> Option<String> {
     Some(String::from_utf16_lossy(&wide))
 }
 
-/// The words of an HTML body, with a line break for each block and no styles or scripts.
-// ponytail: tags go and the text stays; show the mail's own layout if plain text reads too bare.
+/// The words of an HTML body, with a line break for each block and no styles or scripts. A mail
+/// in HTML alone also shows as it was laid out; these are its words for "Just the words".
 fn html_text(html: &str) -> String {
     let mut out = String::new();
     let mut rest = html;
@@ -554,6 +571,13 @@ fn outlook(path: &Path, with_data: bool) -> std::io::Result<(Mail, Vec<Bytes>)> 
             }
             continue;
         }
+        if let Some((name, bytes)) = file.is_storage(&item).then(|| object(&mut file, &item, name.as_deref())).flatten() {
+            attachments.push(Attachment { name, size: bytes.len() as u64 });
+            if with_data {
+                data.push(Some(bytes));
+            }
+            continue;
+        }
         let stream = format!("{folder}/__substg1.0_37010102");
         let size = file.entry(&stream).map_or(0, |entry| entry.len());
         attachments.push(Attachment { name: name.unwrap_or_else(|| "Attachment".into()), size });
@@ -582,6 +606,53 @@ fn is_message(file: &mut cfb::CompoundFile<std::fs::File>, folder: &str, item: &
         Some(method) => method as u32 == 5,
         None => ["001F", "001E"].iter().any(|kind| file.is_stream(format!("{item}/__substg1.0_001A{kind}"))),
     }
+}
+
+/// An embedded object as a file of its own, where Perli can tell what it is: an Office document,
+/// a file packed into the mail, or a Paint picture. Its name and bytes.
+fn object(file: &mut cfb::CompoundFile<std::fs::File>, item: &str, name: Option<&str>) -> Option<(String, Vec<u8>)> {
+    let class = *file.entry(item).ok()?.clsid();
+    let named = |extension: &str| {
+        let name = file_name(name.unwrap_or("Object"));
+        if name.to_ascii_lowercase().ends_with(&format!(".{extension}")) { name } else { format!("{name}.{extension}") }
+    };
+    if let Some(native) = binary(file, format!("{item}/\u{1}Ole10Native")) {
+        // Its size comes first.
+        let data = native.get(4..)?;
+        return match class.as_u128() {
+            PACKAGE => packed(data),
+            PAINT => Some((named("bmp"), data.to_vec())),
+            _ => None,
+        };
+    }
+    let &(_, extension) = OBJECTS.iter().find(|(id, _)| *id == class.as_u128())?;
+    let bytes = if extension.len() == 4 {
+        binary(file, format!("{item}/Package"))?
+    } else {
+        let mut out = cfb::CompoundFile::create(std::io::Cursor::new(Vec::new())).ok()?;
+        out.set_storage_clsid("/", class).ok()?;
+        copy_tree(file, &mut out, item, Path::new("/")).ok()?;
+        out.flush().ok()?;
+        out.into_inner().into_inner()
+    };
+    Some((named(extension), bytes))
+}
+
+/// The file in a packed object: its name and bytes. After a kind come its name, where it was
+/// packed from, four bytes, a temp path with its length first, then the file with its size first.
+fn packed(data: &[u8]) -> Option<(String, Vec<u8>)> {
+    let text = |at: usize| -> Option<(&[u8], usize)> {
+        let end = at + data.get(at..)?.iter().position(|&byte| byte == 0)?;
+        Some((&data[at..end], end + 1))
+    };
+    let number = |at: usize| Some(u32::from_le_bytes(data.get(at..at + 4)?.try_into().ok()?) as usize);
+    let (label, at) = text(2)?;
+    let (_, at) = text(at)?;
+    let at = at + 4;
+    let at = at + 4 + number(at)?;
+    let size = number(at)?;
+    let bytes = data.get(at + 4..at.checked_add(4 + size)?)?;
+    Some((file_name(&decode(label, "windows-1252")), bytes.to_vec()))
 }
 
 /// An Outlook item kept in a mail, as a .msg of its own, laid out as MS-OXMSG says: the item's
@@ -754,6 +825,12 @@ LjQK\r\n\
             file.create_storage("/__attach_version1.0_#00000001/__substg1.0_3701000D").unwrap();
             file.create_storage("/__attach_version1.0_#00000002").unwrap();
             file.create_storage("/__attach_version1.0_#00000002/__substg1.0_3701000D").unwrap();
+            for (at, class) in [(3, 0x0002_0821_0000_0000_C000_0000_0000_0046), (4, PACKAGE)] {
+                let item = format!("/__attach_version1.0_#0000000{at}/__substg1.0_3701000D");
+                file.create_storage(format!("/__attach_version1.0_#0000000{at}")).unwrap();
+                file.create_storage(&item).unwrap();
+                file.set_storage_clsid(&item, uuid::Uuid::from_u128(class)).unwrap();
+            }
             file.create_storage("/__nameid_version1.0").unwrap();
             let mut put = |path: &str, bytes: &[u8]| {
                 std::io::Write::write_all(&mut file.create_stream(path).unwrap(), bytes).unwrap();
@@ -771,6 +848,24 @@ LjQK\r\n\
             put("/__attach_version1.0_#00000002/__properties_version1.0", &method(6));
             put("/__attach_version1.0_#00000002/__substg1.0_3001001F", &utf16("Chart"));
             put("/__attach_version1.0_#00000002/__substg1.0_3701000D/\u{1}Ole", b"ole");
+            put("/__attach_version1.0_#00000003/__properties_version1.0", &method(6));
+            put("/__attach_version1.0_#00000003/__substg1.0_3001001F", &utf16("Sales"));
+            put("/__attach_version1.0_#00000003/__substg1.0_3701000D/Workbook", b"cells");
+            put("/__attach_version1.0_#00000004/__properties_version1.0", &method(6));
+            let temp = b"C:\\Temp\\notes.txt\0";
+            let native = [
+                &[0u8; 4][..],
+                &[2, 0],
+                b"notes.txt\0",
+                b"C:\\Docs\\notes.txt\0",
+                &[0, 0, 3, 0],
+                &(temp.len() as u32).to_le_bytes(),
+                temp,
+                &5u32.to_le_bytes(),
+                b"hello",
+            ]
+            .concat();
+            put("/__attach_version1.0_#00000004/__substg1.0_3701000D/\u{1}Ole10Native", &native);
             put("/__nameid_version1.0/__substg1.0_00020102", &[1; 16]);
         }
 
@@ -804,8 +899,14 @@ LjQK\r\n\
                 Attachment { name: "menu.txt".into(), size: 4 },
                 Attachment { name: "Re_ Lunch.msg".into(), size: 18 + 40 },
                 Attachment { name: "Chart".into(), size: 0 },
+                Attachment { name: "Sales.xls".into(), size: attached[3].1.as_ref().unwrap().len() as u64 },
+                Attachment { name: "notes.txt".into(), size: 5 },
             ]
         );
+        let sales = cfb::CompoundFile::open(std::io::Cursor::new(attached[3].1.clone().unwrap())).unwrap();
+        assert_eq!(sales.root_entry().clsid().as_u128(), 0x0002_0821_0000_0000_C000_0000_0000_0046, "an Excel chart comes out as its own workbook");
+        assert!(sales.is_stream("/Workbook"));
+        assert_eq!(attached[4], ("notes.txt".to_string(), Some(b"hello".to_vec())), "a packed file comes out as itself");
         assert_eq!(attached[0], ("menu.txt".to_string(), Some(b"soup".to_vec())));
         assert_eq!(attached[2], ("Chart".to_string(), None), "an embedded object has no bytes to pass off as a file");
         assert_eq!(inner.subject, "Re: Lunch", "the Outlook item inside comes out as a .msg of its own");
