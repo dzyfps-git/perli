@@ -42,7 +42,7 @@ import {
   type ColumnSet,
   type PropColumn,
 } from "./columns";
-import { clampTile, GALLERY_GAP, groupedMove, justifiedPlaces, moveTarget, placesOf, rowsAround, TILE_STEP, type Gallery, type Layout, type Places } from "./layout";
+import { clampTile, GALLERY_GAP, groupedMove, justifiedPlaces, moveTarget, nextShapes, placesOf, rowsAround, TILE_STEP, type Gallery, type Layout, type Places } from "./layout";
 import { ageShare, hasPicture, iconKindOf, iconSheet, kindOf } from "./fileKinds";
 import {
   dateForm,
@@ -1112,8 +1112,8 @@ export function FileList(props: {
 
   /**
    * Reads the shape of the pictures a page of rows at a time, the page in view first, and lays the
-   * gallery out again with each. Pages far from the view wait till it comes near them, and the
-   * picture at the top stays put as the lines above it change.
+   * gallery out again with each. Pages far from the view come after, while nothing else goes on,
+   * and the picture at the top stays put as the lines above it change.
    */
   function askAspects() {
     if (!gallery || aspectsAsked) return;
@@ -1128,28 +1128,32 @@ export function FileList(props: {
     const ahead = Math.floor(Math.min(props.count - 1, last + ASPECT_PAGE / 4) / ASPECT_PAGE);
     const behind = Math.floor(Math.max(0, first - ASPECT_PAGE / 4) / ASPECT_PAGE);
     const near = [here, ...Array.from({ length: Math.max(0, ahead - here) }, (_, step) => here + 1 + step), behind];
-    const page = near.find((page) => page * ASPECT_PAGE < props.count && !aspectPages.has(page));
-    if (page === undefined) return;
+    const next = nextShapes(near, here, props.count, ASPECT_PAGE, aspectPages);
+    if (!next) return;
+    const { page } = next;
     aspectPages.add(page);
     aspectsAsked = true;
-    pictureAspects(props.view, snapshot, page * ASPECT_PAGE, ASPECT_PAGE)
-      .then((found) => {
-        if (snapshot !== shown) return;
-        // A new snapshot starts afresh once its first page is in, so a reload never blinks.
-        if (aspectsOf !== snapshot) {
-          aspects = [];
-          aspectsOf = snapshot;
-        }
-        found.forEach((aspect, at) => (aspects[page * ASPECT_PAGE + at] = aspect));
-        galleryMotion = "reflow";
-        resize();
-      })
-      // A reload in between forgets the snapshot, and the next one asks again.
-      .catch(() => undefined)
-      .finally(() => {
-        aspectsAsked = false;
-        askAspects();
-      });
+    const when = next.near ? (ask: () => void) => ask() : (ask: () => void) => requestIdleCallback(ask, { timeout: 2000 });
+    when(() =>
+      pictureAspects(props.view, snapshot, page * ASPECT_PAGE, ASPECT_PAGE)
+        .then((found) => {
+          if (snapshot !== shown) return;
+          // A new snapshot starts afresh once its first page is in, so a reload never blinks.
+          if (aspectsOf !== snapshot) {
+            aspects = [];
+            aspectsOf = snapshot;
+          }
+          found.forEach((aspect, at) => (aspects[page * ASPECT_PAGE + at] = aspect));
+          galleryMotion = "reflow";
+          resize();
+        })
+        // A reload in between forgets the snapshot, and the next one asks again.
+        .catch(() => undefined)
+        .finally(() => {
+          aspectsAsked = false;
+          askAspects();
+        }),
+    );
   }
 
   function moveMarker(instant: boolean) {
