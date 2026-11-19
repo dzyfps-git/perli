@@ -21,6 +21,7 @@ import {
 import type { FolderView } from "../navigation/folderView";
 import { baseName, join, samePath } from "../navigation/path";
 import { markBack, markDeleted, markUnpacking } from "../filelist/rowMotion";
+import { notePulse } from "../space/pulses";
 import { checkCut } from "./clipboard";
 import { setEjected, setLanded } from "./landed";
 import { nextRate, nextThen, startRate, withSpeed, type Rate, type Then } from "./progress";
@@ -108,6 +109,8 @@ export function createJobs(views: () => FolderView[], host: JobsHost) {
   let failures = 0;
   /** What each job taking files out of archives says once it ends. */
   const unpacked = new Map<number, () => void>();
+  /** The folders each running job takes things from. */
+  const sources = new Map<number, string[]>();
 
   const find = (id: number) => cards.find((card) => card.id === id);
   const patch = (id: number, change: Partial<JobCard>) => setCards((card) => card.id === id, change);
@@ -129,6 +132,7 @@ export function createJobs(views: () => FolderView[], host: JobsHost) {
 
   function started(event: Extract<JobEvent, { kind: "started" }>) {
     const { id, title, origin, newItem, recycle, back, unpack, target } = event;
+    sources.set(id, event.from);
     const rate = startRate(performance.now());
     setCards(cards.length, { id, title, origin, newItem, recycle, shown: false, paused: false, rate, speeds: [], target, then: "none" });
     if (recycle) markDeleted();
@@ -168,6 +172,9 @@ export function createJobs(views: () => FolderView[], host: JobsHost) {
     unpacked.delete(event.id);
     reloadViews(event, card);
     if (!event.cancelled && event.touched.length > 0) setLanded({ folders: event.touched });
+    const from = sources.get(event.id) ?? [];
+    sources.delete(event.id);
+    if (!event.cancelled && (from.length > 0 || card.target)) notePulse({ from, to: card.target, away: card.recycle || (!card.target && from.length > 0) });
     // A finished cut paste empties the clipboard. A cancelled one leaves the cut standing.
     checkCut().catch(console.error);
 

@@ -2,7 +2,7 @@ import { createSignal, untrack } from "solid-js";
 import { pathsExist } from "../../api";
 import { saved, stored } from "../filelist/prefs";
 import { isBin } from "../navigation/path";
-import { serverOf, visited, withPaths } from "./lists";
+import { counted, serverOf, visited, withPaths, type Visits } from "./lists";
 
 /** What the shelf, the drop chips and the path bar remember between folders, tabs and runs. */
 
@@ -37,10 +37,25 @@ export const [recentFolders, setRecentFolders] = stored<string[]>("recent-folder
 /** Off, the sidebar reads no Recent list and Perli notes no folders or servers it opens. */
 export const [rememberRecent, keepRecent] = stored("remember-recent", saved("remember-recent") !== false);
 
+/** How often each folder is visited, which Space draws as how strong its link is. */
+export const [folderVisits, setFolderVisits] = stored<Visits>("folder-visits", visitsOf(saved("folder-visits")));
+
+function visitsOf(value: unknown): Visits {
+  if (!value || typeof value !== "object") return {};
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>).filter(
+      (entry): entry is [string, [number, number]] => Array.isArray(entry[1]) && entry[1].length === 2 && entry[1].every((part) => typeof part === "number"),
+    ),
+  );
+}
+
 /** Turning it off forgets Perli's own list of folders too. Windows' list stays as it is. */
 export function setRememberRecent(on: boolean) {
   keepRecent(on);
-  if (!on) setRecentFolders([]);
+  if (!on) {
+    setRecentFolders([]);
+    setFolderVisits({});
+  }
 }
 
 const SERVERS = 8;
@@ -54,6 +69,7 @@ export function noteFolder(path: string | undefined) {
   untrack(() => {
     if (!path || isBin(path) || !rememberRecent()) return;
     if (recentFolders()[0] !== path) setRecentFolders(visited(recentFolders(), path, RECENT_FOLDERS));
+    setFolderVisits(counted(folderVisits(), path, Date.now()));
     const server = serverOf(path);
     if (server && servers()[0]?.toLowerCase() !== server.toLowerCase()) setServers(visited(servers(), server, SERVERS));
   });

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { radiiOf, relax, startSpot } from "./pack.ts";
+import { packed, radiiOf, relax, startSpot } from "./pack.ts";
 
 const WIDTH = 640;
 const HEIGHT = 420;
@@ -37,4 +37,11 @@ test("circles on one point still come apart", () => {
   ];
   for (let step = 0; step < 50; step++) relax(spots, [20, 20], WIDTH, HEIGHT);
   assert.ok(Math.hypot(spots[0].x - spots[1].x, spots[0].y - spots[1].y) > 40);
+});
+
+test("packed settles every circle at once, none overlapping", () => {
+  const { spots, radii } = packed([400, 300, 200, 100, 50, 25], WIDTH, HEIGHT);
+  for (let a = 0; a < spots.length; a++)
+    for (let b = a + 1; b < spots.length; b++) assert.ok(Math.hypot(spots[a].x - spots[b].x, spots[a].y - spots[b].y) >= radii[a] + radii[b]);
+  assert.ok(radii[0] > radii[5]);
 });

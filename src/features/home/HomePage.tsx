@@ -7,7 +7,21 @@ import { baseName, parentOf } from "../navigation/path";
 import { draw } from "../preview/QuickPreview";
 import { clock } from "../preview/playback";
 import { rememberRecent } from "../reach/reach";
-import { cleanSections, HOME_SECTIONS, movedSection, readingPlaces, startOfDay, type HomeSection, type HomeSectionId, type ReadingStores } from "./home";
+import { SpaceMini } from "../space/SpaceMini";
+import {
+  cleanSections,
+  daysToFull,
+  fullText,
+  HOME_SECTIONS,
+  loggedSpace,
+  movedSection,
+  readingPlaces,
+  startOfDay,
+  type HomeSection,
+  type HomeSectionId,
+  type ReadingStores,
+  type SpaceLog,
+} from "./home";
 import "./home.css";
 
 const ICON_DRIVE = "";
@@ -34,6 +48,7 @@ const MOST_TODAY = 12;
 
 const TITLES: Record<HomeSectionId, string> = {
   drives: "Drives",
+  space: "Space",
   reading: "Pick up where you left off",
   pinned: "Pinned",
   folders: "Recent folders",
@@ -41,6 +56,13 @@ const TITLES: Record<HomeSectionId, string> = {
 };
 
 const [sections, setSections] = stored<HomeSection[]>("home-sections", cleanSections(saved("home-sections")));
+
+/** Each drive's free space, a sample a day, by its lowercase path, so a drive filling up can say when it will be full. */
+const logsOf = (value: unknown): Record<string, SpaceLog> =>
+  value && typeof value === "object"
+    ? Object.fromEntries(Object.entries(value as Record<string, unknown>).filter((entry): entry is [string, SpaceLog] => Array.isArray(entry[1])))
+    : {};
+const [spaceLog, setSpaceLog] = stored<Record<string, SpaceLog>>("space-log", logsOf(saved("space-log")));
 
 /** The places every viewer keeps, read fresh, since the viewers write them straight to storage. */
 const READING_KEYS = { book: "book-places", comic: "comic-pages", pdf: "pdf-pages", timed: "song-resume" } as const;
@@ -71,6 +93,7 @@ export function HomePage(props: {
   onMenu: (event: MouseEvent, path: string) => void;
   onEject: (path: string) => void;
   onSearch: (text: string) => void;
+  onOpenSpace: () => void;
 }) {
   let page!: HTMLElement;
   let searchBox!: HTMLInputElement;
@@ -84,7 +107,12 @@ export function HomePage(props: {
     for (const drive of props.drives ?? []) {
       if (drive.locked || drive.path in spaces()) continue;
       driveSpace(drive.path)
-        .then((space) => space.total > 0 && setSpaces({ ...spaces(), [drive.path]: space }))
+        .then((space) => {
+          if (space.total <= 0) return;
+          setSpaces({ ...spaces(), [drive.path]: space });
+          const key = drive.path.toLowerCase();
+          setSpaceLog({ ...spaceLog(), [key]: loggedSpace(spaceLog()[key] ?? [], space.free, Date.now()) });
+        })
         .catch(() => undefined);
     }
   });
@@ -261,6 +289,10 @@ export function HomePage(props: {
               const space = () => spaces()[drive.path];
               const used = () => (space() ? 1 - space()!.free / space()!.total : 0);
               const low = () => !!space() && space()!.free / space()!.total < LOW_SHARE;
+              const full = () => {
+                const days = daysToFull(spaceLog()[drive.path.toLowerCase()] ?? [], Date.now());
+                return days === undefined ? "" : ` · ${fullText(days)}`;
+              };
               return (
                 <div class="home-drive-wrap">
                   <button
@@ -278,7 +310,7 @@ export function HomePage(props: {
                         {drive.locked
                           ? "Locked by BitLocker"
                           : space()
-                            ? `${formatSize(space()!.free)} free of ${formatSize(space()!.total)}${low() ? " · running low" : ""}`
+                            ? `${formatSize(space()!.free)} free of ${formatSize(space()!.total)}${low() ? " · running low" : ""}${full()}`
                             : drive.path}
                       </span>
                     </span>
@@ -295,6 +327,11 @@ export function HomePage(props: {
           </For>
         </div>
       ),
+    },
+    space: {
+      empty: () => !props.drives?.length,
+      note: () => "Space shows what fills each drive once Windows lists them.",
+      view: () => <SpaceMini drives={props.drives ?? []} spaces={spaces()} onOpen={props.onOpenSpace} />,
     },
     reading: {
       empty: () => reading().length === 0,

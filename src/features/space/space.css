@@ -1,0 +1,256 @@
+/* Space: what fills a folder or the whole PC, drawn on a canvas, with Perli's own controls around it. */
+.space {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  width: min(1100px, 94vw);
+  height: min(760px, 90vh);
+}
+
+.space:not([open]) {
+  display: none;
+}
+
+.space-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.space-title {
+  flex: 1;
+  min-width: 0;
+}
+
+.space-title h2 {
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.space-title .settings-note {
+  margin: 0;
+}
+
+.space-button {
+  flex: none;
+  height: 30px;
+  padding: 0 var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  white-space: nowrap;
+  transition: background-color var(--motion);
+}
+
+.space-up {
+  width: 30px;
+  padding: 0;
+  font: 12px / 1 var(--font-icons);
+}
+
+.space-up:disabled {
+  opacity: 0.4;
+}
+
+.space-button:not(:disabled):hover {
+  background: var(--surface-hover);
+}
+
+.space-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  text-decoration: underline;
+}
+
+:is(.space-button, .space-link, .space-stage canvas):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* The lenses: the one picked wears a pill that slides over to the next pick. */
+.space-lenses {
+  position: relative;
+  display: grid;
+  flex: none;
+  grid-template-columns: repeat(var(--of), 1fr);
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.space-lenses button {
+  position: relative;
+  height: 24px;
+  padding: 0 var(--space-2);
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 12px;
+  white-space: nowrap;
+  transition: color var(--motion);
+}
+
+.space-lenses button[aria-checked="true"],
+.space-lenses button:hover {
+  color: var(--text);
+}
+
+.space-lenses button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  border-radius: 6px;
+}
+
+.space-lens-pill {
+  position: absolute;
+  inset: 2px auto 2px 2px;
+  width: calc((100% - 4px) / var(--of));
+  border-radius: 6px;
+  background: var(--surface-selected);
+  translate: calc(var(--at) * 100%) 0;
+  transition: translate 420ms var(--spring);
+}
+
+.space-find {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: var(--space-1);
+  width: 150px;
+  height: 30px;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text-muted);
+  font: 12px / 1 var(--font-icons);
+}
+
+.space-find:focus-within {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.space-find input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: none;
+  color: var(--text);
+  font: 13px var(--font);
+}
+
+.space-stage {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-large);
+  background: color-mix(in srgb, var(--surface) 60%, transparent);
+}
+
+.space-stage canvas {
+  position: absolute;
+  inset: 0;
+  display: block;
+  border-radius: inherit;
+}
+
+/* What the pointer is on, in the look of Perli's hover text. */
+.space-card {
+  position: absolute;
+  display: grid;
+  gap: 2px;
+  max-width: 260px;
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--overlay-tint);
+  box-shadow: var(--shadow);
+  backdrop-filter: var(--blur);
+  color: var(--text-muted);
+  font-size: 12px;
+  pointer-events: none;
+  animation: space-card-in var(--motion);
+}
+
+.space-card[data-flip] {
+  translate: -100% 0;
+}
+
+.space-card span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.space-card-name {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.space-empty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  margin: 0;
+  color: var(--text-muted);
+  pointer-events: none;
+}
+
+/* For screen readers only: a canvas has no parts of its own to step through. */
+.space-unseen {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+@keyframes space-card-in {
+  from {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .space-lens-pill,
+  .space-button {
+    transition: none;
+  }
+
+  .space-card {
+    animation: none;
+  }
+}
+
+/* The home page's small Space: This PC in Brain, the whole card a way in. */
+.space-mini {
+  position: relative;
+  display: block;
+  width: 100%;
+  height: 220px;
+  padding: 0;
+  overflow: hidden;
+}
+
+.space-mini canvas {
+  position: absolute;
+  inset: 0;
+  display: block;
+}

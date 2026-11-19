@@ -1,11 +1,11 @@
-/** Where the circles of the disk map go: sized by what they hold, and nudged until none overlap. */
+/** Where the circles of Space's Cells lens go: sized by what they hold, and nudged until none overlap. */
 
 export interface Spot {
   x: number;
   y: number;
 }
 
-/** Smaller than this, the melting filter eats a circle whole. */
+/** Smaller than this, a circle is too small to point at. */
 const MIN_RADIUS = 8;
 /** How strongly each step draws a circle to the middle, as a share of the way there. */
 const PULL = 0.02;
@@ -67,4 +67,12 @@ export function relax(spots: Spot[], radii: number[], width: number, height: num
     moved = Math.max(moved, Math.hypot(spot.x - before[at].x, spot.y - before[at].y));
   });
   return moved;
+}
+
+/** Every circle settled at once: where each goes and how big it is, the biggest in the middle. */
+export function packed(bytes: number[], width: number, height: number, most = 300): { spots: Spot[]; radii: number[] } {
+  const radii = radiiOf(bytes, width, height);
+  const spots = bytes.map((_, at) => startSpot(at, width, height));
+  for (let step = 0; step < most && relax(spots, radii, width, height) > 0.05; step++);
+  return { spots, radii };
 }

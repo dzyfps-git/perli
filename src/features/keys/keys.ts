@@ -38,7 +38,7 @@ export const KEYS: KeyCommand[] = [
   ...nine.map(
     (tag): KeyCommand => ({ id: `tag-${tag}`, label: `Tag with tag ${tag}`, group: "Files", keys: [`Alt+${tag}`], where: "list", quiet: true }),
   ),
-  { id: "diskMap", label: "Disk map", group: "View", keys: ["Ctrl+Shift+M"] },
+  { id: "diskMap", label: "Space", group: "View", keys: ["Ctrl+Shift+M"] },
   { id: "toFileDialog", label: "Send folder to file dialog (experimental)", group: "Go", keys: ["Ctrl+Shift+O"] },
   { id: "open", label: "Open", group: "Files", keys: ["Enter"], fixed: true },
   { id: "preview", label: "Quick preview", group: "Files", keys: ["Space"], fixed: true },

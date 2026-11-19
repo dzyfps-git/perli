@@ -83,6 +83,8 @@ enum Change {
         unpack: Vec<String>,
         /// The folder the job fills, for what to do when it is done.
         target: Option<String>,
+        /// The folders its sources are in, for Space to draw where things went.
+        from: Vec<String>,
     },
     /// Windows is about to ask for permission.
     Elevating,
@@ -692,6 +694,30 @@ fn target_of(job: &Job) -> Option<String> {
     }
 }
 
+/// The folders a job takes things out of, each once.
+fn sources_of(job: &Job) -> Vec<String> {
+    let paths: Vec<&PathBuf> = match job {
+        Job::Copy { sources, .. } | Job::Move { sources, .. } | Job::Zip { sources, .. } => sources.iter().collect(),
+        Job::Recycle { paths } | Job::Delete { paths } => paths.iter().collect(),
+        Job::Unzip { archives, .. } => archives.iter().collect(),
+        Job::Several { jobs } => return jobs.iter().flat_map(sources_of).fold(Vec::new(), |mut all, one| {
+            if !all.contains(&one) {
+                all.push(one);
+            }
+            all
+        }),
+        _ => Vec::new(),
+    };
+    let mut folders: Vec<String> = Vec::new();
+    for path in paths {
+        let folder = text(&ops::sys::parent(path));
+        if !folders.contains(&folder) {
+            folders.push(folder);
+        }
+    }
+    folders
+}
+
 /// Starts a job on its own thread and returns its id right away. One job per thread lets jobs
 /// run side by side, and each thread hosts its own shell work.
 pub fn start(app: &AppHandle, plan: Plan) -> Result<u64, String> {
@@ -795,6 +821,7 @@ impl Bridge {
                 _ => Vec::new(),
             },
             target: target_of(&plan.job),
+            from: sources_of(&plan.job),
         });
 
         let jobs = self.app.state::<Jobs>();

@@ -51,3 +51,16 @@ export function dayOf(time: number, now: number) {
 
 /** The `\\server` part of a path on another computer, or nothing. `\\?\` and `\\.\` are this PC. */
 export const serverOf = (path: string) => /^\\\\[^\\?.][^\\]*/.exec(path)?.[0];
+
+/** Folders visited, by lowercase path: how often and when last, in milliseconds. */
+export type Visits = Record<string, [count: number, last: number]>;
+
+/** One more visit to `path`, with the folders left alone longest dropped past `most`. */
+export function counted(visits: Visits, path: string, now: number, most = 300): Visits {
+  const key = path.toLowerCase();
+  const next: Visits = { ...visits, [key]: [(visits[key]?.[0] ?? 0) + 1, now] };
+  const keys = Object.keys(next);
+  if (keys.length <= most) return next;
+  const kept = keys.sort((a, b) => next[b][1] - next[a][1]).slice(0, most);
+  return Object.fromEntries(kept.map((one) => [one, next[one]]));
+}

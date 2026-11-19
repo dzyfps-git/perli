@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { dayOf, looksLikeName, readTyped, serverOf, visited, withPaths } from "./lists.ts";
+import { counted, dayOf, looksLikeName, readTyped, serverOf, visited, withPaths } from "./lists.ts";
 
 test("a path goes on the shelf once, whatever its case", () => {
   assert.deepEqual(withPaths(["C:\\a"], ["c:\\A", "C:\\b", "C:\\B"]), ["C:\\a", "C:\\b"]);
@@ -44,4 +44,12 @@ test("a server is told from the path of a folder on it", () => {
   assert.equal(serverOf("C:\\Users"), undefined);
   assert.equal(serverOf("\\\\?\\C:\\long"), undefined, "a long path is this PC");
   assert.equal(serverOf("\\\\.\\pipe"), undefined);
+});
+
+test("a visit counts up by lowercase path and the longest left alone go past the most", () => {
+  let visits = counted({}, "C:\\Work", 1);
+  visits = counted(visits, "c:\\work", 2);
+  assert.deepEqual(visits, { "c:\\work": [2, 2] });
+  visits = counted(counted(visits, "C:\\New", 3), "C:\\Newer", 4, 2);
+  assert.deepEqual(Object.keys(visits).sort(), ["c:\\new", "c:\\newer"]);
 });
