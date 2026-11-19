@@ -14,6 +14,7 @@ mod git;
 mod index;
 mod jobs;
 mod launch;
+mod looks;
 mod mail;
 mod menus;
 mod network;
@@ -50,7 +51,7 @@ mod zipped;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex, PoisonError, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -286,6 +287,8 @@ enum Task {
     Tag { target: ShellTarget, tag: u32, on: bool },
     DeleteTag { id: u32 },
     Recycle { selection: Selection },
+    /// Files by path to the Recycle Bin, as Twins cleans them.
+    RecyclePaths { paths: Vec<PathBuf> },
     Delete { selection: Selection },
     Restore { selection: Selection },
     /// Puts deleted items back somewhere other than where they came from.
@@ -455,6 +458,7 @@ impl Task {
             Self::Recycle { selection } => Job::Recycle {
                 paths: movable(&selection)?,
             },
+            Self::RecyclePaths { paths } => Job::Recycle { paths },
             Self::Delete { selection } => Job::Delete {
                 paths: movable(&selection)?,
             },
@@ -2559,6 +2563,99 @@ fn stop_map() {
     sizes::stop_map();
 }
 
+/// What the Time river hears as a folder is counted.
+#[derive(Clone, Serialize)]
+struct RiverGrew {
+    ticket: u32,
+    hours: sizes::Hours,
+    done: bool,
+}
+
+/// Counts every file under `path` by the hour it last changed, for the Time river.
+#[tauri::command]
+fn river(path: PathBuf, ticket: u32, app: AppHandle) {
+    sizes::river(path, move |hours, done| {
+        let _ = app.emit("river-grew", RiverGrew { ticket, hours, done });
+    });
+}
+
+#[tauri::command]
+fn stop_river() {
+    sizes::stop_river();
+}
+
+/// The files right inside `path` that last changed from `from` up to `to`, in milliseconds since
+/// 1970, newest first and at most 40, for the Time river's day journal. Hidden ones stay out.
+#[tauri::command]
+fn changed_between(path: PathBuf, from: i64, to: i64) -> Vec<String> {
+    let mut found: Vec<(i64, String)> = Vec::new();
+    let _ = ops::sys::each_entry(&ops::sys::extended(&path.join("*")), |data| {
+        let Some(entry) = folder::Entry::from_find_data(data) else { return };
+        let at = (entry.modified() / 10_000) as i64 - 11_644_473_600_000;
+        let shown = folder::Sight { hidden: false, system: false }.shows(&entry);
+        if shown && !ops::sys::Stat::from_find_data(data).is_folder() && (from..to).contains(&at) {
+            found.push((at, entry.file_name().to_string_lossy().into_owned()));
+        }
+    });
+    found.sort_unstable_by(|a, b| b.cmp(a));
+    found.into_iter().take(40).map(|(_, name)| name).collect()
+}
+
+/// A file of a set of twins: copies with the same content, or pictures that look alike.
+#[derive(Serialize)]
+struct Twin {
+    path: PathBuf,
+    bytes: u64,
+    /// Milliseconds since 1970.
+    modified: i64,
+    /// How sharp a picture is, higher sharper. Only pictures that look alike say.
+    sharp: Option<f32>,
+}
+
+/// The look for twins under way, which a new look or `stop_twins` stops.
+static TWINS: Mutex<Option<Arc<AtomicBool>>> = Mutex::new(None);
+/// The checksum lane of a look for twins, apart from every view's.
+const TWINS_LANE: u32 = 0x4000_0000;
+
+/// Files under `path` with the same content as another, or with `photos` the pictures that look
+/// alike, in sets. Hidden and system files stay out.
+#[tauri::command]
+async fn find_twins(path: PathBuf, photos: bool) -> Result<Vec<Vec<Twin>>, String> {
+    let stop = Arc::new(AtomicBool::new(false));
+    if let Some(old) = TWINS.lock().unwrap_or_else(PoisonError::into_inner).replace(stop.clone()) {
+        old.store(true, Ordering::SeqCst);
+    }
+    let ms = |ticks: u64| (ticks / 10_000) as i64 - 11_644_473_600_000;
+    blocking(move || {
+        let stopped = || stop.load(Ordering::SeqCst);
+        let sets = if photos {
+            looks::alike(&[path], &stopped)
+                .into_iter()
+                .map(|set| set.into_iter().map(|seen| Twin { path: seen.path, bytes: seen.bytes, modified: ms(seen.modified), sharp: Some(seen.look.sharp) }).collect())
+                .collect()
+        } else {
+            let sight = folder::Sight { hidden: false, system: false };
+            copies::find(&[path], true, sight, TWINS_LANE, &stopped, &|| ())
+                .copy_sets()
+                .into_iter()
+                .map(|set| set.into_iter().map(|(path, bytes, modified)| Twin { path, bytes, modified: ms(modified), sharp: None }).collect())
+                .collect()
+        };
+        if stopped() {
+            return Err("Stopped".into());
+        }
+        Ok(sets)
+    })
+    .await
+}
+
+#[tauri::command]
+fn stop_twins() {
+    if let Some(stop) = TWINS.lock().unwrap_or_else(PoisonError::into_inner).take() {
+        stop.store(true, Ordering::SeqCst);
+    }
+}
+
 /// A tagged file under a folder, with its tags, for the Tags lens of Space.
 #[derive(Serialize)]
 struct TaggedFile {
@@ -3152,6 +3249,11 @@ fn main() {
             map_folder,
             send_to_file_dialog,
             stop_map,
+            river,
+            stop_river,
+            changed_between,
+            find_twins,
+            stop_twins,
             tagged_under,
             folder_stamp,
             save_space_picture,

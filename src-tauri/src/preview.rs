@@ -749,7 +749,20 @@ pub fn props_of(paths: &[PathBuf], names: &[String]) -> Vec<Vec<Option<String>>>
         Some(store) => names.iter().map(|name| read(&store, name)).collect(),
         None => vec![None; names.len()],
     };
-    paths.iter().map(each).collect()
+    // A picture's colour is Perli's own reading, done for all of them at once on a few threads.
+    let colour = names.iter().position(|name| name == crate::looks::COLOUR);
+    let colours = colour.map(|_| crate::looks::looks_of(paths)).unwrap_or_default();
+    paths
+        .iter()
+        .enumerate()
+        .map(|(at, path)| {
+            let mut values = each(path);
+            if let Some(slot) = colour {
+                values[slot] = colours[at].map(|look| crate::looks::colour_text(&look));
+            }
+            values
+        })
+        .collect()
 }
 
 /// What a batch rename's name tokens read from one item. Dates are milliseconds since 1970,

@@ -63,7 +63,7 @@ export interface Tag {
 
 export type SortKey = "name" | "modified" | "created" | "type" | "size" | "location";
 /** The extra columns, read from each file's own properties. */
-export type PropKey = "artist" | "album" | "length" | "taken" | "dimensions" | "packed" | "note";
+export type PropKey = "artist" | "album" | "length" | "taken" | "dimensions" | "packed" | "note" | "colour";
 
 export interface Sort {
   /** `found` is the order a search found its rows in, which no column stands for. */
@@ -230,6 +230,8 @@ export type Task =
   | { kind: "deleteTag"; id: number }
   | { kind: "drop"; folder: string; action?: DropAction; id: number }
   | { kind: "recycle" | "delete" | "restore" | "purge"; selection: Selection }
+  /** Files by path to the Recycle Bin, as Twins cleans them. */
+  | { kind: "recyclePaths"; paths: string[] }
   | { kind: "restoreTo"; selection: Selection; folder: string }
   | { kind: "empty" }
   /** Everything in a ZIP, into a folder of its own beside it. */
@@ -1028,6 +1030,32 @@ export const stopMap = () => invoke<void>("stop_map");
 /** `cells` are new or have grown. `done` says they were the last. */
 export const onMapGrew = (handler: (grew: { ticket: number; cells: MapCell[]; done: boolean }) => void) =>
   listen<{ ticket: number; cells: MapCell[]; done: boolean }>("map-grew", (event) => handler(event.payload));
+
+/** Files by the hour they last changed: hours since 1970 by UTC, how many files, their bytes. */
+export type RiverHour = [hour: number, files: number, bytes: number];
+
+/** Counts every file under `path` by the hour it last changed, for the Time river. */
+export const river = (path: string, ticket: number) => invoke<void>("river", { path, ticket });
+export const stopRiver = () => invoke<void>("stop_river");
+/** Up to 40 files right inside `path` that last changed from `from` up to `to`, newest first. */
+export const changedBetween = (path: string, from: number, to: number) => invoke<string[]>("changed_between", { path, from, to });
+/** `hours` were counted since the last answer. `done` says the walk is over. */
+export const onRiverGrew = (handler: (grew: { ticket: number; hours: RiverHour[]; done: boolean }) => void) =>
+  listen<{ ticket: number; hours: RiverHour[]; done: boolean }>("river-grew", (event) => handler(event.payload));
+
+/** A file of a set of twins. */
+export interface Twin {
+  path: string;
+  bytes: number;
+  /** Milliseconds since 1970. */
+  modified: number;
+  /** How sharp a picture is, higher sharper. Only pictures that look alike say. */
+  sharp: number | null;
+}
+
+/** Files under `path` with the same content as another, or with `photos` pictures that look alike, in sets. */
+export const findTwins = (path: string, photos: boolean) => invoke<Twin[][]>("find_twins", { path, photos });
+export const stopTwins = () => invoke<void>("stop_twins");
 
 export const onSizesGrew = (handler: (view: number) => void) =>
   listen<number>("sizes-grew", (event) => handler(event.payload));

@@ -68,6 +68,8 @@ pub enum SortKey {
     Packed,
     /// What a cloud service says of each row, such as an S3 storage class.
     Note,
+    /// A picture's main colour, in rainbow order.
+    Colour,
 }
 
 impl SortKey {
@@ -80,6 +82,7 @@ impl SortKey {
             Self::Taken => "date:System.Photo.DateTaken",
             Self::Dimensions => "System.Image.Dimensions",
             Self::Note => crate::preview::CLOUD_NOTE,
+            Self::Colour => crate::looks::COLOUR,
             _ => return None,
         })
     }
@@ -557,6 +560,21 @@ impl Found {
 
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+
+    /// A look for copies as its sets, in order: each file's path, size and modified time.
+    pub fn copy_sets(&self) -> Vec<Vec<(PathBuf, u64, u64)>> {
+        let mut sets: Vec<Vec<(PathBuf, u64, u64)>> = Vec::new();
+        let mut slot_of = HashMap::<u32, usize>::new();
+        for ((entry, location), &set) in self.entries.iter().zip(&self.locations).zip(&self.sets) {
+            let path = PathBuf::from(OsString::from_wide(&location[..location.len() - 1])).join(entry.file_name());
+            let slot = *slot_of.entry(set).or_insert_with(|| {
+                sets.push(Vec::new());
+                sets.len() - 1
+            });
+            sets[slot].push((path, entry.size(), entry.modified()));
+        }
+        sets
     }
 
     /// The rows the list would show.
@@ -1439,7 +1457,8 @@ fn compare(
             | SortKey::Taken
             | SortKey::Dimensions
             | SortKey::Packed
-            | SortKey::Note => ranks[first as usize].cmp(&ranks[second as usize]),
+            | SortKey::Note
+            | SortKey::Colour => ranks[first as usize].cmp(&ranks[second as usize]),
             SortKey::Location => natural(location_of(locations, first), location_of(locations, second)),
             SortKey::Found => first.cmp(&second),
         };

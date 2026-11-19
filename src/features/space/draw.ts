@@ -44,6 +44,8 @@ export interface Aim {
   node?: SpaceNode;
   /** What else a hover card needs, such as a brick's owner and year. */
   about?: { owner?: string; year?: number; bytes?: number; tag?: number; path?: string };
+  /** A small picture shown inside a round node, as Twins does for photos. */
+  image?: ImageBitmap;
 }
 
 export interface Thing extends Aim {
@@ -346,8 +348,21 @@ export function paint(context: CanvasRenderingContext2D, scene: Scene, palette: 
     }
     context.stroke();
     context.globalAlpha = shown;
-    // The bright middle shows only while it is round; a brick has none.
-    if (roundness > 0.5 && thing.shape !== "brick") {
+    if (thing.image) {
+      // Cover-scaled into a circle just inside the ring.
+      const image = thing.image;
+      const radius = Math.min(w, h) / 2 - 1.5;
+      const scale = Math.max((radius * 2) / image.width, (radius * 2) / image.height);
+      if (radius > 1) {
+        context.save();
+        context.beginPath();
+        context.arc(x, y, radius, 0, Math.PI * 2);
+        context.clip();
+        context.drawImage(image, x - (image.width * scale) / 2, y - (image.height * scale) / 2, image.width * scale, image.height * scale);
+        context.restore();
+      }
+    } else if (roundness > 0.5 && thing.shape !== "brick") {
+      // The bright middle shows only while it is round; a brick has none.
       context.fillStyle = rgba(color, 0.9 * glow * (roundness - 0.5) * 2);
       context.beginPath();
       context.arc(x, y, Math.max(1.5, Math.min(w, h) * 0.1), 0, Math.PI * 2);
