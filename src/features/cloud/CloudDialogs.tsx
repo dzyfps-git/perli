@@ -123,7 +123,13 @@ export function AddPlace(props: { onAdded: (place: CloudPlace) => void }) {
               </button>
             )}
           </For>
-          <button class="cloud-kind" onClick={() => setStep("s3")}>
+          <button
+            class="cloud-kind"
+            onClick={() => {
+              setFailure(undefined);
+              setStep("s3");
+            }}
+          >
             <span class="cloud-kind-icon" aria-hidden="true">
               {ICON_STORAGE}
             </span>
@@ -190,7 +196,14 @@ export function AddPlace(props: { onAdded: (place: CloudPlace) => void }) {
       </p>
       <div class="confirm-buttons properties-buttons">
         <Show when={step() !== "choose"}>
-          <button class="properties-link" onClick={() => (step() === "waiting" ? stopWaiting() : setStep("choose"))}>
+          <button
+            class="properties-link"
+            onClick={() => {
+              setFailure(undefined);
+              if (step() === "waiting") stopWaiting();
+              else setStep("choose");
+            }}
+          >
             Back
           </button>
         </Show>

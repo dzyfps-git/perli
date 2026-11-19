@@ -484,6 +484,8 @@ export function PdfView(live: PdfViewProps) {
         renderForms: true,
         // Fields drawn before the scripts started are drawn again once they have.
         enableScripting: !!scripts,
+        // pdf.js wires a field's keys and focus to its scripts only when told the PDF has some.
+        hasJSActions: !!scripts,
         // A Reset button in the form clears the fields it names.
         fieldObjects: await fieldObjects,
       });

@@ -124,11 +124,13 @@ export async function runScripts(pdf: PDFDocumentProxy, found: Found, view: Scri
         // Printing, saving, zooming and laying out are left to the view's own buttons.
         return;
       }
+      // A field's new value goes on to it with the rest.
+      const change = value === undefined ? detail : { ...detail, value };
       for (const one of [id, ...((siblings as string[] | undefined) ?? [])] as string[]) {
         if (!ids.has(one)) continue;
         const element = view.box().querySelector(`[data-element-id="${CSS.escape(one)}"]`);
-        if (element) element.dispatchEvent(new CustomEvent("updatefromsandbox", { detail }));
-        else pdf.annotationStorage.setValue(one, detail);
+        if (element) element.dispatchEvent(new CustomEvent("updatefromsandbox", { detail: change }));
+        else pdf.annotationStorage.setValue(one, change);
       }
     },
     /** A page shown, counted from 1: its own scripts come with its first showing. */
