@@ -85,6 +85,8 @@ pub enum Job {
     Several { jobs: Vec<Job> },
     /// A run of a sync pair: the two sides are compared first, then what differs goes over.
     Sync { pair: crate::sync::Pair },
+    /// Files of a cloud place, and every file in its folders, kept on this PC or let go.
+    KeepOffline { paths: Vec<PathBuf>, keep: bool },
 }
 
 /// What one item weighs on the bar beyond its bytes, as the window counts it.
@@ -472,6 +474,7 @@ impl<'a> Run<'a> {
                     None => Ok(()),
                 }
             }
+            Job::KeepOffline { paths, keep } => self.keep_offline(&paths, keep),
             Job::Several { jobs } => {
                 let parts = jobs.len() as u32;
                 let shares = shares(&jobs.iter().map(|job| self.weigh(job)).collect::<Vec<_>>());

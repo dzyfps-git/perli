@@ -55,6 +55,45 @@ fn local_facts(path: &Path) -> Option<Facts> {
 }
 
 impl Run<'_> {
+    /// Keeps a copy of each file on this PC, and of every file in each folder, or lets them go.
+    pub(super) fn keep_offline(&mut self, paths: &[PathBuf], keep: bool) -> Flow {
+        for path in paths {
+            self.check()?;
+            self.add_total(1, 0);
+            let found = self.attempt(path, None, |_| {
+                let at = remote::at(path).unwrap_or_else(|| Err("Not in a cloud place".into()));
+                at.and_then(|at| Ok((at.item()?, at))).map_err(failed)
+            })?;
+            if let Some((item, at)) = found {
+                self.touched.insert(sys::parent(path));
+                self.keep_item(&at, &item, keep)?;
+            }
+            self.step(1, 0);
+        }
+        Ok(())
+    }
+
+    fn keep_item(&mut self, at: &At, item: &Item, keep: bool) -> Flow {
+        let shown = at.shown(&at.inner);
+        if item.folder {
+            let Some(children) = self.attempt(&shown, None, |_| remote::listed(at, &at.inner, false).map_err(failed))? else { return Ok(()) };
+            self.add_total(children.len() as u64, 0);
+            for child in children.iter() {
+                self.check()?;
+                let child_at = At { place: at.place.clone(), service: at.service.clone(), inner: remote::join(&at.inner, &child.name) };
+                self.keep_item(&child_at, child, keep)?;
+                self.step(1, 0);
+            }
+            return Ok(());
+        }
+        let size = if keep { item.size } else { 0 };
+        self.add_total(0, size);
+        let base = self.progress.bytes;
+        self.attempt(&shown, None, |run| remote::keep_file(at, item, keep, &mut |done| run.copied(base + done)).map_err(failed))?;
+        self.progress.bytes = base + size;
+        Ok(())
+    }
+
     fn spot(folder: &Path) -> std::result::Result<Spot, String> {
         match remote::at(folder) {
             Some(at) => Ok(Spot::Cloud(Box::new(at?))),

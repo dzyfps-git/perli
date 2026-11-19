@@ -70,6 +70,8 @@ pub struct Item {
     pub id: String,
     /// What else a row says of it: a storage class, or "Google Doc".
     pub note: String,
+    /// In S3 Glacier, to be restored before it can be read.
+    pub cold: bool,
 }
 
 /// An older version of a file the service keeps.
@@ -118,6 +120,10 @@ pub trait Service: Send + Sync {
     }
     fn bring_back(&self, _path: &str, _item: &Item, _version: &str) -> Result<(), String> {
         Err("This place keeps no older versions".into())
+    }
+    /// Asks for a file in cold storage to be made readable again for a while.
+    fn warm(&self, _path: &str, item: &Item) -> Result<(), String> {
+        Err(format!("{} opens as it is", item.name))
     }
 }
 
@@ -513,28 +519,20 @@ pub fn is_offline(path: &Path) -> bool {
     matches!(at(path), Some(Ok(at)) if offline_version(&at).is_some())
 }
 
-/// Keeps a copy of each file on this PC, taken again whenever it changes in the cloud, or lets it go.
-pub fn keep_offline(paths: &[PathBuf], keep: bool) -> Result<(), String> {
-    for path in paths {
-        let Some(found) = at(path) else { continue };
-        let at = found?;
-        let slot = offline_slot(&at).ok_or("There is no folder for Perli's own files")?;
-        if !keep {
-            let _ = fs::remove_dir_all(&slot);
-            continue;
-        }
-        let item = at.item()?;
-        if item.folder {
-            return Err(format!("{} is a folder: keep its files one by one", item.name));
-        }
-        take_down(&at, &item, &slot)?;
-        fs::write(slot.join(".version"), &item.version).map_err(|error| error.to_string())?;
+/// Keeps a copy of one file on this PC, taken again whenever it changes in the cloud, or lets it
+/// go. `tick` hears the bytes taken down so far, and says whether to go on.
+pub fn keep_file(at: &At, item: &Item, keep: bool, tick: Tick) -> Result<(), String> {
+    let slot = offline_slot(at).ok_or("There is no folder for Perli's own files")?;
+    if !keep {
+        let _ = fs::remove_dir_all(&slot);
+        return Ok(());
     }
-    Ok(())
+    take_down(at, item, &slot, tick)?;
+    fs::write(slot.join(".version"), &item.version).map_err(|error| error.to_string())
 }
 
 /// Takes the file down into `slot`, under its own name, unless it is there already.
-fn take_down(at: &At, item: &Item, slot: &Path) -> Result<PathBuf, String> {
+fn take_down(at: &At, item: &Item, slot: &Path, tick: Tick) -> Result<PathBuf, String> {
     let target = slot.join(&item.name);
     if target.exists() {
         return Ok(target);
@@ -543,7 +541,7 @@ fn take_down(at: &At, item: &Item, slot: &Path) -> Result<PathBuf, String> {
     let part = slot.join(format!("{}.part", item.name));
     let from = fs::metadata(&part).map_or(0, |metadata| metadata.len());
     let mut file = fs::OpenOptions::new().create(true).append(true).open(&part).map_err(|error| error.to_string())?;
-    at.service.read(&at.inner, item, from, &mut file, &mut |_| true)?;
+    at.service.read(&at.inner, item, from, &mut file, &mut |done| tick(from + done))?;
     drop(file);
     fs::rename(&part, &target).map_err(|error| error.to_string())?;
     Ok(target)
@@ -573,7 +571,7 @@ fn real_at(path: &Path) -> Result<PathBuf, String> {
         take_down_folder(&at, &at.inner, &target)?;
         return Ok(target);
     }
-    let taken = take_down(&at, &item, &slot)?;
+    let taken = take_down(&at, &item, &slot, &mut |_| true)?;
     // A kept file changed in the cloud: its offline copy follows.
     if offline_version(&at).is_some() {
         if let Some(kept) = offline_slot(&at) {
@@ -594,7 +592,7 @@ fn take_down_folder(at: &At, inner: &str, target: &Path) -> Result<(), String> {
             take_down_folder(at, &path, &target.join(&item.name))?;
         } else if !target.join(&item.name).exists() {
             let child = At { place: at.place.clone(), service: at.service.clone(), inner: path };
-            let taken = take_down(&child, item, target)?;
+            let taken = take_down(&child, item, target, &mut |_| true)?;
             debug_assert_eq!(taken, target.join(&item.name));
         }
     }
@@ -646,6 +644,17 @@ pub fn versions(path: &Path) -> Result<Vec<Version>, String> {
     let at = at(path).ok_or("Not in a cloud place")??;
     let item = at.item()?;
     at.service.versions(&at.inner, &item)
+}
+
+/// Asks for each file in S3 Glacier to be restored, readable again in a few hours.
+pub fn warm(paths: &[PathBuf]) -> Result<(), String> {
+    for path in paths {
+        let at = at(path).ok_or("Not in a cloud place")??;
+        let item = at.item()?;
+        at.service.warm(&at.inner, &item)?;
+    }
+    forget(paths);
+    Ok(())
 }
 
 pub fn bring_back(path: &Path, version: &str) -> Result<(), String> {

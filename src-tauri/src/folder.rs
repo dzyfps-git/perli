@@ -29,6 +29,7 @@ const FLAG_CLOUD: u8 = 4;
 const FLAG_PINNED: u8 = 8;
 const FLAG_CUSTOM: u8 = 16;
 const FLAG_SYSTEM: u8 = 32;
+const FLAG_COLD: u8 = 64;
 /// How Windows marks a folder whose `desktop.ini` gives it an icon of its own.
 const CUSTOMIZED: u32 = FILE_ATTRIBUTE_READONLY.0 | FILE_ATTRIBUTE_SYSTEM.0;
 /// What Explorer keeps out of sight even when hidden files show.
@@ -294,6 +295,8 @@ pub struct Entry {
     pinned: bool,
     /// A folder with an icon of its own.
     custom: bool,
+    /// In S3 Glacier, to be restored before it opens.
+    cold: bool,
 }
 
 impl Entry {
@@ -320,6 +323,7 @@ impl Entry {
             cloud: data.dwFileAttributes & ONLINE_ONLY != 0,
             pinned: data.dwFileAttributes & FILE_ATTRIBUTE_PINNED.0 != 0,
             custom: data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0 && data.dwFileAttributes & CUSTOMIZED != 0,
+            cold: false,
         })
     }
 
@@ -335,6 +339,7 @@ impl Entry {
             cloud: false,
             pinned: false,
             custom: false,
+            cold: false,
         }
     }
 
@@ -351,6 +356,7 @@ impl Entry {
             cloud: false,
             pinned: false,
             custom: false,
+            cold: false,
         }
     }
 
@@ -367,6 +373,7 @@ impl Entry {
             cloud: !item.folder && !kept,
             pinned: kept,
             custom: false,
+            cold: item.cold,
         }
     }
 
@@ -383,6 +390,7 @@ impl Entry {
             cloud: false,
             pinned: false,
             custom: false,
+            cold: false,
         }
     }
 
@@ -1350,6 +1358,7 @@ impl Listing {
             let pinned = if row.pinned { FLAG_PINNED } else { 0 };
             let custom = if row.custom { FLAG_CUSTOM } else { 0 };
             let system = if row.system { FLAG_SYSTEM } else { 0 };
+            let cold = if row.cold { FLAG_COLD } else { 0 };
             // A row of the folder itself has no place of its own to name.
             let top = self.parents.get(entry as usize) == Some(&TOP);
             let location = if top { &[0][..] } else { location_of(self.locations(), entry) };
@@ -1358,7 +1367,7 @@ impl Listing {
             bytes.extend(self.size_of(entry as usize).to_le_bytes());
             bytes.extend(row.modified.to_le_bytes());
             bytes.extend(row.created.to_le_bytes());
-            bytes.push(folder | hidden | cloud | pinned | custom | system);
+            bytes.push(folder | hidden | cloud | pinned | custom | system | cold);
             bytes.extend((location.len() as u32 * 2).to_le_bytes());
             let tags = &self.tags_of(entry)[..self.tags_of(entry).len().min(MAX_ROW_TAGS)];
             bytes.push(tags.len() as u8);

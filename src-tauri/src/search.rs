@@ -493,15 +493,51 @@ fn in_zip(archive: &Path, inner: &str, shown: &Path, asked: &Asked) -> Result<Fo
     Ok(found)
 }
 
+/// Folders an "every file" walk of a cloud place reads at most, one request each, and how long it
+/// may take. Past either it shows what it found, nearest folders first.
+const MOST_CLOUD_FOLDERS: usize = 400;
+const CLOUD_WALK: Duration = Duration::from_secs(20);
+
+/// Everything below `top` in the cloud, nearest folders first, as `list` gives each folder. A
+/// folder that can't be read is passed over, unless it is `top` itself.
+fn walked(top: &Path, mut list: impl FnMut(&Path) -> std::result::Result<Vec<(crate::remote::Item, bool)>, String>) -> std::result::Result<Vec<(PathBuf, crate::remote::Item, bool)>, String> {
+    let started = Instant::now();
+    let mut folders = VecDeque::from([top.to_path_buf()]);
+    let mut items = Vec::new();
+    let mut read = 0;
+    while let Some(folder) = folders.pop_front() {
+        if read == MOST_CLOUD_FOLDERS || started.elapsed() > CLOUD_WALK {
+            break;
+        }
+        read += 1;
+        let rows = match list(&folder) {
+            Ok(rows) => rows,
+            Err(message) if read == 1 => return Err(message),
+            Err(_) => continue,
+        };
+        for (item, kept) in rows {
+            let path = folder.join(&item.name);
+            if item.folder {
+                folders.push_back(path.clone());
+            }
+            items.push((path, item, kept));
+        }
+    }
+    Ok(items)
+}
+
 /// The names in a cloud folder that hold the query. A scope wider than the folder asks the
-/// service's own search, as a walk would take a request for each folder.
+/// service's own search, as a walk would take a request for each folder. Every file below the
+/// folder takes that walk, as no service searches for everything.
 fn in_cloud(shown: &Path, asked: &Asked) -> Result<Found> {
     let failed = |message: String| windows::core::Error::new(windows::Win32::Foundation::E_FAIL, message);
     let query = Query::new(&asked.query);
-    // ponytail: every file of a cloud place means this folder's alone; walk the place if wanted.
-    let items: Vec<(PathBuf, crate::remote::Item, bool)> = if asked.scope == Scope::Folder || query.every_file {
-        let rows = crate::remote::rows(shown, false).unwrap_or_else(|| Ok(Vec::new())).map_err(failed)?;
+    let list = |folder: &Path| crate::remote::rows(folder, false).unwrap_or_else(|| Ok(Vec::new()));
+    let items: Vec<(PathBuf, crate::remote::Item, bool)> = if asked.scope == Scope::Folder {
+        let rows = list(shown).map_err(failed)?;
         rows.into_iter().map(|(item, kept)| (shown.join(&item.name), item, kept)).collect()
+    } else if query.every_file {
+        walked(shown, list).map_err(failed)?
     } else {
         let found = crate::remote::search(shown, &asked.query).map_err(failed)?;
         found.into_iter().map(|(path, item)| {
@@ -657,6 +693,26 @@ mod tests {
     use std::sync::mpsc;
 
     use super::*;
+
+    #[test]
+    fn every_file_of_a_cloud_folder_walks_the_folders_below_it() {
+        let item = |name: &str, folder: bool| crate::remote::Item { name: name.into(), folder, ..Default::default() };
+        let top = Path::new(r"\\perli\cloud\place");
+        let mut asked = Vec::new();
+        let found = walked(top, |folder| {
+            asked.push(folder.to_path_buf());
+            match folder.strip_prefix(top).unwrap().to_str().unwrap() {
+                "" => Ok(vec![(item("a.txt", false), false), (item("docs", true), false), (item("broken", true), false)]),
+                "docs" => Ok(vec![(item("b.txt", false), true)]),
+                _ => Err("can't read".into()),
+            }
+        })
+        .unwrap();
+        let names: Vec<_> = found.iter().map(|(path, _, kept)| (path.strip_prefix(top).unwrap().to_path_buf(), *kept)).collect();
+        assert_eq!(names, [("a.txt".into(), false), ("docs".into(), false), ("broken".into(), false), (Path::new("docs").join("b.txt"), true)]);
+        assert_eq!(asked.len(), 3, "a folder that can't be read is passed over");
+        assert!(walked(top, |_| Err("offline".into())).is_err(), "the folder itself not read is an error");
+    }
 
     const WAIT: Duration = Duration::from_secs(5);
 

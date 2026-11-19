@@ -48,6 +48,8 @@ export interface Row {
   isCustom: boolean;
   /** Hidden and system both: one of Windows' own files. */
   isSystem: boolean;
+  /** In S3 Glacier, to be restored before it opens. */
+  isCold?: boolean;
   /** Where a deleted item came from, or where a search found the row. Otherwise empty. */
   location: string;
   /** Ids of its tags. */
@@ -470,6 +472,7 @@ const FLAG_CLOUD = 4;
 const FLAG_PINNED = 8;
 const FLAG_CUSTOM = 16;
 const FLAG_SYSTEM = 32;
+const FLAG_COLD = 64;
 const UINT32_RANGE = 2 ** 32;
 const FILETIME_TICKS_PER_MS = 10_000;
 const FILETIME_TO_UNIX_MS = 11_644_473_600_000;
@@ -564,6 +567,8 @@ export const cloudAbout = (path: string) => invoke<CloudAbout>("cloud_about", { 
 export const shareLink = (path: string) => invoke<string>("share_link", { path });
 export const cloudVersions = (path: string) => invoke<CloudVersion[]>("cloud_versions", { path });
 export const bringBack = (path: string, version: string) => invoke<void>("bring_back", { path, version });
+/** Asks S3 to restore the selected files from Glacier, readable again in a few hours. */
+export const restoreCold = (selection: Selection) => invoke<void>("restore_cold", { selection });
 
 /** How an eject went. A busy drive says what still holds it. */
 export type Ejected = { kind: "done" } | { kind: "busy"; reason: string };
@@ -1682,6 +1687,7 @@ function decodeRows(buffer: ArrayBuffer): Row[] {
       isPinned: (flags & FLAG_PINNED) !== 0,
       isCustom: (flags & FLAG_CUSTOM) !== 0,
       isSystem: (flags & FLAG_SYSTEM) !== 0,
+      isCold: (flags & FLAG_COLD) !== 0,
     };
     offset = tagStart + tagCount * TAG_BYTES;
   }

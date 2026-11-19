@@ -23,6 +23,13 @@ const PART: u64 = 16 * 1024 * 1024;
 const LINK_SECONDS: u64 = 7 * 24 * 3600;
 /// A search reads at most this many names.
 const MOST_SEARCHED: usize = 100_000;
+/// One copy request holds up to 5 GB. A bigger file is copied by the service in parts of this size.
+const COPY_MOST: u64 = 5 * 1024 * 1024 * 1024;
+const COPY_PART: u64 = 1024 * 1024 * 1024;
+/// DeleteObjects takes up to this many keys at once.
+const DELETE_MOST: usize = 1000;
+/// A file restored from Glacier stays readable this many days.
+const RESTORED_DAYS: u32 = 7;
 
 const UNSIGNED: &str = "UNSIGNED-PAYLOAD";
 
@@ -167,6 +174,51 @@ fn records(xml: &str, record: &str) -> Vec<HashMap<String, String>> {
     }
 }
 
+/// The XML that ends a multipart upload or copy: each part's number and tag.
+fn completed(tags: &[String]) -> String {
+    let parts: String = tags.iter().enumerate().map(|(at, tag)| format!("<Part><PartNumber>{}</PartNumber><ETag>{tag}</ETag></Part>", at + 1)).collect();
+    format!("<CompleteMultipartUpload>{parts}</CompleteMultipartUpload>")
+}
+
+/// Where each part of a copy of `size` bytes starts and ends, both counted.
+fn copy_ranges(size: u64) -> Vec<(u64, u64)> {
+    (0..size.div_ceil(COPY_PART)).map(|at| (at * COPY_PART, ((at + 1) * COPY_PART).min(size) - 1)).collect()
+}
+
+/// A DeleteObjects body for `keys`, which answers only of keys it couldn't delete.
+fn delete_body(keys: &[String]) -> String {
+    let objects: String = keys.iter().map(|key| format!("<Object><Key>{}</Key></Object>", quick_xml::escape::escape(key.as_str()))).collect();
+    format!("<Delete><Quiet>true</Quiet>{objects}</Delete>")
+}
+
+/// The headers of a body Amazon wants a checksum of, as DeleteObjects and RestoreObject do.
+fn summed(body: &str) -> Vec<(&'static str, String)> {
+    use base64::Engine;
+    vec![
+        ("content-type", "application/xml".into()),
+        ("x-amz-checksum-sha256", base64::engine::general_purpose::STANDARD.encode(Sha256::digest(body.as_bytes()))),
+        ("x-amz-sdk-checksum-algorithm", "SHA256".into()),
+    ]
+}
+
+/// What a row says of a file's storage class, and whether it can be restored from Glacier now:
+/// a cold one with no copy restored or on its way, as Amazon's `RestoreStatus` tells.
+fn class_of(fields: &HashMap<String, String>) -> (String, bool) {
+    let Some(class) = fields.get("StorageClass").filter(|class| *class != "STANDARD") else { return (String::new(), false) };
+    let name = class_name(class);
+    if !matches!(class.as_str(), "GLACIER" | "DEEP_ARCHIVE") {
+        return (name, false);
+    }
+    let short = name.split(':').next().unwrap_or_default();
+    if fields.get("IsRestoreInProgress").is_some_and(|going| going == "true") {
+        return (format!("{short}: coming back, opens in a few hours"), false);
+    }
+    match fields.get("RestoreExpiryDate") {
+        Some(until) => (format!("{short}: restored until {}", until.get(..10).unwrap_or(until)), false),
+        None => (name, true),
+    }
+}
+
 /// The text of the first `<tag>` anywhere.
 fn first(xml: &str, tag: &str) -> Option<String> {
     let start = xml.find(&format!("<{tag}>"))? + tag.len() + 2;
@@ -264,21 +316,64 @@ impl S3 {
         }
     }
 
-    fn copy_key(&self, from: &str, to: &str, version: Option<&str>) -> Result<(), String> {
+    /// A copy made by the service: in one request up to 5 GB, in parts past that.
+    fn copy_key(&self, from: &str, to: &str, version: Option<&str>, size: u64) -> Result<(), String> {
         let mut source = format!("/{}/{}", self.setup.bucket, encode_path(from));
         if let Some(version) = version {
             source.push_str(&format!("?versionId={}", encode(version)));
         }
-        self.text(Method::PUT, to, &[], &[("x-amz-copy-source", source)], None).map(|_| ())
+        if size <= COPY_MOST {
+            return self.text(Method::PUT, to, &[], &[("x-amz-copy-source", source)], None).map(|_| ());
+        }
+        let xml = self.text(Method::POST, to, &[("uploads", String::new())], &[], None)?;
+        let id = first(&xml, "UploadId").ok_or("The service didn't start the copy")?;
+        let tags = copy_ranges(size)
+            .into_iter()
+            .enumerate()
+            .map(|(at, (start, end))| {
+                let query = [("partNumber", (at + 1).to_string()), ("uploadId", id.clone())];
+                let headers = [("x-amz-copy-source", source.clone()), ("x-amz-copy-source-range", format!("bytes={start}-{end}"))];
+                first(&self.text(Method::PUT, to, &query, &headers, None)?, "ETag").ok_or_else(|| "The service didn't copy a part".to_string())
+            })
+            .collect::<Result<Vec<_>, _>>();
+        let done = tags.and_then(|tags| {
+            let body = completed(&tags);
+            self.text(Method::POST, to, &[("uploadId", id.clone())], &[("content-type", "application/xml".into())], Some(body.as_bytes())).map(|_| ())
+        });
+        if done.is_err() {
+            // A copy cut short leaves no parts behind to pay for.
+            let _ = self.send(Method::DELETE, to, &[("uploadId", id)], &[], None);
+        }
+        done
     }
 
-    /// Each key of a file or of everything in a folder, with where it goes under `to`.
-    fn under(&self, path: &str, item: &Item, to: &str) -> Result<Vec<(String, String)>, String> {
+    /// Each key of a file or of everything in a folder, with where it goes under `to` and its size.
+    fn under(&self, path: &str, item: &Item, to: &str) -> Result<Vec<(String, String, u64)>, String> {
         if !item.folder {
-            return Ok(vec![(path.to_string(), to.to_string())]);
+            return Ok(vec![(path.to_string(), to.to_string(), item.size)]);
         }
         let prefix = format!("{path}/");
-        Ok(self.keys(&prefix)?.into_iter().map(|(key, _)| (key.clone(), format!("{to}/{}", &key[prefix.len()..]))).collect())
+        Ok(self.keys(&prefix)?.into_iter().map(|(key, size)| (key.clone(), format!("{to}/{}", &key[prefix.len()..]), size)).collect())
+    }
+
+    /// Deletes each key, up to 1000 in one request. A service that won't take that, or says no to
+    /// a key in it, has them deleted one at a time, which says what went wrong.
+    fn delete_keys(&self, keys: &[String]) -> Result<(), String> {
+        for batch in keys.chunks(DELETE_MOST) {
+            let body = delete_body(batch);
+            if batch.len() > 1 && self.text(Method::POST, "", &[("delete", String::new())], &summed(&body), Some(body.as_bytes())).is_ok() {
+                continue;
+            }
+            for key in batch {
+                match self.send(Method::DELETE, key, &[], &[], None) {
+                    Err(failure) if failure.status == 404 => {}
+                    other => {
+                        other?;
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     fn upload_parts(&self, key: &str, file: &mut File, size: u64, tick: Tick) -> Result<(), String> {
@@ -310,8 +405,7 @@ impl S3 {
                 return Err(super::STOPPED.into());
             }
         }
-        let parts: String = session.parts.iter().enumerate().map(|(at, tag)| format!("<Part><PartNumber>{}</PartNumber><ETag>{tag}</ETag></Part>", at + 1)).collect();
-        let body = format!("<CompleteMultipartUpload>{parts}</CompleteMultipartUpload>");
+        let body = completed(&session.parts);
         self.text(Method::POST, key, &[("uploadId", session.id.clone())], &[("content-type", "application/xml".into())], Some(body.as_bytes()))?;
         super::resume::clear(&resume);
         Ok(())
@@ -326,8 +420,8 @@ fn class_name(class: &str) -> String {
         "ONEZONE_IA" => "One Zone-IA",
         "INTELLIGENT_TIERING" => "Intelligent-Tiering",
         "GLACIER_IR" => "Glacier Instant Retrieval",
-        "GLACIER" => "Glacier Flexible Retrieval: restore it on Amazon before opening",
-        "DEEP_ARCHIVE" => "Glacier Deep Archive: restore it on Amazon before opening",
+        "GLACIER" => "Glacier Flexible Retrieval: restore it before opening",
+        "DEEP_ARCHIVE" => "Glacier Deep Archive: restore it before opening",
         "REDUCED_REDUNDANCY" => "Reduced redundancy",
         "EXPRESS_ONEZONE" => "Express One Zone",
         other => other,
@@ -344,12 +438,14 @@ impl Service for S3 {
         let prefix = prefix_of(folder);
         let mut items = Vec::new();
         let mut token = String::new();
+        // Only Amazon has Glacier, and others may refuse a header they don't know.
+        let restores: Vec<(&str, String)> = if self.setup.preset == "aws" { vec![("x-amz-optional-object-attributes", "RestoreStatus".into())] } else { Vec::new() };
         loop {
             let mut query = vec![("list-type", "2".to_string()), ("prefix", prefix.clone()), ("delimiter", "/".to_string())];
             if !token.is_empty() {
                 query.push(("continuation-token", token.clone()));
             }
-            let xml = self.text(Method::GET, "", &query, &[], None)?;
+            let xml = self.text(Method::GET, "", &query, &restores, None)?;
             for fields in records(&xml, "CommonPrefixes") {
                 let name = fields.get("Prefix").map(|whole| whole[prefix.len().min(whole.len())..].trim_end_matches('/').to_string()).unwrap_or_default();
                 if !name.is_empty() {
@@ -363,7 +459,7 @@ impl Service for S3 {
                 if name.is_empty() || name.contains('/') {
                     continue;
                 }
-                let class = fields.get("StorageClass").filter(|class| *class != "STANDARD").map_or_else(String::new, |class| class_name(class));
+                let (note, cold) = class_of(&fields);
                 items.push(Item {
                     name: name.to_string(),
                     folder: false,
@@ -371,7 +467,8 @@ impl Service for S3 {
                     modified: fields.get("LastModified").map_or(0, |time| super::ticks_from_text(time)),
                     version: fields.get("ETag").cloned().unwrap_or_default(),
                     id: key,
-                    note: class,
+                    note,
+                    cold,
                 });
             }
             match first(&xml, "NextContinuationToken") {
@@ -406,20 +503,11 @@ impl Service for S3 {
     }
 
     fn remove(&self, path: &str, item: &Item) -> Result<String, String> {
-        let mut keys = self.under(path, item, "")?.into_iter().map(|(key, _)| key).collect::<Vec<_>>();
+        let mut keys = self.under(path, item, "")?.into_iter().map(|(key, _, _)| key).collect::<Vec<_>>();
         if item.folder {
             keys.push(format!("{path}/"));
         }
-        // ponytail: one request per key; DeleteObjects takes 1000 at once but wants a checksum
-        // that not every S3-style service reads the same way.
-        for key in keys {
-            match self.send(Method::DELETE, &key, &[], &[], None) {
-                Err(failure) if failure.status == 404 => {}
-                other => {
-                    other?;
-                }
-            }
-        }
+        self.delete_keys(&keys)?;
         Ok(String::new())
     }
 
@@ -433,16 +521,12 @@ impl Service for S3 {
     }
 
     fn duplicate(&self, path: &str, item: &Item, folder: &str, name: &str) -> Result<(), String> {
-        // ponytail: one copy request holds up to 5 GB; a bigger file would need its parts copied one by one.
-        if !item.folder && item.size > 5 * 1024 * 1024 * 1024 {
-            return Err("S3 copies files up to 5 GB within a bucket; copy this one through this PC".into());
-        }
         let to = join(folder, name);
         if item.folder {
             self.make_folder(folder, name)?;
         }
-        for (from, into) in self.under(path, item, &to)? {
-            self.copy_key(&from, &into, None)?;
+        for (from, into, size) in self.under(path, item, &to)? {
+            self.copy_key(&from, &into, None, size)?;
         }
         Ok(())
     }
@@ -504,14 +588,46 @@ impl Service for S3 {
             .collect())
     }
 
-    fn bring_back(&self, path: &str, _item: &Item, version: &str) -> Result<(), String> {
-        self.copy_key(path, path, Some(version))
+    fn bring_back(&self, path: &str, item: &Item, version: &str) -> Result<(), String> {
+        let size = self.versions(path, item)?.into_iter().find(|old| old.id == version).map_or(0, |old| old.size);
+        self.copy_key(path, path, Some(version), size)
+    }
+
+    fn warm(&self, path: &str, item: &Item) -> Result<(), String> {
+        // Standard takes 3 to 5 hours from Flexible Retrieval and up to 12 from Deep Archive.
+        let body = format!("<RestoreRequest><Days>{RESTORED_DAYS}</Days><GlacierJobParameters><Tier>Standard</Tier></GlacierJobParameters></RestoreRequest>");
+        match self.send(Method::POST, path, &[("restore", String::new())], &summed(&body), Some(body.as_bytes())) {
+            Err(failure) if failure.status == 409 => Err(format!("{} is already on its way back", item.name)),
+            other => other.map(|_| ()).map_err(|failure| failure.message),
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_big_copy_goes_in_parts_and_deletes_go_in_batches() {
+        let gib = COPY_PART;
+        assert_eq!(copy_ranges(2 * gib + 5), [(0, gib - 1), (gib, 2 * gib - 1), (2 * gib, 2 * gib + 4)]);
+        assert_eq!(copy_ranges(gib), [(0, gib - 1)]);
+        assert_eq!(delete_body(&["a & b.txt".into(), "c".into()]), "<Delete><Quiet>true</Quiet><Object><Key>a &amp; b.txt</Key></Object><Object><Key>c</Key></Object></Delete>");
+        assert!(summed("x").iter().any(|(name, sum)| *name == "x-amz-checksum-sha256" && sum == "LXEWQrcmsEQBYnyp+6wy9chTD7GQPMTbAiWHF5IaSIE="));
+    }
+
+    #[test]
+    fn a_glacier_file_says_whether_it_can_be_restored() {
+        let fields = |pairs: &[(&str, &str)]| pairs.iter().map(|(name, value)| (name.to_string(), value.to_string())).collect::<HashMap<_, _>>();
+        let (note, cold) = class_of(&fields(&[("StorageClass", "GLACIER")]));
+        assert!(cold && note.contains("restore"));
+        let (note, cold) = class_of(&fields(&[("StorageClass", "DEEP_ARCHIVE"), ("IsRestoreInProgress", "true")]));
+        assert!(!cold && note.contains("coming back"), "{note}");
+        let (note, cold) = class_of(&fields(&[("StorageClass", "GLACIER"), ("IsRestoreInProgress", "false"), ("RestoreExpiryDate", "2026-11-26T00:00:00.000Z")]));
+        assert_eq!((note.as_str(), cold), ("Glacier Flexible Retrieval: restored until 2026-11-26", false));
+        assert_eq!(class_of(&fields(&[("StorageClass", "STANDARD_IA")])), ("Standard-IA".into(), false));
+        assert_eq!(class_of(&fields(&[("StorageClass", "STANDARD")])), (String::new(), false));
+    }
 
     #[test]
     fn a_cold_storage_class_says_to_restore_first() {

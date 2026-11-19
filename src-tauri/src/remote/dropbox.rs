@@ -66,6 +66,7 @@ fn item_of(value: &Value) -> Item {
         version: value["rev"].as_str().or(value["content_hash"].as_str()).unwrap_or_default().to_string(),
         id: value["preview_url"].as_str().or(value["id"].as_str()).unwrap_or_default().to_string(),
         note: if readable { String::new() } else { "Opens only on dropbox.com".into() },
+        cold: false,
     }
 }
 

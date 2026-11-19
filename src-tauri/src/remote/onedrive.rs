@@ -62,6 +62,7 @@ fn item_of(value: &Value) -> Item {
         version: value["cTag"].as_str().or(value["eTag"].as_str()).unwrap_or_default().to_string(),
         id: value["id"].as_str().unwrap_or_default().to_string(),
         note: if pick("package").is_null() { String::new() } else { "OneNote notebook".into() },
+        cold: false,
     }
 }
 

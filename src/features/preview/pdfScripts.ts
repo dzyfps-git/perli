@@ -67,9 +67,8 @@ let speaking: Scripts | undefined;
 
 window.addEventListener("updatefromsandbox", (event) => {
   const detail = (event as CustomEvent).detail as Record<string, unknown>;
-  // ponytail: a script's own timer calls back with no one speaking, so what it sends goes to
-  // every PDF running scripts, each taking only its own fields. Two PDFs with the same field
-  // ids, open at once, could then share a timed change.
+  // A script's own timers call back with their scripts speaking too (see `call`), so this is a
+  // fallback for anything else, which each PDF takes only for its own fields.
   for (const scripts of speaking ? [speaking] : [...running]) scripts.update(detail);
 });
 
@@ -95,13 +94,25 @@ export async function runScripts(pdf: PDFDocumentProxy, found: Found, view: Scri
   let stopped = false;
   answerForms();
 
-  /** Calls into the sandbox with these scripts speaking. */
+  /**
+   * Calls into the sandbox with these scripts speaking. A timer a script sets meanwhile, which
+   * pdf.js sets on the window, calls back with them speaking as well, so a timed change goes to
+   * this PDF alone, even beside another with the same field ids.
+   */
   function call(work: () => void) {
+    const before = { speaking, timeout: window.setTimeout, interval: window.setInterval };
+    const ours = (timer: typeof window.setTimeout) =>
+      ((handler: TimerHandler, ms?: number, ...rest: unknown[]) =>
+        timer(() => !stopped && call(() => (handler as (...args: unknown[]) => void)(...rest)), ms)) as typeof window.setTimeout;
     speaking = scripts;
+    window.setTimeout = ours(before.timeout);
+    window.setInterval = ours(before.interval) as typeof window.setInterval;
     try {
       work();
     } finally {
-      speaking = undefined;
+      speaking = before.speaking;
+      window.setTimeout = before.timeout;
+      window.setInterval = before.interval;
     }
   }
 

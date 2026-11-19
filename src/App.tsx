@@ -24,6 +24,7 @@ import {
   otherWindows,
   sendTab,
   keepOnDevice,
+  restoreCold,
   fetchRows,
   setTagPaths,
   openWindow,
@@ -948,7 +949,14 @@ export function App() {
       { label: "Delete", action: () => actions.remove(view, false) },
       { label: "Copy link", divider: true, disabled: !one, action: () => quietly(copyLink()) },
       ...(row.isDir ? [] : [{ label: "Versions…", disabled: !one, action: () => setVersioning({ path, view }) }]),
-      { label: "Always keep on this device", checked: row.isPinned, action: () => keepHere(view, !row.isPinned) },
+      ...(row.isCold ? [{ label: "Restore from Glacier", action: () => restoreHere(view, row.name) }] : []),
+      // A folder keeps or frees every file in it, as a job with its own card.
+      ...(row.isDir
+        ? [
+            { label: "Keep its files on this device", action: () => keepHere(view, true) },
+            { label: "Free their space", action: () => keepHere(view, false) },
+          ]
+        : [{ label: "Always keep on this device", checked: row.isPinned, action: () => keepHere(view, !row.isPinned) }]),
       { label: "Copy name", divider: true, action: () => quietly(copyName(view)) },
       { label: "Select same", items: sameItems(view, row) },
       ...(two ? [{ label: "Compare", keys: keyText("compare"), action: () => quietly(compare(view)) }] : []),
@@ -1291,6 +1299,19 @@ export function App() {
   /** True for a folder a sync app keeps, or anything under one. */
   const inCloud = (path: string) =>
     (places()?.clouds ?? []).some((cloud) => (path + "\\").toLowerCase().startsWith(cloud.path.replace(/\\+$/, "").toLowerCase() + "\\"));
+
+  /** Amazon takes hours to bring a file back from Glacier, so this says so once it has asked. */
+  function restoreHere(view: FolderView, name: string) {
+    const selection = actions.selected(view);
+    if (!selection) return;
+    const many = selection.rows.length > 1 ? `${selection.rows.length} files` : name;
+    quietly(
+      restoreCold(selection).then(() => {
+        jobs.notify(`Amazon is bringing back ${many}`, "It opens in 3 to 5 hours, 12 from Deep Archive, and stays for 7 days", true);
+        view.reload();
+      }),
+    );
+  }
 
   /** The sync app does the fetching or the freeing in its own time. The rows show the wish at once. */
   function keepHere(view: FolderView, keep: boolean) {

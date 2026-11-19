@@ -116,6 +116,7 @@ fn items_of(values: &[Value], pdf: bool) -> Vec<(Item, Known)> {
             version: value["version"].as_str().unwrap_or_default().to_string(),
             id: id.to_string(),
             note,
+            cold: false,
         };
         rows.push((item, Known { id: id.to_string(), mime: mime.to_string(), drive: None }));
     }

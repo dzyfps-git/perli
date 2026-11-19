@@ -7,13 +7,17 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use windows::core::{HSTRING, PCWSTR};
+use windows::core::{w, HSTRING, PCWSTR};
+use windows::Win32::Foundation::{CloseHandle, HANDLE};
+use windows::Win32::System::Threading::{CreateMutexW, ReleaseMutex, WaitForSingleObject};
 use windows::Win32::UI::Shell::PathMatchSpecW;
 
 use crate::ops::{sys, Job};
 use crate::{remote, session};
 
 const PAIRS_FILE: &str = "sync-pairs.json";
+/// How long a window waits for another to finish saving the pairs before it saves anyway.
+const HOLD_MS: u32 = 5000;
 /// Times this close count as one, as FAT drives and some services keep them in 2 s steps.
 const SAME_TIME: u64 = 2 * 10_000_000;
 
@@ -148,29 +152,62 @@ pub fn job(preview: Preview) -> Option<Job> {
 
 /// The saved pairs, in the order they were made.
 pub fn pairs() -> Vec<Pair> {
-    session::data_file(PAIRS_FILE)
-        .and_then(|file| fs::read(file).ok())
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .unwrap_or_default()
+    session::data_file(PAIRS_FILE).map_or_else(Vec::new, |file| read_from(&file))
 }
 
-// ponytail: each window is a process, so two saving at once keep the last; a lock file if that bites.
-fn save(pairs: &[Pair]) -> Result<(), String> {
+fn read_from(file: &Path) -> Vec<Pair> {
+    fs::read(file).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default()
+}
+
+/// A mutex every Perli window shares, held while one reads, changes and saves the pairs. Each
+/// window is a process of its own, so without it two saving at once would keep only the last.
+struct Held(HANDLE);
+
+impl Held {
+    fn take() -> Self {
+        let mutex = unsafe { CreateMutexW(None, false, w!("Local\\PerliSyncPairs")) }.unwrap_or_default();
+        if !mutex.is_invalid() {
+            // A window that died holding it leaves it abandoned, which is taken as free.
+            unsafe { WaitForSingleObject(mutex, HOLD_MS) };
+        }
+        Self(mutex)
+    }
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        if !self.0.is_invalid() {
+            let _ = unsafe { ReleaseMutex(self.0) };
+            let _ = unsafe { CloseHandle(self.0) };
+        }
+    }
+}
+
+/// Reads the pairs in `file`, lets `change` change them and saves them if it did, all while
+/// holding the windows' mutex.
+fn change_in<T>(file: &Path, change: impl FnOnce(&mut Vec<Pair>) -> Result<T, String>) -> Result<T, String> {
+    let _held = Held::take();
+    let mut all = read_from(file);
+    let before = serde_json::to_string_pretty(&all).map_err(|error| error.to_string())?;
+    let answer = change(&mut all)?;
+    let text = serde_json::to_string_pretty(&all).map_err(|error| error.to_string())?;
+    if text != before {
+        if let Some(folder) = file.parent() {
+            fs::create_dir_all(folder).map_err(|error| error.to_string())?;
+        }
+        let staged = file.with_extension("json.new");
+        fs::write(&staged, text).and_then(|()| fs::rename(&staged, file)).map_err(|error| error.to_string())?;
+    }
+    Ok(answer)
+}
+
+fn change<T>(change: impl FnOnce(&mut Vec<Pair>) -> Result<T, String>) -> Result<T, String> {
     let file = session::data_file(PAIRS_FILE).ok_or("There is no folder for Perli's own files")?;
-    if let Some(folder) = file.parent() {
-        fs::create_dir_all(folder).map_err(|error| error.to_string())?;
-    }
-    let staged = file.with_extension("json.new");
-    let text = serde_json::to_string_pretty(pairs).map_err(|error| error.to_string())?;
-    fs::write(&staged, text).and_then(|()| fs::rename(&staged, &file)).map_err(|error| error.to_string())
+    change_in(&file, change)
 }
 
-/// Saves a new pair or a changed one. Gives it as saved.
-pub fn save_pair(mut pair: Pair) -> Result<Pair, String> {
-    if holds(&pair.from, &pair.to) || holds(&pair.to, &pair.from) {
-        return Err("Neither folder of a sync can hold the other".into());
-    }
-    let mut all = pairs();
+/// `pair` saved into `all`, as new or over the one it changes. Gives it as saved.
+fn put(all: &mut Vec<Pair>, mut pair: Pair) -> Pair {
     match all.iter_mut().find(|known| !pair.id.is_empty() && known.id == pair.id) {
         Some(known) => {
             pair.ran = known.ran;
@@ -182,34 +219,63 @@ pub fn save_pair(mut pair: Pair) -> Result<Pair, String> {
             all.push(pair.clone());
         }
     }
-    save(&all)?;
-    Ok(pair)
+    pair
+}
+
+/// Saves a new pair or a changed one. Gives it as saved.
+pub fn save_pair(pair: Pair) -> Result<Pair, String> {
+    if holds(&pair.from, &pair.to) || holds(&pair.to, &pair.from) {
+        return Err("Neither folder of a sync can hold the other".into());
+    }
+    change(|all| Ok(put(all, pair)))
 }
 
 pub fn remove_pair(id: &str) -> Result<(), String> {
-    let mut all = pairs();
-    all.retain(|pair| pair.id != id);
-    save(&all)
+    change(|all| {
+        all.retain(|pair| pair.id != id);
+        Ok(())
+    })
 }
 
 /// The pair, noted as run now. A `scheduled` run is only taken when it is due, so of the windows
 /// open, only the first to ask runs it.
 pub fn take_run(id: &str, scheduled: bool) -> Result<Option<Pair>, String> {
-    let mut all = pairs();
-    let pair = all.iter_mut().find(|pair| pair.id == id).ok_or("That sync is gone")?;
-    let now = crate::since_1970().as_millis() as u64;
-    if scheduled && (pair.every == 0 || now < pair.ran + u64::from(pair.every) * 60_000) {
-        return Ok(None);
-    }
-    pair.ran = now;
-    let taken = pair.clone();
-    save(&all)?;
-    Ok(Some(taken))
+    change(|all| {
+        let pair = all.iter_mut().find(|pair| pair.id == id).ok_or("That sync is gone")?;
+        let now = crate::since_1970().as_millis() as u64;
+        if scheduled && (pair.every == 0 || now < pair.ran + u64::from(pair.every) * 60_000) {
+            return Ok(None);
+        }
+        pair.ran = now;
+        Ok(Some(pair.clone()))
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_saving_pairs_at_once_each_keep_theirs() {
+        let file = std::env::temp_dir().join(format!("perli-sync-pairs-{}.json", std::process::id()));
+        let _ = fs::remove_file(&file);
+        let pair = |at: usize| Pair { id: String::new(), from: format!("C:\\from{at}").into(), to: "D:\\to".into(), mirror: false, skip: String::new(), every: 0, ran: 0 };
+        let savers: Vec<_> = (0..8)
+            .map(|at| {
+                let file = file.clone();
+                std::thread::spawn(move || {
+                    for round in 0..5 {
+                        change_in(&file, |all| Ok(put(all, pair(at * 10 + round)))).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for saver in savers {
+            saver.join().unwrap();
+        }
+        assert_eq!(read_from(&file).len(), 40, "no save is lost to another made at the same time");
+        let _ = fs::remove_file(&file);
+    }
 
     #[test]
     fn a_target_not_made_yet_gets_everything() {

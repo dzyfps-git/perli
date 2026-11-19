@@ -1794,6 +1794,13 @@ async fn bring_back(path: PathBuf, version: String) -> Result<(), String> {
     blocking(move || remote::bring_back(&path, &version)).await
 }
 
+/// Asks S3 to restore the selected files from Glacier, readable again in a few hours.
+#[tauri::command]
+async fn restore_cold(selection: Selection, views: State<'_, Views>) -> Result<(), String> {
+    let paths = views.read(&selection, folder::Listing::paths)?;
+    blocking(move || remote::warm(&paths)).await
+}
+
 #[tauri::command]
 fn sync_pairs() -> Vec<sync::Pair> {
     sync::pairs()
@@ -2375,11 +2382,11 @@ async fn restore_tagged(files: Vec<(PathBuf, Vec<u32>)>) -> Result<usize, String
 
 /// Asks the sync app to keep the selected rows on this device, or to free their space.
 #[tauri::command]
-async fn keep_on_device(selection: Selection, keep: bool, views: State<'_, Views>) -> Result<(), String> {
+async fn keep_on_device(selection: Selection, keep: bool, app: AppHandle, views: State<'_, Views>) -> Result<(), String> {
     let paths = views.read(&selection, folder::Listing::paths)?;
-    // Perli's own cloud places keep a copy here; a sync app's folders ask Windows.
+    // Perli's own cloud places keep a copy here, as a job with its card; a sync app's folders ask Windows.
     if paths.iter().any(|path| remote::is_remote(path)) {
-        return blocking(move || remote::keep_offline(&paths, keep)).await;
+        return jobs::start(&app, Job::KeepOffline { paths, keep }.into()).map(|_| ());
     }
     off_main(move || props::keep_on_device(&paths, keep)).await
 }
@@ -3096,6 +3103,7 @@ fn main() {
             share_link,
             cloud_versions,
             bring_back,
+            restore_cold,
             sync_pairs,
             save_sync_pair,
             remove_sync_pair,

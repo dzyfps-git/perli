@@ -996,6 +996,8 @@ fn title(job: &Job) -> String {
         ),
         Job::Wallpaper { picture } => named("Setting as the wallpaper:", &[picture.as_path()]),
         Job::Sync { pair } => named("Syncing", &[pair.from.as_path()]),
+        Job::KeepOffline { paths, keep: true } => listed("Keeping on this PC:", paths),
+        Job::KeepOffline { paths, keep: false } => listed("Freeing the space of", paths),
     }
 }
 
