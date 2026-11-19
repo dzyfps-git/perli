@@ -4,3 +4,9 @@ target/
 src-tauri/gen/
 .cargo/
 bench-results/
+
+# Real-app checks: what a run makes, and the local S3 server with its test key
+scripts/checks/*.built.mjs
+scripts/checks/shots-*/
+scripts/checks/seaweed/
+scripts/checks/seaweed-run/
