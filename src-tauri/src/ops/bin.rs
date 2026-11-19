@@ -78,7 +78,8 @@ pub fn read_root(root: &Path) -> Vec<BinItem> {
         .collect()
 }
 
-fn user_sid() -> Result<String> {
+/// This user's SID, as `S-1-5-21-…`.
+pub(crate) fn user_sid() -> Result<String> {
     unsafe {
         let mut token = HANDLE::default();
         OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token)?;

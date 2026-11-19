@@ -12,6 +12,7 @@ mod folder;
 mod fonts;
 mod git;
 mod index;
+mod journal;
 mod jobs;
 mod launch;
 mod looks;
@@ -1789,6 +1790,18 @@ async fn cloud_versions(path: PathBuf) -> Result<Vec<remote::Version>, String> {
     blocking(move || remote::versions(&path)).await
 }
 
+/// Whether the helper that catches the index up at once can be set up here, and whether it is.
+#[tauri::command]
+async fn journal_status() -> Result<journal::Status, String> {
+    blocking(|| Ok(journal::status())).await
+}
+
+/// Sets the helper up, or takes it away, with Windows asking for admin.
+#[tauri::command]
+async fn set_journal(on: bool) -> Result<(), String> {
+    blocking(move || journal::change(on)).await
+}
+
 #[tauri::command]
 async fn bring_back(path: PathBuf, version: String) -> Result<(), String> {
     blocking(move || remote::bring_back(&path, &version)).await
@@ -2976,6 +2989,14 @@ fn pose_for(folder: String) {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // The journal helper, in its admin-only copy or as Windows asked admin for, does its part
+    // before anything else of Perli starts.
+    if let Some(asked) = args.first().filter(|asked| [journal::RUN, journal::SET_UP, journal::TAKE_AWAY].contains(&asked.as_str())) {
+        std::process::exit(journal::helper(asked));
+    }
+    if args.first().map(String::as_str) == Some(journal::OFF) {
+        std::process::exit(i32::from(journal::off().is_err()));
+    }
     if args.first().map(String::as_str) == Some(default_app::RESTORE_ARGUMENT) {
         let _ = default_app::set(false);
         return;
@@ -3104,6 +3125,8 @@ fn main() {
             cloud_versions,
             bring_back,
             restore_cold,
+            journal_status,
+            set_journal,
             sync_pairs,
             save_sync_pair,
             remove_sync_pair,

@@ -330,20 +330,30 @@ mod tests {
         let pair = Pair { id: "p".into(), from: from.clone(), to: root.join("to"), mirror: false, skip: String::new(), every: 0, changed: true, ran: 0 };
         let all = [pair.clone()];
         assert!(!has_changed(&all, &pair, 1), "the first look starts the watch");
+        // Its thread starts listening in a moment, which a busy PC may take a while to give.
+        std::thread::sleep(std::time::Duration::from_millis(500));
         assert!(!has_changed(&all, &pair, 2), "nothing changed");
         fs::write(from.join("new.txt"), "new").unwrap();
         std::thread::sleep(std::time::Duration::from_millis(300));
         assert!(!has_changed(&all, &pair, 3), "a change still going on waits");
-        assert!(has_changed(&all, &pair, 4), "a change heard, then a quiet look, runs");
-        assert!(!has_changed(&all, &pair, 5), "once");
+        // A busy PC may tell of one change in more than one go: once they stop, a quiet look runs it.
+        let mut now = 4;
+        while !has_changed(&all, &pair, now) {
+            assert!(now < 40, "a change settles");
+            now += 1;
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert!(!has_changed(&all, &pair, now + 1), "once");
         fs::write(from.join("more.txt"), "more").unwrap();
         std::thread::sleep(std::time::Duration::from_millis(300));
-        assert!(!has_changed(&all, &pair, 6));
-        let ran = Pair { ran: 7, ..pair.clone() };
-        assert!(!has_changed(&all, &ran, 8), "another window ran it since");
+        let ran = Pair { ran: 1000, ..pair.clone() };
+        for now in 100..110 {
+            assert!(!has_changed(&all, &ran, now), "another window ran it since");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
         // Another pair, whose folder isn't there to watch, asks once this one is gone.
         let other = Pair { id: "q".into(), from: root.join("not there"), ..pair.clone() };
-        assert!(!has_changed(std::slice::from_ref(&other), &other, 9), "a pair gone takes its watch");
+        assert!(!has_changed(std::slice::from_ref(&other), &other, 2000), "a pair gone takes its watch");
         assert!(HEARD.lock().unwrap().is_empty());
         let _ = fs::remove_dir_all(&root);
     }

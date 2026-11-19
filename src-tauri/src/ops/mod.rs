@@ -39,6 +39,7 @@ pub use wallpaper::shown as wallpaper_shown;
 pub use shell::write_shortcut;
 pub use transfer::{is_temp_name, put_back, remove_leftovers};
 pub use tree::measure;
+pub(crate) use bin::user_sid;
 pub use wallpaper::Screens;
 
 /// One unit of work, run to the end by `run`.

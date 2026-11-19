@@ -786,6 +786,18 @@ export interface IndexStatus {
 
 export const setIndexOptions = (options: IndexOptions) => invoke<void>("set_index_options", { options });
 export const indexStatus = () => invoke<IndexStatus>("index_status");
+
+/** The helper that catches the index up at once from the drives' change journals. */
+export interface JournalStatus {
+  /** This user is an administrator, so it can be set up. */
+  possible: boolean;
+  on: boolean;
+  /** Set up by an older Perli, and to be set up again. */
+  old: boolean;
+}
+export const journalStatus = () => invoke<JournalStatus>("journal_status");
+/** Sets the helper up, or takes it away, with Windows asking for admin. */
+export const setJournal = (on: boolean) => invoke<void>("set_journal", { on });
 export const rebuildIndex = () => invoke<void>("rebuild_index");
 export const takeSweepReport = () => invoke<Swept>("take_sweep_report");
 

@@ -7,9 +7,9 @@
 //! a change watch on the drive's root. A USB disk is walked again now and then instead of being
 //! watched, because a watch holds a handle on it and Windows then can't eject it.
 //
-// ponytail: a keeper that starts walks every drive again once, a while after it starts, to catch
-// what changed while no Perli ran. The NTFS change journal would give that at once, but reading
-// it needs administrator rights.
+// A keeper that starts walks every drive again once, a while after it starts, to catch what
+// changed while no Perli ran. With the journal helper set up (see journal.rs), the NTFS change
+// journal tells that at once instead, and only drives it couldn't read are walked again.
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
@@ -605,6 +605,8 @@ pub(crate) enum Heard {
     Changed(PathBuf),
     /// Too much changed at once for the watch to say what: walk the drive again.
     Lost(PathBuf),
+    /// The journal told every change on this drive while no Perli ran: no walk again needed.
+    Caught(PathBuf),
 }
 
 /// A change watch on the top of a drive, held by its own thread. Each read waits on the drive and
@@ -750,6 +752,8 @@ struct Keeping {
     said: String,
     /// Paused since the last look for drives, so what was walked before is walked again soon.
     rested: bool,
+    /// The journal helper was asked what changed while no Perli ran.
+    caught_up: bool,
 }
 
 impl Keeping {
@@ -771,6 +775,7 @@ impl Keeping {
             listed: 0,
             said: String::new(),
             rested: false,
+            caught_up: false,
         }
     }
 
@@ -874,6 +879,20 @@ impl Keeping {
             if self.drives_seen.elapsed() >= DRIVES_AGAIN || self.due.is_empty() {
                 self.look_for_drives(options.network);
             }
+            if !self.caught_up {
+                // Once the drives are known, as what it hears names them.
+                self.caught_up = true;
+                let sender = self.sender.clone();
+                thread::spawn(move || {
+                    for found in crate::journal::catch_up().unwrap_or_default() {
+                        let _ = sender.send(match found {
+                            crate::journal::Found::Changed(path) => Heard::Changed(path),
+                            crate::journal::Found::Caught(root) => Heard::Caught(root),
+                            crate::journal::Found::Lost(root) => Heard::Lost(root),
+                        });
+                    }
+                });
+            }
             match self.heard.recv_timeout(Duration::from_millis(250)) {
                 Ok(heard) => self.hear(heard),
                 Err(RecvTimeoutError::Timeout) => {}
@@ -925,6 +944,14 @@ impl Keeping {
             Heard::Lost(root) => {
                 for due in self.due.iter_mut().filter(|(due, ..)| *due == root) {
                     due.1 = Instant::now();
+                }
+            }
+            Heard::Caught(root) => {
+                // The walk to catch up, still to come, isn't needed. One never made is.
+                let root = low(&root.to_string_lossy());
+                let walked: Vec<String> = self.db.0.prepare("SELECT root FROM drives").and_then(|mut rows| rows.query_map([], |row| row.get(0))?.collect()).unwrap_or_default();
+                for due in self.due.iter_mut().filter(|(due, _, again)| !again && low(&due.to_string_lossy()) == root && walked.contains(&root)) {
+                    due.1 = Instant::now() + Duration::from_secs(u64::MAX / 4);
                 }
             }
         }
