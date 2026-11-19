@@ -7,7 +7,7 @@ const KEY_STEP = 0.05;
 const SPECKS = [0, 1, 2, 3, 4, 5, 6];
 
 /** Seconds for a speck to cross: slow for a trickle, quick for a fast copy, in quarter steps so it never jitters. */
-const paceOf = (speed: number) => Math.round(Math.min(2.2, Math.max(0.5, 2.2 - 0.25 * Math.log2(1 + speed / 1e6))) * 4) / 4;
+const paceOf = (speed: number) => Math.round(Math.min(2.25, Math.max(0.5, 2.25 - 0.25 * Math.log2(1 + speed / 1e6))) * 4) / 4;
 
 /** A job copying from one pane's folder into the other's, and how fast it goes. */
 export interface Stream {
