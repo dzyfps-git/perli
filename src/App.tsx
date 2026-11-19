@@ -2053,7 +2053,7 @@ export function App() {
   /** Places Twins adds with one click: the other pane's folder, then each drive. */
   const twinOffers = () => {
     const other = tabs.active().other()?.folder()?.path;
-    const drives = (places()?.drives ?? []).filter((drive) => !drive.locked).map((drive) => ({ path: drive.path, name: drive.name ? `${drive.name} (${drive.path.replace(/\\$/, "")})` : drive.path }));
+    const drives = (places()?.drives ?? []).filter((drive) => !drive.locked).map((drive) => ({ path: drive.path, name: drive.name || drive.path }));
     return [...(other ? [{ path: other, name: baseName(other) || other }] : []), ...drives];
   };
 
