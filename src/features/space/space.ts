@@ -134,6 +134,8 @@ export function pcTree(
   drives: { path: string; name: string; used: number }[],
   weighed: Record<string, MapCell[]>,
   kindOf: (cell: MapCell) => string,
+  /** Each drive's bytes by year, for Layers. */
+  years: Record<string, [number, number][]> = {},
 ): SpaceNode {
   const root: SpaceNode = { id: PC, path: "", name: "This PC", bytes: 0, folder: true, newest: 0, kind: "folder", depth: 0, kids: [], years: [], place: true };
   root.kids = drives.map((drive) => {
@@ -148,7 +150,7 @@ export function pcTree(
       depth: 1,
       parent: root,
       kids: [],
-      years: [],
+      years: years[idOf(drive.path)] ?? [],
       place: true,
     };
     const cells = weighed[idOf(drive.path)] ?? [];
@@ -424,7 +426,7 @@ export function tagsLayout(
   files: { path: string; tags: number[] }[],
   width: number,
   height: number,
-  most = 600,
+  most = 5000,
 ): { stars: TagStar[]; specks: Speck[]; left: number } {
   const counts = new Map<number, number>(tags.map((tag) => [tag.id, 0]));
   for (const file of files) for (const tag of file.tags) if (counts.has(tag)) counts.set(tag, counts.get(tag)! + 1);

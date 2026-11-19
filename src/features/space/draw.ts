@@ -294,6 +294,9 @@ export function paint(context: CanvasRenderingContext2D, scene: Scene, palette: 
 
   // Bigger things first, so small ones stay on top where a pointer can reach them.
   const order = [...scene.things.values()].sort((a, b) => b.now.w * b.now.h - a.now.w * a.now.h);
+  // Specks come by the thousand and look alike, so those of one colour and strength share one path,
+  // drawn on top of the rest.
+  const dust = new Map<string, { color: Rgb; alpha: number; path: Path2D }>();
   for (const thing of order) {
     const { w, h, round, alpha, lit } = thing.now;
     if (alpha < 0.01 || w < 0.5 || h < 0.5) continue;
@@ -321,10 +324,13 @@ export function paint(context: CanvasRenderingContext2D, scene: Scene, palette: 
     }
 
     if (thing.shape === "speck") {
-      context.fillStyle = rgba(color, (0.75 + 0.25 * lit) * shown);
-      context.beginPath();
-      context.arc(x, y, w / 2 + lit, 0, Math.PI * 2);
-      context.fill();
+      const alpha = Math.round((0.75 + 0.25 * lit) * shown * 20) / 20;
+      const key = `${color}|${alpha}`;
+      let batch = dust.get(key);
+      if (!batch) dust.set(key, (batch = { color, alpha, path: new Path2D() }));
+      const radius = w / 2 + lit;
+      batch.path.moveTo(x + radius, y);
+      batch.path.arc(x, y, radius, 0, Math.PI * 2);
       continue;
     }
 
@@ -369,6 +375,11 @@ export function paint(context: CanvasRenderingContext2D, scene: Scene, palette: 
       context.fill();
     }
     context.globalAlpha = 1;
+  }
+
+  for (const { color, alpha, path } of dust.values()) {
+    context.fillStyle = rgba(color, alpha);
+    context.fill(path);
   }
 
   // Names over everything, never under a circle.

@@ -6,7 +6,7 @@ import { baseName, join } from "../navigation/path";
 import { rememberRecent } from "../reach/reach";
 import type { Palette, Rgb } from "./draw";
 import { readPalette, reducedMotion, watchPalette } from "./lenses";
-import { addHours, columns, DAY, dayKey, dayStart, HOUR, panned, riverOf, softened, sumBetween, ticks, wholeSpan, zoomed, type River } from "./river";
+import { addQuarters, columns, DAY, dayKey, dayStart, HOUR, hourStart, panned, riverOf, softened, sumBetween, ticks, wholeSpan, zoomed, type River } from "./river";
 import "../settings/settings.css";
 import "./space.css";
 
@@ -38,6 +38,9 @@ const specks = Array.from({ length: SPECKS }, (_, at) => {
  */
 export function TimeRiver(props: {
   folder: string;
+  /** Hidden and system files count too, as the file list shows them. */
+  showHidden: boolean;
+  showSystem: boolean;
   downloads?: string;
   /** Shows the files under the folder that changed on `day`, as `YYYY-MM-DD`. */
   onShowDay: (folder: string, day: string) => void;
@@ -76,12 +79,12 @@ export function TimeRiver(props: {
 
   const off = onRiverGrew((grew) => {
     if (grew.ticket !== ticket) return;
-    addHours(known, grew.hours);
+    addQuarters(known, grew.quarters);
     setFlow(riverOf(known));
     if (!moved) setSpan(wholeSpan(flow()));
     if (grew.done) setDone(true);
   });
-  river(props.folder, ticket).catch(console.error);
+  river(props.folder, ticket, props.showHidden, props.showSystem).catch(console.error);
   activity().then(setLog).catch(() => setLog([]));
   if (rememberRecent()) recentFiles(300).then(setOpened).catch(() => setOpened([]));
 
@@ -93,7 +96,7 @@ export function TimeRiver(props: {
   });
 
   /** The stretch of the river at the pointer: a day, or an hour when zoomed in close. */
-  const stretchAt = (time: number): [number, number] => (fine() ? [Math.floor(time / HOUR) * HOUR, Math.floor(time / HOUR) * HOUR + HOUR] : [dayStart(time), dayStart(time) + DAY]);
+  const stretchAt = (time: number): [number, number] => (fine() ? [hourStart(time), hourStart(time) + HOUR] : [dayStart(time), dayStart(time) + DAY]);
 
   function paint(seconds: number) {
     const context = canvas.getContext("2d");

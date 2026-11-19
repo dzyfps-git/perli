@@ -443,6 +443,10 @@ fn live() -> Vec<String> {
     let Some(db) = path_of().filter(|path| path.exists()).and_then(|path| Db::open(&path).ok()) else {
         return Vec::new();
     };
+    live_in(&db)
+}
+
+fn live_in(db: &Db) -> Vec<String> {
     let beat: i64 = db.meta("beat").and_then(|beat| beat.parse().ok()).unwrap_or(0);
     if now_ms() - beat > STALE.as_millis() as i64 {
         return Vec::new();
@@ -514,6 +518,51 @@ fn page_in(db: &Db, parts: &[Part], text: &str, deepest: usize, sight: Sight, sk
         Ok((PathBuf::from(folder), data))
     })?;
     rows.collect()
+}
+
+/// Every file under `folder` as the list holds it, each with the folder it sits in, so a folder
+/// can be weighed with no walk. False when the list can't answer for all of it: off, its drive
+/// not listed yet, or a folder left out inside it or above it. Ends early when `stop` is set.
+pub fn each_file_under(folder: &Path, stop: &AtomicBool, mut visit: impl FnMut(&Path, &WIN32_FIND_DATAW)) -> bool {
+    let options = options();
+    if !options.on || options.paused {
+        return false;
+    }
+    let inside = inside_of(&low(&folder.to_string_lossy()));
+    let left_out = |skip: &String| {
+        let skip = inside_of(&low(skip));
+        skip.starts_with(&inside) || inside.starts_with(&skip)
+    };
+    if options.skip.iter().any(left_out) {
+        return false;
+    }
+    let Some(db) = path_of().filter(|path| path.exists()).and_then(|path| Db::open(&path).ok()) else {
+        return false;
+    };
+    live_in(&db).contains(&low(&root_of(folder).to_string_lossy())) && files_in(&db, folder, stop, &mut visit).is_ok()
+}
+
+fn files_in(db: &Db, folder: &Path, stop: &AtomicBool, visit: &mut dyn FnMut(&Path, &WIN32_FIND_DATAW)) -> rusqlite::Result<()> {
+    let folder_low = low(&folder.to_string_lossy());
+    let start = inside_of(&folder_low);
+    let mut statement = db.0.prepare(
+        "SELECT f.path, e.name, e.attributes, e.size, e.modified, e.created FROM folders f JOIN entries e ON e.folder = f.id
+         WHERE (f.low = ?1 OR (f.low >= ?2 AND f.low < ?3)) AND e.attributes & ?4 = 0",
+    )?;
+    let mut rows = statement.query(params![folder_low.trim_end_matches('\\'), start, past(&start), ATTRIBUTE_DIRECTORY])?;
+    let mut at = PathBuf::new();
+    while let Some(row) = rows.next()? {
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
+        let path: String = row.get(0)?;
+        if at.as_os_str() != path.as_str() {
+            at = PathBuf::from(path);
+        }
+        let name: String = row.get(1)?;
+        visit(&at, &find_data(&name, row.get(2)?, row.get::<_, i64>(3)? as u64, row.get::<_, i64>(4)? as u64, row.get::<_, i64>(5)? as u64));
+    }
+    Ok(())
 }
 
 /// How the list is doing, as Settings shows it.
@@ -1076,6 +1125,27 @@ mod tests {
         let (folder, data) = &page_in(&db, &inside, "final", usize::MAX, ALL, 0, 1).unwrap()[0];
         assert_eq!(folder, &tree.0.join(r"deep\inner"));
         assert_eq!((data.nFileSizeLow, data.dwFileAttributes & ATTRIBUTE_DIRECTORY), (1, 0));
+    }
+
+    #[test]
+    fn the_files_under_a_folder_come_with_their_folders_and_nothing_beside_it() {
+        let tree = Tree::new("under");
+        tree.file(r"deep\inner\one.txt");
+        tree.file(r"deep\two.txt");
+        tree.file(r"deeper\three.txt");
+        tree.file(r"top.txt");
+        let db = tree.db();
+        walk(&db, &tree.0, &[], &mut || false).unwrap();
+        let under = |folder: &Path, stop: bool| {
+            let mut found = Vec::new();
+            files_in(&db, folder, &AtomicBool::new(stop), &mut |at, data| found.push((at.to_path_buf(), name_of(data)))).unwrap();
+            found.sort();
+            found
+        };
+        let deep = tree.0.join("deep");
+        assert_eq!(under(&deep, false), [(deep.clone(), "two.txt".to_string()), (deep.join("inner"), "one.txt".to_string())], "files only, deeper too, not deeper's");
+        assert_eq!(under(&tree.0, false).len(), 4);
+        assert!(under(&tree.0, true).is_empty(), "a stop ends it");
     }
 
     #[test]

@@ -1053,21 +1053,23 @@ export function saveSpacePicture(folder: string, name: string, png: ArrayBuffer)
 /** Weighs what is in `path` for Space. Answers come through `onMapGrew` with `ticket`. */
 export const mapFolder = (path: string, ticket: number) => invoke<void>("map_folder", { path, ticket });
 export const stopMap = () => invoke<void>("stop_map");
+/** What `path` holds with all the bytes under each, from the search index at once. Null when the index is off or doesn't list its drive yet. */
+export const listedParts = (path: string) => invoke<MapCell[] | null>("listed_parts", { path });
 /** `cells` are new or have grown. `done` says they were the last. */
 export const onMapGrew = (handler: (grew: { ticket: number; cells: MapCell[]; done: boolean }) => void) =>
   listen<{ ticket: number; cells: MapCell[]; done: boolean }>("map-grew", (event) => handler(event.payload));
 
-/** Files by the hour they last changed: hours since 1970 by UTC, how many files, their bytes. */
-export type RiverHour = [hour: number, files: number, bytes: number];
+/** Files by the quarter hour they last changed: quarter hours since 1970 by UTC, how many files, their bytes. */
+export type RiverQuarter = [quarter: number, files: number, bytes: number];
 
 /** Counts every file under `path` by the hour it last changed, for the Time river. */
-export const river = (path: string, ticket: number) => invoke<void>("river", { path, ticket });
+export const river = (path: string, ticket: number, showHidden: boolean, showSystem: boolean) => invoke<void>("river", { path, ticket, showHidden, showSystem });
 export const stopRiver = () => invoke<void>("stop_river");
 /** Up to 40 files right inside `path` that last changed from `from` up to `to`, newest first. */
 export const changedBetween = (path: string, from: number, to: number) => invoke<string[]>("changed_between", { path, from, to });
-/** `hours` were counted since the last answer. `done` says the walk is over. */
-export const onRiverGrew = (handler: (grew: { ticket: number; hours: RiverHour[]; done: boolean }) => void) =>
-  listen<{ ticket: number; hours: RiverHour[]; done: boolean }>("river-grew", (event) => handler(event.payload));
+/** `quarters` were counted since the last answer. `done` says the walk is over. */
+export const onRiverGrew = (handler: (grew: { ticket: number; quarters: RiverQuarter[]; done: boolean }) => void) =>
+  listen<{ ticket: number; quarters: RiverQuarter[]; done: boolean }>("river-grew", (event) => handler(event.payload));
 
 /** A file of a set of twins. */
 export interface Twin {
@@ -1080,7 +1082,7 @@ export interface Twin {
 }
 
 /** Files under `path` with the same content as another, or with `photos` pictures that look alike, in sets. */
-export const findTwins = (path: string, photos: boolean) => invoke<Twin[][]>("find_twins", { path, photos });
+export const findTwins = (paths: string[], photos: boolean) => invoke<Twin[][]>("find_twins", { paths, photos });
 export const stopTwins = () => invoke<void>("stop_twins");
 
 export const onSizesGrew = (handler: (view: number) => void) =>

@@ -2606,19 +2606,26 @@ fn stop_map() {
     sizes::stop_map();
 }
 
+/// What `path` holds with all the bytes under each, from the search index at once. None when the
+/// index is off or doesn't list its drive yet.
+#[tauri::command]
+async fn listed_parts(path: PathBuf) -> Result<Option<Vec<sizes::Cell>>, String> {
+    blocking(move || Ok(sizes::listed_parts(&path))).await
+}
+
 /// What the Time river hears as a folder is counted.
 #[derive(Clone, Serialize)]
 struct RiverGrew {
     ticket: u32,
-    hours: sizes::Hours,
+    quarters: sizes::Quarters,
     done: bool,
 }
 
-/// Counts every file under `path` by the hour it last changed, for the Time river.
+/// Counts every file under `path` by the quarter hour it last changed, for the Time river.
 #[tauri::command]
-fn river(path: PathBuf, ticket: u32, app: AppHandle) {
-    sizes::river(path, move |hours, done| {
-        let _ = app.emit("river-grew", RiverGrew { ticket, hours, done });
+fn river(path: PathBuf, ticket: u32, show_hidden: bool, show_system: bool, app: AppHandle) {
+    sizes::river(path, folder::Sight { hidden: show_hidden, system: show_system }, move |quarters, done| {
+        let _ = app.emit("river-grew", RiverGrew { ticket, quarters, done });
     });
 }
 
@@ -2660,10 +2667,10 @@ static TWINS: Mutex<Option<Arc<AtomicBool>>> = Mutex::new(None);
 /// The checksum lane of a look for twins, apart from every view's.
 const TWINS_LANE: u32 = 0x4000_0000;
 
-/// Files under `path` with the same content as another, or with `photos` the pictures that look
-/// alike, in sets. Hidden and system files stay out.
+/// Files under `paths` with the same content as another, or with `photos` the pictures that look
+/// alike, in sets, across all of them. Hidden and system files stay out.
 #[tauri::command]
-async fn find_twins(path: PathBuf, photos: bool) -> Result<Vec<Vec<Twin>>, String> {
+async fn find_twins(paths: Vec<PathBuf>, photos: bool) -> Result<Vec<Vec<Twin>>, String> {
     let stop = Arc::new(AtomicBool::new(false));
     if let Some(old) = TWINS.lock().unwrap_or_else(PoisonError::into_inner).replace(stop.clone()) {
         old.store(true, Ordering::SeqCst);
@@ -2672,13 +2679,13 @@ async fn find_twins(path: PathBuf, photos: bool) -> Result<Vec<Vec<Twin>>, Strin
     blocking(move || {
         let stopped = || stop.load(Ordering::SeqCst);
         let sets = if photos {
-            looks::alike(&[path], &stopped)
+            looks::alike(&paths, &stopped)
                 .into_iter()
                 .map(|set| set.into_iter().map(|seen| Twin { path: seen.path, bytes: seen.bytes, modified: ms(seen.modified), sharp: Some(seen.look.sharp) }).collect())
                 .collect()
         } else {
             let sight = folder::Sight { hidden: false, system: false };
-            copies::find(&[path], true, sight, TWINS_LANE, &stopped, &|| ())
+            copies::find(&paths, true, sight, TWINS_LANE, &stopped, &|| ())
                 .copy_sets()
                 .into_iter()
                 .map(|set| set.into_iter().map(|(path, bytes, modified)| Twin { path, bytes, modified: ms(modified), sharp: None }).collect())
@@ -3303,6 +3310,7 @@ fn main() {
             scan_sizes,
             stop_sizes,
             map_folder,
+            listed_parts,
             send_to_file_dialog,
             stop_map,
             river,

@@ -94,7 +94,8 @@ export function samePath(a: string | undefined, b: string) {
   return a?.toLowerCase() === b.toLowerCase();
 }
 
-function isInside(path: string, folder: string) {
+/** True when `path` is `folder` or lies somewhere under it. */
+export function isInside(path: string, folder: string) {
   const a = path.toLowerCase();
   const b = folder.toLowerCase();
   return a === b || a.startsWith(b.endsWith("\\") ? b : `${b}\\`);
