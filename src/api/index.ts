@@ -278,6 +278,9 @@ export interface Progress {
   /** In a job of several parts, which one this is and how many there are; both 0 otherwise. */
   part?: number;
   parts?: number;
+  /** In a job of several parts, where this one starts on the bar and its share of it, from 0 to 1. */
+  start?: number;
+  share?: number;
 }
 
 export type Answer = "replace" | "keepBoth" | "merge" | "skip" | "retry" | "elevate" | "permanent" | "cancel";

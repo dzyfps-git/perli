@@ -1161,6 +1161,14 @@ fn rows_of_two_archives_and_a_file_copy_as_one_job_with_one_undo() {
     assert!(sandbox.names("to").is_empty());
 }
 
+#[test]
+fn parts_of_a_job_of_several_share_the_bar_by_weight() {
+    let near = |got: Vec<f64>, want: &[f64]| got.iter().zip(want).all(|(got, want)| (got - want).abs() < 1e-9);
+    // One that can't be weighed counts as an average one.
+    assert!(near(shares(&[1000, 0, 3000]), &[1.0 / 6.0, 2.0 / 6.0, 3.0 / 6.0]));
+    assert!(near(shares(&[0, 0]), &[0.5, 0.5]), "with none weighed, each gets the same");
+}
+
 fn unzip(archive: &Path, own_folder: bool) -> Job {
     Job::Unzip {
         archives: vec![archive.to_path_buf()],

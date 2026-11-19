@@ -15,7 +15,7 @@ use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -24,17 +24,18 @@ use serde::{Deserialize, Serialize};
 use windows::core::HSTRING;
 use windows::Win32::Foundation::{CloseHandle, FILETIME, HANDLE, WAIT_ABANDONED, WAIT_OBJECT_0};
 use windows::Win32::Storage::FileSystem::{
-    CreateFileW, GetDriveTypeW, GetLogicalDrives, ReadDirectoryChangesW, FILE_FLAG_BACKUP_SEMANTICS, FILE_LIST_DIRECTORY,
+    CreateFileW, GetDriveTypeW, GetLogicalDrives, ReadDirectoryChangesW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OVERLAPPED, FILE_LIST_DIRECTORY,
     FILE_NOTIFY_CHANGE_ATTRIBUTES, FILE_NOTIFY_CHANGE_CREATION, FILE_NOTIFY_CHANGE_DIR_NAME, FILE_NOTIFY_CHANGE_FILE_NAME,
     FILE_NOTIFY_CHANGE_LAST_WRITE, FILE_NOTIFY_CHANGE_SIZE, FILE_NOTIFY_INFORMATION, FILE_SHARE_DELETE, FILE_SHARE_READ,
     FILE_SHARE_WRITE, OPEN_EXISTING, WIN32_FIND_DATAW,
 };
 use windows::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
 use windows::Win32::System::Threading::{
-    CreateMutexW, GetCurrentThread, ReleaseMutex, SetThreadPriority, WaitForSingleObject, THREAD_MODE_BACKGROUND_BEGIN,
+    CreateEventW, CreateMutexW, GetCurrentThread, ReleaseMutex, ResetEvent, SetEvent, SetThreadPriority, WaitForMultipleObjects,
+    WaitForSingleObject, INFINITE, THREAD_MODE_BACKGROUND_BEGIN,
 };
 use windows::Win32::System::WindowsProgramming::{DRIVE_FIXED, DRIVE_REMOTE};
-use windows::Win32::System::IO::CancelSynchronousIo;
+use windows::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 
 use crate::folder::Sight;
 use crate::ops::sys;
@@ -606,21 +607,25 @@ enum Heard {
     Lost(PathBuf),
 }
 
-/// A change watch on the top of a drive, held by its own thread.
+/// A change watch on the top of a drive, held by its own thread. Each read waits on the drive and
+/// on `quit` at once, so a watch told to stop ends then, between reads or in one.
 struct Watch {
-    stopped: Arc<AtomicBool>,
-    thread: thread::JoinHandle<()>,
+    quit: isize,
+    thread: Option<thread::JoinHandle<()>>,
 }
 
 impl Watch {
     fn start(root: PathBuf, heard: Sender<Heard>) -> Option<Self> {
         let share = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
-        let opened = unsafe { CreateFileW(&HSTRING::from(root.as_os_str()), FILE_LIST_DIRECTORY.0, share, None, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, None) }.ok()?;
-        let raw = opened.0 as isize;
-        let stopped = Arc::new(AtomicBool::new(false));
-        let stop = stopped.clone();
+        let flags = FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED;
+        let opened = unsafe { CreateFileW(&HSTRING::from(root.as_os_str()), FILE_LIST_DIRECTORY.0, share, None, OPEN_EXISTING, flags, None) }.ok()?;
+        let (Ok(done), Ok(quit)) = (unsafe { CreateEventW(None, true, false, None) }, unsafe { CreateEventW(None, true, false, None) }) else {
+            let _ = unsafe { CloseHandle(opened) };
+            return None;
+        };
+        let raw = [opened.0 as isize, done.0 as isize, quit.0 as isize];
         let thread = thread::spawn(move || {
-            let opened = HANDLE(raw as *mut _);
+            let [opened, done, quit] = raw.map(|raw| HANDLE(raw as *mut _));
             let mut buffer = vec![0u32; 16 * 1024];
             let filter = FILE_NOTIFY_CHANGE_FILE_NAME
                 | FILE_NOTIFY_CHANGE_DIR_NAME
@@ -630,10 +635,21 @@ impl Watch {
                 | FILE_NOTIFY_CHANGE_CREATION;
             loop {
                 let mut bytes = 0u32;
-                let read = unsafe {
-                    ReadDirectoryChangesW(opened, buffer.as_mut_ptr().cast(), (buffer.len() * 4) as u32, true, filter, Some(&mut bytes), None, None)
+                let mut overlapped = OVERLAPPED { hEvent: done, ..Default::default() };
+                let _ = unsafe { ResetEvent(done) };
+                let asked = unsafe {
+                    ReadDirectoryChangesW(opened, buffer.as_mut_ptr().cast(), (buffer.len() * 4) as u32, true, filter, None, Some(&mut overlapped), None)
                 };
-                if read.is_err() || stop.load(Ordering::SeqCst) {
+                if asked.is_err() {
+                    break;
+                }
+                if unsafe { WaitForMultipleObjects(&[done, quit], false, INFINITE) } != WAIT_OBJECT_0 {
+                    // Told to stop: the read is called off, and waited for, as it writes into `buffer`.
+                    let _ = unsafe { CancelIoEx(opened, Some(&overlapped)) };
+                    let _ = unsafe { GetOverlappedResult(opened, &overlapped, &mut bytes, true) };
+                    break;
+                }
+                if unsafe { GetOverlappedResult(opened, &overlapped, &mut bytes, false) }.is_err() {
                     break;
                 }
                 if bytes == 0 {
@@ -652,17 +668,21 @@ impl Watch {
                 }
             }
             let _ = unsafe { CloseHandle(opened) };
+            let _ = unsafe { CloseHandle(done) };
         });
-        Some(Self { stopped, thread })
+        Some(Self { quit: raw[2], thread: Some(thread) })
     }
 }
 
 impl Drop for Watch {
-    // ponytail: a watch between two reads when told to stop ends with the next change on its drive.
     fn drop(&mut self) {
-        use std::os::windows::io::AsRawHandle;
-        self.stopped.store(true, Ordering::SeqCst);
-        let _ = unsafe { CancelSynchronousIo(HANDLE(self.thread.as_raw_handle())) };
+        let quit = HANDLE(self.quit as *mut _);
+        let _ = unsafe { SetEvent(quit) };
+        // Quick, as the wait wakes at once: then the drive's handle is closed, and `quit` can go.
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+        let _ = unsafe { CloseHandle(quit) };
     }
 }
 
@@ -976,6 +996,19 @@ mod tests {
                 let _ = fs::remove_file(self.0.with_extension(end));
             }
         }
+    }
+
+    #[test]
+    fn a_watch_hears_a_change_and_stops_at_once_between_changes() {
+        let tree = Tree::new("watch");
+        let (sender, heard) = mpsc::channel();
+        let watch = Watch::start(tree.0.clone(), sender).unwrap();
+        let made = tree.file("new.txt");
+        let first = heard.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(matches!(first, Heard::Changed(path) if path == made));
+        let asked = Instant::now();
+        drop(watch);
+        assert!(asked.elapsed() < Duration::from_secs(2), "a watch told to stop ends with no change on its drive");
     }
 
     const ALL: Sight = Sight { hidden: true, system: true };

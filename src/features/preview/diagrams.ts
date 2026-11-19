@@ -172,11 +172,23 @@ function failed(block: HTMLElement, text: string, error: unknown) {
   block.before(note);
 }
 
+/** Draws the diagrams in `root` again in the colours of the moment, as after a theme change. */
+export function redrawDiagrams(root: HTMLElement) {
+  for (const figure of root.querySelectorAll<HTMLElement>("figure.md-diagram[data-source]")) {
+    const block = document.createElement("pre");
+    const code = document.createElement("code");
+    code.className = "language-mermaid";
+    code.textContent = figure.dataset.source!;
+    block.append(code);
+    figure.replaceWith(block);
+  }
+  return drawDiagrams(root);
+}
+
 /**
  * Draws each ```mermaid block in `root` in place, with tools to zoom and copy. Mermaid loads only
  * when a page has one. A block that can't be drawn stays as code under what went wrong.
  */
-// ponytail: drawn once with the theme of the moment; a theme change shows on the next open.
 export async function drawDiagrams(root: HTMLElement) {
   const blocks = [...root.querySelectorAll<HTMLElement>("pre:has(> code.language-mermaid)")];
   if (!blocks.length) return;
@@ -200,6 +212,8 @@ export async function drawDiagrams(root: HTMLElement) {
       scrap();
       const figure = document.createElement("figure");
       figure.className = "md-diagram";
+      // Kept, so a theme change can draw it again in the new colours.
+      figure.dataset.source = text;
       figure.innerHTML = svg;
       const drawing = figure.querySelector("svg")!;
       drawing.removeAttribute("height");

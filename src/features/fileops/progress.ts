@@ -11,12 +11,14 @@ const SECONDS_PER_HOUR = 3600;
 
 const work = (bytes: number, items: number) => bytes + items * ITEM_WEIGHT;
 
-/** How far along a job is, from 0 to 1. Each part of a job of several has the same share. */
+/** How far along a job is, from 0 to 1. Each part of a job of several has its share, or the same share where none is given. */
 export function fraction(progress: Progress) {
   const total = work(progress.totalBytes, progress.totalItems);
   const own = total > 0 ? Math.min(1, work(progress.bytes, progress.items) / total) : 0;
   const parts = progress.parts ?? 0;
-  return parts > 1 ? ((progress.part ?? 0) + own) / parts : own;
+  if (parts <= 1) return own;
+  if (progress.share) return Math.min(1, (progress.start ?? 0) + own * progress.share);
+  return ((progress.part ?? 0) + own) / parts;
 }
 
 export interface Rate {

@@ -53,6 +53,8 @@ test("fraction counts items as well as bytes", () => {
   // The second of four parts, half done, is three eighths of the whole.
   assert.equal(fraction({ ...progress(0, 1), totalBytes: 0, totalItems: 2, part: 1, parts: 4 }), 0.375);
   assert.equal(fraction({ ...progress(0, 2), totalBytes: 0, totalItems: 2, part: 3, parts: 4 }), 1);
+  // A part given its share by weight: the big second part, half done, after a tiny first.
+  assert.equal(fraction({ ...progress(0, 1), totalBytes: 0, totalItems: 2, part: 1, parts: 2, start: 0.1, share: 0.9 }), 0.55);
 });
 
 test("fraction never passes 1, even if files grow while they copy", () => {

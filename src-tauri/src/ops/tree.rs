@@ -130,7 +130,14 @@ impl Host for Quiet {
 /// Counts items and bytes in `paths`, skipping whatever can't be read.
 pub fn measure(paths: &[PathBuf]) -> (u64, u64) {
     let control = Arc::new(Control::default());
-    let mut run = Run::new(&Quiet, &control);
-    let _ = run.scan_all(paths);
-    (run.progress.total_items, run.progress.total_bytes)
+    Run::new(&Quiet, &control).measured(paths)
+}
+
+impl Run<'_> {
+    /// Items and bytes in `paths`, skipping whatever can't be read, and stopping with the job.
+    pub(super) fn measured(&self, paths: &[PathBuf]) -> (u64, u64) {
+        let mut run = Run::new(&Quiet, self.control);
+        let _ = run.scan_all(paths);
+        (run.progress.total_items, run.progress.total_bytes)
+    }
 }
