@@ -538,6 +538,8 @@ export interface SyncPair {
   skip: string;
   /** Minutes between runs while Perli is open. 0 is never. */
   every: number;
+  /** Runs once a change in `from` has settled, while Perli is open. */
+  changed: boolean;
   /** When it last ran, in ms since 1970. 0 is never. */
   ran: number;
 }

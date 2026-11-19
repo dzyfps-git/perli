@@ -601,7 +601,7 @@ fn on_battery() -> bool {
     unsafe { GetSystemPowerStatus(&mut power) }.is_ok() && power.ACLineStatus == 0
 }
 
-enum Heard {
+pub(crate) enum Heard {
     Changed(PathBuf),
     /// Too much changed at once for the watch to say what: walk the drive again.
     Lost(PathBuf),
@@ -609,13 +609,13 @@ enum Heard {
 
 /// A change watch on the top of a drive, held by its own thread. Each read waits on the drive and
 /// on `quit` at once, so a watch told to stop ends then, between reads or in one.
-struct Watch {
+pub(crate) struct Watch {
     quit: isize,
     thread: Option<thread::JoinHandle<()>>,
 }
 
 impl Watch {
-    fn start(root: PathBuf, heard: Sender<Heard>) -> Option<Self> {
+    pub(crate) fn start(root: PathBuf, heard: Sender<Heard>) -> Option<Self> {
         let share = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
         let flags = FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED;
         let opened = unsafe { CreateFileW(&HSTRING::from(root.as_os_str()), FILE_LIST_DIRECTORY.0, share, None, OPEN_EXISTING, flags, None) }.ok()?;

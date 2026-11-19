@@ -255,6 +255,15 @@ impl Service for OneDrive {
         Ok(format!("{drive}:{id}"))
     }
 
+    fn erase(&self, path: &str, item: &Item) -> Result<Option<String>, String> {
+        // Work and school accounts delete for good; a personal one puts it in its recycle bin.
+        let address = Self::then(&self.address(path)?, "/permanentDelete");
+        match self.post(&address, &json!({})) {
+            Ok(_) => Ok(None),
+            Err(_) => self.remove(path, item).map(Some),
+        }
+    }
+
     fn restore(&self, _path: &str, token: &str) -> Result<(), String> {
         let (drive, id) = token.split_once(':').ok_or("Nothing to bring back")?;
         self.post(&format!("{GRAPH}/drives/{drive}/items/{id}/restore"), &json!({}))

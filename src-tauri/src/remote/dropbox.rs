@@ -18,6 +18,8 @@ const CONTENT: &str = "https://content.dropboxapi.com/2";
 pub const SHARED: &str = "Shared with me";
 /// Files up to this size go in one request; bigger ones in parts of this size.
 const PART: u64 = 8 * 1024 * 1024;
+/// Files of a deleted folder that Undo brings back one by one, at most.
+const MOST_RESTORED: usize = 2000;
 
 pub static APP: App = App {
     authorize: "https://www.dropbox.com/oauth2/authorize",
@@ -153,6 +155,18 @@ impl Dropbox {
         Ok(())
     }
 
+    /// What brings back a folder once deleted: each file in it with its revision, as JSON, or
+    /// `""` past `MOST_RESTORED` files.
+    // ponytail: reads the whole folder before it goes, a request a 2000 entries; a big one takes a while.
+    fn folder_token(&self, path: &str) -> String {
+        let Ok(values) = self.entries("files/list_folder", json!({ "path": path_of(path), "recursive": true, "limit": 2000 })) else { return String::new() };
+        let files: Vec<Value> = values.iter().filter(|value| value[".tag"] == "file").map(|value| json!([value["path_display"], value["rev"]])).collect();
+        if files.len() > MOST_RESTORED {
+            return String::new();
+        }
+        json!({ "folder": path_of(path), "files": files }).to_string()
+    }
+
     fn no_writing(folder: &str) -> Result<(), String> {
         if folder == SHARED || folder.starts_with(&format!("{SHARED}/")) {
             return Err("What others shared one file at a time can be opened and copied, not changed".into());
@@ -205,14 +219,32 @@ impl Service for Dropbox {
 
     fn remove(&self, path: &str, item: &Item) -> Result<String, String> {
         Self::no_writing(super::parent_of(path))?;
+        // Dropbox brings back a deleted file by its revision, and so a folder by each file in it.
+        let token = if item.folder { self.folder_token(path) } else { item.version.clone() };
         self.call("files/delete_v2", &json!({ "path": path_of(path) }))?;
-        // Dropbox brings back a deleted file by its revision; a folder comes back only on dropbox.com.
-        Ok(if item.folder || item.version.is_empty() { String::new() } else { item.version.clone() })
+        Ok(token)
+    }
+
+    fn erase(&self, path: &str, item: &Item) -> Result<Option<String>, String> {
+        Self::no_writing(super::parent_of(path))?;
+        // Only a team account may delete for good; others put it in Dropbox's deleted files.
+        match self.call("files/permanently_delete", &json!({ "path": path_of(path) })) {
+            Ok(_) => Ok(None),
+            Err(_) => self.remove(path, item).map(Some),
+        }
     }
 
     fn restore(&self, path: &str, token: &str) -> Result<(), String> {
         if token.is_empty() {
-            return Err("Dropbox brings back a deleted folder only from its deleted files on dropbox.com".into());
+            return Err(format!("Dropbox brings back a folder of more than {MOST_RESTORED} files only from its deleted files on dropbox.com"));
+        }
+        if let Some(folder) = serde_json::from_str::<Value>(token).ok().filter(Value::is_object) {
+            // The folder itself first, so one that was empty comes back too.
+            let _ = self.call("files/create_folder_v2", &json!({ "path": folder["folder"], "autorename": false }));
+            for file in folder["files"].as_array().into_iter().flatten() {
+                self.call("files/restore", &json!({ "path": file[0], "rev": file[1] }))?;
+            }
+            return Ok(());
         }
         self.call("files/restore", &json!({ "path": path_of(path), "rev": token }))?;
         Ok(())

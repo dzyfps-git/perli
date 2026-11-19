@@ -14,6 +14,11 @@ use crate::remote::{self, At, Item};
 
 /// Marks the undo record of a cloud delete: what follows it is what brings it back.
 const TOKEN: &str = "cloud-bin:";
+/// Marks the undo record of a cloud file written over: the size and time of what it replaced
+/// follow, to find among the file's versions.
+const VERSION: &str = "cloud-version:";
+/// Times this close count as one, as some services keep them in 2 s steps.
+const SAME_TIME: u64 = 2 * 10_000_000;
 
 fn failed(message: String) -> Error {
     Error::new(E_FAIL, message)
@@ -180,7 +185,7 @@ impl Run<'_> {
             Some(Err(message)) => return self.cloud_refused(source, &message),
         };
         match (from, spot) {
-            (Some(from), Spot::Cloud(to)) if from.place.id == to.place.id => self.within(&from, to, &name, moving),
+            (Some(from), Spot::Cloud(to)) if remote::same_store(&from.place, &to.place) => self.within(&from, to, &name, moving),
             (Some(from), spot) => {
                 let item = match from.item() {
                     Ok(item) => item,
@@ -196,7 +201,7 @@ impl Run<'_> {
                     }
                 };
                 if moving && whole {
-                    self.cloud_remove_one(source)?;
+                    self.cloud_remove_one(source, false)?;
                 }
                 Ok(())
             }
@@ -306,12 +311,30 @@ impl Run<'_> {
         if sent.is_none() {
             return Ok(false);
         }
-        if top && replace.is_none() {
-            // ponytail: a file written over leaves no undo record; the services keep its old
-            // version, which Versions brings back.
-            self.done.push(Done::Created { path: target });
+        if top {
+            self.done.push(match &replace {
+                None => Done::Created { path: target },
+                // Undo brings back what it replaced, from the service's own versions.
+                Some(old) => Done::Replaced { path: target, kept: PathBuf::from(format!("{VERSION}{}:{}", old.size, old.modified)) },
+            });
         }
         Ok(true)
+    }
+
+    /// Puts back the version of a cloud file that a write replaced: the one of its size and time
+    /// among the versions the service keeps, else the newest before the file as it is.
+    pub(super) fn cloud_put_back(&mut self, path: &Path, kept: &Path) -> Flow {
+        self.add_total(1, 0);
+        let facts = kept.to_string_lossy().strip_prefix(VERSION).and_then(|facts| facts.split_once(':').map(|(size, time)| (size.parse().ok(), time.parse().ok())));
+        let (size, modified): (Option<u64>, Option<u64>) = facts.unwrap_or_default();
+        self.attempt(path, None, |_| {
+            let versions = remote::versions(path).map_err(failed)?;
+            let same = |version: &&remote::Version| Some(version.size) == size && modified.is_some_and(|time| version.modified.abs_diff(time) <= SAME_TIME);
+            let old = versions.iter().find(same).or(versions.first()).ok_or_else(|| failed("This place keeps no older versions, so what this replaced can't come back".into()))?;
+            remote::bring_back(path, &old.id).map_err(failed)
+        })?;
+        self.step(1, 0);
+        Ok(())
     }
 
     /// Brings `item`, a file or a folder with all it holds, into `folder` on this PC as `name`.
@@ -371,8 +394,9 @@ impl Run<'_> {
         Ok(true)
     }
 
-    /// Deletes one item of a place, to its bin where it has one, noting what brings it back.
-    fn cloud_remove_one(&mut self, path: &Path) -> Flow {
+    /// Deletes one item of a place, to its bin where it has one, noting what brings it back. For
+    /// good when the service lets this account and `for_good` asks it.
+    fn cloud_remove_one(&mut self, path: &Path, for_good: bool) -> Flow {
         let at = match remote::at(path) {
             Some(Ok(at)) => at,
             Some(Err(message)) => return self.cloud_refused(path, &message),
@@ -380,6 +404,9 @@ impl Run<'_> {
         };
         let removed = self.attempt(path, None, |_| {
             let item = at.item().map_err(failed)?;
+            if for_good {
+                return at.service.erase(&at.inner, &item).map(Option::unwrap_or_default).map_err(failed);
+            }
             at.service.remove(&at.inner, &item).map_err(failed)
         })?;
         if let Some(token) = removed {
@@ -391,11 +418,11 @@ impl Run<'_> {
         Ok(())
     }
 
-    /// The cloud ones of a Recycle or a Delete.
-    pub(super) fn cloud_remove(&mut self, paths: &[PathBuf]) -> Flow {
+    /// The cloud ones of a Recycle or, `for_good`, a Delete.
+    pub(super) fn cloud_remove(&mut self, paths: &[PathBuf], for_good: bool) -> Flow {
         for path in paths {
             self.check()?;
-            self.cloud_remove_one(path)?;
+            self.cloud_remove_one(path, for_good)?;
             self.step(1, 0);
         }
         Ok(())
@@ -409,7 +436,7 @@ impl Run<'_> {
                 self.cloud_refused(&from, "This moves only within one cloud place")?;
                 continue;
             };
-            if source.place.id != target.place.id {
+            if !remote::same_store(&source.place, &target.place) {
                 self.cloud_refused(&from, "This moves only within one cloud place")?;
                 continue;
             }
@@ -474,6 +501,11 @@ impl Run<'_> {
         self.step(1, 0);
         Ok(())
     }
+}
+
+/// Whether an undo record of a file written over is a cloud one.
+pub(super) fn is_cloud_version(kept: &Path) -> bool {
+    kept.to_string_lossy().starts_with(VERSION)
 }
 
 /// Whether an undo record of a delete is a cloud one.

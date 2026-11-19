@@ -79,11 +79,11 @@ impl Run<'_> {
 
     /// Permanently deletes everything in `paths`. Links go, their targets stay.
     pub(super) fn delete_paths(&mut self, paths: &[PathBuf]) -> Flow {
-        // ponytail: a cloud delete goes to the service's own bin even here, as none of them
-        // offers a delete for good that a mistake can't undo; S3, with no bin, deletes for good.
+        // Google, S3 and work OneDrive and Dropbox accounts delete for good; a personal OneDrive
+        // or Dropbox account has no way to, so there it goes to the service's bin.
         let (cloud, paths): (Vec<_>, Vec<_>) = paths.iter().cloned().partition(|path| crate::remote::is_remote(path));
         self.add_total(cloud.len() as u64, 0);
-        self.cloud_remove(&cloud)?;
+        self.cloud_remove(&cloud, true)?;
         for node in self.scan_all(&paths)? {
             self.touched.insert(sys::parent(&node.path));
             self.delete_node(&node)?;

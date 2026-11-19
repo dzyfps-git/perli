@@ -5,6 +5,8 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver};
+use std::sync::{Mutex, PoisonError};
 
 use serde::{Deserialize, Serialize};
 use windows::core::{w, HSTRING, PCWSTR};
@@ -38,6 +40,10 @@ pub struct Pair {
     /// Runs by itself this often while Perli is open, in minutes. 0 is never.
     #[serde(default)]
     pub every: u32,
+    /// Runs by itself once a change in `from` has settled, while Perli is open. Only a folder on
+    /// this PC can be heard.
+    #[serde(default)]
+    pub changed: bool,
     /// When it last ran, in ms since 1970. 0 is never, so the first run shows what it will do.
     #[serde(default)]
     pub ran: u64,
@@ -183,6 +189,40 @@ impl Drop for Held {
     }
 }
 
+/// A watch on the source of a pair that runs when something changes, and when this window last
+/// heard one there that hasn't run yet.
+struct Heard {
+    from: PathBuf,
+    _watch: crate::index::Watch,
+    heard: Receiver<crate::index::Heard>,
+    last: Option<u64>,
+}
+
+// ponytail: a watch holds its folder open, so a source on a USB disk can't be ejected while
+// Perli runs; changes made while no Perli ran wait for the next one.
+static HEARD: Mutex<Vec<Heard>> = Mutex::new(Vec::new());
+
+/// Whether a pair that runs on change has a change to run for: one heard at the minute's look
+/// before last, none since, so it has settled, and not run since by another window. The first
+/// look starts the watch.
+fn has_changed(all: &[Pair], pair: &Pair, now: u64) -> bool {
+    let mut heard = HEARD.lock().unwrap_or_else(PoisonError::into_inner);
+    // A watch goes with its pair.
+    heard.retain(|one| all.iter().any(|pair| pair.changed && pair.from == one.from));
+    let Some(one) = heard.iter_mut().find(|one| one.from == pair.from) else {
+        let (sender, receiver) = mpsc::channel();
+        if let Some(watch) = crate::index::Watch::start(pair.from.clone(), sender) {
+            heard.push(Heard { from: pair.from.clone(), _watch: watch, heard: receiver, last: None });
+        }
+        return false;
+    };
+    if one.heard.try_iter().count() > 0 {
+        one.last = Some(now);
+        return false;
+    }
+    one.last.take().is_some_and(|last| last > pair.ran)
+}
+
 /// Reads the pairs in `file`, lets `change` change them and saves them if it did, all while
 /// holding the windows' mutex.
 fn change_in<T>(file: &Path, change: impl FnOnce(&mut Vec<Pair>) -> Result<T, String>) -> Result<T, String> {
@@ -227,6 +267,9 @@ pub fn save_pair(pair: Pair) -> Result<Pair, String> {
     if holds(&pair.from, &pair.to) || holds(&pair.to, &pair.from) {
         return Err("Neither folder of a sync can hold the other".into());
     }
+    if pair.changed && remote::is_remote(&pair.from) {
+        return Err("Perli hears changes only in folders on this PC, so a sync from the cloud runs on a timer".into());
+    }
     change(|all| Ok(put(all, pair)))
 }
 
@@ -237,17 +280,19 @@ pub fn remove_pair(id: &str) -> Result<(), String> {
     })
 }
 
-/// The pair, noted as run now. A `scheduled` run is only taken when it is due, so of the windows
-/// open, only the first to ask runs it.
+/// The pair, noted as run now. A `scheduled` run is only taken when it is due, by its time or by
+/// a change, so of the windows open, only the first to ask runs it.
 pub fn take_run(id: &str, scheduled: bool) -> Result<Option<Pair>, String> {
     change(|all| {
-        let pair = all.iter_mut().find(|pair| pair.id == id).ok_or("That sync is gone")?;
         let now = crate::since_1970().as_millis() as u64;
-        if scheduled && (pair.every == 0 || now < pair.ran + u64::from(pair.every) * 60_000) {
+        let at = all.iter().position(|pair| pair.id == id).ok_or("That sync is gone")?;
+        let pair = &all[at];
+        let due = if pair.changed { has_changed(all, pair, now) } else { pair.every > 0 && now >= pair.ran + u64::from(pair.every) * 60_000 };
+        if scheduled && !due {
             return Ok(None);
         }
-        pair.ran = now;
-        Ok(Some(pair.clone()))
+        all[at].ran = now;
+        Ok(Some(all[at].clone()))
     })
 }
 
@@ -259,7 +304,7 @@ mod tests {
     fn windows_saving_pairs_at_once_each_keep_theirs() {
         let file = std::env::temp_dir().join(format!("perli-sync-pairs-{}.json", std::process::id()));
         let _ = fs::remove_file(&file);
-        let pair = |at: usize| Pair { id: String::new(), from: format!("C:\\from{at}").into(), to: "D:\\to".into(), mirror: false, skip: String::new(), every: 0, ran: 0 };
+        let pair = |at: usize| Pair { id: String::new(), from: format!("C:\\from{at}").into(), to: "D:\\to".into(), mirror: false, skip: String::new(), every: 0, changed: false, ran: 0 };
         let savers: Vec<_> = (0..8)
             .map(|at| {
                 let file = file.clone();
@@ -278,12 +323,38 @@ mod tests {
     }
 
     #[test]
+    fn a_sync_on_change_runs_once_a_change_has_settled() {
+        let root = std::env::temp_dir().join(format!("perli-sync-heard-{}", std::process::id()));
+        let from = root.join("from");
+        fs::create_dir_all(&from).unwrap();
+        let pair = Pair { id: "p".into(), from: from.clone(), to: root.join("to"), mirror: false, skip: String::new(), every: 0, changed: true, ran: 0 };
+        let all = [pair.clone()];
+        assert!(!has_changed(&all, &pair, 1), "the first look starts the watch");
+        assert!(!has_changed(&all, &pair, 2), "nothing changed");
+        fs::write(from.join("new.txt"), "new").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(!has_changed(&all, &pair, 3), "a change still going on waits");
+        assert!(has_changed(&all, &pair, 4), "a change heard, then a quiet look, runs");
+        assert!(!has_changed(&all, &pair, 5), "once");
+        fs::write(from.join("more.txt"), "more").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(!has_changed(&all, &pair, 6));
+        let ran = Pair { ran: 7, ..pair.clone() };
+        assert!(!has_changed(&all, &ran, 8), "another window ran it since");
+        // Another pair, whose folder isn't there to watch, asks once this one is gone.
+        let other = Pair { id: "q".into(), from: root.join("not there"), ..pair.clone() };
+        assert!(!has_changed(std::slice::from_ref(&other), &other, 9), "a pair gone takes its watch");
+        assert!(HEARD.lock().unwrap().is_empty());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn a_target_not_made_yet_gets_everything() {
         let root = std::env::temp_dir().join(format!("perli-sync-new-{}", std::process::id()));
         let from = root.join("from");
         fs::create_dir_all(from.join("sub")).unwrap();
         fs::write(from.join("a.txt"), "a").unwrap();
-        let pair = Pair { id: String::new(), from: from.clone(), to: root.join("to"), mirror: true, skip: String::new(), every: 0, ran: 0 };
+        let pair = Pair { id: String::new(), from: from.clone(), to: root.join("to"), mirror: true, skip: String::new(), every: 0, changed: false, ran: 0 };
         let look = preview(&pair).unwrap();
         assert_eq!(look.copies.len(), 2);
         assert!(look.removes.is_empty());
@@ -308,7 +379,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(20));
         fs::write(to.join("same.txt"), "same").unwrap();
 
-        let mut pair = Pair { id: String::new(), from: from.clone(), to: to.clone(), mirror: false, skip: "*.tmp".into(), every: 0, ran: 0 };
+        let mut pair = Pair { id: String::new(), from: from.clone(), to: to.clone(), mirror: false, skip: "*.tmp".into(), every: 0, changed: false, ran: 0 };
         let names = |paths: Vec<PathBuf>| {
             let mut names: Vec<String> = paths.iter().map(|path| path.strip_prefix(&root).unwrap().to_string_lossy().replace('\\', "/")).collect();
             names.sort();

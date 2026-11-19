@@ -660,6 +660,7 @@ impl<'a> Run<'a> {
                 Done::Replaced { .. } | Done::Wallpaper { .. } | Done::Tagged { .. } | Done::TagDeleted { .. } | Done::TagRevived { .. } => {
                     for record in group {
                         match record {
+                            Done::Replaced { path, kept } if cloud::is_cloud_version(kept) => self.cloud_put_back(path, kept)?,
                             Done::Replaced { path, kept } => self.put_back_kept(path, kept)?,
                             Done::Wallpaper { before, .. } => self.put_back_wallpaper(before)?,
                             Done::Tagged { paths, keys, tag, on, .. } => self.tag(paths, Some(keys), *tag, !on)?,

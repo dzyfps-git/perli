@@ -361,6 +361,13 @@ impl Service for Google {
         Ok(found.id)
     }
 
+    fn erase(&self, path: &str, _item: &Item) -> Result<Option<String>, String> {
+        let found = self.find(path)?;
+        self.send_json(reqwest::Method::DELETE, &format!("{API}/files/{}?supportsAllDrives=true", found.id), &json!({}))?;
+        self.lock().remove(path);
+        Ok(None)
+    }
+
     fn restore(&self, _path: &str, token: &str) -> Result<(), String> {
         self.send_json(reqwest::Method::PATCH, &format!("{API}/files/{token}?supportsAllDrives=true"), &json!({ "trashed": false }))?;
         Ok(())

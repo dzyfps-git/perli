@@ -97,6 +97,11 @@ pub trait Service: Send + Sync {
     fn make_folder(&self, folder: &str, name: &str) -> Result<(), String>;
     /// Deletes it, to the service's own bin where it has one. Gives what brings it back, or `""`.
     fn remove(&self, path: &str, item: &Item) -> Result<String, String>;
+    /// Deletes it for good where the service lets this account, else to its bin as `remove`
+    /// does, giving what brings it back.
+    fn erase(&self, path: &str, item: &Item) -> Result<Option<String>, String> {
+        self.remove(path, item).map(Some)
+    }
     fn restore(&self, path: &str, token: &str) -> Result<(), String>;
     /// Moves it within the place, renamed to `name`.
     fn relocate(&self, path: &str, item: &Item, folder: &str, name: &str) -> Result<(), String>;
@@ -191,6 +196,12 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 /// Whether `path` is the cloud root or inside it.
+/// Whether a copy or move from one place to the other can be made by the service itself: one
+/// place, or two of one account. Two S3 places are two buckets, which this doesn't join.
+pub fn same_store(from: &Place, to: &Place) -> bool {
+    from.id == to.id || (from.kind == to.kind && from.kind != Kind::S3 && !from.account.is_empty() && from.account == to.account)
+}
+
 pub fn is_remote(path: &Path) -> bool {
     let text = path.as_os_str().to_string_lossy();
     text.len() >= ROOT.len()

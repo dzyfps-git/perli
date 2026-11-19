@@ -319,7 +319,7 @@ impl Run<'_> {
     /// Sends `paths` to the Recycle Bin and never deletes for good without asking.
     pub(super) fn recycle(&mut self, paths: Vec<PathBuf>) -> Flow {
         let (cloud, paths): (Vec<_>, Vec<_>) = paths.into_iter().partition(|path| crate::remote::is_remote(path));
-        self.cloud_remove(&cloud)?;
+        self.cloud_remove(&cloud, false)?;
         self.recycle_with(paths, FILEOPERATION_FLAGS(0))
     }
 
