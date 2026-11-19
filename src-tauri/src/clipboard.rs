@@ -368,6 +368,8 @@ mod tests {
             Content::Bytes(bytes) => bytes,
             other => panic!("{other:?}"),
         };
+        // A new window station's clipboard is not always empty on a build machine, so it is emptied first.
+        fresh(&|| ());
         assert!(!can_paste());
 
         let text: Vec<u8> = "héllo\0".encode_utf16().flat_map(u16::to_le_bytes).collect();
