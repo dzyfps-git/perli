@@ -2506,7 +2506,8 @@ async fn row_props(view: u32, request: u64, rows: Vec<u32>, names: Vec<String>, 
             for (row, value) in values.iter_mut().enumerate() {
                 value[at] = packed[row].map(|bytes| bytes.to_string());
             }
-        }        Ok(values)
+        }
+        Ok(values)
     })
     .await
 }
