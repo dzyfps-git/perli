@@ -97,7 +97,8 @@ pub fn preview(pair: &Pair) -> Result<Preview, String> {
 
 fn walk(from: &Path, to: &Path, mirror: bool, skip: &[HSTRING], preview: &mut Preview) -> Result<(), String> {
     let ours = children(from)?;
-    let theirs = children(to)?;
+    // A target on this PC not made yet holds nothing; the first run makes it.
+    let theirs = if !remote::is_remote(to) && !to.exists() { Vec::new() } else { children(to)? };
     let there = |name: &str| theirs.iter().find(|child| child.name.eq_ignore_ascii_case(name));
     for child in ours.iter().filter(|child| !skipped(skip, &child.name)) {
         let source = from.join(&child.name);
@@ -209,6 +210,19 @@ pub fn take_run(id: &str, scheduled: bool) -> Result<Option<Pair>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_target_not_made_yet_gets_everything() {
+        let root = std::env::temp_dir().join(format!("perli-sync-new-{}", std::process::id()));
+        let from = root.join("from");
+        fs::create_dir_all(from.join("sub")).unwrap();
+        fs::write(from.join("a.txt"), "a").unwrap();
+        let pair = Pair { id: String::new(), from: from.clone(), to: root.join("to"), mirror: true, skip: String::new(), every: 0, ran: 0 };
+        let look = preview(&pair).unwrap();
+        assert_eq!(look.copies.len(), 2);
+        assert!(look.removes.is_empty());
+        let _ = fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn a_run_copies_what_changed_and_a_mirror_takes_away_what_went() {
