@@ -447,7 +447,13 @@ impl<'a> Run<'a> {
             Job::Sync { pair } => {
                 let compared = self.attempt(&pair.from, None, |_| crate::sync::preview(&pair).map_err(|message| Error::new(E_FAIL, message.as_str())))?;
                 match compared.and_then(crate::sync::job) {
-                    Some(job) => self.job(job),
+                    Some(job) => {
+                        // The first run into a folder on this PC not made yet makes it.
+                        if !crate::remote::is_remote(&pair.to) {
+                            let _ = std::fs::create_dir_all(&pair.to);
+                        }
+                        self.job(job)
+                    }
                     None => Ok(()),
                 }
             }
