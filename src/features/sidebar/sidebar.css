@@ -319,6 +319,42 @@
   }
 }
 
+/* Space just taken rises into the bar like a tide in the accent's colours, then settles into it. */
+.place-tide {
+  position: absolute;
+  inset: 0 auto 0 calc(var(--from) * 100%);
+  z-index: 2;
+  width: calc((var(--to) - var(--from)) * 100%);
+  min-width: 3px;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--accent-start), var(--accent-end));
+  transform-origin: left;
+  animation: place-tide 1400ms var(--spring) forwards;
+  pointer-events: none;
+}
+
+@keyframes place-tide {
+  from {
+    scale: 0 1;
+  }
+
+  55% {
+    scale: 1 1;
+    opacity: 1;
+  }
+
+  to {
+    scale: 1 1;
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .place-tide {
+    display: none;
+  }
+}
+
 /* A copy landed on this drive: the bar swells once and a quick light runs through it. */
 .place-bar[data-wave] {
   animation: place-wave 1100ms var(--spring);
@@ -861,6 +897,79 @@ html[data-blurred] .place-used::before {
 
 /* A lock or a dot sits on the icon's corner, as Explorer marks a drive, so the rail shows it too. */
 /* A small disc on the icon's corner, like the reach dot, so the lock reads at a glance. */
+/* A sync running: specks cross a small bridge between its two ends, and wait amber on it while a
+   clash waits for an answer. */
+.place-bridge {
+  --bridge: var(--accent);
+  position: relative;
+  flex: none;
+  width: 26px;
+  height: 8px;
+  margin-left: auto;
+  background:
+    radial-gradient(circle at 2px 50%, var(--bridge) 1.5px, transparent 2px),
+    radial-gradient(circle at calc(100% - 2px) 50%, var(--bridge) 1.5px, transparent 2px),
+    linear-gradient(color-mix(in srgb, var(--bridge) 35%, transparent), color-mix(in srgb, var(--bridge) 35%, transparent)) 50% 50% / calc(100% - 6px) 1px no-repeat;
+}
+
+.place-bridge i {
+  position: absolute;
+  top: calc(50% - 1.5px);
+  left: 2px;
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: var(--bridge);
+  animation: place-bridge 1.2s ease-in-out infinite;
+}
+
+.place-bridge i:nth-child(2) {
+  animation-delay: -0.4s;
+}
+
+.place-bridge i:nth-child(3) {
+  animation-delay: -0.8s;
+}
+
+.place-bridge[data-clash] {
+  --bridge: var(--tag-2);
+}
+
+.place-bridge[data-clash] i {
+  left: calc(50% - 1.5px);
+  animation: place-bridge-wait 900ms ease-in-out infinite alternate;
+}
+
+@keyframes place-bridge {
+  from {
+    translate: 0 0;
+    opacity: 0;
+  }
+
+  20%,
+  80% {
+    opacity: 1;
+  }
+
+  to {
+    translate: 19px 0;
+    opacity: 0;
+  }
+}
+
+@keyframes place-bridge-wait {
+  from {
+    opacity: 0.35;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .place-bridge i {
+    left: calc(50% - 1.5px);
+    animation: none;
+  }
+}
+
 .place-badge {
   position: absolute;
   inset: calc(50% - 2px) auto auto calc(var(--space-2) + 8px);

@@ -410,6 +410,74 @@ html[data-blurred] .logo {
   outline: none;
 }
 
+/* While a job copies from one pane into the other, a few specks stream across the divider, as
+   fast as the job goes. */
+.pane-stream {
+  position: absolute;
+  top: 50%;
+  left: calc(var(--split, 0.5) * 100%);
+  z-index: 3;
+  width: 120px;
+  height: 64px;
+  translate: -50% -50%;
+  pointer-events: none;
+  mask-image: linear-gradient(90deg, transparent, #000 25%, #000 75%, transparent);
+  animation: pane-stream-in 300ms ease-out;
+}
+
+.pane-pair-stacked > .pane-stream {
+  top: calc(var(--split, 0.5) * 100%);
+  left: 50%;
+  rotate: 90deg;
+}
+
+.pane-stream i {
+  position: absolute;
+  top: calc(8px + var(--at) * 8px);
+  left: 0;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--accent) 60%, transparent);
+  animation: pane-stream var(--pace, 1.6s) linear infinite;
+  animation-delay: calc(var(--at) * -0.43 * var(--pace, 1.6s));
+}
+
+.pane-stream i:nth-child(3n) {
+  background: var(--accent-end);
+}
+
+.pane-stream i:nth-child(3n + 1) {
+  background: var(--accent-start);
+}
+
+.pane-stream[data-back] i {
+  animation-direction: reverse;
+}
+
+@keyframes pane-stream {
+  to {
+    translate: 115px 0;
+  }
+}
+
+@keyframes pane-stream-in {
+  from {
+    opacity: 0;
+  }
+}
+
+html[data-blurred] .pane-stream i {
+  animation-play-state: paused;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pane-stream {
+    display: none;
+  }
+}
+
 /* Where the divider settles, shown while it moves. The one it sits on lights up. */
 .split-tick {
   position: absolute;

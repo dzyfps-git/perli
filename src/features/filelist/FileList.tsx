@@ -1,10 +1,12 @@
 import { createEffect, createMemo, createRoot, createSignal, For, Index, on, onCleanup, onMount, Show } from "solid-js";
 import {
+  binCleanDays,
   fetchRows,
   fetchBigPicture,
   fetchPictureFile,
   fetchThumb,
   findRow,
+  folderKinds,
   folderPictures,
   MARKS,
   pictureAspects,
@@ -44,7 +46,10 @@ import {
 } from "./columns";
 import { clampTile, GALLERY_GAP, groupedMove, justifiedPlaces, moveTarget, nextShapes, placesOf, rowsAround, TILE_STEP, type Gallery, type Layout, type Places } from "./layout";
 import { ageShare, hasPicture, iconKindOf, iconSheet, kindOf } from "./fileKinds";
+import { kindRgb, readPalette } from "../space/lenses";
+import type { Rgb } from "../space/draw";
 import {
+  ageDim,
   dateForm,
   hoverCards,
   iconTheme,
@@ -232,12 +237,56 @@ const CELL_CLASS: Partial<Record<ColumnId, string>> = {
   album: "file-meta file-clipped",
 };
 
-/** A few pictures from inside a folder, fanned out like prints on a table. */
+/** The most dots a folder's fingerprint has, and their size on a tile's picture. */
+const MOST_DOTS = 19;
+const DOT_RADIUS = 9;
+const DAY_MS = 86_400_000;
+/** How long a row takes to fade all it will when old rows dim. */
+const DIM_OVER_MS = 365 * DAY_MS;
+
+/** Steps of a turn between dots, the golden angle, so they pack evenly like a sunflower's seeds. */
+const GOLDEN_TURN = Math.PI * (3 - Math.sqrt(5));
+
+/**
+ * A folder with no pictures shows what is inside as a small cluster of dots, one colour for each
+ * kind and as many dots as its share.
+ * ponytail: the colours are the theme's when first drawn, so a cached tile keeps them until the folder changes.
+ */
+async function fingerprintOf(folder: string): Promise<Thumb | null> {
+  const kinds = await folderKinds(folder);
+  const total = kinds.reduce((sum, [, count]) => sum + count, 0);
+  if (total === 0) return null;
+  const palette = readPalette();
+  const room = Math.min(MOST_DOTS, total);
+  const dots: Rgb[] = [];
+  for (const [extension, count] of kinds) {
+    const color = kindRgb(extension === "/" ? "folder" : kindOf(`x.${extension}`, false), palette);
+    const many = Math.max(1, Math.round((count / total) * room));
+    for (let at = 0; at < many && dots.length < room; at++) dots.push(color);
+  }
+  const context = new OffscreenCanvas(STACK_EDGE, STACK_EDGE).getContext("2d")!;
+  const middle = STACK_EDGE / 2;
+  context.globalAlpha = 0.85;
+  dots.forEach((color, at) => {
+    const away = 13 * Math.sqrt(at + 0.5);
+    context.fillStyle = `rgb(${color.join(",")})`;
+    context.beginPath();
+    context.arc(middle + Math.cos(at * GOLDEN_TURN) * away, middle + Math.sin(at * GOLDEN_TURN) * away, DOT_RADIUS, 0, Math.PI * 2);
+    context.fill();
+  });
+  return { width: STACK_EDGE, height: STACK_EDGE, pixels: context.getImageData(0, 0, STACK_EDGE, STACK_EDGE).data };
+}
+
+/** After how many days Storage Sense empties the Recycle Bin, read once the bin is first shown. */
+const [cleanDays, setCleanDays] = createSignal<number | null>(null);
+let cleanAsked = false;
+
+/** A few pictures from inside a folder, fanned out like prints on a table. With none, its fingerprint. */
 async function stackOf(folder: string): Promise<Thumb | null> {
   const paths = await folderPictures(folder);
   const read = await Promise.all(paths.map((path) => fetchPictureFile(path, STACK_EDGE).catch(() => null)));
   const pictures = read.filter((picture): picture is Thumb => picture !== null);
-  if (pictures.length === 0) return null;
+  if (pictures.length === 0) return fingerprintOf(folder);
   const context = new OffscreenCanvas(STACK_EDGE, STACK_EDGE).getContext("2d")!;
   const card = STACK_EDGE * STACK_CARD;
   const border = 3;
@@ -828,6 +877,16 @@ export function FileList(props: {
     else pooled.element.style.removeProperty("--look-color");
     pooled.element.toggleAttribute("data-look", look !== undefined);
     const now = Date.now();
+    // In the bin, a row fades toward the day Storage Sense empties it; elsewhere old rows dim, when asked.
+    const days = isBin(props.folder) ? cleanDays() : null;
+    const fade = !row ? 0 : days ? Math.min(1, Math.max(0, (now - row.modified) / (days * DAY_MS))) : ageDim() && !isBin(props.folder) ? Math.min(1, Math.max(0, (now - row.modified) / DIM_OVER_MS)) : 0;
+    pooled.element.toggleAttribute("data-fade", fade > 0);
+    if (fade > 0) pooled.element.style.setProperty("--fade", fade.toFixed(3));
+    else pooled.element.style.removeProperty("--fade");
+    if (row && days) {
+      const left = Math.ceil(days - (now - row.modified) / DAY_MS);
+      pooled.element.dataset.tip = left > 0 ? `Storage Sense empties this from the bin in ${left} ${left === 1 ? "day" : "days"}` : "Storage Sense empties this from the bin soon";
+    }
     const inList = props.layout === "list";
     for (const cell of pooled.cells) {
       const { id } = cell;
@@ -1766,6 +1825,11 @@ export function FileList(props: {
 
     const observer = new ResizeObserver(resize);
     observer.observe(grid);
+    createEffect(() => {
+      if (!isBin(props.folder) || cleanAsked) return;
+      cleanAsked = true;
+      binCleanDays().then(setCleanDays).catch(console.error);
+    });
     speak();
     // By the time this list goes, the folder it is told about is already the next one.
     const folder = props.folder;
@@ -1816,7 +1880,7 @@ export function FileList(props: {
 
   createEffect(
     on(
-      [typesLearned, () => props.cut, () => props.marks, () => props.git, () => props.match, () => props.synced, tags, allLooks, windowsIcons, dateForm, nests, readProgress, sizeBars, iconTheme],
+      [typesLearned, () => props.cut, () => props.marks, () => props.git, () => props.match, () => props.synced, tags, allLooks, windowsIcons, dateForm, nests, readProgress, sizeBars, iconTheme, ageDim, cleanDays],
       () => {
         for (const pooled of pool) pooled.filled = false;
         paint();

@@ -1496,6 +1496,29 @@ pub fn pictures_in(folder: &Path, most: usize) -> Vec<PathBuf> {
     found
 }
 
+/// How many of each kind of thing are right inside `folder`, by extension, most first, for a
+/// folder tile's fingerprint. Folders count under "/". Hidden items stay out, and only the first
+/// `most` entries are looked at, so a huge folder answers as fast as a small one.
+pub fn kinds_in(folder: &Path, most: usize) -> Vec<(String, u32)> {
+    let mut counts: HashMap<String, u32> = HashMap::new();
+    let mut seen = 0;
+    let _ = ops::sys::each_entry(&ops::sys::extended(&folder.join("*")), |data| {
+        if seen == most {
+            return;
+        }
+        if let Some(entry) = Entry::from_find_data(data) {
+            if entry.hidden {
+                return;
+            }
+            seen += 1;
+            *counts.entry(if entry.is_dir { "/".into() } else { entry.extension_text() }).or_default() += 1;
+        }
+    });
+    let mut kinds: Vec<_> = counts.into_iter().collect();
+    kinds.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    kinds
+}
+
 /// What is right inside `path`, in Explorer's order, as (name, is a folder): the folders, for a
 /// path crumb's menu, and with `files` the files after them, for the column view.
 pub fn subfolders(path: &Path, sight: Sight, files: bool) -> std::io::Result<Vec<(String, bool)>> {
@@ -1693,6 +1716,20 @@ mod tests {
 
         let names: Vec<_> = pictures_in(&folder.0, 2).iter().map(|path| path.file_name().unwrap().to_owned()).collect();
         assert_eq!(names, ["c.PNG", "d.gif"]);
+    }
+
+    #[test]
+    fn a_folder_fingerprint_counts_kinds_most_first_and_skips_hidden_ones() {
+        let folder = TempFolder::new("kinds");
+        for name in ["a.jpg", "b.JPG", "c.txt", "d.jpg", "e"] {
+            fs::write(folder.0.join(name), "").unwrap();
+        }
+        fs::create_dir(folder.0.join("inner")).unwrap();
+        hide(&folder.0.join("d.jpg"));
+
+        let kinds = kinds_in(&folder.0, 100);
+        assert_eq!(kinds, [("jpg".into(), 2), ("".into(), 1), ("/".into(), 1), ("txt".into(), 1)]);
+        assert_eq!(kinds_in(&folder.0, 1).iter().map(|kind| kind.1).sum::<u32>(), 1);
     }
 
     #[test]

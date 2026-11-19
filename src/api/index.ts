@@ -965,6 +965,10 @@ export const rowProps = (view: number, request: number, rows: number[], names: s
 /** A few pictures right inside `path`, for its tile to show a stack of, or up to `most` (200 at
  *  the very most) for the cover picker. */
 export const folderPictures = (path: string, most?: number) => invoke<string[]>("folder_pictures", { path, most: most ?? null });
+/** How many of each kind of thing are right inside `path`, by extension, most first. Folders count under "/". */
+export const folderKinds = (path: string) => invoke<[string, number][]>("folder_kinds", { path });
+/** After how many days Storage Sense empties the Recycle Bin, or null when it doesn't. */
+export const binCleanDays = () => invoke<number | null>("bin_clean_days");
 
 /** The bytes of the selected files, from the listing alone. Folders count as nothing. */
 /** How many files the rows are, each once, and their size. */

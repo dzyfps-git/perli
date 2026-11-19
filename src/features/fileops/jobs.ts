@@ -59,6 +59,8 @@ export interface JobCard {
   speeds: number[];
   /** The folder the job fills. */
   target: string | null;
+  /** The folders its sources are in. */
+  from: string[];
   /** What happens once it is done. */
   then: Then;
   /** The drives it waits for while another job uses them. */
@@ -134,7 +136,7 @@ export function createJobs(views: () => FolderView[], host: JobsHost) {
     const { id, title, origin, newItem, recycle, back, unpack, target } = event;
     sources.set(id, event.from);
     const rate = startRate(performance.now());
-    setCards(cards.length, { id, title, origin, newItem, recycle, shown: false, paused: false, rate, speeds: [], target, then: "none" });
+    setCards(cards.length, { id, title, origin, newItem, recycle, shown: false, paused: false, rate, speeds: [], target, from: event.from, then: "none" });
     if (recycle) markDeleted();
     if (back) markBack();
     if (unpack.length > 0) unpacked.set(id, markUnpacking(unpack));
@@ -249,6 +251,7 @@ export function createJobs(views: () => FolderView[], host: JobsHost) {
       rate: startRate(0),
       speeds: [],
       target: null,
+      from: [],
       then: "none",
       ended: { note, done: false, kept: [], failed: [], retries: false, step: null, action },
     });

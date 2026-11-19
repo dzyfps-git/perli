@@ -2519,12 +2519,35 @@ async fn row_props(view: u32, request: u64, rows: Vec<u32>, names: Vec<String>, 
 /// The most pictures the cover picker offers. A folder with more is better served by Browse.
 const MOST_COVER_CHOICES: usize = 200;
 
+/// How many entries of a folder its tile's fingerprint looks at.
+const FOLDER_KINDS_LOOKED_AT: usize = 400;
+
 /// A few pictures right inside `path`, for a folder tile to show a stack of, or up to `most`
 /// for the cover picker.
 #[tauri::command]
 async fn folder_pictures(path: PathBuf, most: Option<usize>) -> Result<Vec<PathBuf>, String> {
     let most = most.unwrap_or(FOLDER_STACK).min(MOST_COVER_CHOICES);
     blocking(move || Ok(folder::pictures_in(&path, most))).await
+}
+
+/// How many of each kind of thing are right inside `path`, most first, for a folder tile.
+#[tauri::command]
+async fn folder_kinds(path: PathBuf) -> Result<Vec<(String, u32)>, String> {
+    blocking(move || Ok(folder::kinds_in(&path, FOLDER_KINDS_LOOKED_AT))).await
+}
+
+/// After how many days Storage Sense empties the Recycle Bin, when it is on and set to.
+#[tauri::command]
+fn bin_clean_days() -> Option<u32> {
+    use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
+    const POLICY: &str = r"Software\Microsoft\Windows\CurrentVersion\StorageSense\Parameters\StoragePolicy";
+    let number = |name: &str| {
+        let bytes = registry::read_value(HKEY_CURRENT_USER, POLICY, Some(name), RRF_RT_REG_DWORD)?;
+        Some(u32::from_le_bytes(bytes.get(..4)?.try_into().ok()?))
+    };
+    // "01" turns Storage Sense on, "08" lets it empty the bin, "256" is after how many days.
+    let on = number("01") == Some(1) && number("08") != Some(0);
+    number("256").filter(|&days| on && days > 0)
 }
 
 /// Adds up the folders in `path`, and says so as totals come in.
@@ -3242,6 +3265,8 @@ fn main() {
             count_where,
             row_props,
             folder_pictures,
+            folder_kinds,
+            bin_clean_days,
             selection_size,
             windows_accent,
             scan_sizes,

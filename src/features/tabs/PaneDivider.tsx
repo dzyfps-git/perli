@@ -4,12 +4,23 @@ import { EVEN_SPLIT, snapped, SPLIT_MAX, SPLIT_MIN, SPLIT_SNAPS } from "./tabLis
 
 /** How far an arrow key moves the divider. */
 const KEY_STEP = 0.05;
+const SPECKS = [0, 1, 2, 3, 4, 5, 6];
+
+/** Seconds for a speck to cross: slow for a trickle, quick for a fast copy, in quarter steps so it never jitters. */
+const paceOf = (speed: number) => Math.round(Math.min(2.2, Math.max(0.5, 2.2 - 0.25 * Math.log2(1 + speed / 1e6))) * 4) / 4;
+
+/** A job copying from one pane's folder into the other's, and how fast it goes. */
+export interface Stream {
+  toSecond: boolean;
+  /** Bytes a second. */
+  speed: number;
+}
 
 /**
  * The bar between two panes. Drag it, and it settles at a third, a half or two thirds when it
  * comes near one, which ticks show while it moves. A double click or Enter gives each pane half.
  */
-export function PaneDivider(props: { tab: Tab }) {
+export function PaneDivider(props: { tab: Tab; stream?: Stream }) {
   const [dragging, setDragging] = createSignal(false);
   let bar!: HTMLDivElement;
 
@@ -64,6 +75,18 @@ export function PaneDivider(props: { tab: Tab }) {
         onDblClick={() => props.tab.setSplit(EVEN_SPLIT)}
         onKeyDown={onKeyDown}
       />
+      <Show when={props.stream}>
+        {(stream) => (
+          <span
+            class="pane-stream"
+            data-back={stream().toSecond === props.tab.swapped() ? "" : undefined}
+            style={{ "--pace": `${paceOf(stream().speed)}s` }}
+            aria-hidden="true"
+          >
+            <For each={SPECKS}>{(at) => <i style={{ "--at": at }} />}</For>
+          </span>
+        )}
+      </Show>
       <Show when={dragging()}>
         <For each={SPLIT_SNAPS}>
           {(snap) => (
