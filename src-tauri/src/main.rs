@@ -880,9 +880,9 @@ async fn open_folder(
 /// drops can't keep the watch either: the next read starts by going back to the rows shown.
 fn watch_of(path: &str, expanded: &[String]) -> Option<Watch> {
     let resolved = PathBuf::from(folder::resolve(path).ok().filter(|_| path != folder::BIN_PATH)?);
-    // A cloud folder changes far away, so it is read again on F5 and after each job here.
+    // A cloud folder is watched through the count of Perli's own jobs there, and read again on F5.
     if remote::is_remote(&resolved) {
-        return None;
+        return Some(Watch::new(std::iter::once(resolved).chain(expanded.iter().map(PathBuf::from))));
     }
     // A ZIP changes as one file, in the folder it sits in.
     let watched = zipped::outer(&resolved).map_or(resolved, |archive| ops::sys::parent(&archive));

@@ -49,6 +49,11 @@ impl Watch {
 }
 
 fn stamp(folder: &Path) -> Option<u64> {
+    // ponytail: a cloud folder moves only with Perli's own jobs; a change made on the web shows on
+    // the next visit, as asking the service every second would cost a request each time.
+    if let Some(edits) = crate::remote::edits(folder) {
+        return Some(edits);
+    }
     let mut hasher = DefaultHasher::new();
     let Ok(entries) = sys::read_dir(folder) else {
         // A file watched on its own, as git's index, changes by its size and time.

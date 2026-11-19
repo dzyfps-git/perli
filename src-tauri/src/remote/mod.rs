@@ -13,7 +13,7 @@ pub const ON_THIS_PC: &str = "This works on files on this PC. Copy them here fir
 mod onedrive;
 pub mod s3;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::Write;
@@ -246,6 +246,11 @@ pub fn join(folder: &str, name: &str) -> String {
 
 /// The place and the path in it, `None` outside the cloud or for the cloud root itself.
 pub fn at(path: &Path) -> Option<Result<At, String>> {
+    spot(path).map(|found| found.and_then(|(place, inner)| service(&place).map(|service| At { place, service, inner })))
+}
+
+/// The place and the path in it, with no service made, `None` outside the cloud or for the cloud root itself.
+fn spot(path: &Path) -> Option<Result<(Place, String), String>> {
     if !is_remote(path) {
         return None;
     }
@@ -259,7 +264,7 @@ pub fn at(path: &Path) -> Option<Result<At, String>> {
         return Some(Err(format!("There is no cloud place called {name}")));
     };
     let inner = inner.split('\\').filter(|part| !part.is_empty()).collect::<Vec<_>>().join("/");
-    Some(service(&place).map(|service| At { place, service, inner }))
+    Some(Ok((place, inner)))
 }
 
 fn places_file() -> Option<PathBuf> {
@@ -406,13 +411,48 @@ pub fn listed(at: &At, folder: &str, fresh: bool) -> Result<Arc<Vec<Item>>, Stri
     Ok(items)
 }
 
+/// How many times jobs changed each cloud folder: (place, folder, false) counts what the folder
+/// holds, and (place, path, true) the path with all below it. The watcher reads these, as it
+/// can't list the cloud itself.
+type Edits = BTreeMap<(String, String, bool), u64>;
+static EDITS: Mutex<Edits> = Mutex::new(BTreeMap::new());
+
+fn note_edit(edits: &mut Edits, place: &str, inner: &str) {
+    *edits.entry((place.to_string(), parent_of(inner).to_string(), false)).or_default() += 1;
+    *edits.entry((place.to_string(), inner.to_string(), true)).or_default() += 1;
+}
+
+fn edits_of(edits: &Edits, place: &str, folder: &str) -> u64 {
+    let count = |inner: &str, tree: bool| edits.get(&(place.to_string(), inner.to_string(), tree)).copied().unwrap_or(0);
+    let mut total = count(folder, false);
+    let mut above = folder;
+    loop {
+        total += count(above, true);
+        if above.is_empty() {
+            return total;
+        }
+        above = parent_of(above);
+    }
+}
+
+/// A count that moves each time a job changes what the cloud folder at `path` shows, or the
+/// places when it is the cloud root. `None` outside the cloud.
+pub fn edits(path: &Path) -> Option<u64> {
+    match spot(path) {
+        Some(Ok((place, inner))) => Some(edits_of(&lock(&EDITS), &place.id, &inner)),
+        _ if is_remote(path) => Some(hashed(&places().iter().map(|place| place.name.as_str()).collect::<Vec<_>>().join("/"))),
+        _ => None,
+    }
+}
+
 /// Forgets what was read of the folder holding each path, and of each path, after a job changed them.
 pub fn forget(paths: &[PathBuf]) {
     for path in paths {
-        let Some(Ok(at)) = at(path) else { continue };
+        let Some(Ok((place, inner))) = spot(path) else { continue };
+        note_edit(&mut lock(&EDITS), &place.id, &inner);
         let mut lists = lock(lists());
-        lists.remove(&(at.place.id.clone(), at.parent()));
-        lists.retain(|(place, folder), _| *place != at.place.id || !(folder == &at.inner || folder.starts_with(&format!("{}/", at.inner))));
+        lists.remove(&(place.id.clone(), parent_of(&inner).to_string()));
+        lists.retain(|(id, folder), _| *id != place.id || !(folder == &inner || folder.starts_with(&format!("{inner}/"))));
     }
 }
 
@@ -661,6 +701,22 @@ fn parse_time(text: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_job_moves_the_count_of_the_folders_it_changed_and_no_others() {
+        let mut edits = Edits::new();
+        let of = |edits: &Edits| ["", "a", "a/b", "a/b/c", "z"].map(|folder| edits_of(edits, "p", folder));
+        let before = of(&edits);
+        // A new file in a/b: a/b's listing changed, and below b is gone stale too.
+        note_edit(&mut edits, "p", "a/b");
+        let after = of(&edits);
+        assert_eq!(after[0], before[0], "the top doesn't change");
+        assert_ne!(after[1], before[1], "a holds b, whose time may move");
+        assert_ne!(after[2], before[2]);
+        assert_ne!(after[3], before[3], "below a/b, read again");
+        assert_eq!(after[4], before[4], "a folder beside it doesn't change");
+        assert_eq!(edits_of(&edits, "other place", "a/b"), 0);
+    }
 
     #[test]
     fn cloud_paths_are_told_apart_from_real_servers() {
