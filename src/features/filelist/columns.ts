@@ -13,12 +13,13 @@ export const PROP_NAMES: Record<PropColumn, string> = {
   taken: "date:System.Photo.DateTaken",
   dimensions: "System.Image.Dimensions",
   packed: "zip:packed",
+  note: "cloud:note",
 };
 
 export const isProp = (id: ColumnId): id is PropColumn => id in PROP_NAMES;
 
 /** The columns that suit a folder: its songs' or pictures' own, or the plain ones. */
-export type ColumnSet = "plain" | "music" | "pictures";
+export type ColumnSet = "plain" | "music" | "pictures" | "cloud";
 
 export interface Column {
   id: ColumnId;
@@ -52,12 +53,17 @@ const SET_SHOWS: Record<ColumnSet, ColumnId[]> = {
   plain: [],
   music: ["artist", "length"],
   pictures: ["taken", "dimensions"],
+  cloud: ["note"],
 };
+
+/** What only a cloud folder's rows have: what the service says of each, such as an S3 storage
+ *  class, "Google Doc" or "Opens only on dropbox.com". */
+const CLOUD_COLUMNS: Column[] = [{ id: "note", label: "Note", width: 220, visible: false }];
 
 /** What a set of columns starts as: the plain ones, with its own extras put before Size. */
 export function startColumns(set: ColumnSet): Column[] {
   const shows = SET_SHOWS[set];
-  const extras = EXTRA_COLUMNS.map((column) => ({ ...column, visible: shows.includes(column.id) }));
+  const extras = [...EXTRA_COLUMNS, ...(set === "cloud" ? CLOUD_COLUMNS : [])].map((column) => ({ ...column, visible: shows.includes(column.id) }));
   const shown = extras.filter((column) => column.visible);
   const size = DEFAULT_COLUMNS.findIndex((column) => column.id === "size");
   return [...DEFAULT_COLUMNS.slice(0, size), ...shown, ...DEFAULT_COLUMNS.slice(size), ...extras.filter((column) => !column.visible)];

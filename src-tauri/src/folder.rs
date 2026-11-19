@@ -66,6 +66,8 @@ pub enum SortKey {
     Dimensions,
     /// What each row takes up packed in its ZIP.
     Packed,
+    /// What a cloud service says of each row, such as an S3 storage class.
+    Note,
 }
 
 impl SortKey {
@@ -77,6 +79,7 @@ impl SortKey {
             Self::Length => "System.Media.Duration",
             Self::Taken => "date:System.Photo.DateTaken",
             Self::Dimensions => "System.Image.Dimensions",
+            Self::Note => crate::preview::CLOUD_NOTE,
             _ => return None,
         })
     }
@@ -1435,7 +1438,8 @@ fn compare(
             | SortKey::Length
             | SortKey::Taken
             | SortKey::Dimensions
-            | SortKey::Packed => ranks[first as usize].cmp(&ranks[second as usize]),
+            | SortKey::Packed
+            | SortKey::Note => ranks[first as usize].cmp(&ranks[second as usize]),
             SortKey::Location => natural(location_of(locations, first), location_of(locations, second)),
             SortKey::Found => first.cmp(&second),
         };

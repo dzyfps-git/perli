@@ -318,6 +318,23 @@ impl S3 {
     }
 }
 
+/// A storage class as Amazon's console names it. A file in the two cold ones must be restored
+/// before it can be read.
+fn class_name(class: &str) -> String {
+    match class {
+        "STANDARD_IA" => "Standard-IA",
+        "ONEZONE_IA" => "One Zone-IA",
+        "INTELLIGENT_TIERING" => "Intelligent-Tiering",
+        "GLACIER_IR" => "Glacier Instant Retrieval",
+        "GLACIER" => "Glacier Flexible Retrieval: restore it on Amazon before opening",
+        "DEEP_ARCHIVE" => "Glacier Deep Archive: restore it on Amazon before opening",
+        "REDUCED_REDUNDANCY" => "Reduced redundancy",
+        "EXPRESS_ONEZONE" => "Express One Zone",
+        other => other,
+    }
+    .to_string()
+}
+
 fn prefix_of(folder: &str) -> String {
     if folder.is_empty() { String::new() } else { format!("{folder}/") }
 }
@@ -346,7 +363,7 @@ impl Service for S3 {
                 if name.is_empty() || name.contains('/') {
                     continue;
                 }
-                let class = fields.get("StorageClass").filter(|class| *class != "STANDARD").cloned().unwrap_or_default();
+                let class = fields.get("StorageClass").filter(|class| *class != "STANDARD").map_or_else(String::new, |class| class_name(class));
                 items.push(Item {
                     name: name.to_string(),
                     folder: false,
@@ -495,6 +512,16 @@ impl Service for S3 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_cold_storage_class_says_to_restore_first() {
+        assert!(class_name("DEEP_ARCHIVE").contains("restore"));
+        assert!(class_name("GLACIER").contains("restore"));
+        assert!(!class_name("GLACIER_IR").contains("restore"));
+        assert_eq!(class_name("STANDARD_IA"), "Standard-IA");
+        // One Amazon adds later shows as it comes.
+        assert_eq!(class_name("NEW_CLASS"), "NEW_CLASS");
+    }
 
     /// Amazon's own worked example of signing a GET of part of an object.
     #[test]

@@ -456,6 +456,14 @@ pub fn forget(paths: &[PathBuf]) {
     }
 }
 
+/// What the service says of the item at `path` beyond its name, such as an S3 storage class or
+/// "Google Doc", or a place's account. `None` when it says nothing, or outside the cloud.
+pub fn note(path: &Path) -> Option<String> {
+    let at = at(path)?.ok()?;
+    let note = if at.inner.is_empty() { at.place.account.clone() } else { at.item().ok()?.note };
+    Some(note).filter(|note| !note.is_empty())
+}
+
 /// The rows of the cloud root: every place, as a folder.
 pub fn place_items() -> Vec<Item> {
     places().into_iter().map(|place| Item { name: place.name, folder: true, note: place.account, ..Item::default() }).collect()

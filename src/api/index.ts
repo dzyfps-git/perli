@@ -63,7 +63,7 @@ export interface Tag {
 
 export type SortKey = "name" | "modified" | "created" | "type" | "size" | "location";
 /** The extra columns, read from each file's own properties. */
-export type PropKey = "artist" | "album" | "length" | "taken" | "dimensions" | "packed";
+export type PropKey = "artist" | "album" | "length" | "taken" | "dimensions" | "packed" | "note";
 
 export interface Sort {
   /** `found` is the order a search found its rows in, which no column stands for. */

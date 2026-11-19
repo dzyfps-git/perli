@@ -49,7 +49,7 @@ function columnStore(set: ColumnSet) {
   const key = set === "plain" ? "columns" : `columns-${set}`;
   return stored<Column[]>(key, restoreColumns(saved(key), startColumns(set)));
 }
-const COLUMN_SETS = { plain: columnStore("plain"), music: columnStore("music"), pictures: columnStore("pictures") };
+const COLUMN_SETS = { plain: columnStore("plain"), music: columnStore("music"), pictures: columnStore("pictures"), cloud: columnStore("cloud") };
 export const columnsOf = (set: ColumnSet) => COLUMN_SETS[set][0]();
 const setColumnsOf = (set: ColumnSet, next: Column[]) => COLUMN_SETS[set][1](next);
 export const [showHidden, setShowHidden] = stored("show-hidden", saved("show-hidden") === true);
