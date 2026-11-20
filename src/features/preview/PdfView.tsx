@@ -107,7 +107,7 @@ export interface PdfViewProps {
   keys: (handler: ((event: KeyboardEvent) => boolean) | undefined) => void;
   note: (text: string | undefined) => void;
   /** Writes a filled-in PDF, staged by `stagePdf`, over the file as a job with an Undo. Says whether it went. */
-  saveOver: (staged: number, seen: string | undefined) => Promise<boolean>;
+  saveOver: (path: string, staged: number, seen: string | undefined) => Promise<boolean>;
 }
 
 /**
@@ -201,6 +201,8 @@ export function PdfView(live: PdfViewProps) {
   });
 
   async function load() {
+    // How the file stood before it was read: a change while it reads shows at the next look.
+    const stamp = await fileSeen(props.path).catch(() => null);
     const url = convertFileSrc(await props.open());
     if (gone) return;
     task = pdfjs.getDocument({
@@ -217,14 +219,18 @@ export function PdfView(live: PdfViewProps) {
     const opened = await task.promise;
     if (gone) return void opened.loadingTask.destroy();
     setLocked(undefined);
+    const first = (await opened.getPage(1)).getViewport({ scale: 1 });
+    if (gone) return void opened.loadingTask.destroy();
+    const before = doc();
+    // Read again: fields filled in or a save begun meanwhile win over what was read, which goes.
+    if (before && (changed() || saving())) {
+      task = before.loadingTask;
+      return void opened.loadingTask.destroy();
+    }
     fieldObjects = opened.getFieldObjects().catch(() => null);
     (opened.annotationStorage as unknown as { onSetModified: () => void }).onSetModified = () => batch(() => (setChanged(true), setEdited(true)));
-    void fileSeen(props.path).then(
-      (stamp) => (readAs = stamp ?? undefined),
-      () => {},
-    );
-    const first = (await opened.getPage(1)).getViewport({ scale: 1 });
-    const before = doc();
+    // The stamp a save over it checks goes with the document it saves, never ahead of it.
+    readAs = stamp ?? undefined;
     batch(() => {
       // Read again, the pages keep the sizes they have and the place stays.
       if (!before || sizes().length !== opened.numPages) setSizes(Array.from({ length: opened.numPages }, () => ({ width: first.width, height: first.height })));
@@ -252,13 +258,17 @@ export function PdfView(live: PdfViewProps) {
 
   // The file changed on disk, as an Undo of a save over it does when it puts the old one back:
   // with nothing filled in here since, it is read again, so the page shows what the file holds.
+  let reloading = false;
   const looking = setInterval(() => {
-    if (gone || !doc() || changed() || saving() || document.hidden) return;
+    if (gone || !doc() || changed() || saving() || reloading || document.hidden) return;
     void fileSeen(props.path).then(
       (stamp) => {
-        if (!stamp || !readAs || stamp === readAs || changed() || saving()) return;
-        readAs = stamp;
-        void load().catch(console.error);
+        if (!stamp || !readAs || stamp === readAs || changed() || saving() || reloading) return;
+        reloading = true;
+        // One that fails, say while the file is still being written, is tried again next look.
+        void load()
+          .catch(console.error)
+          .finally(() => (reloading = false));
       },
       () => {},
     );
@@ -697,6 +707,9 @@ export function PdfView(live: PdfViewProps) {
     }
   }
 
+  /** A fingerprint of the fields as filled in right now, to tell whether one changed during a save. */
+  const fieldsNow = (opened: pdfjs.PDFDocumentProxy) => opened.annotationStorage.serializable.hash;
+
   /** The fields as filled in, written as a copy beside the file: "name (filled).pdf". */
   async function saveCopy() {
     const opened = doc();
@@ -704,10 +717,11 @@ export function PdfView(live: PdfViewProps) {
     setSaving(true);
     try {
       await scripts?.willSave();
+      const written = fieldsNow(opened);
       const name = await savePdfCopy(props.path, await opened.saveDocument());
       scripts?.didSave();
-      opened.annotationStorage.resetModified();
-      setChanged(false);
+      // A field filled in while the copy was written is not in it, so it stays unsaved.
+      if (fieldsNow(opened) === written) (opened.annotationStorage.resetModified(), setChanged(false));
       tell(`Saved as ${name}`);
     } catch (reason) {
       tell(`Not saved: ${reason instanceof Error ? reason.message : reason}`);
@@ -723,10 +737,13 @@ export function PdfView(live: PdfViewProps) {
     setSaving(true);
     try {
       await scripts?.willSave();
-      if (!(await props.saveOver(await stagePdf(await opened.saveDocument()), readAs))) return;
+      const written = fieldsNow(opened);
+      if (!(await props.saveOver(props.path, await stagePdf(await opened.saveDocument()), readAs))) return;
       scripts?.didSave();
-      opened.annotationStorage.resetModified();
-      batch(() => (setChanged(false), setEdited(false)));
+      if (fieldsNow(opened) === written) {
+        opened.annotationStorage.resetModified();
+        batch(() => (setChanged(false), setEdited(false)));
+      }
       readAs = (await fileSeen(props.path).catch(() => null)) ?? undefined;
       tell("Saved over the original. Undo puts it back.");
     } catch (reason) {
