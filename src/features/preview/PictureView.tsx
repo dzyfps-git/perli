@@ -673,7 +673,16 @@ export function PictureView(live: PictureViewProps) {
                 <div class="picture-tools-row">
                   <For each={PICTURE_FORMATS.filter(([format]) => format !== own().format)}>
                     {([format, name]) => (
-                      <button class="preview-chip" onClick={() => void edit({ kind: "convert", format }, `${name} copy made beside it`)}>
+                      <button
+                        class="preview-chip"
+                        onClick={() =>
+                          void edit(
+                            { kind: "convert", format },
+                            // A BMP holds pixels and nothing else.
+                            format === "bmp" && copyFacts() ? `${name} copy made beside it, without camera facts, which BMP has no room for` : `${name} copy made beside it`,
+                          )
+                        }
+                      >
                         {name}
                         <Show when={guess(format)}>{(about) => <small class="chip-guess">{about()}</small>}</Show>
                       </button>
@@ -692,7 +701,7 @@ export function PictureView(live: PictureViewProps) {
                   {copyFacts()
                     ? `Copies keep the camera, date and colour profile${copyNoPlace() ? ", without the place it was taken" : " and the place it was taken"}.`
                     : "Copies keep only the colour profile."}{" "}
-                  A copy to share is a smaller JPEG. Copies go beside the picture, and sizes are a guess.
+                  {copyFacts() ? "A BMP has no room for them. " : ""}A copy to share is a smaller JPEG. Copies go beside the picture, and sizes are a guess.
                   <Show when={turned() && !frames()}>
                     <span id="picture-crop-why"> Save the turn first to crop it.</span>
                   </Show>

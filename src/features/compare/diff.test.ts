@@ -81,6 +81,27 @@ test("two long files with nothing alike are all gone then all new, without stall
   assert.equal(lines.filter((line) => line.kind === "same").length, 0);
 });
 
+test("many changes in one stretch still find the shortest way", () => {
+  // Lines that come back four times over, in the other order: past 4096 changes, yet in time.
+  const a = Array.from({ length: 9000 }, (_, at) => `line ${at % 2250}`);
+  const b = [...a].reverse();
+  // No time limit, so a slow machine finds it too.
+  const lines = diffLines(a, b, undefined, undefined, Infinity);
+  sound(lines, a, b);
+  assert.equal(lines.filter((line) => line.kind === "same").length, 7);
+});
+
+test("lines on one side only are set aside and come back where they were", () => {
+  const a = ["only a", "x", "gone 1", "y", "z"];
+  const b = ["x", "new 1", "y", "only b", "z", "end"];
+  const lines = diffLines(a, b);
+  sound(lines, a, b);
+  assert.deepEqual(
+    lines.map((line) => `${line.kind} ${line.a ?? "-"} ${line.b ?? "-"}`),
+    ["gone 0 -", "same 1 0", "gone 2 -", "new - 1", "same 3 2", "new - 3", "same 4 4", "new - 5"],
+  );
+});
+
 test("spaces can be set aside", () => {
   const a = ["if (x)  {", "\treturn;"];
   const b = ["if (x) {", "  return;  "];

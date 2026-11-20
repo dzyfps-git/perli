@@ -6,6 +6,7 @@ import {
   clipboardCanPaste,
   clipboardHasFiles,
   setJobOptions,
+  setIndexOptions,
   takeSweepReport,
   clipboardText,
   deleteTag,
@@ -140,6 +141,7 @@ import {
 } from "./features/filelist/prefs";
 import { SelectPattern } from "./features/filelist/SelectPattern";
 import { COPIES_QUERY, FLAT_QUERY, type FolderView, type RowAt } from "./features/navigation/folderView";
+import { indexOptions } from "./features/settings/indexPrefs";
 import { BIN_PATH, isBin, isDriveRoot, isArchiveName, join, parentOf, baseName, relativeTo, samePath, type Crumb } from "./features/navigation/path";
 import { Palette, type Command } from "./features/palette/Palette";
 import { wordsFor, type Verb } from "./features/palette/words";
@@ -230,6 +232,8 @@ import { Tooltip } from "./ui/Tooltip";
 import "./ui/controls.css";
 
 const SAVE_DELAY_MS = 300;
+/** Windows closed within this long of each other were closed together, as the taskbar's Close all windows does. */
+const CLOSE_TOGETHER_MS = 800;
 /** How long a folder bound for its own window waits to hear which file to select there. */
 const WINDOW_WAIT_MS = 600;
 /** How long a window opened for a folder takes the file named for it after. */
@@ -454,7 +458,16 @@ export function App() {
     return tab.panes().length > 1 ? [{ label: "Compare with other pane", checked: tab.comparing(), action: () => tab.setComparing(!tab.comparing()) }] : [];
   };
   /** `from` is the path crumb whose menu this is. */
-  const [menu, setMenu] = createSignal<{ x: number; y: number; above?: number; items: MenuItem[]; from?: string; mount?: HTMLElement }>();
+  const [menu, setMenu] = createSignal<{
+    x: number;
+    y: number;
+    above?: number;
+    items: MenuItem[];
+    from?: string;
+    mount?: HTMLElement;
+    /** Runs as the menu closes, picked from or not. */
+    closed?: () => void;
+  }>();
   /** The settings are a tab of their own: it can exist without being the one in front. */
   const [settingsOpen, setSettingsOpen] = createSignal(false);
   const [settingsShown, setSettingsShown] = createSignal(false);
@@ -565,6 +578,7 @@ export function App() {
   }
 
   createEffect(() => setJobOptions(verifyCopies(), onePerDrive()).catch(console.error));
+  createEffect(() => setIndexOptions(indexOptions()).catch(console.error));
 
   createEffect(() => {
     const session = keepSession() ? tabs.session() : undefined;
@@ -597,10 +611,16 @@ export function App() {
   /**
    * Browser-style: a window closed while others stay open is forgotten, kept a while to reopen
    * unless its tabs went to another window. The last one keeps its tabs for the next start, and a
-   * Windows restart, which closes no window, keeps them all.
+   * Windows restart, which closes no window, keeps them all. So do windows closed all at once:
+   * each hides and looks again a moment later, and one with no other left in sight was among them.
    */
   async function leaveSession() {
     if (!keepSession() || (await otherWindows()).length === 0) return;
+    if (!leftWindow()) {
+      await getCurrentWindow().hide();
+      await new Promise((done) => setTimeout(done, CLOSE_TOGETHER_MS));
+      if ((await otherWindows()).length === 0) return;
+    }
     // Nothing may be written once the file is gone, which would bring it back.
     setKeepSession(false);
     await flushSession();
@@ -612,7 +632,7 @@ export function App() {
   const dragListener = followFileDrag(
     tabs.allViews,
     jobs.report,
-    (x, y, items) => setMenu({ x, y, items }),
+    (x, y, items, closed) => setMenu({ x, y, items, closed }),
     dropNoted,
     (folder) => void tabs.active().active().open(folder),
     setDeleting,
@@ -741,6 +761,7 @@ export function App() {
   function closeMenu() {
     const from = menu()?.from;
     if (from) crumbClosed = { path: from, at: performance.now() };
+    menu()?.closed?.();
     setMenu(undefined);
   }
 

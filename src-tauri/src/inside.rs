@@ -70,12 +70,12 @@ pub(crate) fn reason(error: ZipError) -> String {
 const DAMAGED_LOCKED: &str = "This file is damaged in the archive. The password is right.";
 
 /// A wrong ZipCrypto password passes its one-byte check about once in 256 tries, and then the
-/// file reads as garbage: a broken compressed stream, or a checksum that does not match. A right
+/// file reads as garbage: a broken or cut-short compressed stream, or a checksum that does not match. A right
 /// password on a damaged file reads the same way, so another locked file of the archive tells
 /// them apart: if the password reads that one whole, it is right.
 pub(crate) fn read_failed(error: std::io::Error, path: &Path, name: &str, password: Option<&str>) -> String {
-    use std::io::ErrorKind::{InvalidData, InvalidInput};
-    match password.filter(|_| matches!(error.kind(), InvalidData | InvalidInput)) {
+    use std::io::ErrorKind::{InvalidData, InvalidInput, UnexpectedEof};
+    match password.filter(|_| matches!(error.kind(), InvalidData | InvalidInput | UnexpectedEof)) {
         Some(password) if opens_another(path, name, password) => DAMAGED_LOCKED.into(),
         Some(_) => WRONG_PASSWORD.into(),
         None => error.to_string(),
@@ -98,7 +98,8 @@ fn opens_another(path: &Path, name: &str, password: &str) -> bool {
 }
 
 /// One entry's data, opened with the password if it has one. Zstandard, which the zip crate reads
-/// only through the C zstd library, is read here through ruzstd and checked against its CRC.
+/// only through the C zstd library, is read here through ruzstd and checked against its CRC, and a
+/// locked one is unlocked here first.
 pub(crate) fn data<'a>(zip: &'a mut Zip, index: usize, password: Option<&str>) -> Result<Box<dyn Read + 'a>, ZipError> {
     let (method, locked) = zip.by_index_data(index).map(|entry| (entry.compression(), entry.encrypted()))?;
     if method != zip::CompressionMethod::ZSTD {
@@ -108,14 +109,31 @@ pub(crate) fn data<'a>(zip: &'a mut Zip, index: usize, password: Option<&str>) -
         }?;
         return Ok(Box::new(file));
     }
-    // ponytail: a locked Zstandard file would need the zip crate's own zstd and its C library.
-    // No common tool writes one; read it through that crate if one turns up.
-    if locked {
-        return Err(ZipError::UnsupportedArchive("Perli can't read a locked file squeezed with Zstandard"));
-    }
     let raw = zip.by_index_raw(index)?;
     let want = raw.crc32();
+    if locked {
+        let password = password.ok_or(ZipError::UnsupportedArchive(ZipError::PASSWORD_REQUIRED))?;
+        let (extra, length, time) = (raw.extra_data().unwrap_or_default(), raw.compressed_size(), raw.last_modified().map_or(0, |time| time.timepart()));
+        let (squeezed, keeps_crc) = crate::unlock::unlocked(raw, length, &extra, password.as_bytes(), want, time)?;
+        let from = Sealed(packs::Zstd::new(std::io::BufReader::new(squeezed)));
+        return Ok(if keeps_crc { Box::new(Checked { from, sum: flate2::Crc::new(), want }) } else { Box::new(from) });
+    }
     Ok(Box::new(Checked { from: packs::Zstd::new(std::io::BufReader::new(raw)), sum: flate2::Crc::new(), want }))
+}
+
+/// A locked Zstandard entry, read to the end of its locked data once the file in it is out: the
+/// decoder stops at its last frame, and only past that does WinZip AES check its code, so a change
+/// to what comes after would go unseen and the file read as fine.
+struct Sealed<R>(packs::Zstd<R>);
+
+impl<R: std::io::BufRead> Read for Sealed<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let count = self.0.read(buffer)?;
+        if count == 0 && !buffer.is_empty() {
+            std::io::copy(self.0.source_mut(), &mut std::io::sink())?;
+        }
+        Ok(count)
+    }
 }
 
 /// A file's data that fails at its end if it doesn't match the checksum the archive keeps.
@@ -542,8 +560,7 @@ pub fn shown_aspects(paths: &[PathBuf]) -> Vec<f32> {
         if !video && (!is(&crate::folder::PICTURE_TYPES) || crate::thumbs::is_online_only(path)) {
             return None;
         }
-        let stat = crate::ops::sys::stat(path).ok()??;
-        let (key, stamp) = (path.to_string_lossy().to_lowercase(), (stat.size, stat.modified));
+        let (key, stamp) = (path.to_string_lossy().to_lowercase(), crate::ops::sys::stamp(path).ok()?);
         if let Some(known) = KNOWN_ASPECTS.get(&key, stamp) {
             return Some(known);
         }
@@ -957,6 +974,32 @@ pub(crate) mod tests {
     use zip::write::SimpleFileOptions;
     use zip::ZipWriter;
 
+    #[test]
+    fn a_locked_zstandard_entry_is_checked_past_its_last_frame() {
+        // "hi" as one raw zstd block, then bytes past the frame that zstd's own tools pass over.
+        let mut payload = vec![0x28, 0xB5, 0x2F, 0xFD, 0x20, 0x02, 0x11, 0x00, 0x00, b'h', b'i'];
+        payload.extend_from_slice(b"tail");
+        let mut zip = ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored).with_aes_encryption(zip::AesMode::Aes256, "pw");
+        zip.start_file("a.zst", options).unwrap();
+        zip.write_all(&payload).unwrap();
+        let mut archive = ZipArchive::new(std::io::Cursor::new(zip.finish().unwrap().into_inner())).unwrap();
+        let mut raw = archive.by_index_raw(0).unwrap();
+        let extra = raw.extra_data().unwrap_or_default();
+        let mut data = Vec::new();
+        raw.read_to_end(&mut data).unwrap();
+        let read = |data: &[u8]| {
+            let (squeezed, _) = crate::unlock::unlocked(data, data.len() as u64, &extra, b"pw", 0, 0).unwrap();
+            let mut out = Vec::new();
+            Sealed(packs::Zstd::new(BufReader::new(squeezed))).read_to_end(&mut out).map(|_| out)
+        };
+        assert_eq!(read(&data).unwrap(), b"hi");
+        // The locked data ends in a 10-byte code; two bytes before it is inside "tail".
+        let mut spoiled = data.clone();
+        spoiled[data.len() - 12] ^= 1;
+        assert!(read(&spoiled).is_err(), "a change after the frame fails the code");
+    }
+
     fn archive(name: &str, files: &[(&str, &[u8])]) -> std::path::PathBuf {
         let path = std::env::temp_dir().join(format!("perli-inside-{}-{name}", std::process::id()));
         let mut zip = ZipWriter::new(File::create(&path).unwrap());
@@ -1000,10 +1043,14 @@ pub(crate) mod tests {
         assert_eq!(list.iter().map(|entry| entry.locked).collect::<Vec<_>>(), [true, false]);
         assert!(text(&path, "secret.txt", None).is_err());
         assert_eq!(text(&path, "secret.txt", Some("open sesame")).unwrap().as_deref(), Some("treasure"));
-        // Some wrong passwords get past the one-byte check, and the checksum has to catch them.
+        // Some wrong passwords get past the one-byte check, and the garbage they read must still
+        // say wrong password: a broken stream, one cut short, or a checksum that does not match.
         let mut zip = open(&path).unwrap();
-        let lucky = (0..5000).map(|n| format!("wrong {n}")).find(|tried| zip.by_name_decrypt("secret.txt", tried.as_bytes()).is_ok()).unwrap();
-        assert_eq!(text(&path, "secret.txt", Some(&lucky)), Err(WRONG_PASSWORD.to_string()));
+        let lucky: Vec<String> = (0..20000).map(|n| format!("wrong {n}")).filter(|tried| zip.by_name_decrypt("secret.txt", tried.as_bytes()).is_ok()).collect();
+        assert!(!lucky.is_empty());
+        for tried in &lucky {
+            assert_eq!(text(&path, "secret.txt", Some(tried)), Err(WRONG_PASSWORD.to_string()), "{tried}");
+        }
         assert_eq!(text(&path, "secret.txt", Some("nope")), Err(WRONG_PASSWORD.to_string()));
         assert_eq!(test(&path, None).unwrap(), Tested { sound: 1, damaged: vec![], locked: 1 });
         assert_eq!(test(&path, Some("open sesame")).unwrap(), Tested { sound: 2, damaged: vec![], locked: 0 });
@@ -1155,6 +1202,42 @@ pub(crate) mod tests {
         }
         std::fs::write(&path, bytes).unwrap();
         path
+    }
+
+    #[test]
+    fn a_locked_zstandard_file_reads_with_its_password() {
+        use ruzstd::encoding::{compress_to_vec, CompressionLevel};
+        let words = "locked and squeezed, ".repeat(40);
+        let squeezed = compress_to_vec(words.as_bytes(), CompressionLevel::Fastest);
+        let path = std::env::temp_dir().join(format!("perli-inside-{}-locked-zstd.zip", std::process::id()));
+        let mut zip = ZipWriter::new(File::create(&path).unwrap());
+        let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored).with_aes_encryption(zip::AesMode::Aes256, "pw");
+        zip.start_file("a.txt", options).unwrap();
+        zip.write_all(&squeezed).unwrap();
+        zip.finish().unwrap();
+        // Marked as Zstandard in the AES field, with the file's own size and CRC.
+        let mut bytes = std::fs::read(&path).unwrap();
+        let mut crc = flate2::Crc::new();
+        crc.update(words.as_bytes());
+        let central = bytes.windows(4).position(|four| four == b"PK\x01\x02").unwrap();
+        for (at, sums) in [(0, 14), (central, 16)] {
+            if bytes[at + sums..at + sums + 4] != [0; 4] {
+                bytes[at + sums..at + sums + 4].copy_from_slice(&crc.sum().to_le_bytes());
+            }
+            bytes[at + sums + 8..at + sums + 12].copy_from_slice(&(words.len() as u32).to_le_bytes());
+        }
+        let fields: Vec<usize> = bytes.windows(4).enumerate().filter(|(_, four)| *four == [0x01, 0x99, 0x07, 0x00]).map(|(at, _)| at).collect();
+        assert_eq!(fields.len(), 2);
+        for at in fields {
+            bytes[at + 9..at + 11].copy_from_slice(&93u16.to_le_bytes());
+        }
+        std::fs::write(&path, bytes).unwrap();
+
+        assert_eq!(entries(&path).unwrap().entries[0].method.as_deref(), Some("Zstandard"));
+        assert_eq!(text(&path, "a.txt", Some("pw")).unwrap().as_deref(), Some(words.as_str()));
+        assert!(text(&path, "a.txt", Some("wrong")).is_err());
+        assert_eq!(test(&path, Some("pw")).unwrap(), Tested { sound: 1, damaged: vec![], locked: 0 });
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

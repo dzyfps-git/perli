@@ -2240,6 +2240,99 @@ th[aria-sort="descending"] .table-sort::after {
   opacity: 1;
 }
 
+/* A drawn Mermaid diagram: Ctrl+wheel zooms toward the pointer, a drag moves it. */
+.md-diagram {
+  position: relative;
+  margin: var(--space-3) 0;
+  padding: var(--space-3);
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  text-align: center;
+  cursor: grab;
+  touch-action: none;
+  animation: md-diagram-in var(--motion-spring) backwards;
+}
+
+.md-diagram[data-dragging] {
+  cursor: grabbing;
+}
+
+.md-diagram svg {
+  max-width: 100%;
+  height: auto;
+  transform-origin: center;
+  transition: transform var(--motion);
+}
+
+.md-diagram[data-dragging] svg {
+  transition: none;
+}
+
+.md-diagram-tools {
+  position: absolute;
+  top: var(--space-1);
+  right: var(--space-1);
+  display: flex;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity var(--motion);
+}
+
+.md-diagram:hover .md-diagram-tools,
+.md-diagram-tools:focus-within,
+.md-diagram[data-zoomed] .md-diagram-tools {
+  opacity: 1;
+}
+
+.md-diagram-tool {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--space-1);
+  background: var(--overlay-tint);
+  color: var(--text-muted);
+  font: 12px / 1 var(--font-icons);
+  cursor: default;
+  transition: color var(--motion);
+}
+
+.md-diagram-tool:hover {
+  color: var(--text);
+}
+
+.md-diagram-tool[data-done] {
+  color: var(--accent);
+}
+
+.md-diagram-error {
+  margin: var(--space-3) 0 var(--space-1);
+  color: var(--danger);
+}
+
+.md-diagram-error + pre mark {
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--danger) 24%, transparent);
+  color: inherit;
+}
+
+@keyframes md-diagram-in {
+  from {
+    opacity: 0;
+    scale: 0.98;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .md-diagram,
+  .md-diagram svg {
+    animation: none;
+    transition: none;
+  }
+}
+
 .preview-markdown li:has(> input[type="checkbox"]) {
   list-style: none;
   margin-left: -1.4em;
@@ -3500,6 +3593,21 @@ th[aria-sort="descending"] .table-sort::after {
 
 .mail-empty {
   color: var(--text-muted);
+}
+
+/* An HTML mail, on the white it was written for, scrolling on its own. */
+.mail-html {
+  flex: 1;
+  width: 100%;
+  min-height: 240px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: #fff;
+  animation: details-in var(--motion-slide);
+}
+
+.mail-as-text {
+  align-self: flex-start;
 }
 
 @media (prefers-reduced-motion: reduce) {

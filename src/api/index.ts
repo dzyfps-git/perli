@@ -271,6 +271,9 @@ export interface Progress {
   items: number;
   totalItems: number;
   current: string;
+  /** In a job of several parts, which one this is and how many there are; both 0 otherwise. */
+  part?: number;
+  parts?: number;
 }
 
 export type Answer = "replace" | "keepBoth" | "merge" | "skip" | "retry" | "elevate" | "permanent" | "cancel";
@@ -658,6 +661,35 @@ export const resumeJob = (id: number) => invoke<void>("resume_job", { id });
 export const cancelJob = (id: number) => invoke<void>("cancel_job", { id });
 export const startJobNow = (id: number) => invoke<void>("start_job_now", { id });
 export const setJobOptions = (verify: boolean, onePerDrive: boolean) => invoke<void>("set_job_options", { verify, onePerDrive });
+
+/** The whole-PC index as the user set it. */
+export interface IndexOptions {
+  on: boolean;
+  paused: boolean;
+  /** Wait while the PC runs on its battery. */
+  battery: boolean;
+  network: boolean;
+  /** Folders left out, with all they hold. */
+  skip: string[];
+}
+
+export interface IndexStatus {
+  state: "off" | "waiting" | "walking" | "ready" | "paused" | "battery";
+  /** Files and folders listed. */
+  files: number;
+  folders: number;
+  /** What the list takes on disk. */
+  bytes: number;
+  /** When the last look through a drive ended, in ms. */
+  walked?: number | null;
+  /** What the look under way has listed so far. */
+  listed: number;
+  drives: string[];
+}
+
+export const setIndexOptions = (options: IndexOptions) => invoke<void>("set_index_options", { options });
+export const indexStatus = () => invoke<IndexStatus>("index_status");
+export const rebuildIndex = () => invoke<void>("rebuild_index");
 export const takeSweepReport = () => invoke<Swept>("take_sweep_report");
 
 /** `all` uses the same answer for every later case of this kind. */
@@ -780,6 +812,9 @@ export interface GitStatus {
 /** `fresh` asks git past what it said for the same index and rows. */
 export const gitStatus = (folder: string, fresh = false) => invoke<GitStatus | null>("git_status", { folder, fresh });
 
+/** Git asked again, for what changed deep inside `folder`. Null while it isn't time yet. */
+export const gitRecheck = (folder: string) => invoke<GitStatus | null>("git_recheck", { folder });
+
 /** How a row stands against the other pane's row of the same name, in the order of `folder::Mark`.
  *  Pending is a folder whose insides, or a file whose bytes, are still being compared. */
 export const MARKS = ["none", "only", "newer", "older", "differs", "same", "pending"] as const;
@@ -820,6 +855,10 @@ export const compareSummary = (view: number, request: number, other: number, oth
 /** Learns for a while what the marks of compared panes wait on. How many pairs it settled. */
 export const compareSettle = (view: number, request: number, other: number, otherRequest: number, content: boolean) =>
   invoke<number>("compare_settle", { view, request, other, otherRequest, content });
+
+/** Walks compared folders already known again for a while, for what changed deeper down. How many changed. */
+export const compareFreshen = (view: number, request: number, other: number, otherRequest: number, content: boolean) =>
+  invoke<number>("compare_freshen", { view, request, other, otherRequest, content });
 
 /** Stops learning for two panes' marks, as their compare ended. */
 export const compareStop = (view: number, other: number) => invoke<void>("compare_stop", { view, other });
@@ -1070,6 +1109,9 @@ export const dropChoices = (folder: string) => invoke<DropAction[]>("drop_choice
 /** The count and size of the drop that waits for an answer. */
 export const measureDrop = (id: number) => invoke<Measured>("measure_drop", { id });
 
+/** Lets go of a drop the user said no to, so its source hears at once that nothing came of it. */
+export const forgetDrop = (id: number) => invoke<void>("forget_drop", { id });
+
 /** Starts dragging the selected files to any app. Ends when the user lets go. */
 export const startDrag = (selection: Selection) => invoke<void>("start_drag", { selection });
 
@@ -1114,6 +1156,8 @@ export interface Mail {
   cc: string;
   date: number;
   body: string;
+  /** A mail written only in HTML, which shows as it was laid out. Empty when it has plain text. */
+  html: string;
   attachments: { name: string; size: number }[];
 }
 
@@ -1350,6 +1394,8 @@ export interface SongInfo {
   longest: number;
   /** When the last note ends, in seconds. 0 for a song with no notes. */
   end: number;
+  /** Notes past what fits in the memory free, which still play but don't show. */
+  leftOut: number;
   overview: Overview;
   /** The notes that may sound from `from` to `to` seconds, in order of start. A big song has
    *  millions, so they come a stretch at a time. */

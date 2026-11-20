@@ -263,3 +263,31 @@ export function groupedMove(key: string, focused: number, groups: Gathered[], pe
   }
   return focused;
 }
+
+/**
+ * The rows a compared pane offers the other to line up by, best first: those from `first` on
+ * down, then those above, `reach` of each. A row on one side only has no twin, so a run of them
+ * at the top still finds one further on.
+ */
+export function rowsAround(first: number, count: number, reach: number) {
+  const below = Array.from({ length: Math.max(0, Math.min(count, first + reach) - first) }, (_, step) => first + step);
+  const above = Array.from({ length: Math.min(first, reach) }, (_, step) => first - 1 - step);
+  return [...below, ...above];
+}
+
+/**
+ * The next page of a gallery to read the picture shapes of, and whether it is near: the pages in
+ * `near` first, in their order, then the rest nearest to `here` first, so a jump far off finds
+ * its lines laid out. Nothing once every page of `count` rows is asked for.
+ */
+export function nextShapes(near: number[], here: number, count: number, page: number, asked: Set<number>) {
+  const pages = Math.ceil(count / page);
+  const close = near.find((at) => at < pages && !asked.has(at));
+  if (close !== undefined) return { page: close, near: true };
+  let best: number | undefined;
+  for (let at = 0; at < pages; at++) {
+    // Of two as near, the one further down, where a scroll most often goes.
+    if (!asked.has(at) && (best === undefined || Math.abs(at - here) <= Math.abs(best - here))) best = at;
+  }
+  return best === undefined ? undefined : { page: best, near: false };
+}

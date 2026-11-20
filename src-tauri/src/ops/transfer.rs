@@ -18,6 +18,26 @@ const TEMP_PREFIX: &str = "~perli-";
 
 static TEMP_NUMBER: AtomicU64 = AtomicU64::new(0);
 
+fn with_tokens(name: &OsStr, tokens: &[(String, String)]) -> OsString {
+    match name.to_str() {
+        Some(text) if !tokens.is_empty() => tokens.iter().fold(text.to_string(), |text, (token, value)| text.replace(token, value)).into(),
+        _ => name.to_os_string(),
+    }
+}
+
+/// Copies `from` to `to` with `tokens` filled in on every name inside.
+fn copy_filled(from: &Path, to: &Path, tokens: &[(String, String)]) -> io::Result<()> {
+    if !fs::symlink_metadata(from)?.is_dir() {
+        return fs::copy(from, to).map(drop);
+    }
+    fs::create_dir_all(to)?;
+    for entry in fs::read_dir(from)? {
+        let entry = entry?;
+        copy_filled(&entry.path(), &to.join(with_tokens(&entry.file_name(), tokens)), tokens)?;
+    }
+    Ok(())
+}
+
 /// A copy is written here and renamed when whole, so a real name never holds half a file.
 fn temp_path(folder: &Path) -> PathBuf {
     let number = TEMP_NUMBER.fetch_add(1, Ordering::Relaxed);
@@ -125,8 +145,6 @@ impl Run<'_> {
 
     /// A folder template, copied whole to `target` the way a copy would, with `tokens` filled in on
     /// the names inside. One undo step takes it all back.
-    // ponytail: a part that needs admin rights goes through Windows' copy, which keeps the names as
-    // they are; fill them in there too if templates ever land in protected folders.
     pub(super) fn new_tree(&mut self, source: &Path, target: PathBuf, tokens: Vec<(String, String)>) -> Flow {
         let Some(found) = self.attempt(source, None, |_| sys::stat(source))? else {
             return Ok(());
@@ -139,19 +157,36 @@ impl Run<'_> {
         };
         self.add_total(node.items, node.bytes);
         self.tokens = tokens;
+        let handed = self.elevated.len();
         let placed = self.place(&mut node, Plan::Write(target), false);
+        self.stage_filled(handed);
         self.settle(&node, false);
         placed
     }
 
+    /// Windows copies what needs admin rights as it finds it, so each template folder handed over
+    /// since `from` is swapped for a copy in the temp folder with its names filled in. One that
+    /// can't be made keeps the template's own names.
+    fn stage_filled(&mut self, from: usize) {
+        for entry in &mut self.elevated[from..] {
+            // A file's own name is filled in already.
+            let Elevated::Copy { source, target, .. } = entry else { continue };
+            if !source.is_dir() {
+                continue;
+            }
+            let number = TEMP_NUMBER.fetch_add(1, Ordering::Relaxed);
+            let stage = std::env::temp_dir().join(format!("perli-template-{}-{number}", std::process::id()));
+            let staged = stage.join(file_name(target));
+            if copy_filled(source, &staged, &self.tokens).is_ok() {
+                *source = staged;
+            }
+            self.staged.push(stage);
+        }
+    }
+
     /// A name inside a folder template with its tokens filled in. Any other copy keeps its names.
     fn filled(&self, name: &OsStr) -> OsString {
-        match name.to_str() {
-            Some(text) if !self.tokens.is_empty() => {
-                self.tokens.iter().fold(text.to_string(), |text, (token, value)| text.replace(token, value)).into()
-            }
-            _ => name.to_os_string(),
-        }
+        with_tokens(name, &self.tokens)
     }
 
     fn copy_nodes(&mut self, nodes: &mut [Node], folder: &Path, identity: &str) -> Flow {

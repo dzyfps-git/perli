@@ -1,4 +1,4 @@
-import { dropChoices, measureDrop, onFileDrag, setDropTarget, shelveDrop, spaceDown, startJob, type DropAction } from "../../api";
+import { dropChoices, forgetDrop, measureDrop, onFileDrag, setDropTarget, shelveDrop, spaceDown, startJob, type DropAction } from "../../api";
 import { setDragging, SHELF, shelve } from "../reach/reach";
 import type { MenuItem } from "../../ui/Menu";
 import { iconKindOf } from "../filelist/fileKinds";
@@ -201,7 +201,8 @@ function spotAt(x: number, y: number, views: FolderView[]): Spot | undefined {
 export function followFileDrag(
   views: () => FolderView[],
   report: (failure: unknown) => void,
-  showMenu: (x: number, y: number, items: MenuItem[]) => void,
+  /** `dismissed` runs when the menu closes with nothing picked. */
+  showMenu: (x: number, y: number, items: MenuItem[], dismissed: () => void) => void,
   /** Files landed on `place`, one of Perli's own that is no folder. Nothing moved. */
   noted: (place: string, paths: string[]) => void,
   /** A drag rested on a place that stands for `folder`, such as one in the sidebar. */
@@ -220,13 +221,25 @@ export function followFileDrag(
   const run = (spot: Spot, id: number, action?: DropAction) =>
     startJob({ kind: "drop", folder: spot.folder, action, id }, spot.view?.id).catch(report);
 
+  /** A drop the user said no to goes at once, so its source isn't left waiting for the next one. */
+  const forget = (id: number) => void forgetDrop(id).catch(report);
+
   /** A right drag asks what to do, in the window's own units. */
   async function ask(spot: Spot, id: number, x: number, y: number) {
     const choices = await dropChoices(spot.folder);
-    const items: MenuItem[] = choices.map((action) => ({ label: ACTION_LABELS[action], action: () => run(spot, id, action) }));
-    if (items.length === 0) return;
+    let picked = false;
+    const items: MenuItem[] = choices.map((action) => ({
+      label: ACTION_LABELS[action],
+      action: () => {
+        picked = true;
+        run(spot, id, action);
+      },
+    }));
+    if (items.length === 0) return forget(id);
     const scale = window.devicePixelRatio;
-    showMenu(x / scale, y / scale, [...items, { label: "Cancel", divider: true }]);
+    // The menu closes before a pick runs, so the pick has its turn first.
+    const dismissed = () => queueMicrotask(() => picked || forget(id));
+    showMenu(x / scale, y / scale, [...items, { label: "Cancel", divider: true }], dismissed);
   }
 
   function aim(spot: Spot | undefined) {
@@ -309,6 +322,7 @@ export function followFileDrag(
         title: "Delete permanently?",
         measure: () => measureDrop(event.id),
         confirm: () => void run(spot, event.id, "delete"),
+        cancel: () => forget(event.id),
       });
     else if (spot) run(spot, event.id);
   });

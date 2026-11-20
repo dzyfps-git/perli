@@ -11,6 +11,7 @@ mod drag;
 mod folder;
 mod fonts;
 mod git;
+mod index;
 mod jobs;
 mod launch;
 mod mail;
@@ -40,6 +41,7 @@ mod tags;
 mod tearoff;
 mod templates;
 mod thumbs;
+mod unlock;
 mod watch;
 mod zipped;
 
@@ -1034,6 +1036,22 @@ fn set_job_options(verify: bool, one_per_drive: bool, jobs: State<'_, Jobs>) {
     jobs.set_options(verify, one_per_drive);
 }
 
+/// The whole-PC index as the user set it, which every window hands over.
+#[tauri::command]
+fn set_index_options(options: index::Options) {
+    index::set_options(options);
+}
+
+#[tauri::command]
+async fn index_status() -> Result<index::Status, String> {
+    blocking(|| Ok(index::status())).await
+}
+
+#[tauri::command]
+async fn rebuild_index() -> Result<(), String> {
+    blocking(index::rebuild).await
+}
+
 #[tauri::command]
 fn start_job_now(id: u64, jobs: State<'_, Jobs>) {
     jobs.start_now(id);
@@ -1440,11 +1458,14 @@ impl ShellTarget {
             Self::Rows { selection } => {
                 menus::Target::Items(on_disk(views.read(&selection, folder::Listing::paths)?).await?)
             }
-            // ponytail: one inside another stands for the outermost, a menu of its own when asked for.
-            Self::Folder { path } => match zipped::outer(Path::new(&path)) {
-                Some(archive) => menus::Target::Items(vec![archive]),
-                None => menus::Target::Folder(path.into()),
-            },
+            // One inside another stands for the innermost, taken out first.
+            Self::Folder { path } => {
+                let shown = PathBuf::from(&path);
+                match blocking(move || zipped::innermost(&shown).transpose()).await? {
+                    Some(archive) => menus::Target::Items(vec![archive]),
+                    None => menus::Target::Folder(path.into()),
+                }
+            }
             Self::Paths { paths } => menus::Target::Items(on_disk(paths).await?),
         })
     }
@@ -2250,6 +2271,12 @@ async fn git_status(folder: String, fresh: bool) -> Result<Option<git::Status>, 
     blocking(move || Ok(git::status(Path::new(&folder), fresh))).await
 }
 
+/// Git asked again for `folder`, for what changed deep inside it, or nothing while it isn't time.
+#[tauri::command]
+async fn git_recheck(folder: String) -> Result<Option<git::Status>, String> {
+    blocking(move || Ok(git::recheck(Path::new(&folder)))).await
+}
+
 /// The two listings of compared panes, as `work` needs them.
 fn compared_pair<T>(views: &Views, one: (u32, u64), two: (u32, u64), work: impl FnOnce(&folder::Listing, &folder::Listing) -> T) -> Result<T, String> {
     let views = views.0.read().unwrap_or_else(|error| error.into_inner());
@@ -2294,6 +2321,15 @@ async fn compare_settle(view: u32, request: u64, other: u32, other_request: u64,
     })?;
     let round = compare::round(view, other);
     blocking(move || Ok(compare::settle(pairs, content, sight, (view, other), round))).await
+}
+
+/// Walks compared folders already known again, for a while, for what changed deeper down. How many
+/// pairs it found changed, for the marks to be asked for again.
+#[tauri::command]
+async fn compare_freshen(view: u32, request: u64, other: u32, other_request: u64, content: bool, views: State<'_, Views>) -> Result<usize, String> {
+    let (pairs, sight) = compared_pair(&views, (view, request), (other, other_request), |mine, theirs| (mine.folder_twins(theirs), mine.sight().either(theirs.sight())))?;
+    let round = compare::round(view, other);
+    blocking(move || Ok(compare::freshen(pairs, content, sight, (view, other), round))).await
 }
 
 /// The first of `names` among a view's rows, in any case: which of them, and its row. Compared
@@ -2419,6 +2455,12 @@ fn templates_folder() -> Result<PathBuf, String> {
 #[tauri::command]
 async fn measure_drop(id: u64, drags: State<'_, Arc<Drags>>) -> Result<Measured, String> {
     measure(drags.waiting(id)).await
+}
+
+/// Lets go of a drop the user said no to: a Shift-drop's delete or the right drop's menu.
+#[tauri::command]
+fn forget_drop(id: u64, drags: State<'_, Arc<Drags>>) {
+    drags.forget(id);
 }
 
 /// Whether Space is held, for a drag resting on a folder to open it at once. A drag holds the
@@ -2759,6 +2801,9 @@ fn main() {
             clipboard_has_files,
             bin_usage,
             set_job_options,
+            set_index_options,
+            index_status,
+            rebuild_index,
             start_job_now,
             take_sweep_report,
             rows,
@@ -2889,6 +2934,9 @@ fn main() {
             stop_map,
             drop_choices,
             measure_drop,
+            git_recheck,
+            compare_freshen,
+            forget_drop,
             own_templates,
             templates_folder,
             subfolders,

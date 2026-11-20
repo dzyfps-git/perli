@@ -21,11 +21,13 @@ use crate::folder::Filter;
 use crate::folder::{self, Entry, Found, GroupBy, Listing, Order, Sight, SortKey};
 use crate::network;
 use crate::ops::sys::{self, Stat};
-use crate::{copies, tags, zipped};
+use crate::{copies, index, tags, zipped};
 
 /// How many rows past the user the walk keeps ready. Scrolling never catches up, so the list
 /// feels endless, while a search nobody scrolls goes no further than this.
 const AHEAD: usize = 100_000;
+/// Rows asked of the index at a time.
+const INDEX_PAGE: usize = 20_000;
 const REPORT_GAP: Duration = Duration::from_millis(200);
 
 const LETTER: i32 = 1;
@@ -285,12 +287,15 @@ impl Search {
         }
     }
 
-    /// Walks everything in `below`, nearest first. `rows` is what a quiet search starts from,
-    /// because it only shows its rows once it has as many as it will wait with.
+    /// Walks everything in `below`, nearest first, after taking what the index has for `parts`.
+    /// `rows` is what a quiet search starts from, because it only shows its rows once it has as
+    /// many as it will wait with.
+    #[allow(clippy::too_many_arguments)]
     fn walk(
         &self,
         query: &Query,
         mut rows: Found,
+        parts: Vec<index::Part>,
         mut below: VecDeque<PathBuf>,
         sight: Sight,
         mut quiet: bool,
@@ -298,6 +303,41 @@ impl Search {
     ) {
         let mut reported = Instant::now();
         let mut in_sight = if quiet { rows.in_sight(sight) } else { self.found().in_sight(sight) };
+        let mut taken = 0;
+        while !parts.is_empty() {
+            if in_sight >= self.room() && !self.stopped() {
+                self.show(&mut rows, &mut quiet);
+                report(Walk::Waiting);
+                self.wait_for_room(in_sight);
+            }
+            if self.stopped() {
+                return;
+            }
+            let page = index::page(&parts, &query.text, query.deepest, sight, taken, INDEX_PAGE);
+            taken += page.len();
+            let mut at = 0;
+            while at < page.len() {
+                let folder = page[at].0.clone();
+                let location: Arc<[u16]> = folder::null_terminated(&folder).into();
+                let from = rows.len();
+                while at < page.len() && page[at].0 == folder {
+                    if let Some(entry) = Entry::from_find_data(&page[at].1) {
+                        in_sight += usize::from(sight.shows(&entry));
+                        rows.push(entry, location.clone());
+                    }
+                    at += 1;
+                }
+                rows.tag_from(&folder, from);
+            }
+            if page.len() < INDEX_PAGE {
+                break;
+            }
+            if !quiet {
+                self.show(&mut rows, &mut quiet);
+                report(Walk::Going);
+                reported = Instant::now();
+            }
+        }
         while let Some(folder) = below.pop_front() {
             if in_sight >= self.room() && !self.stopped() {
                 self.show(&mut rows, &mut quiet);
@@ -529,8 +569,10 @@ impl Searches {
             let search = Arc::new(Search::new(shown.clone(), usize::MAX));
             self.all().insert(view, search.clone());
             let (deep, sight) = (asked.scope != Scope::Folder, order.sight());
+            let before = shown.clone();
             thread::spawn(move || {
-                let found = copies::find(&folders, deep, sight, COPIES_LANE | view, &|| search.stopped(), &|| report(Walk::Going));
+                let mut found = copies::find(&folders, deep, sight, COPIES_LANE | view, &|| search.stopped(), &|| report(Walk::Going));
+                found.keep_copies_order(&before);
                 if !search.stopped() {
                     *search.found() = found;
                     report(Walk::Done);
@@ -557,6 +599,8 @@ impl Searches {
             Scope::Drives => below.extend(other_drives(&folder)),
             Scope::Below | Scope::Drive => (),
         }
+        // The index answers names at once wherever it has every file. Content has to be read.
+        let parts = if query.inside || query.every_file || asked.scope == Scope::Folder { Vec::new() } else { index::parts_for(&folder, &mut below) };
         let quiet = asked.step == Step::Again;
         let kept = running.filter(|_| quiet);
         let room = match &kept {
@@ -570,7 +614,7 @@ impl Searches {
         self.all().insert(view, search.clone());
         let rows = if quiet { first } else { Found::default() };
         let sight = order.sight();
-        thread::spawn(move || search.walk(&query, rows, below, sight, quiet, report));
+        thread::spawn(move || search.walk(&query, rows, parts, below, sight, quiet, report));
         Ok(Listing::searched(shown, order))
     }
 }
@@ -719,7 +763,7 @@ mod tests {
             let report = move |walk| {
                 let _ = reports.send(walk);
             };
-            search.walk(&Query::new("report"), Found::default(), below, Sight::default(), quiet, report);
+            search.walk(&Query::new("report"), Found::default(), Vec::new(), below, Sight::default(), quiet, report);
         });
         heard
     }
@@ -873,7 +917,7 @@ mod tests {
         search.stop();
         let below = VecDeque::from([tree.0.clone()]);
 
-        search.walk(&Query::new("report"), Found::default(), below, Sight::default(), false, move |walk| {
+        search.walk(&Query::new("report"), Found::default(), Vec::new(), below, Sight::default(), false, move |walk| {
             let _ = reports.send(walk);
         });
 

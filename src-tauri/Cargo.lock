@@ -2556,6 +2556,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 name = "perli"
 version = "0.5.0"
 dependencies = [
+ "aes",
  "base64 0.23.1",
  "brotli",
  "brotli-decompressor",
@@ -2563,7 +2564,9 @@ dependencies = [
  "cab",
  "cfb",
  "flate2",
+ "hmac",
  "lzma-rust2",
+ "pbkdf2",
  "pulldown-cmark",
  "quick-xml",
  "rusqlite",
@@ -2572,6 +2575,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sevenz-rust2",
+ "sha1",
  "tar",
  "tauri",
  "tauri-build",

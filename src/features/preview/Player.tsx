@@ -97,8 +97,8 @@ export interface PlayerProps {
   lyrics?: () => Promise<string | null>;
   /** The files of the folder that play, and the sound sets (`.sf2`) there. */
   queue?: () => Promise<{ tracks: Track[]; fonts: string[] }>;
-  /** Steps the preview to another row of the list. */
-  onPick?: (index: number) => void;
+  /** Steps the preview to another song of the queue, wherever its row is now. */
+  onPick?: (track: Track) => void;
   /** Hands the player's keys to the preview, which passes key presses on first. */
   keys: (handler: ((event: KeyboardEvent) => boolean) | undefined) => void;
   /** A soft color behind the player, taken from the cover. */
@@ -617,6 +617,9 @@ export function Player(live: PlayerProps) {
       <Show when={subtitle()}>
         <div class="player-sub">{subtitle()}</div>
       </Show>
+      <Show when={song()?.leftOut}>
+        {(count) => <div class="player-sub">{`${count().toLocaleString()} notes play but don't show, as there isn't the memory free for them`}</div>}
+      </Show>
       <Show
         when={midi && song()?.channels.length}
         fallback={
@@ -812,7 +815,7 @@ export function Player(live: PlayerProps) {
           <For each={tracks()}>
             {(track) => (
               <li>
-                <button aria-current={track.path === props.path ? "true" : undefined} onClick={() => track.path !== props.path && props.onPick?.(track.index)}>
+                <button aria-current={track.path === props.path ? "true" : undefined} onClick={() => track.path !== props.path && props.onPick?.(track)}>
                   {titleOf(track.name)}
                 </button>
               </li>

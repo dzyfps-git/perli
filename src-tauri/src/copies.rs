@@ -67,7 +67,7 @@ pub fn find(folders: &[PathBuf], deep: bool, sight: Sight, lane: u32, stopped: &
     let path_of = |(entry, location): &Candidate| path_in(location).join(entry.file_name());
     let mut sets: Vec<(u64, Vec<Candidate>)> = Vec::new();
     for (size, files) in by_size.into_iter().filter(|(_, files)| files.len() > 1) {
-        for alike in split_by(files, |file| head_of(&path_of(file), file.0.size(), file.0.modified())) {
+        for alike in split_by(files, |file| head_of(&path_of(file))) {
             if stopped() {
                 return Found::default();
             }
@@ -101,10 +101,11 @@ fn split_by<K: Hash + Eq>(files: Vec<Candidate>, key: impl Fn(&Candidate) -> Opt
 }
 
 /// A quick fingerprint of the file's first bytes. Only a sorting step: the checksum decides. One
-/// worked out before for the same size and time is given at once.
-fn head_of(path: &Path, size: u64, modified: u64) -> Option<u64> {
+/// worked out before, for a file unchanged since, is given at once.
+fn head_of(path: &Path) -> Option<u64> {
     let key = path.to_string_lossy().to_lowercase();
-    if let Some(print) = KNOWN_HEADS.get(&key, (size, modified)) {
+    let stamp = crate::ops::sys::stamp(path).ok()?;
+    if let Some(print) = KNOWN_HEADS.get(&key, stamp) {
         return Some(print);
     }
     let mut head = Vec::with_capacity(HEAD);
@@ -112,7 +113,7 @@ fn head_of(path: &Path, size: u64, modified: u64) -> Option<u64> {
     let mut hasher = DefaultHasher::new();
     head.hash(&mut hasher);
     let print = hasher.finish();
-    KNOWN_HEADS.put(key, (size, modified), print);
+    KNOWN_HEADS.put(key, stamp, print);
     Some(print)
 }
 
@@ -127,13 +128,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_first_bytes_print_is_read_again_only_for_a_new_size_or_time() {
+    fn a_first_bytes_print_is_read_again_once_the_file_changes_even_with_its_old_time_put_back() {
         let file = std::env::temp_dir().join(format!("perli-copies-head-{}.bin", std::process::id()));
         fs::write(&file, "first").unwrap();
-        let print = head_of(&file, 5, 1).unwrap();
+        let print = head_of(&file).unwrap();
+        assert_eq!(head_of(&file), Some(print), "unchanged, it gives the print known");
+        let (modified, ticks) = (fs::metadata(&file).unwrap().modified().unwrap(), crate::ops::sys::stamp(&file).unwrap().1);
+        // Windows stamps the change time from a clock that moves about every 16 ms, so a rewrite
+        // straight after could carry the same one. A tool puts an old time back later than that.
+        std::thread::sleep(std::time::Duration::from_millis(50));
         fs::write(&file, "other").unwrap();
-        assert_eq!(head_of(&file, 5, 1), Some(print), "the same size and time give the print known");
-        assert_ne!(head_of(&file, 5, 2), Some(print), "a new time reads the file again");
+        fs::File::options().write(true).open(&file).unwrap().set_modified(modified).unwrap();
+        assert_eq!(crate::ops::sys::stamp(&file).unwrap().1, ticks, "its old time is back");
+        assert_ne!(head_of(&file), Some(print), "the same size and time, read again");
         fs::remove_file(&file).unwrap();
     }
 

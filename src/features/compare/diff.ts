@@ -10,10 +10,14 @@ export interface Line {
 }
 
 /**
- * Past this many changes in one stretch the search stops and splits where it got furthest, as GNU
- * diff does: a few more lines may show as changed than had to, but a compare never stalls.
+ * Past this many changes in one stretch the search looks at the clock, and once a compare has
+ * searched for `BUDGET_MS` it splits where it got furthest, as GNU diff does: only then may a few
+ * more lines show as changed than had to, and a compare never stalls. It runs in a worker.
  */
 const COSTLY = 4096;
+const BUDGET_MS = 3000;
+/** When the compare under way stops looking for the shortest way. */
+let deadline = Infinity;
 
 /**
  * The shortest way from a[aLo, aHi) to b[bLo, bHi), as lines kept, gone and new, onto `lines` in
@@ -47,12 +51,18 @@ function middle<T>(a: T[], b: T[], aLo: number, aHi: number, bLo: number, bHi: n
   const m = bHi - bLo;
   const delta = n - m;
   const odd = (delta & 1) !== 0;
-  const most = Math.min(Math.ceil((n + m) / 2), COSTLY);
-  const zero = most + 1;
+  const full = Math.ceil((n + m) / 2);
+  const zero = full + 1;
   /** How far along a each diagonal the search from the start got, and the one from the end. */
-  const ahead = new Int32Array(2 * most + 3);
-  const behind = new Int32Array(2 * most + 3);
-  for (let d = 0; d <= most; d++) {
+  const ahead = new Int32Array(2 * full + 3);
+  const behind = new Int32Array(2 * full + 3);
+  /** The last round both searches finished. */
+  let most = full;
+  for (let d = 0; d <= full; d++) {
+    if (d > COSTLY && (d & 63) === 0 && performance.now() > deadline) {
+      most = d - 1;
+      break;
+    }
     for (let k = -d; k <= d; k += 2) {
       let x = k === -d || (k !== d && ahead[zero + k - 1] < ahead[zero + k + 1]) ? ahead[zero + k + 1] : ahead[zero + k - 1] + 1;
       let y = x - k;
@@ -112,15 +122,40 @@ export type Open = readonly [boolean, boolean];
 /**
  * Lines of `a` and `b` in order, each marked same, gone or new. `key` says when two lines count as
  * one. A last line with no ending (`open`) never counts as one with a last line that has one.
+ * `budget` is how long, in ms, the search may look for the shortest way.
  */
-export function diffLines(a: string[], b: string[], key: (line: string) => string = (line) => line, open: Open = [false, false]) {
+export function diffLines(a: string[], b: string[], key: (line: string) => string = (line) => line, open: Open = [false, false], budget = BUDGET_MS) {
   const keysA = a.map(key);
   const keysB = b.map(key);
   // No line holds a line ending, so one on the key marks the open end and matches nothing else.
   if (open[0] && keysA.length) keysA[keysA.length - 1] += "\n";
   if (open[1] && keysB.length) keysB[keysB.length - 1] += "\n";
+  // A line on one side only can't be kept, so those are set aside before the search, as GNU diff
+  // does: the shortest way stays the same, and the search goes through only lines that may match.
+  const [inA, inB] = [new Set(keysA), new Set(keysB)];
+  const keptA = keysA.flatMap((line, at) => (inB.has(line) ? [at] : []));
+  const keptB = keysB.flatMap((line, at) => (inA.has(line) ? [at] : []));
+  const found: Line[] = [];
+  deadline = performance.now() + budget;
+  edits(keptA.map((at) => keysA[at]), keptB.map((at) => keysB[at]), 0, keptA.length, 0, keptB.length, found);
+  // Back in place, with the lines set aside where they were.
   const lines: Line[] = [];
-  edits(keysA, keysB, 0, a.length, 0, b.length, lines);
+  let [x, y] = [0, 0];
+  const goneTo = (end: number) => {
+    for (; x < end; x++) lines.push({ kind: "gone", a: x });
+  };
+  const newTo = (end: number) => {
+    for (; y < end; y++) lines.push({ kind: "new", b: y });
+  };
+  for (const line of found) {
+    if (line.a !== undefined) goneTo(keptA[line.a]);
+    if (line.b !== undefined) newTo(keptB[line.b]);
+    if (line.kind === "same") lines.push({ kind: "same", a: x++, b: y++ });
+    else if (line.kind === "gone") lines.push({ kind: "gone", a: x++ });
+    else lines.push({ kind: "new", b: y++ });
+  }
+  goneTo(a.length);
+  newTo(b.length);
   goneFirst(lines);
   return lines;
 }

@@ -30,7 +30,7 @@ const KINDS = {
   text: [PLAIN, `${PAGE}M10 12.5h5M10 15.5h5`, "txt nfo"],
   sheet: [150, `${PAGE}M10 11h5v6h-5zM10 14h5M12.5 11v6`, "xls xlsx xlsm ods csv tsv numbers"],
   slides: [40, `${PAGE}M10 11h5v4h-5zM12.5 15v2.5`, "ppt pptx odp"],
-  markdown: [230, `${PAGE}M9.5 17.5v-6l3 3.5 3-3.5v6`, "md markdown mdx rst"],
+  markdown: [230, `${PAGE}M9.5 17.5v-6l3 3.5 3-3.5v6`, "md markdown mdx rst mmd mermaid"],
   code: [
     190,
     "M8 8l-4 4 4 4M16 8l4 4-4 4M13.5 6l-3 12",

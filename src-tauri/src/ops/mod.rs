@@ -157,6 +157,10 @@ pub struct Progress {
     pub items: u64,
     pub total_items: u64,
     pub current: String,
+    /// In a job of several parts, which one this is and how many there are. Each part counts
+    /// from nothing, and the bar gives each the same share. Both 0 in a job of one.
+    pub part: u32,
+    pub parts: u32,
 }
 
 /// What the job can do next. The UI shows one button for each it is offered.
@@ -367,6 +371,9 @@ struct Run<'a> {
     tally: (u64, u64),
     /// Filled in on the names a folder template copies, such as `{date}`. Empty for any other copy.
     tokens: Vec<(String, String)>,
+    /// Temp folders holding template parts with their names filled in, for Windows to copy with
+    /// admin rights. They go once the job ends.
+    staged: Vec<PathBuf>,
 }
 
 impl<'a> Run<'a> {
@@ -387,6 +394,13 @@ impl<'a> Run<'a> {
             temp_folders: HashSet::new(),
             tally: (0, 0),
             tokens: Vec::new(),
+            staged: Vec::new(),
+        }
+    }
+
+    fn unstage(&mut self) {
+        for stage in self.staged.drain(..) {
+            let _ = std::fs::remove_dir_all(stage);
         }
     }
 
@@ -425,9 +439,15 @@ impl<'a> Run<'a> {
             Job::Save { path, bytes, read } => self.save(&path, &bytes, read),
             Job::Picture { paths, edit, keep } => self.edit_pictures(&paths, edit, keep),
             Job::Wallpaper { picture } => self.set_wallpaper(&picture),
-            // ponytail: each part adds its total as it starts, so the bar steps back once per part;
-            // count all parts first if that reads as wrong.
-            Job::Several { jobs } => jobs.into_iter().try_for_each(|job| self.job(job)),
+            // ponytail: each part has the same share of the bar, as a part's total is known only once it
+            // starts; weigh them by size if one dwarfs the others.
+            Job::Several { jobs } => {
+                let parts = jobs.len() as u32;
+                jobs.into_iter().enumerate().try_for_each(|(part, job)| {
+                    self.progress = Progress { part: part as u32, parts, ..Progress::default() };
+                    self.job(job)
+                })
+            }
         }
     }
 
@@ -822,6 +842,7 @@ pub fn run(job: Job, host: &dyn Host, control: &Arc<Control>) -> Outcome {
     // A restore or an undo lists what it skipped, but has no "try again" of its own.
     let retries = matches!(job, Job::Copy { .. } | Job::Move { .. });
     let worked = run.job(job).and_then(|()| run.finish_elevated());
+    run.unstage();
     let mut outcome = run.finish(worked.is_err() || control.cancelled());
     outcome.retries = retries;
     outcome

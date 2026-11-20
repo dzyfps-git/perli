@@ -1,8 +1,26 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { besidePoint, groupedMove, justifiedPlaces, moveTarget, placesOf } from "./layout.ts";
+import { besidePoint, groupedMove, justifiedPlaces, moveTarget, nextShapes, placesOf, rowsAround } from "./layout.ts";
 
 const list = { count: 100, perRow: 1, pageRows: 10 };
+
+test("a gallery reads the shapes near the view first, then the rest nearest first", () => {
+  const asked = new Set<number>();
+  assert.deepEqual(nextShapes([3, 4, 2], 3, 1000, 100, asked), { page: 3, near: true });
+  asked.add(3).add(4).add(2);
+  assert.deepEqual(nextShapes([3, 4, 2], 3, 1000, 100, asked), { page: 5, near: false }, "then the next one out, down before up");
+  asked.add(5);
+  assert.deepEqual(nextShapes([3, 4, 2], 3, 1000, 100, asked), { page: 1, near: false });
+  for (let page = 0; page < 10; page++) asked.add(page);
+  assert.equal(nextShapes([3], 3, 1000, 100, asked), undefined, "every page is asked for");
+  assert.deepEqual(nextShapes([12], 0, 250, 100, new Set()), { page: 0, near: false }, "a near page past the end doesn't count");
+});
+
+test("a compared pane offers the rows below its top first, then those above", () => {
+  assert.deepEqual(rowsAround(5, 100, 3), [5, 6, 7, 4, 3, 2]);
+  assert.deepEqual(rowsAround(1, 3, 5), [1, 2, 0], "as far as there are rows");
+  assert.deepEqual(rowsAround(0, 0, 5), []);
+});
 const grid = { count: 10, perRow: 4, pageRows: 2 };
 
 test("list keys move by rows and clamp to the ends", () => {

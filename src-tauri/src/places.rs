@@ -167,7 +167,7 @@ fn bitlocker(drive: &str) -> Option<i32> {
 }
 
 /// True for a disk on a USB cable, which Windows calls fixed like the ones inside.
-fn is_usb(drive: &str) -> bool {
+pub(crate) fn is_usb(drive: &str) -> bool {
     let volume = HSTRING::from(format!(r"\\.\{}", drive.trim_end_matches('\\')));
     let share = FILE_SHARE_READ | FILE_SHARE_WRITE;
     // Asking for no access is enough for this question, and needs no rights.

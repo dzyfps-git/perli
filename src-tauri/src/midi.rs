@@ -377,6 +377,8 @@ pub struct SongInfo {
     longest: f32,
     /// When the last note ends, in seconds.
     end: f32,
+    /// Notes past what fits in the memory free, which the song still plays but doesn't show.
+    left_out: u64,
 }
 
 /// Packs notes as columns of little-endian numbers: every start, every length, every key, every
@@ -448,9 +450,6 @@ impl Songs {
 
 pub const DRUMS: u8 = 128;
 const DRUM_CHANNEL: u8 = 9;
-// ponytail: past this many notes, about 360 MB of them, the rest are left out. Read the file a
-// stretch at a time if bigger songs matter.
-const MOST_NOTES: usize = 30_000_000;
 const MOST_BEATS: usize = 20_000;
 const DEFAULT_TEMPO: f64 = 500_000.0;
 
@@ -504,6 +503,11 @@ pub fn info(song: &Path) -> Result<SongInfo, String> {
 }
 
 fn read_info(bytes: &[u8]) -> Option<SongInfo> {
+    read_song(bytes, most_notes())
+}
+
+/// The song in `bytes`, with at most `room` of its notes.
+fn read_song(bytes: &[u8], room: usize) -> Option<SongInfo> {
     let mut file = Reader { bytes, at: 0 };
     if file.take(4)? != b"MThd" {
         return None;
@@ -514,49 +518,95 @@ fn read_info(bytes: &[u8]) -> Option<SongInfo> {
     let division = file.u16()?;
     file.take(header.checked_sub(6)?)?;
 
-    let mut title = None;
-    let mut events = Vec::new();
+    let mut bodies = Vec::new();
     for track in 0..tracks {
         let (Some(kind), Some(length)) = (file.take(4), file.u32()) else { break };
         let Some(body) = file.take(length as usize).or_else(|| file.bytes.get(file.at..)) else { break };
         if kind == b"MTrk" {
-            read_track(body, &mut events, if track == 0 { Some(&mut title) } else { None });
+            bodies.push((track, body));
         }
     }
-    events.sort_by_key(|(tick, _)| *tick);
 
-    let seconds_at = timing(division, &events);
-    let (beats, bars) = beats_and_bars(division, &events);
-    let mut info = SongInfo { title, beats, bars, ..SongInfo::default() };
-    let mut programs = [0u8; 16];
-    let mut held: Vec<Vec<(u8, f32)>> = vec![Vec::new(); 16];
-    for ((_, event), seconds) in events.iter().zip(seconds_at) {
-        let seconds = seconds as f32;
-        match *event {
-            Event::Program { channel, program } => programs[usize::from(channel)] = program,
-            Event::On { channel, key } => {
-                let instrument = if channel == DRUM_CHANNEL { DRUMS } else { programs[usize::from(channel)] };
-                if !info.instruments.contains(&instrument) {
-                    info.instruments.push(instrument);
-                }
-                if !info.channels.iter().any(|(known, _)| *known == channel) {
-                    info.channels.push((channel, instrument));
-                }
-                held[usize::from(channel)].push((key, seconds));
+    // A song can hold hundreds of millions of notes, so each track is read twice instead of all
+    // its events being kept: first for what times the song and sets its instruments, which are
+    // few, then for the notes.
+    let mut title = None;
+    let (mut timed, mut last, mut starts) = (Vec::new(), 0u64, 0usize);
+    for &(track, body) in &bodies {
+        read_track(body, if track == 0 { Some(&mut title) } else { None }, |tick, event| {
+            last = last.max(tick);
+            match event {
+                Event::On { .. } => starts += 1,
+                Event::Off { .. } => {}
+                _ => timed.push((tick, event)),
             }
-            Event::Off { channel, key } => {
-                let notes = &mut held[usize::from(channel)];
-                if let Some(at) = notes.iter().position(|(held_key, _)| *held_key == key) {
-                    let (_, start) = notes.remove(at);
-                    if info.notes.len() < MOST_NOTES {
-                        info.notes.push((start, seconds - start, key, channel));
+        });
+    }
+    timed.sort_by_key(|(tick, _)| *tick);
+
+    let (beats, bars) = beats_and_bars(division, &timed, last);
+    let clock = Clock::new(division, &timed);
+    let mut programs: Vec<Vec<(u64, u8)>> = vec![Vec::new(); 16];
+    for (tick, event) in &timed {
+        if let Event::Program { channel, program } = *event {
+            programs[usize::from(channel)].push((*tick, program));
+        }
+    }
+    let instrument_at = |channel: u8, tick: u64| {
+        if channel == DRUM_CHANNEL {
+            return DRUMS;
+        }
+        let changes = &programs[usize::from(channel)];
+        let before = changes.partition_point(|(at, _)| *at <= tick);
+        before.checked_sub(1).map_or(0, |at| changes[at].1)
+    };
+
+    let most = starts.min(room);
+    let mut info = SongInfo { title, beats, bars, notes: Vec::with_capacity(most), ..SongInfo::default() };
+    // When each channel and each instrument first plays, to list them in that order.
+    let mut channels: Vec<((u64, usize, usize), u8, u8)> = Vec::new();
+    let mut instruments: Vec<((u64, usize, usize), u8)> = Vec::new();
+    for (order, &(_, body)) in bodies.iter().enumerate() {
+        let mut held: Vec<Vec<(u8, f32)>> = vec![Vec::new(); 16];
+        let mut index = 0;
+        read_track(body, None, |tick, event| {
+            index += 1;
+            let when = (tick, order, index);
+            match event {
+                Event::On { channel, key } => {
+                    let instrument = instrument_at(channel, tick);
+                    match channels.iter_mut().find(|(_, known, _)| *known == channel) {
+                        Some(first) if when < first.0 => *first = (when, channel, instrument),
+                        Some(_) => {}
+                        None => channels.push((when, channel, instrument)),
+                    }
+                    match instruments.iter_mut().find(|(_, known)| *known == instrument) {
+                        Some(first) if when < first.0 => first.0 = when,
+                        Some(_) => {}
+                        None => instruments.push((when, instrument)),
+                    }
+                    held[usize::from(channel)].push((key, clock.seconds(tick) as f32));
+                }
+                Event::Off { channel, key } => {
+                    let notes = &mut held[usize::from(channel)];
+                    if let Some(at) = notes.iter().position(|(held_key, _)| *held_key == key) {
+                        let (_, start) = notes.remove(at);
+                        if info.notes.len() < most {
+                            info.notes.push((start, clock.seconds(tick) as f32 - start, key, channel));
+                        } else {
+                            info.left_out += 1;
+                        }
                     }
                 }
+                _ => {}
             }
-            Event::Tempo(_) | Event::Meter { .. } => {}
-        }
+        });
     }
-    info.notes.sort_by(|a, b| a.0.total_cmp(&b.0));
+    channels.sort_by_key(|(when, ..)| *when);
+    instruments.sort_by_key(|(when, _)| *when);
+    info.channels = channels.into_iter().map(|(_, channel, instrument)| (channel, instrument)).collect();
+    info.instruments = instruments.into_iter().map(|(_, instrument)| instrument).collect();
+    info.notes.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
     let (mut low, mut high) = (127, 0);
     for &(start, long, key, _) in &info.notes {
         (low, high) = (low.min(key), high.max(key));
@@ -567,7 +617,50 @@ fn read_info(bytes: &[u8]) -> Option<SongInfo> {
     Some(info)
 }
 
-fn read_track(body: &[u8], events: &mut Vec<(u64, Event)>, mut title: Option<&mut Option<String>>) {
+/// As many notes as fit in half the memory free now, so a huge song can't take Perli down with it.
+fn most_notes() -> usize {
+    use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+    let mut status = MEMORYSTATUSEX { dwLength: size_of::<MEMORYSTATUSEX>() as u32, ..Default::default() };
+    let free = if unsafe { GlobalMemoryStatusEx(&mut status) }.is_ok() { status.ullAvailPhys } else { 1 << 32 };
+    usize::try_from(free / 2 / size_of::<Note>() as u64).unwrap_or(usize::MAX)
+}
+
+/// Seconds from ticks, following the song's tempo changes.
+struct Clock {
+    /// Ticks a second, for a song timed in frames, the same at every point of it.
+    frames: Option<f64>,
+    per_beat: f64,
+    /// Each tempo change: its tick, the seconds there, and the new tempo.
+    changes: Vec<(u64, f64, f64)>,
+}
+
+impl Clock {
+    fn new(division: u16, timed: &[(u64, Event)]) -> Self {
+        let frames = (division & 0x8000 != 0)
+            .then(|| (f64::from(-((division >> 8) as i8)) * f64::from(division & 0xFF)).max(1.0));
+        let per_beat = f64::from(division.max(1));
+        let mut changes = vec![(0, 0.0, DEFAULT_TEMPO)];
+        for (tick, event) in timed {
+            if let Event::Tempo(tempo) = event {
+                let &(at, seconds, old) = changes.last().expect("starts with one");
+                changes.push((*tick, seconds + (tick - at) as f64 * old / 1_000_000.0 / per_beat, f64::from(*tempo)));
+            }
+        }
+        Self { frames, per_beat, changes }
+    }
+
+    fn seconds(&self, tick: u64) -> f64 {
+        if let Some(per_second) = self.frames {
+            return tick as f64 / per_second;
+        }
+        let before = self.changes.partition_point(|(at, ..)| *at <= tick);
+        let (at, seconds, tempo) = self.changes[before.saturating_sub(1)];
+        seconds + (tick - at) as f64 * tempo / 1_000_000.0 / self.per_beat
+    }
+}
+
+/// Each event of a track that Perli uses, with its tick, in the order the track gives them.
+fn read_track(body: &[u8], mut title: Option<&mut Option<String>>, mut found: impl FnMut(u64, Event)) {
     let mut track = Reader { bytes: body, at: 0 };
     let mut tick = 0u64;
     let mut running = 0u8;
@@ -620,42 +713,18 @@ fn read_track(body: &[u8], events: &mut Vec<(u64, Event)>, mut title: Option<&mu
             _ => return,
         };
         if let Some(event) = event {
-            events.push((tick, event));
+            found(tick, event);
         }
     }
 }
 
-/// When each event happens, in seconds, following the tempo changes before it.
-fn timing(division: u16, events: &[(u64, Event)]) -> Vec<f64> {
-    if division & 0x8000 != 0 {
-        // Frames a second and ticks a frame, the same at every point of the song.
-        let frames = f64::from(-((division >> 8) as i8));
-        let per_second = frames * f64::from(division & 0xFF);
-        return events.iter().map(|(tick, _)| *tick as f64 / per_second.max(1.0)).collect();
-    }
-    let per_beat = f64::from(division.max(1));
-    let (mut tempo, mut last_tick, mut seconds) = (DEFAULT_TEMPO, 0u64, 0.0);
-    events
-        .iter()
-        .map(|(tick, event)| {
-            seconds += (tick - last_tick) as f64 * tempo / 1_000_000.0 / per_beat;
-            last_tick = *tick;
-            if let Event::Tempo(next) = event {
-                tempo = f64::from(*next);
-            }
-            seconds
-        })
-        .collect()
-}
-
 /// When each beat and each bar starts, in seconds, up to the song's last event. A new time
 /// signature starts a new bar where it falls.
-fn beats_and_bars(division: u16, events: &[(u64, Event)]) -> (Vec<f32>, Vec<f32>) {
+fn beats_and_bars(division: u16, events: &[(u64, Event)], last: u64) -> (Vec<f32>, Vec<f32>) {
     if division & 0x8000 != 0 {
         return (Vec::new(), Vec::new());
     }
     let per_beat = u64::from(division.max(1));
-    let last = events.last().map_or(0, |(tick, _)| *tick);
     let beats: Vec<u64> = (0..).map(|beat| beat * per_beat).take_while(|tick| *tick <= last).take(MOST_BEATS).collect();
     let mut meters = events
         .iter()
@@ -867,6 +936,38 @@ mod tests {
         assert!(read_info(b"RIFF").is_none());
         // Cut off in the middle of a track: the notes before the cut stay.
         assert_eq!(read_info(&song[..song.len() - 12]).unwrap().notes.len(), 2);
+    }
+
+    /// `count` quarter notes of middle C, one after another, in one track.
+    fn notes(count: usize) -> Vec<u8> {
+        let mut track = Vec::with_capacity(count * 7 + 4);
+        for _ in 0..count {
+            track.extend_from_slice(&[0x00, 0x90, 0x3C, 0x64, 0x60, 0x3C, 0x00]);
+        }
+        track.extend_from_slice(&[0x00, 0xFF, 0x2F, 0x00]);
+        let mut song = b"MThd\0\0\0\x06\0\0\0\x01\0\x60MTrk".to_vec();
+        song.extend_from_slice(&(track.len() as u32).to_be_bytes());
+        song.extend_from_slice(&track);
+        song
+    }
+
+    #[test]
+    fn notes_past_the_memory_free_are_counted_as_left_out() {
+        let info = read_song(&notes(5), 3).unwrap();
+        assert_eq!((info.notes.len(), info.left_out), (3, 2));
+        assert_eq!(info.notes[2], (1.0, 0.5, 60, 0), "the first ones stay");
+        assert_eq!(read_song(&notes(5), usize::MAX).unwrap().left_out, 0);
+    }
+
+    /// Past the 30 million notes the player once stopped at. Slow, so run by hand.
+    #[test]
+    #[ignore]
+    fn a_song_of_forty_million_notes_shows_whole() {
+        let song = notes(40_000_000);
+        let started = std::time::Instant::now();
+        let info = read_info(&song).unwrap();
+        eprintln!("{} notes in {:?}", info.notes.len(), started.elapsed());
+        assert_eq!((info.notes.len(), info.left_out), (40_000_000, 0));
     }
 
     #[test]

@@ -1,6 +1,7 @@
 import { createMemo, createSignal, For, onCleanup, Show } from "solid-js";
 import { filetimeToMs, mailAttachment, openFile, readMail, startDragPaths, type Mail } from "../../api";
 import { formatSize } from "../../ui/format";
+import { framedMail } from "./mailFrame";
 
 export interface MailViewProps {
   mail: Mail;
@@ -34,6 +35,8 @@ export function MailView(props: MailViewProps) {
   const shown = createMemo(() => opened().at(-1) ?? { mail: props.mail, path: props.path });
   const [busy, setBusy] = createSignal(false);
   const [note, setNote] = createSignal<string>();
+  /** An HTML mail shows as it was laid out, or as its words alone. */
+  const [asText, setAsText] = createSignal(false);
   const when = () =>
     shown().mail.date ? new Date(filetimeToMs(shown().mail.date)).toLocaleString(undefined, { dateStyle: "full", timeStyle: "short" }) : "";
   const total = () => shown().mail.attachments.reduce((sum, attachment) => sum + attachment.size, 0);
@@ -193,9 +196,22 @@ export function MailView(props: MailViewProps) {
               </div>
             </section>
           </Show>
-          <div class="mail-body" tabindex="0">
-            {page.mail.body || <span class="mail-empty">This mail has no text.</span>}
-          </div>
+          <Show
+            when={page.mail.html && !asText()}
+            fallback={
+              <div class="mail-body" tabindex="0">
+                {page.mail.body || <span class="mail-empty">This mail has no text.</span>}
+              </div>
+            }
+          >
+            {/* Every sandbox flag off: nothing in the mail runs, sends or leaves. */}
+            <iframe class="mail-html" sandbox="" srcdoc={framedMail(page.mail.html)} title={`Mail: ${page.mail.subject}`} />
+          </Show>
+          <Show when={page.mail.html}>
+            <button class="preview-chip mail-as-text" aria-pressed={asText()} onClick={() => setAsText(!asText())}>
+              {asText() ? "As it was laid out" : "Just the words"}
+            </button>
+          </Show>
         </div>
       )}
     </Show>

@@ -233,8 +233,8 @@ pub fn walk<E: From<String>>(
 /// Takes what a walk's caller gives back, and an error of the archive's as a string.
 pub(crate) fn read_error(error: io::Error, item: &Item, password: Option<&str>) -> String {
     match error.kind() {
-        // A wrong key reads as garbage that fails to unpack or to match its checksum.
-        io::ErrorKind::InvalidData | io::ErrorKind::InvalidInput if item.locked && password.is_some() => WRONG_PASSWORD.into(),
+        // A wrong key reads as garbage that fails to unpack, ends too soon, or fails its checksum.
+        io::ErrorKind::InvalidData | io::ErrorKind::InvalidInput | io::ErrorKind::UnexpectedEof if item.locked && password.is_some() => WRONG_PASSWORD.into(),
         _ => error.to_string(),
     }
 }
@@ -353,6 +353,11 @@ pub(crate) struct Zstd<R> {
 impl<R: io::BufRead> Zstd<R> {
     pub(crate) fn new(source: R) -> Self {
         Self { source, frame: ruzstd::decoding::FrameDecoder::new(), frames: 0 }
+    }
+
+    /// What it reads from, for what is left after the last frame.
+    pub(crate) fn source_mut(&mut self) -> &mut R {
+        &mut self.source
     }
 
     /// Starts the next frame. False at the end of the stream, and at bytes after the first frame

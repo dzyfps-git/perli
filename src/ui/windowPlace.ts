@@ -38,5 +38,15 @@ export const onAScreen = (place: Pick<WindowPlace, "x" | "y" | "width">, screens
     return across >= GRAB && place.y >= position.y - FRAME && place.y <= position.y + size.height - GRAB;
   });
 
+/**
+ * Where a window left where it can't be grabbed goes once the screens change under it: the place
+ * kept for the new screens if there is one, or else the middle of the main screen. Nothing for a
+ * window still on a screen.
+ */
+export function backOnScreen(now: Pick<WindowPlace, "x" | "y" | "width">, screens: Screen[], kept?: WindowPlace) {
+  if (onAScreen(now, screens)) return undefined;
+  return kept && onAScreen(kept, screens) ? { x: kept.x, y: kept.y } : "middle";
+}
+
 /** Where one more window is now, which its session keeps so it comes back there. */
 export const [ownPlace, setOwnPlace] = createSignal<WindowPlace>();

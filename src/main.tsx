@@ -4,7 +4,7 @@ import { App } from "./App";
 import { startState } from "./api";
 import { saved, stored } from "./features/filelist/prefs";
 import { parseMoved, windowExtras } from "./features/tabs/session";
-import { onAScreen, screensKey, setOwnPlace, type WindowPlace } from "./ui/windowPlace";
+import { backOnScreen, onAScreen, screensKey, setOwnPlace, type WindowPlace } from "./ui/windowPlace";
 import "./styles/tokens.css";
 import "./styles/base.css";
 
@@ -56,11 +56,26 @@ async function keepPlace() {
   // A first start has no place yet: the one Windows gave is the one to go back to.
   if (!normal && !(await appWindow.isMaximized())) normal = await bounds();
 
+  // The screens can change while it runs, as when one is unplugged or a scale changes. A window
+  // they leave where it can't be grabbed comes back, checked once it settles and when it's used.
+  const rescue = async () => {
+    if ((await appWindow.isMinimized()) || (await appWindow.isMaximized())) return;
+    const screens = await availableMonitors();
+    const back = backOnScreen(await bounds(), screens, own ? undefined : places()[screensKey(screens)]);
+    if (back === "middle") await appWindow.center();
+    else if (back) await appWindow.setPosition(new PhysicalPosition(back.x, back.y));
+    return back !== undefined;
+  };
+  await appWindow.onFocusChanged(({ payload }) => void (payload && rescue().catch(console.error)));
+  await appWindow.onScaleChanged(() => void rescue().catch(console.error));
+
   let timer = 0;
   const note = () => {
     window.clearTimeout(timer);
     timer = window.setTimeout(async () => {
       if (await appWindow.isMinimized()) return;
+      // A move it is brought back by notes its place again.
+      if (await rescue().catch(() => false)) return;
       const maximized = await appWindow.isMaximized();
       if (!maximized) normal = await bounds();
       // A maximized window keeps the place it goes back to, never its maximized size.

@@ -1,7 +1,8 @@
-import { batch, createMemo, createResource, createSignal, untrack } from "solid-js";
+import { batch, createEffect, createMemo, createResource, createSignal, onCleanup, untrack } from "solid-js";
 import {
   arrangeView,
   countWhere,
+  gitRecheck,
   gitStatus,
   openFolder,
   reloadView,
@@ -59,6 +60,8 @@ export const FLAT_QUERY = "*";
 export const COPIES_QUERY = "copies:";
 /** A folder is one of songs or pictures when at least this share of its files are. */
 const SET_SHARE = 0.6;
+/** How often a folder in a repository asks whether git is due to be asked again. */
+const GIT_LOOK_MS = 3000;
 /** The extensions of each kind group, as the listing sorts them in. */
 const GROUP_KINDS = KIND_GROUPS.map((group) => group.kinds.flatMap(extensionsOf));
 
@@ -638,7 +641,7 @@ export function createFolderView(id: number, saved?: SavedPane, fixed?: Filter) 
   let gitFresh = false;
   // Each read asks git, which answers from its last read while the repository's index and HEAD
   // and the folder's own rows stay the same. A commit changes the index, which is watched.
-  const [gitRead] = createResource(
+  const [gitRead, { mutate: setGitRead }] = createResource(
     () => {
       const shown = folder();
       return gitBadges() && shown && !query() && !shown.archive && !isBin(shown.path) ? shown : undefined;
@@ -657,6 +660,22 @@ export function createFolderView(id: number, saved?: SavedPane, fixed?: Filter) 
   const gitMarks = createMemo(() => {
     const status = git();
     return status && new Map(status.marks);
+  });
+  // An edit deep inside a subfolder changes nothing a look at the folder sees, so while the window
+  // is in sight git is asked again now and then, the more seldom the slower it answers.
+  createEffect(() => {
+    const path = git() && folder()?.path;
+    if (!path) return;
+    const timer = setInterval(() => {
+      if (document.hidden) return;
+      gitRecheck(path)
+        .then((status) => {
+          const now = gitRead.latest;
+          if (status && now?.path === path && JSON.stringify(status) !== JSON.stringify(now.status)) setGitRead({ path, status });
+        })
+        .catch(() => {});
+    }, GIT_LOOK_MS);
+    onCleanup(() => clearInterval(timer));
   });
 
   return {

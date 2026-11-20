@@ -105,12 +105,6 @@ const PictureView = lazy(() => import("./PictureView").then((module) => ({ defau
 const DatabaseView = lazy(() => import("./DatabaseView").then((module) => ({ default: module.DatabaseView })));
 const ParquetView = lazy(() => import("./ParquetView").then((module) => ({ default: module.ParquetView })));
 const FontView = lazy(() => import("./FontView").then((module) => ({ default: module.FontView })));
-/**
- * Views that read by path, or by what they opened at the start, so they outlive the folder's rows.
- * ponytail: the others read by the rows they were shown from, which a reload drops, so they open
- * afresh; they could stay too if each kept its place up to date.
- */
-const KEPT_ACROSS_RELOADS = new Set(["mail", "pdf"]);
 const MailView = lazy(() => import("./MailView").then((module) => ({ default: module.MailView })));
 const PdfView = lazy(() => import("./PdfView").then((module) => ({ default: module.PdfView })));
 const VideoView = lazy(() => import("./VideoView").then((module) => ({ default: module.VideoView })));
@@ -212,6 +206,12 @@ export function QuickPreview(props: {
   let stepped = 0;
   /** The snapshot the row shown came from, so its later pieces are of the same file. */
   let snapshot = 0;
+  /**
+   * Where the view shown reads its row from. A reload that leaves the same file there moves it to
+   * the new snapshot and row in place, so the view stays as it is: a filled form, a note, a place
+   * in a song or a film.
+   */
+  let place = { at: 0, shot: 0 };
   /** Bumped by each step, so answers for a row already left behind are dropped. */
   let ticket = 0;
   /** The keys the view shown takes first, such as the player's or the model's. */
@@ -221,7 +221,7 @@ export function QuickPreview(props: {
 
   const folderOf = (item: Row) => item.location || props.at.folder;
   const pathOf = (item: Row) => join(folderOf(item), item.name);
-  /** Shows the row at `at`. A folder reload that leaves the same mail or PDF there keeps its view, unless `fresh`. */
+  /** Shows the row at `at`. A folder reload that leaves the same file there keeps its view, unless `fresh`. */
   async function show(at: number, fresh = false) {
     const mine = ++ticket;
     setFailure(undefined);
@@ -231,8 +231,8 @@ export function QuickPreview(props: {
     try {
       const [found] = await fetchRows(view, snapshot, at, 1);
       if (mine !== ticket) return;
-      // Left alone, even by a new row object, which the views read: a filled form and a note stay.
-      if (!fresh && !hold && KEPT_ACROSS_RELOADS.has(shown()?.kind ?? "") && sameFile(row(), found, pathOf)) return;
+      // Left alone, even by a new row object, which the views read, and only told where it is now.
+      if (!fresh && !hold && shown() && sameFile(row(), found, pathOf)) return void Object.assign(place, { at, shot: snapshot });
       const held = hold && found && row() && pathOf(found) === pathOf(row()!) ? hold : undefined;
       setRow(found);
       if (!held) setShown(undefined);
@@ -240,6 +240,7 @@ export function QuickPreview(props: {
       const preview = await previewRow(view, snapshot, at);
       if (mine !== ticket) return;
       if (held) return held(preview);
+      place = { at, shot: snapshot };
       setShown(preview);
       slideIn();
     } catch (reason) {
@@ -294,13 +295,12 @@ export function QuickPreview(props: {
 
   function text(item: Row, first: TextPiece & { seen?: string }): TextViewProps {
     const { view } = props.at;
-    const at = index();
-    const shot = snapshot;
+    const here = place;
     return {
       edit: editable(item, first.seen),
       first,
       more: async (offset) => {
-        const piece = await previewRow(view, shot, at, offset);
+        const piece = await previewRow(view, here.shot, here.at, offset);
         return piece.kind === "text" ? piece : null;
       },
       language: languageOf(item.name),
@@ -312,13 +312,12 @@ export function QuickPreview(props: {
 
   function database(preview: { tables: DbTable[]; failure: string | null }): DatabaseViewProps {
     const { view } = props.at;
-    const at = index();
-    const shot = snapshot;
+    const here = place;
     return {
       ...preview,
-      count: (table) => dbCount(view, shot, at, table),
-      rows: (table, order, filters) => dbRows(view, shot, at, table, order, filters),
-      query: (sql) => dbQuery(view, shot, at, sql),
+      count: (table) => dbCount(view, here.shot, here.at, table),
+      rows: (table, order, filters) => dbRows(view, here.shot, here.at, table, order, filters),
+      query: (sql) => dbQuery(view, here.shot, here.at, sql),
       keys: (handler) => (viewKeys = handler),
     };
   }
@@ -326,9 +325,8 @@ export function QuickPreview(props: {
   /** A file the view reads the parts of that it shows, straight from disk. */
   function streamed(item: Row) {
     const { view } = props.at;
-    const at = index();
-    const shot = snapshot;
-    return { open: () => openStreamed(view, shot, at), size: item.size, keys: (handler: typeof viewKeys) => (viewKeys = handler) };
+    const here = place;
+    return { open: () => openStreamed(view, here.shot, here.at), size: item.size, keys: (handler: typeof viewKeys) => (viewKeys = handler) };
   }
 
   /** Attachments land beside the mail, or in a folder picked for them, as one job with an Undo. */
@@ -354,39 +352,37 @@ export function QuickPreview(props: {
 
   function font(faces: FontFacts[]): FontViewProps {
     const { view } = props.at;
-    const at = index();
-    const shot = snapshot;
+    const here = place;
     const chosen = props.at.chosen ?? [];
     return {
       faces,
-      load: (face) => fontFace(view, shot, at, face),
+      load: (face) => fontFace(view, here.shot, here.at, face),
       // Several fonts chosen together set the sample in each, one under another.
       others: async () => {
-        if (!chosen.includes(at)) return [];
-        const rows = chosen.filter((one) => one !== at).slice(0, MOST_COMPARED);
-        const found = await Promise.all(rows.map((one) => fetchRows(view, shot, one, 1).then(([item]) => ({ one, item }))));
-        return found.flatMap(({ one, item }) => (item && !item.isDir && FONTS.test(item.name) ? [{ name: item.name, load: () => fontFace(view, shot, one, 0) }] : []));
+        if (!chosen.includes(here.at)) return [];
+        const rows = chosen.filter((one) => one !== here.at).slice(0, MOST_COMPARED);
+        const found = await Promise.all(rows.map((one) => fetchRows(view, here.shot, one, 1).then(([item]) => ({ one, item }))));
+        return found.flatMap(({ one, item }) => (item && !item.isDir && FONTS.test(item.name) ? [{ name: item.name, load: () => fontFace(view, here.shot, one, 0) }] : []));
       },
       note: setNote,
-      installed: () => fontInstalled(view, shot, at),
-      install: (remove) => installFont(view, shot, at, remove),
+      installed: () => fontInstalled(view, here.shot, here.at),
+      install: (remove) => installFont(view, here.shot, here.at, remove),
     };
   }
 
   function picture(item: Row) {
     const { view } = props.at;
-    const at = index();
-    const shot = snapshot;
+    const here = place;
     const moving = MOVING[item.name.split(".").pop()!.toLowerCase()];
     return {
       // Reading the file would download one that is only online.
-      bytes: moving && !item.isCloud && !item.isDir && item.size <= MOST_MOVING ? () => modelFile(view, shot, at) : undefined,
+      bytes: moving && !item.isCloud && !item.isDir && item.size <= MOST_MOVING ? () => modelFile(view, here.shot, here.at) : undefined,
       moving,
-      facts: item.isDir || item.isCloud ? undefined : () => rowProperties(view, shot, at),
+      facts: item.isDir || item.isCloud ? undefined : () => rowProperties(view, here.shot, here.at),
       slideshow: props.docked ? undefined : slideshow,
       onSlideshow: props.docked ? undefined : setSlideshow,
-      load: (edge: number) => fetchBigPicture(view, shot, at, edge),
-      size: () => pictureSize(view, shot, at),
+      load: (edge: number) => fetchBigPicture(view, here.shot, here.at, edge),
+      size: () => pictureSize(view, here.shot, here.at),
       keys: (handler: typeof viewKeys) => (viewKeys = handler),
       note: setNote,
       tools: pictureTools(item),
@@ -444,15 +440,14 @@ export function QuickPreview(props: {
 
   function book(item: Row, preview: Extract<Preview, { kind: "book" }>): BookViewProps {
     const { view } = props.at;
-    const at = index();
-    const shot = snapshot;
+    const here = place;
     return {
       path: pathOf(item),
       title: preview.title,
       chapters: preview.chapters,
       contents: preview.contents,
-      load: (chapter) => bookChapter(view, shot, at, chapter),
-      fill: (article) => fillPictures(article, (name) => fetchArchivePicture(view, shot, at, name, MARKDOWN_PICTURE_EDGE)),
+      load: (chapter) => bookChapter(view, here.shot, here.at, chapter),
+      fill: (article) => fillPictures(article, (name) => fetchArchivePicture(view, here.shot, here.at, name, MARKDOWN_PICTURE_EDGE)),
       keys: (handler) => (viewKeys = handler),
       note: setNote,
       onFailure: setFailure,
@@ -482,7 +477,7 @@ export function QuickPreview(props: {
     onCleanup(() => window.clearTimeout(timer));
   });
 
-  const reader = (at: number, shot: number) => (part?: string) => modelFile(props.at.view, shot, at, part);
+  const reader = (here: typeof place) => (part?: string) => modelFile(props.at.view, here.shot, here.at, part);
 
   /** The songs of the folder, in list order, and the sound sets there for MIDI files. */
   async function folderSongs(view: number, shot: number) {
@@ -501,27 +496,45 @@ export function QuickPreview(props: {
     return { tracks, fonts };
   }
 
+  /**
+   * The row a queued song is on now, by its path: a refresh since the queue was read may have
+   * moved it. Its old row is looked at first.
+   */
+  async function rowOfSong(track: Track) {
+    const { view } = props.at;
+    const shot = props.at.snapshot();
+    const [there] = await fetchRows(view, shot, track.index, 1).catch(() => []);
+    if (there && pathOf(there) === track.path) return track.index;
+    const count = Math.min(props.at.count(), MOST_QUEUE);
+    for (let at = 0; at < count; at += QUEUE_BATCH) {
+      const rows = await fetchRows(view, shot, at, Math.min(QUEUE_BATCH, count - at));
+      const found = rows.findIndex((row) => pathOf(row) === track.path);
+      if (found >= 0) return at + found;
+      if (!rows.length) break;
+    }
+    return undefined;
+  }
+
   function player(item: Row, midi: boolean): PlayerProps {
     const { view } = props.at;
-    const at = index();
-    const shot = snapshot;
+    const here = place;
     return {
       path: pathOf(item),
       name: item.name,
       size: item.size,
       load: AIFF.test(item.name)
-        ? async () => wav(await aiffAudio(view, shot, at))
+        ? async () => wav(await aiffAudio(view, here.shot, here.at))
         : async () => {
-            const [path, tags] = await openAudio(view, shot, at);
+            const [path, tags] = await openAudio(view, here.shot, here.at);
             return { url: convertFileSrc(path), made: false, tags };
           },
-      render: midi ? async (playing, font) => song(await songAudio(view, shot, at, { playing, font })) : undefined,
-      info: midi ? () => songInfo(view, shot, at) : undefined,
-      cover: midi ? undefined : (edge) => fetchCover(view, shot, at, edge),
-      lyrics: midi || item.isCloud ? undefined : () => besideText(view, shot, at, "lrc"),
-      peaks: midi || item.isCloud ? undefined : (bars) => audioPeaks(view, shot, at, bars),
-      queue: () => folderSongs(view, shot),
-      onPick: (target) => step(target - index()),
+      render: midi ? async (playing, font) => song(await songAudio(view, here.shot, here.at, { playing, font })) : undefined,
+      info: midi ? () => songInfo(view, here.shot, here.at) : undefined,
+      cover: midi ? undefined : (edge) => fetchCover(view, here.shot, here.at, edge),
+      lyrics: midi || item.isCloud ? undefined : () => besideText(view, here.shot, here.at, "lrc"),
+      peaks: midi || item.isCloud ? undefined : (bars) => audioPeaks(view, here.shot, here.at, bars),
+      queue: () => folderSongs(view, here.shot),
+      onPick: (track) => void rowOfSong(track).then((at) => at !== undefined && step(at - index()), console.error),
       keys: (handler) => (viewKeys = handler),
       tint: (color) => body.style.setProperty("--player-tint", color ?? "transparent"),
       onNext: () => void nextAudio(),
@@ -530,16 +543,15 @@ export function QuickPreview(props: {
 
   function video(item: Row): VideoViewProps {
     const { view } = props.at;
-    const at = index();
-    const shot = snapshot;
+    const here = place;
     return {
       path: pathOf(item),
-      load: async () => convertFileSrc((await openAudio(view, shot, at))[0]),
-      subtitles: async () => (item.isCloud ? null : (await besideText(view, shot, at, "srt")) ?? (await besideText(view, shot, at, "vtt"))),
-      saveFrame: (seconds, png) => saveFrame(view, shot, at, seconds, png),
+      load: async () => convertFileSrc((await openAudio(view, here.shot, here.at))[0]),
+      subtitles: async () => (item.isCloud ? null : (await besideText(view, here.shot, here.at, "srt")) ?? (await besideText(view, here.shot, here.at, "vtt"))),
+      saveFrame: (seconds, png) => saveFrame(view, here.shot, here.at, seconds, png),
       keys: (handler) => (viewKeys = handler),
       note: setNote,
-      next: () => folderFilms(view, shot, at),
+      next: () => folderFilms(view, here.shot, here.at),
       leave: (handler) => (leaveVideo = handler),
       // Beside the list the pane stays, showing the film's first frame.
       onPopped: () => props.docked || shut(undefined, false),
@@ -560,23 +572,22 @@ export function QuickPreview(props: {
 
   function archive({ entries, more, hidden, lock }: Extract<Preview, { kind: "archive" }>): ArchiveViewProps {
     const { view } = props.at;
-    const at = index();
-    const shot = snapshot;
+    const here = place;
     return {
       entries,
       more,
       hidden,
       lock,
       kind: archiveKind(row()?.name ?? ""),
-      picture: (entry, edge, password) => fetchArchivePicture(view, shot, at, entry, edge, password),
-      text: (entry, password) => archiveText(view, shot, at, entry, password),
-      check: (entry, password) => archivePassword(view, shot, at, entry, password),
+      picture: (entry, edge, password) => fetchArchivePicture(view, here.shot, here.at, entry, edge, password),
+      text: (entry, password) => archiveText(view, here.shot, here.at, entry, password),
+      check: (entry, password) => archivePassword(view, here.shot, here.at, entry, password),
       extract: (only, password) =>
-        startJob({ kind: "unzip", selection: { view, request: shot, rows: [at] }, ownFolder: false, only, password }, view).catch(
+        startJob({ kind: "unzip", selection: { view, request: here.shot, rows: [here.at] }, ownFolder: false, only, password }, view).catch(
           (reason) => void setFailure(String(reason)),
         ),
-      test: (password) => archiveTest(view, shot, at, password),
-      drag: (entry, password) => dragEntry(view, shot, at, entry, password),
+      test: (password) => archiveTest(view, here.shot, here.at, password),
+      drag: (entry, password) => dragEntry(view, here.shot, here.at, entry, password),
       keys: (handler) => (viewKeys = handler),
       onOpenFolder: !isArchiveName(row()?.name ?? "")
         ? undefined
@@ -586,12 +597,11 @@ export function QuickPreview(props: {
 
   function comic(item: Row, pages: string[]): ComicViewProps {
     const { view } = props.at;
-    const at = index();
-    const shot = snapshot;
+    const here = place;
     return {
       path: pathOf(item),
       pages,
-      load: (page, edge) => fetchArchivePicture(view, shot, at, page, edge),
+      load: (page, edge) => fetchArchivePicture(view, here.shot, here.at, page, edge),
       keys: (handler) => (viewKeys = handler),
       note: setNote,
       onNextVolume: () => nextOf(COMICS),
@@ -767,7 +777,7 @@ export function QuickPreview(props: {
               {preview.kind === "model" && (
                 <ModelStage
                   name={row()!.name}
-                  read={reader(index(), snapshot)}
+                  read={reader(place)}
                   keys={(handler) => (viewKeys = handler)}
                   onFailure={setFailure}
                 />

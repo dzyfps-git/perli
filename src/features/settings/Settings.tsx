@@ -65,6 +65,7 @@ import { bookmarksCompact, setBookmarksCompact, setSidebarOpen, sidebarOpen } fr
 import { rememberRecent, setRememberRecent } from "../reach/reach";
 import { TagSettings } from "../tags/TagSettings";
 import { IconSettings } from "./IconSettings";
+import { IndexSettings } from "./IndexSettings";
 import {
   accent,
   accentColors,
@@ -135,6 +136,7 @@ const SECTIONS = [
   { id: "look", label: "Look", icon: "" },
   { id: "files", label: "Files", icon: "" },
   { id: "sidebar", label: "Sidebar", icon: "" },
+  { id: "index", label: "Search index", icon: "\uE721" },
   { id: "tags", label: "Tags", icon: "" },
   { id: "viewers", label: "Viewers", icon: "" },
   { id: "icons", label: "Icons", icon: "" },
@@ -888,6 +890,15 @@ export function Settings(props: {
             />
           </section>
 
+          <section
+            class="settings-section"
+            data-section="index"
+            data-words="search index find every file drive drives pc fast instant battery network leave out skip exclude rebuild"
+          >
+            <h3>Search index</h3>
+            <IndexSettings open={props.open} />
+          </section>
+
           <section class="settings-section" data-section="tags" data-words="label color">
             <h3>Tags</h3>
             <TagSettings onChanged={props.onTagsChanged} onDelete={props.onDeleteTag} />
@@ -932,9 +943,14 @@ export function Settings(props: {
               opened in still uses it.
             </p>
             <div class="settings-chips settings-cache">
-              <span class="settings-cache-size" role="status" data-empty={!cacheSize() || undefined}>
-                {cacheSize() === undefined ? "Adding up…" : cacheSize() ? `${formatSize(cacheSize()!)} taken out` : "Nothing taken out"}
-              </span>
+              {/* A new size is a new line, so it settles in again each time it changes. */}
+              <For each={[cacheSize() === undefined ? "Adding up…" : cacheSize() ? `${formatSize(cacheSize()!)} taken out` : "Nothing taken out"]}>
+                {(text) => (
+                  <span class="settings-cache-size" role="status" data-empty={!cacheSize() || undefined}>
+                    {text}
+                  </span>
+                )}
+              </For>
               <button class="settings-chip" disabled={!cacheSize()} onClick={() => void clearCache()}>
                 Clear
               </button>

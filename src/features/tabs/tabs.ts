@@ -1,8 +1,9 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { createEffect, createResource, createSignal, on } from "solid-js";
+import { createEffect, createResource, createSignal, on, onCleanup } from "solid-js";
 import {
   closeView,
   compared,
+  compareFreshen,
   compareSettle,
   compareStop,
   compareSummary,
@@ -27,6 +28,8 @@ export type Tab = ReturnType<typeof createTab>;
 let tabCount = 0;
 /** How many closed tabs can be reopened. */
 const MOST_CLOSED = 20;
+/** How often compared folders already known are walked again, for what changed deeper down. */
+const FRESHEN_MS = 5000;
 
 /** How a tab's two panes sit: side by side or stacked, the first one's share, and linked. */
 type Layout = Pick<SavedTab, "split" | "stacked" | "linked" | "home">;
@@ -118,6 +121,25 @@ function createTab(views: FolderView[], startSwapped = false, saved: Layout = {}
         // Marks that came meanwhile may wait on more.
         if (settled > 0 || marks.latest !== now) setLearned(learned() + 1);
       });
+  });
+  // A folder's time misses what changes deeper down, so while the window is in sight, folders
+  // already compared are walked again now and then. Their marks hold until a walk is done.
+  createEffect(() => {
+    if (!comparing()) return;
+    const timer = setInterval(() => {
+      const now = marks.latest;
+      const [one, two] = panes();
+      const [mine, theirs] = [now?.get(one), now?.get(two)];
+      if (settling || document.hidden || !mine || !theirs) return;
+      settling = true;
+      compareFreshen(one.id, mine.snapshot, two.id, theirs.snapshot, compareByContent())
+        .catch(() => 0)
+        .then((changed) => {
+          settling = false;
+          if (changed > 0 || marks.latest !== now) setLearned(learned() + 1);
+        });
+    }, FRESHEN_MS);
+    onCleanup(() => clearInterval(timer));
   });
   createEffect(
     on(

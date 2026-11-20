@@ -3,6 +3,7 @@ import type { BookHeading } from "../../api";
 import { saved, stored } from "../filelist/prefs";
 import { ToolCog } from "../../ui/Controls";
 import { morph } from "../../ui/morph";
+import { drawDiagrams } from "./diagrams";
 import { createFind, findIn } from "./FindBar";
 import { ICON_EDIT, QuickEdit, startsEditing, type EditTarget } from "./QuickEdit";
 import {
@@ -169,6 +170,7 @@ export function MarkdownView(live: { html: string; source: string; fill: (articl
     article.innerHTML = props.html;
     props.fill(article);
     addCopyButtons();
+    drawDiagrams(article).catch(console.error);
     setHeadings([...article.querySelectorAll<HTMLElement>("h1, h2, h3")]);
     // Page Down and the other scrolling keys move the document itself. Beside the list, the list keeps the keys.
     if (!scroller.closest(".preview-docked")) scroller.focus({ preventScroll: true });

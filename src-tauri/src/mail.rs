@@ -22,6 +22,8 @@ pub struct Mail {
     /// FILETIME ticks, or 0 when the mail doesn't say.
     pub date: u64,
     pub body: String,
+    /// A mail written only in HTML, which shows as it was laid out. Empty when it has plain text.
+    pub html: String,
     pub attachments: Vec<Attachment>,
 }
 
@@ -40,6 +42,23 @@ const FROM_ELSEWHERE: &[u8] = b"[ZoneTransfer]\r\nZoneId=3\r\n";
 
 /// The class Outlook gives a message's root storage.
 const MESSAGE: uuid::Uuid = uuid::Uuid::from_u128(0x0002_0D0B_0000_0000_C000_0000_0000_0046);
+/// Embedded objects Perli can make a file of, by their class, with the file's extension. Office
+/// 97 to 2003 documents are compound files of their own; later ones keep theirs in a "Package"
+/// stream.
+const OBJECTS: [(u128, &str); 9] = [
+    (0x0002_0906_0000_0000_C000_0000_0000_0046, "doc"),
+    (0x0002_0820_0000_0000_C000_0000_0000_0046, "xls"),
+    (0x0002_0821_0000_0000_C000_0000_0000_0046, "xls"),
+    (0x6481_8D10_4F9B_11CF_86EA_00AA_00B9_29E8, "ppt"),
+    (0x6481_8D11_4F9B_11CF_86EA_00AA_00B9_29E8, "ppt"),
+    (0xF475_4C9B_64F5_4B40_8AF4_6797_32AC_0607, "docx"),
+    (0x0002_0830_0000_0000_C000_0000_0000_0046, "xlsx"),
+    (0x0002_0832_0000_0000_C000_0000_0000_0046, "xlsm"),
+    (0xCF4F_55F4_8F87_4D47_80BB_5808_164B_B3F8, "pptx"),
+];
+/// A file packed into a mail as an object, and a Paint picture.
+const PACKAGE: u128 = 0x0003_000C_0000_0000_C000_0000_0000_0046;
+const PAINT: u128 = 0x0003_000A_0000_0000_C000_0000_0000_0046;
 
 /// What the preview shows of a mail.
 pub fn read(path: &Path) -> Result<Mail, String> {
@@ -92,6 +111,7 @@ fn eml(bytes: &[u8], with_data: bool) -> (Mail, Vec<Bytes>) {
     let field = |name: &str| words(header(&headers, name).unwrap_or_default());
     let mut found = Found::default();
     walk(bytes, &mut found, with_data, 0);
+    let html = if found.plain.is_none() { found.html.clone().unwrap_or_default() } else { String::new() };
     let body = found.plain.or_else(|| found.html.as_deref().map(html_text)).unwrap_or_default();
     let mail = Mail {
         subject: field("subject"),
@@ -100,6 +120,7 @@ fn eml(bytes: &[u8], with_data: bool) -> (Mail, Vec<Bytes>) {
         cc: field("cc"),
         date: header(&headers, "date").and_then(date).unwrap_or(0),
         body: body.trim_end().to_string(),
+        html,
         attachments: found.attachments,
     };
     (mail, found.data.into_iter().map(Some).collect())
@@ -179,24 +200,48 @@ fn header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
     headers.iter().find(|(key, _)| key == name).map(|(_, value)| value.as_str())
 }
 
-/// A `key=value` after the first `;` of a header, quoted or not. `key*=utf-8''text` is read too.
-// ponytail: a value split into `key*0=`, `key*1=` pieces gives only its first piece's name back.
+/// A `key=value` after the first `;` of a header, quoted or not. RFC 2231's `key*=utf-8''text` is
+/// read too, and so is a long value split into `key*0*=`, `key*1=` pieces, in their order.
 fn param(value: &str, key: &str) -> Option<String> {
-    value.split(';').skip(1).find_map(|pair| {
-        let (name, text) = pair.split_once('=')?;
+    let mut pieces: Vec<(u32, bool, &str)> = Vec::new();
+    for pair in value.split(';').skip(1) {
+        let Some((name, text)) = pair.split_once('=') else { continue };
         let name = name.trim().to_ascii_lowercase();
         let text = text.trim().trim_matches('"');
         if name == key {
             return Some(text.to_string());
         }
-        let extended = name.strip_prefix(key)?;
-        if extended != "*" && extended != "*0*" {
-            return None;
+        let Some(extended) = name.strip_prefix(key).and_then(|rest| rest.strip_prefix('*')) else { continue };
+        if extended.is_empty() {
+            let (charset, rest) = text.split_once('\'')?;
+            let (_, encoded) = rest.split_once('\'')?;
+            return Some(decode(&percent(encoded.as_bytes()), charset));
         }
-        let (charset, rest) = text.split_once('\'')?;
-        let (_, encoded) = rest.split_once('\'')?;
-        Some(decode(&percent(encoded.as_bytes()), charset))
-    })
+        let (number, encoded) = extended.strip_suffix('*').map_or((extended, false), |number| (number, true));
+        if let Ok(number) = number.parse() {
+            pieces.push((number, encoded, text));
+        }
+    }
+    pieces.sort_by_key(|&(number, ..)| number);
+    if pieces.first()?.0 != 0 {
+        return None;
+    }
+    // Only the first piece says which characters the pieces spell in.
+    let mut charset = "";
+    let mut bytes = Vec::new();
+    for (number, encoded, mut text) in pieces {
+        if number == 0 && encoded {
+            let (set, rest) = text.split_once('\'')?;
+            charset = set;
+            text = rest.split_once('\'')?.1;
+        }
+        if encoded {
+            bytes.extend(percent(text.as_bytes()));
+        } else {
+            bytes.extend_from_slice(text.as_bytes());
+        }
+    }
+    Some(if charset.is_empty() { String::from_utf8_lossy(&bytes).into_owned() } else { decode(&bytes, charset) })
 }
 
 /// The parts of a multipart body, each without the line break before the next boundary.
@@ -374,8 +419,8 @@ fn paged(bytes: &[u8], page: u32) -> Option<String> {
     Some(String::from_utf16_lossy(&wide))
 }
 
-/// The words of an HTML body, with a line break for each block and no styles or scripts.
-// ponytail: tags go and the text stays; show the mail's own layout if plain text reads too bare.
+/// The words of an HTML body, with a line break for each block and no styles or scripts. A mail
+/// in HTML alone also shows as it was laid out; these are its words for "Just the words".
 fn html_text(html: &str) -> String {
     let mut out = String::new();
     let mut rest = html;
@@ -498,9 +543,11 @@ fn outlook(path: &Path, with_data: bool) -> std::io::Result<(Mail, Vec<Bytes>)> 
         _ => address,
     };
     let mut body = text(&mut file, "", "1000").unwrap_or_default();
+    let mut html = String::new();
     if body.trim().is_empty() {
-        let html = binary(&mut file, "/__substg1.0_10130102").or_else(|| text(&mut file, "", "1013").map(String::into_bytes));
-        body = html.map(|html| html_text(&String::from_utf8_lossy(&html))).unwrap_or_default();
+        let found = binary(&mut file, "/__substg1.0_10130102").or_else(|| text(&mut file, "", "1013").map(String::into_bytes));
+        html = found.map(|found| String::from_utf8_lossy(&found).into_owned()).unwrap_or_default();
+        body = html_text(&html);
     }
     let date = properties(&mut file, "/__properties_version1.0", 32, &[0x0039_0040, 0x0E06_0040]);
     let folders: Vec<String> = file
@@ -524,6 +571,13 @@ fn outlook(path: &Path, with_data: bool) -> std::io::Result<(Mail, Vec<Bytes>)> 
             }
             continue;
         }
+        if let Some((name, bytes)) = file.is_storage(&item).then(|| object(&mut file, &item, name.as_deref())).flatten() {
+            attachments.push(Attachment { name, size: bytes.len() as u64 });
+            if with_data {
+                data.push(Some(bytes));
+            }
+            continue;
+        }
         let stream = format!("{folder}/__substg1.0_37010102");
         let size = file.entry(&stream).map_or(0, |entry| entry.len());
         attachments.push(Attachment { name: name.unwrap_or_else(|| "Attachment".into()), size });
@@ -538,6 +592,7 @@ fn outlook(path: &Path, with_data: bool) -> std::io::Result<(Mail, Vec<Bytes>)> 
         cc: text(&mut file, "", "0E03").unwrap_or_default(),
         date: date.unwrap_or(0),
         body: body.replace("\r\n", "\n").trim_end().to_string(),
+        html,
         attachments,
     };
     Ok((mail, data))
@@ -551,6 +606,53 @@ fn is_message(file: &mut cfb::CompoundFile<std::fs::File>, folder: &str, item: &
         Some(method) => method as u32 == 5,
         None => ["001F", "001E"].iter().any(|kind| file.is_stream(format!("{item}/__substg1.0_001A{kind}"))),
     }
+}
+
+/// An embedded object as a file of its own, where Perli can tell what it is: an Office document,
+/// a file packed into the mail, or a Paint picture. Its name and bytes.
+fn object(file: &mut cfb::CompoundFile<std::fs::File>, item: &str, name: Option<&str>) -> Option<(String, Vec<u8>)> {
+    let class = *file.entry(item).ok()?.clsid();
+    let named = |extension: &str| {
+        let name = file_name(name.unwrap_or("Object"));
+        if name.to_ascii_lowercase().ends_with(&format!(".{extension}")) { name } else { format!("{name}.{extension}") }
+    };
+    if let Some(native) = binary(file, format!("{item}/\u{1}Ole10Native")) {
+        // Its size comes first.
+        let data = native.get(4..)?;
+        return match class.as_u128() {
+            PACKAGE => packed(data),
+            PAINT => Some((named("bmp"), data.to_vec())),
+            _ => None,
+        };
+    }
+    let &(_, extension) = OBJECTS.iter().find(|(id, _)| *id == class.as_u128())?;
+    let bytes = if extension.len() == 4 {
+        binary(file, format!("{item}/Package"))?
+    } else {
+        let mut out = cfb::CompoundFile::create(std::io::Cursor::new(Vec::new())).ok()?;
+        out.set_storage_clsid("/", class).ok()?;
+        copy_tree(file, &mut out, item, Path::new("/")).ok()?;
+        out.flush().ok()?;
+        out.into_inner().into_inner()
+    };
+    Some((named(extension), bytes))
+}
+
+/// The file in a packed object: its name and bytes. After a kind come its name, where it was
+/// packed from, four bytes, a temp path with its length first, then the file with its size first.
+fn packed(data: &[u8]) -> Option<(String, Vec<u8>)> {
+    let text = |at: usize| -> Option<(&[u8], usize)> {
+        let end = at + data.get(at..)?.iter().position(|&byte| byte == 0)?;
+        Some((&data[at..end], end + 1))
+    };
+    let number = |at: usize| Some(u32::from_le_bytes(data.get(at..at + 4)?.try_into().ok()?) as usize);
+    let (label, at) = text(2)?;
+    let (_, at) = text(at)?;
+    let at = at + 4;
+    let at = at + 4 + number(at)?;
+    let size = number(at)?;
+    let bytes = data.get(at + 4..at.checked_add(4 + size)?)?;
+    Some((file_name(&decode(label, "windows-1252")), bytes.to_vec()))
 }
 
 /// An Outlook item kept in a mail, as a .msg of its own, laid out as MS-OXMSG says: the item's
@@ -680,6 +782,16 @@ LjQK\r\n\
         let mail = b"Content-Type: text/html; charset=windows-1252\n\n<html><head><style>p{}</style></head><body><p>Hi &amp; bye</p><p>Na\xefve<br>end</p></body></html>";
         let (mail, _) = eml(mail, false);
         assert_eq!(mail.body, "Hi & bye\n\nNa\u{ef}ve\nend");
+        assert!(mail.html.contains("<p>Hi &amp; bye</p>"), "and shows as it was laid out");
+    }
+
+    #[test]
+    fn a_long_attachment_name_comes_together_from_its_pieces() {
+        let disposition = "attachment; filename*1=\"de \"; filename*0*=utf-8''Relat%C3%B3rio%20; filename*2*=2026%2Epdf";
+        assert_eq!(param(disposition, "filename").as_deref(), Some("Relatório de 2026.pdf"));
+        assert_eq!(param("attachment; filename*0=\"a\"; filename*1=\"b.txt\"", "filename").as_deref(), Some("ab.txt"));
+        assert_eq!(param("attachment; filename*1=late.txt", "filename"), None, "no first piece, no name");
+        assert_eq!(param("inline; name=plain.txt", "name").as_deref(), Some("plain.txt"));
     }
 
     #[test]
@@ -713,6 +825,12 @@ LjQK\r\n\
             file.create_storage("/__attach_version1.0_#00000001/__substg1.0_3701000D").unwrap();
             file.create_storage("/__attach_version1.0_#00000002").unwrap();
             file.create_storage("/__attach_version1.0_#00000002/__substg1.0_3701000D").unwrap();
+            for (at, class) in [(3, 0x0002_0821_0000_0000_C000_0000_0000_0046), (4, PACKAGE)] {
+                let item = format!("/__attach_version1.0_#0000000{at}/__substg1.0_3701000D");
+                file.create_storage(format!("/__attach_version1.0_#0000000{at}")).unwrap();
+                file.create_storage(&item).unwrap();
+                file.set_storage_clsid(&item, uuid::Uuid::from_u128(class)).unwrap();
+            }
             file.create_storage("/__nameid_version1.0").unwrap();
             let mut put = |path: &str, bytes: &[u8]| {
                 std::io::Write::write_all(&mut file.create_stream(path).unwrap(), bytes).unwrap();
@@ -730,6 +848,24 @@ LjQK\r\n\
             put("/__attach_version1.0_#00000002/__properties_version1.0", &method(6));
             put("/__attach_version1.0_#00000002/__substg1.0_3001001F", &utf16("Chart"));
             put("/__attach_version1.0_#00000002/__substg1.0_3701000D/\u{1}Ole", b"ole");
+            put("/__attach_version1.0_#00000003/__properties_version1.0", &method(6));
+            put("/__attach_version1.0_#00000003/__substg1.0_3001001F", &utf16("Sales"));
+            put("/__attach_version1.0_#00000003/__substg1.0_3701000D/Workbook", b"cells");
+            put("/__attach_version1.0_#00000004/__properties_version1.0", &method(6));
+            let temp = b"C:\\Temp\\notes.txt\0";
+            let native = [
+                &[0u8; 4][..],
+                &[2, 0],
+                b"notes.txt\0",
+                b"C:\\Docs\\notes.txt\0",
+                &[0, 0, 3, 0],
+                &(temp.len() as u32).to_le_bytes(),
+                temp,
+                &5u32.to_le_bytes(),
+                b"hello",
+            ]
+            .concat();
+            put("/__attach_version1.0_#00000004/__substg1.0_3701000D/\u{1}Ole10Native", &native);
             put("/__nameid_version1.0/__substg1.0_00020102", &[1; 16]);
         }
 
@@ -763,8 +899,14 @@ LjQK\r\n\
                 Attachment { name: "menu.txt".into(), size: 4 },
                 Attachment { name: "Re_ Lunch.msg".into(), size: 18 + 40 },
                 Attachment { name: "Chart".into(), size: 0 },
+                Attachment { name: "Sales.xls".into(), size: attached[3].1.as_ref().unwrap().len() as u64 },
+                Attachment { name: "notes.txt".into(), size: 5 },
             ]
         );
+        let sales = cfb::CompoundFile::open(std::io::Cursor::new(attached[3].1.clone().unwrap())).unwrap();
+        assert_eq!(sales.root_entry().clsid().as_u128(), 0x0002_0821_0000_0000_C000_0000_0000_0046, "an Excel chart comes out as its own workbook");
+        assert!(sales.is_stream("/Workbook"));
+        assert_eq!(attached[4], ("notes.txt".to_string(), Some(b"hello".to_vec())), "a packed file comes out as itself");
         assert_eq!(attached[0], ("menu.txt".to_string(), Some(b"soup".to_vec())));
         assert_eq!(attached[2], ("Chart".to_string(), None), "an embedded object has no bytes to pass off as a file");
         assert_eq!(inner.subject, "Re: Lunch", "the Outlook item inside comes out as a .msg of its own");
