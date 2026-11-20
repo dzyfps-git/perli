@@ -239,8 +239,14 @@ impl Service for Dropbox {
             return Err(format!("Dropbox brings back a folder of more than {MOST_RESTORED} files only from its deleted files on dropbox.com"));
         }
         if let Some(folder) = serde_json::from_str::<Value>(token).ok().filter(Value::is_object) {
-            // The folder itself first, so one that was empty comes back too.
-            let _ = self.call("files/create_folder_v2", &json!({ "path": folder["folder"], "autorename": false }));
+            // The folder itself first, so one that was empty comes back too. One there already,
+            // as after an undo that stopped part way, is fine.
+            if let Err(failure) = self.call("files/create_folder_v2", &json!({ "path": folder["folder"], "autorename": false })) {
+                let there = self.call("files/get_metadata", &json!({ "path": folder["folder"] })).is_ok_and(|found| found[".tag"] == "folder");
+                if !there {
+                    return Err(failure.message);
+                }
+            }
             for file in folder["files"].as_array().into_iter().flatten() {
                 self.call("files/restore", &json!({ "path": file[0], "rev": file[1] }))?;
             }
@@ -330,6 +336,11 @@ impl Service for Dropbox {
     fn bring_back(&self, path: &str, _item: &Item, version: &str) -> Result<(), String> {
         self.call("files/restore", &json!({ "path": path_of(path), "rev": version }))?;
         Ok(())
+    }
+
+    fn revision(&self, _path: &str, item: &Item) -> Result<Option<String>, String> {
+        // A file's rev is the id of its version as it is.
+        Ok(Some(item.version.clone()).filter(|rev| !item.folder && !rev.is_empty()))
     }
 }
 

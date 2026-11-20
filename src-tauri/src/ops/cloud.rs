@@ -14,8 +14,8 @@ use crate::remote::{self, At, Item};
 
 /// Marks the undo record of a cloud delete: what follows it is what brings it back.
 const TOKEN: &str = "cloud-bin:";
-/// Marks the undo record of a cloud file written over: the size and time of what it replaced
-/// follow, to find among the file's versions.
+/// Marks the undo record of a cloud file written over: the size, time and revision of what it
+/// replaced follow, to find among the file's versions.
 const VERSION: &str = "cloud-version:";
 /// Times this close count as one, as some services keep them in 2 s steps.
 const SAME_TIME: u64 = 2 * 10_000_000;
@@ -334,6 +334,11 @@ impl Run<'_> {
         }
         self.add_total(0, facts.size);
         let base = self.progress.bytes;
+        // The exact revision written over, for Undo to bring back that one and no other.
+        let revision = match &replace {
+            Some(old) if top => to.service.revision(&remote::join(folder, &chosen), old).ok().flatten(),
+            _ => None,
+        };
         let sent = self.attempt(&target, None, |run| {
             to.service.write(folder, &chosen, local, replace.as_ref(), &mut |done| run.copied(base + done)).map_err(failed)
         })?;
@@ -345,22 +350,19 @@ impl Run<'_> {
             self.done.push(match &replace {
                 None => Done::Created { path: target },
                 // Undo brings back what it replaced, from the service's own versions.
-                Some(old) => Done::Replaced { path: target, kept: PathBuf::from(format!("{VERSION}{}:{}", old.size, old.modified)) },
+                Some(old) => Done::Replaced { path: target, kept: PathBuf::from(format!("{VERSION}{}:{}:{}", old.size, old.modified, revision.unwrap_or_default())) },
             });
         }
         Ok(true)
     }
 
-    /// Puts back the version of a cloud file that a write replaced: the one of its size and time
-    /// among the versions the service keeps, else the newest before the file as it is.
+    /// Puts back the version of a cloud file that a write replaced, as its undo record names it,
+    /// and never another one.
     pub(super) fn cloud_put_back(&mut self, path: &Path, kept: &Path) -> Flow {
         self.add_total(1, 0);
-        let facts = kept.to_string_lossy().strip_prefix(VERSION).and_then(|facts| facts.split_once(':').map(|(size, time)| (size.parse().ok(), time.parse().ok())));
-        let (size, modified): (Option<u64>, Option<u64>) = facts.unwrap_or_default();
         self.attempt(path, None, |_| {
             let versions = remote::versions(path).map_err(failed)?;
-            let same = |version: &&remote::Version| Some(version.size) == size && modified.is_some_and(|time| version.modified.abs_diff(time) <= SAME_TIME);
-            let old = versions.iter().find(same).or(versions.first()).ok_or_else(|| failed("This place keeps no older versions, so what this replaced can't come back".into()))?;
+            let old = replaced_version(&versions, kept).ok_or_else(|| failed("The version this replaced isn't kept any more, so it can't come back".into()))?;
             remote::bring_back(path, &old.id).map_err(failed)
         })?;
         self.step(1, 0);
@@ -537,6 +539,19 @@ impl Run<'_> {
     }
 }
 
+/// Of a file's versions, the one an undo record of a write over it names: by its revision, or
+/// for a record with none, as the service told none then, by its size and time.
+fn replaced_version<'a>(versions: &'a [remote::Version], kept: &Path) -> Option<&'a remote::Version> {
+    let text = kept.to_string_lossy();
+    let mut facts = text.strip_prefix(VERSION)?.splitn(3, ':');
+    let size: Option<u64> = facts.next().and_then(|size| size.parse().ok());
+    let modified: Option<u64> = facts.next().and_then(|time| time.parse().ok());
+    match facts.next().filter(|revision| !revision.is_empty()) {
+        Some(revision) => versions.iter().find(|version| version.id == revision),
+        None => versions.iter().find(|version| Some(version.size) == size && modified.is_some_and(|time| version.modified.abs_diff(time) <= SAME_TIME)),
+    }
+}
+
 /// Whether an undo record of a file written over is a cloud one.
 pub(super) fn is_cloud_version(kept: &Path) -> bool {
     kept.to_string_lossy().starts_with(VERSION)
@@ -550,6 +565,18 @@ pub(super) fn is_cloud_token(item: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_undo_of_a_write_over_brings_back_only_the_revision_it_names() {
+        let version = |id: &str, size, modified| remote::Version { id: id.into(), size, modified };
+        let versions = [version("v3", 10, 3_000_000_000), version("v2", 10, 2_000_000_000), version("v1", 7, 1_000_000_000)];
+        let pick = |kept: &str| replaced_version(&versions, Path::new(kept)).map(|found| found.id.clone());
+        assert_eq!(pick("cloud-version:10:3000000000:v2").as_deref(), Some("v2"), "the revision named, not one of the same size and time");
+        assert_eq!(pick("cloud-version:10:3000000000:gone"), None, "never another one in its place");
+        assert_eq!(pick("cloud-version:7:1000000000:").as_deref(), Some("v1"));
+        assert_eq!(pick("cloud-version:7:1000000000").as_deref(), Some("v1"), "a record from before revisions were noted");
+        assert_eq!(pick("cloud-version:99:1"), None, "not the newest older one instead");
+    }
 
     #[test]
     fn free_names_number_before_the_type() {

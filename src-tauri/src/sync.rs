@@ -233,8 +233,10 @@ impl Drop for Held {
 }
 
 /// A watch on the source of a pair that runs when something changes, and when this window last
-/// heard one there that hasn't run yet.
+/// heard one there that hasn't run yet. Each pair has its own, so two pairs from one folder each
+/// hear every change.
 struct Heard {
+    pair: String,
     from: PathBuf,
     _watch: crate::index::Watch,
     heard: Receiver<crate::index::Heard>,
@@ -251,11 +253,11 @@ static HEARD: Mutex<Vec<Heard>> = Mutex::new(Vec::new());
 fn has_changed(all: &[Pair], pair: &Pair, now: u64) -> bool {
     let mut heard = HEARD.lock().unwrap_or_else(PoisonError::into_inner);
     // A watch goes with its pair.
-    heard.retain(|one| all.iter().any(|pair| pair.changed && pair.from == one.from));
-    let Some(one) = heard.iter_mut().find(|one| one.from == pair.from) else {
+    heard.retain(|one| all.iter().any(|pair| pair.changed && pair.id == one.pair && pair.from == one.from));
+    let Some(one) = heard.iter_mut().find(|one| one.pair == pair.id) else {
         let (sender, receiver) = mpsc::channel();
         if let Some(watch) = crate::index::Watch::start(pair.from.clone(), sender) {
-            heard.push(Heard { from: pair.from.clone(), _watch: watch, heard: receiver, last: None });
+            heard.push(Heard { pair: pair.id.clone(), from: pair.from.clone(), _watch: watch, heard: receiver, last: None });
         }
         return false;
     };
@@ -343,6 +345,32 @@ pub fn take_run(id: &str, scheduled: bool) -> Result<Option<Pair>, String> {
 mod tests {
     use super::*;
 
+    /// The watches are one list for all pairs, which each test's look trims to its own.
+    static WATCHING: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn two_pairs_from_one_folder_each_hear_a_change() {
+        let _one = WATCHING.lock().unwrap_or_else(PoisonError::into_inner);
+        let from = std::env::temp_dir().join(format!("perli-sync-two-heard-{}", std::process::id()));
+        fs::create_dir_all(&from).unwrap();
+        let pair = |id: &str| Pair { id: id.into(), from: from.clone(), to: "D:\\to".into(), mirror: false, skip: String::new(), every: 0, changed: true, ran: 0 };
+        let all = [pair("heard-a"), pair("heard-b")];
+        for one in &all {
+            assert!(!has_changed(&all, one, 1), "the first look starts the watch");
+        }
+        fs::write(from.join("new.txt"), "x").unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        for one in &all {
+            assert!(!has_changed(&all, one, 2), "heard, and not settled yet");
+        }
+        for one in &all {
+            assert!(has_changed(&all, one, 3), "{} runs too", one.id);
+        }
+        // The watches hold the folder open.
+        HEARD.lock().unwrap_or_else(PoisonError::into_inner).clear();
+        let _ = fs::remove_dir_all(&from);
+    }
+
     #[test]
     fn windows_saving_pairs_at_once_each_keep_theirs() {
         let file = std::env::temp_dir().join(format!("perli-sync-pairs-{}.json", std::process::id()));
@@ -367,6 +395,7 @@ mod tests {
 
     #[test]
     fn a_sync_on_change_runs_once_a_change_has_settled() {
+        let _one = WATCHING.lock().unwrap_or_else(PoisonError::into_inner);
         let root = std::env::temp_dir().join(format!("perli-sync-heard-{}", std::process::id()));
         let from = root.join("from");
         fs::create_dir_all(&from).unwrap();

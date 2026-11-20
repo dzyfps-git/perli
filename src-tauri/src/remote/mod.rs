@@ -126,6 +126,11 @@ pub trait Service: Send + Sync {
     fn bring_back(&self, _path: &str, _item: &Item, _version: &str) -> Result<(), String> {
         Err("This place keeps no older versions".into())
     }
+    /// The id `bring_back` takes for the version the file is now, where the service keeps
+    /// versions, so an undo of a write over it brings back that one and no other.
+    fn revision(&self, _path: &str, _item: &Item) -> Result<Option<String>, String> {
+        Ok(None)
+    }
     /// Asks for a file in cold storage to be made readable again for a while.
     fn warm(&self, _path: &str, item: &Item) -> Result<(), String> {
         Err(format!("{} opens as it is", item.name))
@@ -532,6 +537,10 @@ pub fn keep_file(at: &At, item: &Item, keep: bool, tick: Tick) -> Result<(), Str
         let _ = fs::remove_dir_all(&slot);
         return Ok(());
     }
+    // A copy kept of an older version is not this one.
+    if offline_version(at).as_deref() != Some(item.version.as_str()) {
+        let _ = fs::remove_file(slot.join(local_name(&item.name)));
+    }
     take_down(at, item, &slot, tick)?;
     fs::write(slot.join(".version"), &item.version).map_err(|error| error.to_string())
 }
@@ -564,12 +573,33 @@ fn take_down(at: &At, item: &Item, slot: &Path, tick: Tick) -> Result<PathBuf, S
     }
     fs::create_dir_all(slot).map_err(|error| error.to_string())?;
     let part = slot.join(format!("{name}.part"));
-    let from = fs::metadata(&part).map_or(0, |metadata| metadata.len());
+    let from = resume_at(&part, &item.version)?;
     let mut file = fs::OpenOptions::new().create(true).append(true).open(&part).map_err(|error| error.to_string())?;
     at.service.read(&at.inner, item, from, &mut file, &mut |done| tick(from + done))?;
     drop(file);
     fs::rename(&part, &target).map_err(|error| error.to_string())?;
+    let _ = fs::remove_file(part_version(&part));
     Ok(target)
+}
+
+/// Where the revision a part holds bytes of is noted.
+fn part_version(part: &Path) -> PathBuf {
+    let mut noted = part.as_os_str().to_owned();
+    noted.push(".version");
+    PathBuf::from(noted)
+}
+
+/// Where taking down `version` goes on from in `part`: its bytes so far when they are of that
+/// revision, else nothing, as the part starts over. A revision the service names no version for
+/// can't be told from another, so it always starts over.
+fn resume_at(part: &Path, version: &str) -> Result<u64, String> {
+    let noted = part_version(part);
+    if !version.is_empty() && fs::read_to_string(&noted).is_ok_and(|was| was == version) {
+        return Ok(fs::metadata(part).map_or(0, |metadata| metadata.len()));
+    }
+    let _ = fs::remove_file(part);
+    fs::write(&noted, version).map_err(|error| error.to_string())?;
+    Ok(0)
 }
 
 /// A file or folder of a place as a real one on disk: kept offline, or taken down into the
@@ -785,6 +815,23 @@ fn parse_time(text: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_part_goes_on_only_from_bytes_of_the_same_revision() {
+        let folder = std::env::temp_dir().join(format!("perli-part-{}", std::process::id()));
+        fs::create_dir_all(&folder).unwrap();
+        let part = folder.join("a.txt.part");
+        fs::write(&part, "old").unwrap();
+        assert_eq!(resume_at(&part, "v1").unwrap(), 0, "a part with no revision noted starts over");
+        assert!(!part.exists());
+        fs::write(&part, "abc").unwrap();
+        assert_eq!(resume_at(&part, "v1").unwrap(), 3);
+        assert_eq!(resume_at(&part, "v2").unwrap(), 0, "another revision starts over");
+        assert!(!part.exists());
+        fs::write(&part, "abc").unwrap();
+        assert_eq!(resume_at(&part, "").unwrap(), 0, "no version told is never taken as the same");
+        let _ = fs::remove_dir_all(&folder);
+    }
 
     #[test]
     fn a_name_from_a_service_is_one_safe_name_here() {
