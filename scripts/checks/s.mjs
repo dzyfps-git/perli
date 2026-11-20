@@ -202,7 +202,7 @@ try {
     check("This PC counts its drives", /used on \d+ drives?/.test(await status()), true);
     await shot("s-pc.png", 600);
     await lens("Layers");
-    check("Layers asks for a drive first", await empty(), "Open a drive to see its years in layers.");
+    check("Layers asks for a drive first", await empty(), "Open a drive once to see its years in layers.");
     await lens("Brain");
   });
 
@@ -302,7 +302,7 @@ try {
   const latch = () =>
     js(`(() => {
       window.__seen = {};
-      const look = () => { for (const s of ['.row-ripple', '.pane-stream', '.place-tide', '.place-bridge', '.compare-threads path']) { const n = document.querySelectorAll(s).length; if (n) __seen[s] = Math.max(__seen[s] ?? 0, n); } };
+      const look = () => { for (const s of ['.row-ripple', '.pane-stream', '.place-bar .tide', '.place-bridge', '.compare-threads path']) { const n = document.querySelectorAll(s).length; if (n) __seen[s] = Math.max(__seen[s] ?? 0, n); } };
       window.__latch?.disconnect();
       window.__latch = new MutationObserver(look);
       __latch.observe(document.body, { subtree: true, childList: true, attributes: true });
@@ -364,7 +364,7 @@ try {
     check("the copy ends", await waitFor(async () => all(), 60000), true);
     check("the stream stops with the job", await waitFor(() => js(`!document.querySelector('.pane-stream')`), 5000), true);
     check("the new row lands with a ring", await waitFor(async () => (await seen(".row-ripple")) > 0, 3000), true);
-    check("the drive's bar shows the tide", await waitFor(async () => (await seen(".place-tide")) > 0, 6000), true);
+    check("the drive's bar shows the tide", await waitFor(async () => (await seen(".place-bar .tide")) > 0, 6000), true);
   });
 
   await part("threads", async () => {
