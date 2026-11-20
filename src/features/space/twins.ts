@@ -27,6 +27,11 @@ export const setsOf = (found: Twin[][]): TwinSet[] => found.filter((files) => fi
 /** The files of a set that go when it is cleaned. */
 export const goers = (set: TwinSet) => set.files.filter((_, at) => at !== set.keep);
 
+/** The goers that may go now: those still as they were, of sets whose keeper is too. `same` holds
+ *  the ids of files still as Twins saw them. */
+export const stillGoing = (sets: TwinSet[], same: ReadonlySet<string>) =>
+  sets.filter((set) => same.has(idOf(set.files[set.keep].path))).flatMap(goers).filter((file) => same.has(idOf(file.path)));
+
 /** The room cleaning would free. */
 export const wasted = (sets: TwinSet[]) => sets.reduce((sum, set) => sum + goers(set).reduce((bytes, file) => bytes + file.bytes, 0), 0);
 

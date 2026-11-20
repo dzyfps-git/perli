@@ -117,6 +117,10 @@ try {
 
   await part("picture", async () => {
     await openSpace();
+    // What the real Pictures holds before, so a miss of the redirect below takes out only what
+    // this part put there, never a picture of the user's own.
+    const pictures = (await invoke("list_places")).folders.find((folder) => folder.kind === "pictures")?.path;
+    const before = new Set(pictures ? readdirSync(pictures) : []);
     // The picture goes to this run's own folder, not the real Pictures. Tauri's invoke can't be
     // replaced, but its IPC goes through fetch, which can.
     await js(`(() => {
@@ -142,9 +146,8 @@ try {
     check("the picture is saved", saved.length, 1);
     if (saved[0]) check("as a PNG", readFileSync(join(home, saved[0])).subarray(1, 4).toString(), "PNG");
     await js(`window.fetch = window.__realFetch`);
-    // Should the redirect ever miss, the picture is taken out of the real Pictures again.
-    const pictures = (await invoke("list_places")).folders.find((folder) => folder.kind === "pictures")?.path;
-    const stray = pictures ? readdirSync(pictures).filter((name) => name.startsWith("Space of space-root")) : [];
+    // Should the redirect ever miss, the picture it made is taken out of the real Pictures again.
+    const stray = pictures ? readdirSync(pictures).filter((name) => !before.has(name) && name.startsWith("Space of space-root") && name.endsWith(".png")) : [];
     for (const name of stray) rmSync(join(pictures, name));
     check("nothing lands in the real Pictures", stray, []);
   });

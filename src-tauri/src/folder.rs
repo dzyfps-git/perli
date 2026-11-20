@@ -263,7 +263,7 @@ impl Order {
 }
 
 /// Which of the entries the user chose not to see show anyway.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, PartialEq, Eq, Hash, Debug)]
 pub struct Sight {
     pub hidden: bool,
     /// Only counts with `hidden`, since every protected system file is hidden too.
@@ -271,6 +271,11 @@ pub struct Sight {
 }
 
 impl Sight {
+    /// What two compared panes walk folders with: what either shows, the same from both sides.
+    pub fn either(self, other: Sight) -> Sight {
+        Sight { hidden: self.hidden || other.hidden, system: self.system || other.system }
+    }
+
     pub fn shows(self, entry: &Entry) -> bool {
         (self.hidden || !entry.hidden) && (self.system || !entry.system)
     }
@@ -1196,7 +1201,7 @@ impl Listing {
             return Mark::Only;
         };
         match (mine.is_dir, other.entries[twin].is_dir) {
-            (true, true) => compare::folders(&self.side(entry), &other.side(twin), content).map_or(Mark::Pending, |insides| insides.mark),
+            (true, true) => compare::folders(&self.side(entry), &other.side(twin), content, self.sight().either(other.sight())).map_or(Mark::Pending, |insides| insides.mark),
             (false, false) => compare::files(&self.side(entry), &other.side(twin), content),
             _ => Mark::Differs,
         }
@@ -1228,7 +1233,7 @@ impl Listing {
             let Some(twin) = twin.filter(|&twin| self.entries[entry].is_dir && other.entries[twin].is_dir && self.comparable(entry)) else {
                 continue;
             };
-            if let Some(insides) = compare::folders(&self.side(entry), &other.side(twin), content).filter(|insides| insides.count > 0) {
+            if let Some(insides) = compare::folders(&self.side(entry), &other.side(twin), content, sight.either(other.sight())).filter(|insides| insides.count > 0) {
                 summary.folders.push(Apart { row: row as u32, count: insides.count, names: insides.names });
             }
         }
@@ -1492,15 +1497,13 @@ pub(crate) const PICTURE_TYPES: [&str; 10] = ["jpg", "jpeg", "png", "gif", "webp
 /// out, and so do ones in the cloud, which reading would fetch.
 pub fn pictures_in(folder: &Path, most: usize) -> Vec<PathBuf> {
     let mut found = Vec::new();
-    let _ = ops::sys::each_entry(&ops::sys::extended(&folder.join("*")), |data| {
-        if found.len() == most {
-            return;
-        }
+    let _ = ops::sys::each_entry_while(&ops::sys::extended(&folder.join("*")), |data| {
         if let Some(entry) = Entry::from_find_data(data) {
             if !entry.is_dir && !entry.hidden && !entry.cloud && PICTURE_TYPES.contains(&entry.extension_text().as_str()) {
                 found.push(folder.join(entry.file_name()));
             }
         }
+        found.len() < most
     });
     found
 }
@@ -1511,17 +1514,14 @@ pub fn pictures_in(folder: &Path, most: usize) -> Vec<PathBuf> {
 pub fn kinds_in(folder: &Path, most: usize) -> Vec<(String, u32)> {
     let mut counts: HashMap<String, u32> = HashMap::new();
     let mut seen = 0;
-    let _ = ops::sys::each_entry(&ops::sys::extended(&folder.join("*")), |data| {
-        if seen == most {
-            return;
-        }
+    let _ = ops::sys::each_entry_while(&ops::sys::extended(&folder.join("*")), |data| {
         if let Some(entry) = Entry::from_find_data(data) {
-            if entry.hidden {
-                return;
+            if !entry.hidden {
+                seen += 1;
+                *counts.entry(if entry.is_dir { "/".into() } else { entry.extension_text() }).or_default() += 1;
             }
-            seen += 1;
-            *counts.entry(if entry.is_dir { "/".into() } else { entry.extension_text() }).or_default() += 1;
         }
+        seen < most
     });
     let mut kinds: Vec<_> = counts.into_iter().collect();
     kinds.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));

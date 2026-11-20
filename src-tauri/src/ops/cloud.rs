@@ -59,6 +59,17 @@ fn local_facts(path: &Path) -> Option<Facts> {
     sys::stat(path).ok().flatten().map(Facts::from)
 }
 
+/// How an item of a place goes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Removal {
+    /// A Recycle: to the place's bin, and where it keeps none, as S3, for good only once asked.
+    Recycle,
+    /// A Delete the user already said yes to: for good where the service lets this account.
+    Delete,
+    /// The source of a move, whose copy is already where it went.
+    Moved,
+}
+
 impl Run<'_> {
     /// Keeps a copy of each file on this PC, and of every file in each folder, or lets them go.
     pub(super) fn keep_offline(&mut self, paths: &[PathBuf], keep: bool) -> Flow {
@@ -185,10 +196,17 @@ impl Run<'_> {
             Some(Err(message)) => return self.cloud_refused(source, &message),
         };
         match (from, spot) {
+            // Two places on one storage are one place: a move between them is the service's own,
+            // never a copy over itself and then a delete.
             (Some(from), Spot::Cloud(to)) if remote::same_store(&from.place, &to.place) => self.within(&from, to, &name, moving),
             (Some(from), spot) => {
                 let item = match from.item() {
                     Ok(item) => item,
+                    Err(message) => return self.cloud_refused(source, &message),
+                };
+                // What a moved folder held before it went, to tell it changed meanwhile.
+                let before = match (moving && item.folder).then(|| remote::tree_print(&from)).transpose() {
+                    Ok(print) => print,
                     Err(message) => return self.cloud_refused(source, &message),
                 };
                 let whole = match spot {
@@ -201,7 +219,11 @@ impl Run<'_> {
                     }
                 };
                 if moving && whole {
-                    self.cloud_remove_one(source, false)?;
+                    // Only what went over goes: a folder that changed while it moved stays as well.
+                    if before.is_some() && remote::tree_print(&from).ok() != before {
+                        return self.cloud_refused(source, "This changed while it moved, so it stays where it was too");
+                    }
+                    self.cloud_remove_one(source, Removal::Moved)?;
                 }
                 Ok(())
             }
@@ -292,8 +314,16 @@ impl Run<'_> {
                 self.done.push(Done::Created { path: target.clone() });
             }
             let inner = remote::join(folder, &chosen);
+            let children = match sys::read_dir(local) {
+                Ok(children) => children,
+                Err(error) => {
+                    // Not read is not empty: a move then keeps the folder.
+                    self.cloud_refused(local, &error.message())?;
+                    return Ok(false);
+                }
+            };
             let mut whole = true;
-            for (child, _) in sys::read_dir(local).unwrap_or_default() {
+            for (child, _) in children {
                 self.check()?;
                 let child_name = child.to_string_lossy().into_owned();
                 self.add_total(1, 0);
@@ -341,6 +371,7 @@ impl Run<'_> {
     /// True when all of it came.
     fn download(&mut self, from: &At, item: &Item, folder: &Path, name: &str, top: bool) -> Flow<bool> {
         let shown = from.shown(&from.inner);
+        let name = &remote::local_name(name);
         let landing = self.land_here(folder, name, facts_of(item), None)?;
         let (chosen, merge) = match landing {
             Landing::Skip => return Ok(false),
@@ -377,15 +408,13 @@ impl Run<'_> {
                 let _ = file.set_modified(crate::zipped::time_of(item.modified).unwrap_or_else(std::time::SystemTime::now));
             }
             drop(file);
-            // Written over, the old file goes to the Recycle Bin first, as a copy here does.
-            if target.exists() {
-                fs::remove_file(&target).map_err(|error| failed(error.to_string()))?;
-            }
-            fs::rename(&part, &target).map_err(|error| failed(error.to_string()))
+            Ok(())
         })?;
-        let _ = fs::remove_file(&part);
         self.progress.bytes = base + item.size;
-        if came.is_none() {
+        // Written over, the old file goes to the Recycle Bin first with an undo, as a copy here does.
+        let landed = came.is_some() && self.swap_in(&part, &target, target.exists())?;
+        let _ = fs::remove_file(&part);
+        if !landed {
             return Ok(false);
         }
         if top {
@@ -394,17 +423,22 @@ impl Run<'_> {
         Ok(true)
     }
 
-    /// Deletes one item of a place, to its bin where it has one, noting what brings it back. For
-    /// good when the service lets this account and `for_good` asks it.
-    fn cloud_remove_one(&mut self, path: &Path, for_good: bool) -> Flow {
+    /// Deletes one item of a place as `how` says, noting what brings it back.
+    fn cloud_remove_one(&mut self, path: &Path, how: Removal) -> Flow {
         let at = match remote::at(path) {
             Some(Ok(at)) => at,
             Some(Err(message)) => return self.cloud_refused(path, &message),
             None => return Ok(()),
         };
+        if how == Removal::Recycle && !at.service.has_bin() {
+            let question = Question::NoBin { path: path.to_string_lossy().into_owned(), choices: vec![Answer::Permanent, Answer::Skip, Answer::Cancel] };
+            if self.ask(Key::NoBin, question)? != Answer::Permanent {
+                return Ok(());
+            }
+        }
         let removed = self.attempt(path, None, |_| {
             let item = at.item().map_err(failed)?;
-            if for_good {
+            if how == Removal::Delete {
                 return at.service.erase(&at.inner, &item).map(Option::unwrap_or_default).map_err(failed);
             }
             at.service.remove(&at.inner, &item).map_err(failed)
@@ -418,11 +452,11 @@ impl Run<'_> {
         Ok(())
     }
 
-    /// The cloud ones of a Recycle or, `for_good`, a Delete.
-    pub(super) fn cloud_remove(&mut self, paths: &[PathBuf], for_good: bool) -> Flow {
+    /// The cloud ones of a Recycle or a Delete.
+    pub(super) fn cloud_remove(&mut self, paths: &[PathBuf], how: Removal) -> Flow {
         for path in paths {
             self.check()?;
-            self.cloud_remove_one(path, for_good)?;
+            self.cloud_remove_one(path, how)?;
             self.step(1, 0);
         }
         Ok(())

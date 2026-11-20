@@ -329,10 +329,14 @@ fn walk(db: &Db, top: &Path, skip: &[String], steer: &mut dyn Steer) -> rusqlite
     };
     let mut queue = VecDeque::from([(top.to_path_buf(), own)]);
     let mut pending = 0;
-    let mut batch = db.0.unchecked_transaction()?;
+    // Inside a batch of changes already, as a folder renamed in is, its rows go with that batch.
+    let owned = db.0.is_autocommit();
+    let mut batch = owned.then(|| db.0.unchecked_transaction()).transpose()?;
     while let Some((folder, folder_chain)) = queue.pop_front() {
         if steer.stop() {
-            batch.commit()?;
+            if let Some(batch) = batch {
+                batch.commit()?;
+            }
             return Ok(false);
         }
         let id = db.put_folder(&folder, folder_chain, seen)?;
@@ -354,13 +358,17 @@ fn walk(db: &Db, top: &Path, skip: &[String], steer: &mut dyn Steer) -> rusqlite
             }
         });
         if pending >= BATCH {
-            batch.commit()?;
+            if let Some(done) = batch.take() {
+                done.commit()?;
+                batch = Some(db.0.unchecked_transaction()?);
+            }
             steer.walked(pending);
             pending = 0;
-            batch = db.0.unchecked_transaction()?;
         }
     }
-    batch.commit()?;
+    if let Some(batch) = batch {
+        batch.commit()?;
+    }
     steer.walked(pending);
     db.drop_unseen(top, seen)?;
     Ok(true)
@@ -391,6 +399,17 @@ fn apply(db: &Db, path: &Path, skip: &[String]) -> rusqlite::Result<()> {
     match db.folder(&path_low) {
         Some((.., known)) if known == wanted => Ok(()),
         _ => walk(db, path, skip, &mut || false).map(drop),
+    }
+}
+
+/// Brings the list up to date for every path a change watch named, in one batch.
+fn apply_all(db: &Db, changed: &BTreeSet<PathBuf>, skip: &[String]) {
+    let batch = db.0.unchecked_transaction();
+    for path in changed {
+        let _ = apply(db, path, skip);
+    }
+    if let Ok(batch) = batch {
+        let _ = batch.commit();
     }
 }
 
@@ -434,35 +453,41 @@ impl Part {
     }
 }
 
-/// The drive roots the list answers for now, from what its keeper last said. None when this
-/// window has the list off, or its keeper went quiet.
-fn live() -> Vec<String> {
+/// The list, with the drive roots it answers for now, from what its keeper last said. None when
+/// this window has the list off, or its keeper went quiet.
+fn live() -> Option<(Db, Vec<String>)> {
     if !options().on || options().paused {
-        return Vec::new();
+        return None;
     }
-    let Some(db) = path_of().filter(|path| path.exists()).and_then(|path| Db::open(&path).ok()) else {
-        return Vec::new();
-    };
+    let db = path_of().filter(|path| path.exists()).and_then(|path| Db::open(&path).ok())?;
     let beat: i64 = db.meta("beat").and_then(|beat| beat.parse().ok()).unwrap_or(0);
     if now_ms() - beat > STALE.as_millis() as i64 {
-        return Vec::new();
+        return None;
     }
-    db.meta("live").map(|live| live.split('|').filter(|root| !root.is_empty()).map(str::to_string).collect()).unwrap_or_default()
+    let roots = db.meta("live").map(|live| live.split('|').filter(|root| !root.is_empty()).map(str::to_string).collect()).unwrap_or_default();
+    Some((db, roots))
 }
 
 /// Takes out of `below` what the list can answer for, and says what to ask it instead. `folder`
 /// is where the search walks from, whose own entries it has read already.
 pub fn parts_for(folder: &Path, below: &mut VecDeque<PathBuf>) -> Vec<Part> {
-    let live = live();
+    let Some((db, live)) = live() else { return Vec::new() };
+    parts_in(&db, &live, folder, below)
+}
+
+fn parts_in(db: &Db, live: &[String], folder: &Path, below: &mut VecDeque<PathBuf>) -> Vec<Part> {
     let answers = |path: &Path| live.contains(&low(&root_of(path).to_string_lossy()));
     if live.is_empty() {
         return Vec::new();
     }
     let mut parts = Vec::new();
-    let folder_low = inside_of(&low(&folder.to_string_lossy()));
-    if answers(folder) {
+    let folder_low = low(&folder.to_string_lossy());
+    // The list has no rows past a junction or a link, nor in a folder left out of it: a search
+    // from such a place walks it on disk instead.
+    if answers(folder) && db.folder(&folder_low).is_some() {
         parts.push(Part::inside(folder));
-        below.retain(|path| !low(&path.to_string_lossy()).starts_with(&folder_low));
+        let inside = inside_of(&folder_low);
+        below.retain(|path| !low(&path.to_string_lossy()).starts_with(&inside));
     }
     below.retain(|path| {
         let whole_drive = path.parent().is_none();
@@ -570,6 +595,11 @@ pub fn rebuild() -> Result<(), String> {
 pub fn set_options(next: Options) {
     let on = next.on;
     *OPTIONS.lock().unwrap_or_else(PoisonError::into_inner) = Some(next);
+    // Off with no keeper here, as when the app starts after closing while one was leaving: what
+    // it left is deleted now. A keeper still at work in another window keeps it open, so it stays.
+    if !on && !KEEPING.load(Ordering::SeqCst) {
+        delete_list();
+    }
     if on && !KEEPING.swap(true, Ordering::SeqCst) {
         thread::spawn(|| {
             keep();
@@ -738,9 +768,15 @@ fn keep() {
     Keeping::new(db).run();
     drop(keeper);
     if !options().on {
-        for end in ["", "-wal", "-shm"] {
-            let _ = std::fs::remove_file(format!("{}{end}", path.display()));
-        }
+        delete_list();
+    }
+}
+
+/// Deletes the list and its journal files, as turning it off does.
+fn delete_list() {
+    let Some(path) = path_of() else { return };
+    for end in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{end}", path.display()));
     }
 }
 
@@ -912,13 +948,7 @@ impl Keeping {
             }
             if !self.changed.is_empty() && self.last_change.elapsed() >= SETTLE {
                 let changed = std::mem::take(&mut self.changed);
-                let batch = self.db.0.unchecked_transaction();
-                for path in &changed {
-                    let _ = apply(&self.db, path, &self.skip);
-                }
-                if let Ok(batch) = batch {
-                    let _ = batch.commit();
-                }
+                apply_all(&self.db, &changed, &self.skip);
             }
             if options.battery && on_battery() {
                 self.say("battery");
@@ -1114,8 +1144,8 @@ mod tests {
         apply(&db, &added, &[]).unwrap();
         assert_eq!(found("two"), ["two.txt"], "a file in a folder made after the walk");
         fs::rename(tree.0.join("a"), tree.0.join("moved")).unwrap();
-        apply(&db, &tree.0.join("a"), &[]).unwrap();
-        apply(&db, &tree.0.join("moved"), &[]).unwrap();
+        // As the watch hears it: both names at once, in one batch.
+        apply_all(&db, &[tree.0.join("a"), tree.0.join("moved")].into_iter().collect(), &[]);
         let (folder, _) = &page_in(&db, &inside, "two", usize::MAX, ALL, 0, 1).unwrap()[0];
         assert_eq!(folder, &tree.0.join(r"moved\b"), "a renamed folder takes all it holds along");
         assert_eq!(found("one"), ["one.txt"]);
@@ -1155,6 +1185,19 @@ mod tests {
         assert_eq!((part.start.as_str(), part.end.as_str(), part.not.as_str()), (r"c:\users\a\", r"c:\users\a]", r"c:\users\a"));
         let drive = Part::drive(Path::new(r"D:\"));
         assert_eq!((drive.start.as_str(), drive.end.as_str(), drive.not.as_str()), (r"d:\", "d:]", ""));
+
+        // Only from a folder the list has rows for: none past a junction, nor in a folder left out.
+        let tree = Tree::new("parts");
+        tree.file(r"listed\a.txt");
+        let db = tree.db();
+        walk(&db, &tree.0, &[], &mut || false).unwrap();
+        let live = [low(&root_of(&tree.0).to_string_lossy())];
+        let mut below = VecDeque::from([tree.0.join(r"listed\deeper")]);
+        assert_eq!(parts_in(&db, &live, &tree.0.join("listed"), &mut below), [Part::inside(&tree.0.join("listed"))]);
+        assert!(below.is_empty());
+        let mut below = VecDeque::from([tree.0.join(r"through\deeper")]);
+        assert!(parts_in(&db, &live, &tree.0.join("through"), &mut below).is_empty(), "a folder the list never walked into");
+        assert_eq!(below.len(), 1, "is walked on disk");
     }
 
     #[test]

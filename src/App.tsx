@@ -1712,7 +1712,8 @@ export function App() {
 
   /** How a pair's sync is going, while one runs: flowing, or stopped on a clash. */
   function syncingOf(pair: SyncPair) {
-    const card = jobs.cards.find((one) => !one.ended && !!one.target && samePath(one.target, pair.to) && one.from.some((from) => samePath(from, pair.from)));
+    // By the pair's id: a copy between the same two folders, or another pair on them, is not this sync.
+    const card = jobs.cards.find((one) => !one.ended && one.pair === pair.id);
     if (!card) return undefined;
     return card.question?.kind === "conflict" ? "clash" : "flow";
   }
@@ -1724,7 +1725,7 @@ export function App() {
     const other = second?.folder()?.path;
     if (!one || !other) return undefined;
     for (const card of jobs.cards) {
-      if (card.ended || card.paused || card.question || card.recycle || !card.target) continue;
+      if (card.ended || card.paused || card.question || card.waiting || card.recycle || !card.target) continue;
       const outOf = (path: string) => card.from.some((from) => samePath(from, path));
       const toSecond = outOf(one) && samePath(card.target, other);
       if (toSecond || (outOf(other) && samePath(card.target, one))) return { toSecond, speed: card.rate.speed };
@@ -2931,6 +2932,9 @@ export function App() {
             onShowDay={(path, day) =>
               void leaveHome(async (view) => {
                 await view.open(path);
+                // The day's files anywhere under the river's folder, whatever reach and depth the pane had.
+                view.setScope("below");
+                view.setDepth(null);
                 view.search(FLAT_QUERY);
                 view.setFilterForm({ ...NO_FILTER, from: day, to: day });
               })

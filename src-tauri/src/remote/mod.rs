@@ -196,12 +196,6 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 /// Whether `path` is the cloud root or inside it.
-/// Whether a copy or move from one place to the other can be made by the service itself: one
-/// place, or two of one account. Two S3 places are two buckets, which this doesn't join.
-pub fn same_store(from: &Place, to: &Place) -> bool {
-    from.id == to.id || (from.kind == to.kind && from.kind != Kind::S3 && !from.account.is_empty() && from.account == to.account)
-}
-
 pub fn is_remote(path: &Path) -> bool {
     let text = path.as_os_str().to_string_lossy();
     text.len() >= ROOT.len()
@@ -542,14 +536,34 @@ pub fn keep_file(at: &At, item: &Item, keep: bool, tick: Tick) -> Result<(), Str
     fs::write(slot.join(".version"), &item.version).map_err(|error| error.to_string())
 }
 
+/// A name a service gave as one name on this PC: no folder parts and nothing Windows refuses or
+/// reads as a device, so a file a service calls `..\x` or `CON` lands where it was sent.
+pub fn local_name(name: &str) -> String {
+    let mut safe: String = name.chars().map(|c| if c < ' ' || "<>:\"/\\|?*".contains(c) { '_' } else { c }).collect();
+    // Windows drops dots and spaces at the end of a name, so `..` would be no name at all.
+    while safe.ends_with(['.', ' ']) {
+        safe.pop();
+    }
+    if safe.is_empty() {
+        return "_".into();
+    }
+    let stem = safe.split('.').next().unwrap_or_default().trim_end().to_ascii_uppercase();
+    let numbered = stem.len() == 4 && (stem.starts_with("COM") || stem.starts_with("LPT")) && stem.as_bytes()[3].is_ascii_digit();
+    if numbered || ["CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"].contains(&stem.as_str()) {
+        safe.insert(0, '_');
+    }
+    safe
+}
+
 /// Takes the file down into `slot`, under its own name, unless it is there already.
 fn take_down(at: &At, item: &Item, slot: &Path, tick: Tick) -> Result<PathBuf, String> {
-    let target = slot.join(&item.name);
+    let name = local_name(&item.name);
+    let target = slot.join(&name);
     if target.exists() {
         return Ok(target);
     }
     fs::create_dir_all(slot).map_err(|error| error.to_string())?;
-    let part = slot.join(format!("{}.part", item.name));
+    let part = slot.join(format!("{name}.part"));
     let from = fs::metadata(&part).map_or(0, |metadata| metadata.len());
     let mut file = fs::OpenOptions::new().create(true).append(true).open(&part).map_err(|error| error.to_string())?;
     at.service.read(&at.inner, item, from, &mut file, &mut |done| tick(from + done))?;
@@ -569,16 +583,23 @@ pub fn real(path: &Path) -> Option<Result<PathBuf, String>> {
 
 fn real_at(path: &Path) -> Result<PathBuf, String> {
     let at = at(path).ok_or("The cloud itself has no files to open")??;
-    let item = at.item()?;
+    // A kept file opens with no network: when the place can't be asked, the copy kept is it.
+    let kept = offline_slot(&at).map(|slot| slot.join(local_name(at.name()))).filter(|kept| offline_version(&at).is_some() && kept.exists());
+    let item = match at.item() {
+        Ok(item) => item,
+        Err(message) => return kept.ok_or(message),
+    };
     if !item.folder && offline_version(&at).as_deref() == Some(item.version.as_str()) {
-        let kept = offline_slot(&at).map(|slot| slot.join(&item.name));
-        if let Some(kept) = kept.filter(|kept| kept.exists()) {
+        if let Some(kept) = kept {
             return Ok(kept);
         }
     }
     let slot = crate::zipped::cache_root().join(format!("cloud-{}-{:016x}-{:016x}", at.place.id, hashed(&at.inner), hashed(&item.version)));
     if item.folder {
-        let target = slot.join(&item.name);
+        // Taken down afresh each time: a folder's version can stay the same while what it holds
+        // changes, as S3's always does, and an old copy would keep files changed or gone since.
+        let _ = fs::remove_dir_all(&slot);
+        let target = slot.join(local_name(&item.name));
         take_down_folder(&at, &at.inner, &target)?;
         return Ok(target);
     }
@@ -587,7 +608,7 @@ fn real_at(path: &Path) -> Result<PathBuf, String> {
     if offline_version(&at).is_some() {
         if let Some(kept) = offline_slot(&at) {
             let _ = fs::remove_dir_all(&kept);
-            if fs::create_dir_all(&kept).is_ok() && fs::copy(&taken, kept.join(&item.name)).is_ok() {
+            if fs::create_dir_all(&kept).is_ok() && fs::copy(&taken, kept.join(local_name(&item.name))).is_ok() {
                 let _ = fs::write(kept.join(".version"), &item.version);
             }
         }
@@ -595,19 +616,54 @@ fn real_at(path: &Path) -> Result<PathBuf, String> {
     Ok(taken)
 }
 
+/// Takes down everything a folder holds now, as the place lists it afresh.
 fn take_down_folder(at: &At, inner: &str, target: &Path) -> Result<(), String> {
     fs::create_dir_all(target).map_err(|error| error.to_string())?;
-    for item in listed(at, inner, false)?.iter() {
+    for item in listed(at, inner, true)?.iter() {
         let path = join(inner, &item.name);
         if item.folder {
-            take_down_folder(at, &path, &target.join(&item.name))?;
-        } else if !target.join(&item.name).exists() {
+            take_down_folder(at, &path, &target.join(local_name(&item.name)))?;
+        } else {
             let child = At { place: at.place.clone(), service: at.service.clone(), inner: path };
-            let taken = take_down(&child, item, target, &mut |_| true)?;
-            debug_assert_eq!(taken, target.join(&item.name));
+            take_down(&child, item, target, &mut |_| true)?;
         }
     }
     Ok(())
+}
+
+/// What a folder of a place holds all the way down, as the place lists it now, as one number:
+/// it differs once anything inside was added, changed or taken away.
+pub fn tree_print(at: &At) -> Result<u64, String> {
+    fn walk(at: &At, inner: &str, hasher: &mut DefaultHasher) -> Result<(), String> {
+        for item in listed(at, inner, true)?.iter() {
+            let path = join(inner, &item.name);
+            (&path, item.folder, item.size, item.modified, &item.version).hash(hasher);
+            if item.folder {
+                walk(at, &path, hasher)?;
+            }
+        }
+        Ok(())
+    }
+    let mut hasher = DefaultHasher::new();
+    walk(at, &at.inner, &mut hasher)?;
+    Ok(hasher.finish())
+}
+
+/// Whether two places are one storage under two names, such as a bucket added twice, so a path
+/// in one is the same path in the other.
+pub fn same_store(a: &Place, b: &Place) -> bool {
+    if a.id == b.id {
+        return true;
+    }
+    if a.kind != b.kind {
+        return false;
+    }
+    match (&a.s3, &b.s3) {
+        (Some(one), Some(two)) => one.endpoint.trim_end_matches('/').eq_ignore_ascii_case(two.endpoint.trim_end_matches('/')) && one.bucket == two.bucket,
+        // Signed in as the same account; one with no address said is never taken for another.
+        (None, None) => a.account.contains('@') && a.account.eq_ignore_ascii_case(&b.account),
+        _ => false,
+    }
 }
 
 /// Pictures at most this big come down whole for their row's picture where the service makes none.
@@ -729,6 +785,37 @@ fn parse_time(text: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_name_from_a_service_is_one_safe_name_here() {
+        assert_eq!(local_name("photo.jpg"), "photo.jpg");
+        assert_eq!(local_name(r"..\..\Windows\evil.dll"), ".._.._Windows_evil.dll");
+        assert_eq!(local_name("a/b:c?.txt"), "a_b_c_.txt");
+        assert_eq!(local_name(".."), "_");
+        assert_eq!(local_name("name. "), "name");
+        assert_eq!(local_name("CON"), "_CON");
+        assert_eq!(local_name("com1.txt"), "_com1.txt");
+        assert_eq!(local_name("Console.txt"), "Console.txt");
+        assert_eq!(local_name("tab\there"), "tab_here", "a tab is no part of a name");
+    }
+
+    #[test]
+    fn two_places_on_one_storage_are_told_apart_from_two_on_two() {
+        let s3 = |id: &str, endpoint: &str, bucket: &str| Place {
+            id: id.into(),
+            name: id.into(),
+            kind: Kind::S3,
+            account: bucket.into(),
+            s3: Some(s3::Setup { preset: String::new(), endpoint: endpoint.into(), region: String::new(), bucket: bucket.into(), path_style: false, key_id: String::new() }),
+            pdf: false,
+        };
+        assert!(same_store(&s3("a", "https://s3.example.com/", "photos"), &s3("b", "https://S3.example.com", "photos")));
+        assert!(!same_store(&s3("a", "https://s3.example.com", "photos"), &s3("b", "https://s3.example.com", "films")));
+        let drive = |id: &str, account: &str| Place { id: id.into(), name: id.into(), kind: Kind::OneDrive, account: account.into(), s3: None, pdf: false };
+        assert!(same_store(&drive("a", "me@example.com"), &drive("b", "Me@Example.com")));
+        assert!(!same_store(&drive("a", "OneDrive"), &drive("b", "OneDrive")), "no address said is never the same");
+        assert!(!same_store(&drive("a", "me@example.com"), &drive("b", "you@example.com")));
+    }
 
     #[test]
     fn a_job_moves_the_count_of_the_folders_it_changed_and_no_others() {

@@ -1016,7 +1016,7 @@ async fn start_job(
 }
 
 #[tauri::command]
-async fn undo_job(origin: Option<u32>, step: Option<u64>, back: Option<bool>, app: AppHandle) -> Result<(), String> {
+async fn undo_job(origin: Option<u32>, step: Option<u64>, back: Option<bool>, app: AppHandle) -> Result<Option<u64>, String> {
     jobs::undo(&app, origin, step, back.unwrap_or(false))
 }
 
@@ -2478,7 +2478,7 @@ async fn compare_settle(view: u32, request: u64, other: u32, other_request: u64,
         let known: std::collections::HashSet<String> = pairs.iter().map(|pair| pair.theirs.path.to_string_lossy().to_lowercase()).collect();
         let theirs_too = theirs.unsettled(mine, content).into_iter().filter(|pair| !known.contains(&pair.mine.path.to_string_lossy().to_lowercase()));
         pairs.extend(theirs_too.map(|pair| compare::Pair { mine: pair.theirs, theirs: pair.mine, folder: pair.folder }));
-        (pairs, mine.sight())
+        (pairs, mine.sight().either(theirs.sight()))
     })?;
     let round = compare::round(view, other);
     blocking(move || Ok(compare::settle(pairs, content, sight, (view, other), round))).await
@@ -2488,7 +2488,7 @@ async fn compare_settle(view: u32, request: u64, other: u32, other_request: u64,
 /// pairs it found changed, for the marks to be asked for again.
 #[tauri::command]
 async fn compare_freshen(view: u32, request: u64, other: u32, other_request: u64, content: bool, views: State<'_, Views>) -> Result<usize, String> {
-    let (pairs, sight) = compared_pair(&views, (view, request), (other, other_request), |mine, theirs| (mine.folder_twins(theirs), mine.sight()))?;
+    let (pairs, sight) = compared_pair(&views, (view, request), (other, other_request), |mine, theirs| (mine.folder_twins(theirs), mine.sight().either(theirs.sight())))?;
     let round = compare::round(view, other);
     blocking(move || Ok(compare::freshen(pairs, content, sight, (view, other), round))).await
 }
@@ -2505,6 +2505,7 @@ fn row_named(view: u32, request: u64, names: Vec<String>, views: State<'_, Views
 #[tauri::command]
 fn compare_stop(view: u32, other: u32) {
     compare::round(view, other);
+    compare::forget_folders();
 }
 
 /// How many rows fit `filter`, to tell a folder of songs or pictures by.
@@ -2653,6 +2654,33 @@ struct Twin {
     modified: i64,
     /// How sharp a picture is, higher sharper. Only pictures that look alike say.
     sharp: Option<f32>,
+}
+
+/// A file as Twins saw it.
+#[derive(Deserialize)]
+struct SeenTwin {
+    path: PathBuf,
+    bytes: u64,
+    /// Milliseconds since 1970.
+    modified: i64,
+}
+
+/// For each of `files`, nothing if it is gone, else whether it is still the file Twins saw: a
+/// plain file of the same size and time. Twins cleans only by files that are, and counts the gone
+/// ones as freed.
+#[tauri::command]
+async fn twins_now(files: Vec<SeenTwin>) -> Result<Vec<Option<bool>>, String> {
+    blocking(move || Ok(files.iter().map(twin_now).collect())).await
+}
+
+fn twin_now(file: &SeenTwin) -> Option<bool> {
+    let meta = match std::fs::symlink_metadata(&file.path) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(_) => return Some(false),
+    };
+    let ms = meta.modified().ok().and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok()).map(|since| since.as_millis() as i64);
+    Some(meta.is_file() && meta.len() == file.bytes && ms == Some(file.modified))
 }
 
 /// The look for twins under way, which a new look or `stop_twins` stops.
@@ -3310,6 +3338,7 @@ fn main() {
             changed_between,
             find_twins,
             stop_twins,
+            twins_now,
             tagged_under,
             folder_stamp,
             save_space_picture,
@@ -3343,6 +3372,19 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_twin_is_still_the_same_file_only_with_its_size_and_time() {
+        let path = std::env::temp_dir().join(format!("perli-twin-now-{}.txt", std::process::id()));
+        std::fs::write(&path, b"twelve bytes").unwrap();
+        let modified = std::fs::metadata(&path).unwrap().modified().unwrap().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
+        let seen = |bytes, modified| SeenTwin { path: path.clone(), bytes, modified };
+        assert_eq!(twin_now(&seen(12, modified)), Some(true));
+        assert_eq!(twin_now(&seen(13, modified)), Some(false));
+        assert_eq!(twin_now(&seen(12, modified - 5000)), Some(false));
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(twin_now(&seen(12, modified)), None);
+    }
 
     #[test]
     fn a_copy_out_of_a_zip_is_an_extract_and_nothing_lands_in_one() {

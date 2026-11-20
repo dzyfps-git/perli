@@ -176,11 +176,13 @@ export function createFileActions(
       // A cloud place's own bin is its last stop, and S3 storage has none, so only that asks.
       if (isPerliCloud(folder)) {
         const decide = () => {
+          // A place still unknown here, say as the places couldn't be read, goes to the bin as a
+          // recycle, which the job itself never lets delete for good without asking.
           if (!keepsNoBin(folder)) return void start(view, { kind: "recycle", selection });
           confirmDelete({
             title: "Delete for good?",
             note: "S3 storage keeps no bin, so these can't be brought back.",
-            confirm: () => start(view, { kind: "recycle", selection }),
+            confirm: () => start(view, { kind: "delete", selection }),
           });
         };
         // A place added in another window is new to this one, which reads them again before it
