@@ -2317,7 +2317,7 @@ async fn compare_settle(view: u32, request: u64, other: u32, other_request: u64,
         let known: std::collections::HashSet<String> = pairs.iter().map(|pair| pair.theirs.path.to_string_lossy().to_lowercase()).collect();
         let theirs_too = theirs.unsettled(mine, content).into_iter().filter(|pair| !known.contains(&pair.mine.path.to_string_lossy().to_lowercase()));
         pairs.extend(theirs_too.map(|pair| compare::Pair { mine: pair.theirs, theirs: pair.mine, folder: pair.folder }));
-        (pairs, mine.sight())
+        (pairs, mine.sight().either(theirs.sight()))
     })?;
     let round = compare::round(view, other);
     blocking(move || Ok(compare::settle(pairs, content, sight, (view, other), round))).await
@@ -2327,7 +2327,7 @@ async fn compare_settle(view: u32, request: u64, other: u32, other_request: u64,
 /// pairs it found changed, for the marks to be asked for again.
 #[tauri::command]
 async fn compare_freshen(view: u32, request: u64, other: u32, other_request: u64, content: bool, views: State<'_, Views>) -> Result<usize, String> {
-    let (pairs, sight) = compared_pair(&views, (view, request), (other, other_request), |mine, theirs| (mine.folder_twins(theirs), mine.sight()))?;
+    let (pairs, sight) = compared_pair(&views, (view, request), (other, other_request), |mine, theirs| (mine.folder_twins(theirs), mine.sight().either(theirs.sight())))?;
     let round = compare::round(view, other);
     blocking(move || Ok(compare::freshen(pairs, content, sight, (view, other), round))).await
 }
@@ -2344,6 +2344,7 @@ fn row_named(view: u32, request: u64, names: Vec<String>, views: State<'_, Views
 #[tauri::command]
 fn compare_stop(view: u32, other: u32) {
     compare::round(view, other);
+    compare::forget_folders();
 }
 
 /// How many rows fit `filter`, to tell a folder of songs or pictures by.
