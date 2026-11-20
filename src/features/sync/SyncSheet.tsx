@@ -10,8 +10,11 @@ import "../cloud/cloud.css";
 
 /** How often a scheduled pair is looked at, and the choices of how often one runs. */
 const LOOK_MS = 60_000;
+/** The choice that runs a pair once a change in its source has settled. */
+const ON_CHANGE = -1;
 const EVERY: { minutes: number; label: string }[] = [
   { minutes: 0, label: "Only when asked" },
+  { minutes: ON_CHANGE, label: "When something changes" },
   { minutes: 15, label: "Every 15 minutes" },
   { minutes: 60, label: "Every hour" },
   { minutes: 360, label: "Every 6 hours" },
@@ -27,17 +30,17 @@ export const readSyncPairs = () => syncPairs().then(setPairs).catch(console.erro
 /** The pair the sheet shows, new or saved. */
 const [editing, setEditing] = createSignal<SyncPair>();
 export { editing as editingSync };
-export const newSync = (from = "", to = "") => setEditing({ id: "", from, to, mirror: false, skip: "", every: 0, ran: 0 });
+export const newSync = (from = "", to = "") => setEditing({ id: "", from, to, mirror: false, skip: "", every: 0, changed: false, ran: 0 });
 export const editSync = (pair: SyncPair) => setEditing({ ...pair });
 export const closeSync = () => setEditing(undefined);
 
 const base = (path: string) => path.replace(/\\+$/, "").split("\\").pop() || path;
 export const syncLabel = (pair: SyncPair) => `${base(pair.from)} → ${base(pair.to)}`;
 
-/** Asks for each scheduled pair once a minute. Only one that is due runs, in one window. */
+/** Asks for each scheduled pair once a minute, and each that runs on change. Only one that is due runs, in one window. */
 export function startSyncTimer(run: (id: string, scheduled: boolean) => void) {
   // The pairs are read again each time, so one saved in another window runs here too.
-  const timer = setInterval(() => void readSyncPairs().then(() => pairs().forEach((pair) => pair.every > 0 && run(pair.id, true))), LOOK_MS);
+  const timer = setInterval(() => void readSyncPairs().then(() => pairs().forEach((pair) => (pair.every > 0 || pair.changed) && run(pair.id, true))), LOOK_MS);
   onCleanup(() => clearInterval(timer));
 }
 
@@ -161,7 +164,13 @@ export function SyncSheet(props: { pair: SyncPair; onRun: (pair: SyncPair) => vo
         <span />
         <label class="rename-field">
           Runs
-          <select value={pair().every} onChange={(event) => change({ every: Number(event.currentTarget.value) })}>
+          <select
+            value={pair().changed ? ON_CHANGE : pair().every}
+            onChange={(event) => {
+              const minutes = Number(event.currentTarget.value);
+              change(minutes === ON_CHANGE ? { every: 0, changed: true } : { every: minutes, changed: false });
+            }}
+          >
             <For each={EVERY}>{(one) => <option value={one.minutes}>{one.label}</option>}</For>
           </select>
         </label>

@@ -1182,6 +1182,14 @@ fn rows_of_two_archives_and_a_file_copy_as_one_job_with_one_undo() {
     assert!(sandbox.names("to").is_empty());
 }
 
+#[test]
+fn parts_of_a_job_of_several_share_the_bar_by_weight() {
+    let near = |got: Vec<f64>, want: &[f64]| got.iter().zip(want).all(|(got, want)| (got - want).abs() < 1e-9);
+    // One that can't be weighed counts as an average one.
+    assert!(near(shares(&[1000, 0, 3000]), &[1.0 / 6.0, 2.0 / 6.0, 3.0 / 6.0]));
+    assert!(near(shares(&[0, 0]), &[0.5, 0.5]), "with none weighed, each gets the same");
+}
+
 fn unzip(archive: &Path, own_folder: bool) -> Job {
     Job::Unzip {
         archives: vec![archive.to_path_buf()],
@@ -3024,7 +3032,7 @@ fn a_sync_makes_its_folders_with_an_undo_and_leaves_out_what_it_skips() {
     sandbox.file(r"from\new\keep.txt", "k");
     sandbox.file(r"from\new\cache.tmp", "c");
     let to = sandbox.path(r"to\deeper");
-    let pair = crate::sync::Pair { id: String::new(), from: sandbox.path("from"), to: to.clone(), mirror: false, skip: "*.tmp".into(), every: 0, ran: 0 };
+    let pair = crate::sync::Pair { id: String::new(), from: sandbox.path("from"), to: to.clone(), mirror: false, skip: "*.tmp".into(), every: 0, changed: false, ran: 0 };
     let outcome = go(Job::Sync { pair });
     assert!(outcome.failed.is_empty());
     assert_eq!(read(&to.join(r"new\keep.txt")), "k");

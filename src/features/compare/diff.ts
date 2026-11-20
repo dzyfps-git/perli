@@ -12,12 +12,15 @@ export interface Line {
 /**
  * Past this many changes in one stretch the search looks at the clock, and once a compare has
  * searched for `BUDGET_MS` it splits where it got furthest, as GNU diff does: only then may a few
- * more lines show as changed than had to, and a compare never stalls. It runs in a worker.
+ * more lines show as changed than had to, and a compare never stalls. In the worker, a compare cut
+ * short is shown at once and then worked out in full, which takes its place when done.
  */
 const COSTLY = 4096;
 const BUDGET_MS = 3000;
 /** When the compare under way stops looking for the shortest way. */
 let deadline = Infinity;
+/** Whether the last compare ran out of time and may mark more lines than it had to. */
+export let cutShort = false;
 
 /**
  * The shortest way from a[aLo, aHi) to b[bLo, bHi), as lines kept, gone and new, onto `lines` in
@@ -60,6 +63,7 @@ function middle<T>(a: T[], b: T[], aLo: number, aHi: number, bLo: number, bHi: n
   let most = full;
   for (let d = 0; d <= full; d++) {
     if (d > COSTLY && (d & 63) === 0 && performance.now() > deadline) {
+      cutShort = true;
       most = d - 1;
       break;
     }
@@ -137,6 +141,7 @@ export function diffLines(a: string[], b: string[], key: (line: string) => strin
   const keptB = keysB.flatMap((line, at) => (inA.has(line) ? [at] : []));
   const found: Line[] = [];
   deadline = performance.now() + budget;
+  cutShort = false;
   edits(keptA.map((at) => keysA[at]), keptB.map((at) => keysB[at]), 0, keptA.length, 0, keptB.length, found);
   // Back in place, with the lines set aside where they were.
   const lines: Line[] = [];

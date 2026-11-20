@@ -39,6 +39,7 @@ pub use wallpaper::shown as wallpaper_shown;
 pub use shell::write_shortcut;
 pub use transfer::{is_temp_name, put_back, remove_leftovers};
 pub use tree::measure;
+pub(crate) use bin::user_sid;
 pub use wallpaper::Screens;
 
 /// One unit of work, run to the end by `run`.
@@ -85,6 +86,21 @@ pub enum Job {
     Several { jobs: Vec<Job> },
     /// A run of a sync pair: the two sides are compared first, then what differs goes over.
     Sync { pair: crate::sync::Pair },
+    /// Files of a cloud place, and every file in its folders, kept on this PC or let go.
+    KeepOffline { paths: Vec<PathBuf>, keep: bool },
+}
+
+/// What one item weighs on the bar beyond its bytes, as the window counts it.
+const ITEM_WORK: u64 = 4096;
+
+/// Each part's share of the bar, from what each weighs. One that can't be weighed gets the share
+/// of an average one, and with none weighed each gets the same.
+fn shares(weights: &[u64]) -> Vec<f64> {
+    let known: Vec<f64> = weights.iter().filter(|&&weight| weight > 0).map(|&weight| weight as f64).collect();
+    let average = if known.is_empty() { 1.0 } else { known.iter().sum::<f64>() / known.len() as f64 };
+    let weights: Vec<f64> = weights.iter().map(|&weight| if weight > 0 { weight as f64 } else { average }).collect();
+    let whole: f64 = weights.iter().sum();
+    weights.iter().map(|weight| weight / whole).collect()
 }
 
 /// How hard a new archive squeezes its files.
@@ -161,9 +177,13 @@ pub struct Progress {
     pub total_items: u64,
     pub current: String,
     /// In a job of several parts, which one this is and how many there are. Each part counts
-    /// from nothing, and the bar gives each the same share. Both 0 in a job of one.
+    /// from nothing. Both 0 in a job of one.
     pub part: u32,
     pub parts: u32,
+    /// In a job of several parts, where this part starts on the bar and how much of it it has,
+    /// each from 0 to 1, by what its files weigh.
+    pub start: f64,
+    pub share: f64,
 }
 
 /// What the job can do next. The UI shows one button for each it is offered.
@@ -442,8 +462,6 @@ impl<'a> Run<'a> {
             Job::Save { path, bytes, read } => self.save(&path, &bytes, read),
             Job::Picture { paths, edit, keep } => self.edit_pictures(&paths, edit, keep),
             Job::Wallpaper { picture } => self.set_wallpaper(&picture),
-            // ponytail: each part has the same share of the bar, as a part's total is known only once it
-            // starts; weigh them by size if one dwarfs the others.
             Job::Sync { pair } => {
                 let compared = self.attempt(&pair.from, None, |_| crate::sync::preview(&pair).map_err(|message| Error::new(E_FAIL, message.as_str())))?;
                 let Some(preview) = compared else { return Ok(()) };
@@ -469,14 +487,32 @@ impl<'a> Run<'a> {
                     None => Ok(()),
                 }
             }
+            Job::KeepOffline { paths, keep } => self.keep_offline(&paths, keep),
             Job::Several { jobs } => {
                 let parts = jobs.len() as u32;
-                jobs.into_iter().enumerate().try_for_each(|(part, job)| {
-                    self.progress = Progress { part: part as u32, parts, ..Progress::default() };
+                let shares = shares(&jobs.iter().map(|job| self.weigh(job)).collect::<Vec<_>>());
+                let mut start = 0.0;
+                jobs.into_iter().zip(shares).enumerate().try_for_each(|(part, (job, share))| {
+                    self.progress = Progress { part: part as u32, parts, start, share, ..Progress::default() };
+                    start += share;
                     self.job(job)
                 })
             }
         }
+    }
+
+    /// What a part of a job of several weighs on the bar, as the bar counts: its bytes, and a
+    /// little for each item. 0 when that can't be told before it starts, as in the cloud.
+    fn weigh(&self, job: &Job) -> u64 {
+        let paths = match job {
+            Job::Copy { sources, .. } | Job::Move { sources, .. } | Job::Zip { sources, .. } => sources,
+            Job::Recycle { paths } | Job::Delete { paths } => paths,
+            // A few rows out of an archive weigh far less than the whole of it.
+            Job::Unzip { archives, only, .. } if only.is_empty() => archives,
+            _ => return 0,
+        };
+        let (items, bytes) = self.measured(paths);
+        bytes + items * ITEM_WORK
     }
 
     /// Makes one folder a sync run needs, on this PC or in a place, noted so Undo takes it away.
@@ -656,6 +692,7 @@ impl<'a> Run<'a> {
                 Done::Replaced { .. } | Done::Wallpaper { .. } | Done::Tagged { .. } | Done::TagDeleted { .. } | Done::TagRevived { .. } => {
                     for record in group {
                         match record {
+                            Done::Replaced { path, kept } if cloud::is_cloud_version(kept) => self.cloud_put_back(path, kept)?,
                             Done::Replaced { path, kept } => self.put_back_kept(path, kept)?,
                             Done::Wallpaper { before, .. } => self.put_back_wallpaper(before)?,
                             Done::Tagged { paths, keys, tag, on, .. } => self.tag(paths, Some(keys), *tag, !on)?,

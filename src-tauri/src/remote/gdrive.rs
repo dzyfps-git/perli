@@ -116,6 +116,7 @@ fn items_of(values: &[Value], pdf: bool) -> Vec<(Item, Known)> {
             version: value["version"].as_str().unwrap_or_default().to_string(),
             id: id.to_string(),
             note,
+            cold: false,
         };
         rows.push((item, Known { id: id.to_string(), mime: mime.to_string(), drive: None }));
     }
@@ -360,6 +361,13 @@ impl Service for Google {
         Ok(found.id)
     }
 
+    fn erase(&self, path: &str, _item: &Item) -> Result<Option<String>, String> {
+        let found = self.find(path)?;
+        self.send_json(reqwest::Method::DELETE, &format!("{API}/files/{}?supportsAllDrives=true", found.id), &json!({}))?;
+        self.lock().remove(path);
+        Ok(None)
+    }
+
     fn restore(&self, _path: &str, token: &str) -> Result<(), String> {
         self.send_json(reqwest::Method::PATCH, &format!("{API}/files/{token}?supportsAllDrives=true"), &json!({ "trashed": false }))?;
         Ok(())
@@ -470,6 +478,15 @@ impl Service for Google {
         versions.pop();
         versions.reverse();
         Ok(versions)
+    }
+
+    fn revision(&self, path: &str, item: &Item) -> Result<Option<String>, String> {
+        let found = self.find(path)?;
+        if item.folder || found.mime.starts_with("application/vnd.google-apps.") {
+            return Ok(None);
+        }
+        let head = self.get(&format!("{API}/files/{}?fields=headRevisionId&supportsAllDrives=true", found.id))?;
+        Ok(head["headRevisionId"].as_str().map(str::to_string))
     }
 
     fn bring_back(&self, path: &str, item: &Item, version: &str) -> Result<(), String> {

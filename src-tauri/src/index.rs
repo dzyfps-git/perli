@@ -7,15 +7,15 @@
 //! a change watch on the drive's root. A USB disk is walked again now and then instead of being
 //! watched, because a watch holds a handle on it and Windows then can't eject it.
 //
-// ponytail: a keeper that starts walks every drive again once, a while after it starts, to catch
-// what changed while no Perli ran. The NTFS change journal would give that at once, but reading
-// it needs administrator rights.
+// A keeper that starts walks every drive again once, a while after it starts, to catch what
+// changed while no Perli ran. With the journal helper set up (see journal.rs), the NTFS change
+// journal tells that at once instead, and only drives it couldn't read are walked again.
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -24,17 +24,18 @@ use serde::{Deserialize, Serialize};
 use windows::core::HSTRING;
 use windows::Win32::Foundation::{CloseHandle, FILETIME, HANDLE, WAIT_ABANDONED, WAIT_OBJECT_0};
 use windows::Win32::Storage::FileSystem::{
-    CreateFileW, GetDriveTypeW, GetLogicalDrives, ReadDirectoryChangesW, FILE_FLAG_BACKUP_SEMANTICS, FILE_LIST_DIRECTORY,
+    CreateFileW, GetDriveTypeW, GetLogicalDrives, ReadDirectoryChangesW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OVERLAPPED, FILE_LIST_DIRECTORY,
     FILE_NOTIFY_CHANGE_ATTRIBUTES, FILE_NOTIFY_CHANGE_CREATION, FILE_NOTIFY_CHANGE_DIR_NAME, FILE_NOTIFY_CHANGE_FILE_NAME,
-    FILE_NOTIFY_CHANGE_LAST_WRITE, FILE_NOTIFY_CHANGE_SIZE, FILE_NOTIFY_INFORMATION, FILE_SHARE_DELETE, FILE_SHARE_READ,
+    FILE_ACTION_ADDED, FILE_ACTION_RENAMED_NEW_NAME, FILE_NOTIFY_CHANGE_LAST_WRITE, FILE_NOTIFY_CHANGE_SIZE, FILE_NOTIFY_INFORMATION, FILE_SHARE_DELETE, FILE_SHARE_READ,
     FILE_SHARE_WRITE, OPEN_EXISTING, WIN32_FIND_DATAW,
 };
 use windows::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
 use windows::Win32::System::Threading::{
-    CreateMutexW, GetCurrentThread, ReleaseMutex, SetThreadPriority, WaitForSingleObject, THREAD_MODE_BACKGROUND_BEGIN,
+    CreateEventW, CreateMutexW, GetCurrentThread, ReleaseMutex, ResetEvent, SetEvent, SetThreadPriority, WaitForMultipleObjects,
+    WaitForSingleObject, INFINITE, THREAD_MODE_BACKGROUND_BEGIN,
 };
 use windows::Win32::System::WindowsProgramming::{DRIVE_FIXED, DRIVE_REMOTE};
-use windows::Win32::System::IO::CancelSynchronousIo;
+use windows::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 
 use crate::folder::Sight;
 use crate::ops::sys;
@@ -375,7 +376,9 @@ fn walk(db: &Db, top: &Path, skip: &[String], steer: &mut dyn Steer) -> rusqlite
 
 /// Brings the list up to date for one path a change watch named: its row, and if it is a folder
 /// that is new or now hidden in another way, everything in it.
-fn apply(db: &Db, path: &Path, skip: &[String]) -> rusqlite::Result<()> {
+/// A `fresh` path was made or moved there, so a folder there is read again all the way down,
+/// even when the list knows a folder at that path: that one may have been renamed away.
+fn apply(db: &Db, path: &Path, skip: &[String], fresh: bool) -> rusqlite::Result<()> {
     let path_low = low(&path.to_string_lossy());
     if skip.iter().any(|skipped| path_low == *skipped || path_low.starts_with(&inside_of(skipped))) {
         return Ok(());
@@ -389,9 +392,13 @@ fn apply(db: &Db, path: &Path, skip: &[String]) -> rusqlite::Result<()> {
     let Some((parent_id, parent_depth, parent_chain)) = known_folder(db, parent)? else {
         return Ok(());
     };
-    db.put_entry(parent_id, &data, next_seen())?;
     let attributes = data.dwFileAttributes;
-    if attributes & ATTRIBUTE_DIRECTORY == 0 || attributes & ATTRIBUTE_REPARSE != 0 {
+    let folder = attributes & ATTRIBUTE_DIRECTORY != 0 && attributes & ATTRIBUTE_REPARSE == 0;
+    if fresh && folder {
+        db.forget(path)?;
+    }
+    db.put_entry(parent_id, &data, next_seen())?;
+    if !folder {
         return Ok(());
     }
     let wanted = chain(parent_chain, attributes, parent_depth + 1);
@@ -401,11 +408,12 @@ fn apply(db: &Db, path: &Path, skip: &[String]) -> rusqlite::Result<()> {
     }
 }
 
-/// Brings the list up to date for every path a change watch named, in one batch.
-fn apply_all(db: &Db, changed: &BTreeSet<PathBuf>, skip: &[String]) {
+/// Brings the list up to date for every path a change watch named, in one batch. Those in
+/// `fresh` were made or moved there.
+fn apply_all(db: &Db, changed: &BTreeSet<PathBuf>, fresh: &BTreeSet<PathBuf>, skip: &[String]) {
     let batch = db.0.unchecked_transaction();
     for path in changed {
-        let _ = apply(db, path, skip);
+        let _ = apply(db, path, skip, fresh.contains(path));
     }
     if let Ok(batch) = batch {
         let _ = batch.commit();
@@ -630,27 +638,44 @@ fn on_battery() -> bool {
     unsafe { GetSystemPowerStatus(&mut power) }.is_ok() && power.ACLineStatus == 0
 }
 
-enum Heard {
+/// The meta key of the stamp of the last journal report whose changes are all in the list.
+const JOURNAL_APPLIED: &str = "journal-applied";
+
+pub(crate) enum Heard {
     Changed(PathBuf),
+    /// Made or moved to this path. A folder there may be another than the one the list knew.
+    Fresh(PathBuf),
     /// Too much changed at once for the watch to say what: walk the drive again.
     Lost(PathBuf),
+    /// The journal told every change on this drive while no Perli ran: no walk again needed.
+    Caught(PathBuf),
+    /// The journal's report ends here, with its stamp, kept once its changes are in the list.
+    Reported(String),
 }
 
-/// A change watch on the top of a drive, held by its own thread.
-struct Watch {
-    stopped: Arc<AtomicBool>,
-    thread: thread::JoinHandle<()>,
+/// A change watch on the top of a drive, held by its own thread. Each read waits on the drive and
+/// on `quit` at once, so a watch told to stop ends then, between reads or in one.
+pub(crate) struct Watch {
+    quit: isize,
+    thread: Option<thread::JoinHandle<()>>,
 }
 
 impl Watch {
-    fn start(root: PathBuf, heard: Sender<Heard>) -> Option<Self> {
+    pub(crate) fn start(root: PathBuf, heard: Sender<Heard>) -> Option<Self> {
         let share = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
-        let opened = unsafe { CreateFileW(&HSTRING::from(root.as_os_str()), FILE_LIST_DIRECTORY.0, share, None, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, None) }.ok()?;
-        let raw = opened.0 as isize;
-        let stopped = Arc::new(AtomicBool::new(false));
-        let stop = stopped.clone();
+        let flags = FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED;
+        let opened = unsafe { CreateFileW(&HSTRING::from(root.as_os_str()), FILE_LIST_DIRECTORY.0, share, None, OPEN_EXISTING, flags, None) }.ok()?;
+        let (Ok(done), Ok(quit)) = (unsafe { CreateEventW(None, true, false, None) }, unsafe { CreateEventW(None, true, false, None) }) else {
+            let _ = unsafe { CloseHandle(opened) };
+            return None;
+        };
+        let raw = [opened.0 as isize, done.0 as isize, quit.0 as isize];
+        // The drive tells only of changes once a read is asked for, so the watch is handed back
+        // only then, and a change made right after it starts is heard too.
+        let (listening, ready) = mpsc::channel::<()>();
         let thread = thread::spawn(move || {
-            let opened = HANDLE(raw as *mut _);
+            let mut listening = Some(listening);
+            let [opened, done, quit] = raw.map(|raw| HANDLE(raw as *mut _));
             let mut buffer = vec![0u32; 16 * 1024];
             let filter = FILE_NOTIFY_CHANGE_FILE_NAME
                 | FILE_NOTIFY_CHANGE_DIR_NAME
@@ -660,10 +685,24 @@ impl Watch {
                 | FILE_NOTIFY_CHANGE_CREATION;
             loop {
                 let mut bytes = 0u32;
-                let read = unsafe {
-                    ReadDirectoryChangesW(opened, buffer.as_mut_ptr().cast(), (buffer.len() * 4) as u32, true, filter, Some(&mut bytes), None, None)
+                let mut overlapped = OVERLAPPED { hEvent: done, ..Default::default() };
+                let _ = unsafe { ResetEvent(done) };
+                let asked = unsafe {
+                    ReadDirectoryChangesW(opened, buffer.as_mut_ptr().cast(), (buffer.len() * 4) as u32, true, filter, None, Some(&mut overlapped), None)
                 };
-                if read.is_err() || stop.load(Ordering::SeqCst) {
+                if asked.is_err() {
+                    break;
+                }
+                if let Some(listening) = listening.take() {
+                    let _ = listening.send(());
+                }
+                if unsafe { WaitForMultipleObjects(&[done, quit], false, INFINITE) } != WAIT_OBJECT_0 {
+                    // Told to stop: the read is called off, and waited for, as it writes into `buffer`.
+                    let _ = unsafe { CancelIoEx(opened, Some(&overlapped)) };
+                    let _ = unsafe { GetOverlappedResult(opened, &overlapped, &mut bytes, true) };
+                    break;
+                }
+                if unsafe { GetOverlappedResult(opened, &overlapped, &mut bytes, false) }.is_err() {
                     break;
                 }
                 if bytes == 0 {
@@ -674,7 +713,9 @@ impl Watch {
                 loop {
                     let record = unsafe { &*(buffer.as_ptr().cast::<u8>().add(at).cast::<FILE_NOTIFY_INFORMATION>()) };
                     let units = unsafe { std::slice::from_raw_parts(record.FileName.as_ptr(), record.FileNameLength as usize / 2) };
-                    let _ = heard.send(Heard::Changed(root.join(String::from_utf16_lossy(units))));
+                    let path = root.join(String::from_utf16_lossy(units));
+                    let made = record.Action == FILE_ACTION_ADDED || record.Action == FILE_ACTION_RENAMED_NEW_NAME;
+                    let _ = heard.send(if made { Heard::Fresh(path) } else { Heard::Changed(path) });
                     if record.NextEntryOffset == 0 {
                         break;
                     }
@@ -682,17 +723,23 @@ impl Watch {
                 }
             }
             let _ = unsafe { CloseHandle(opened) };
+            let _ = unsafe { CloseHandle(done) };
         });
-        Some(Self { stopped, thread })
+        // A read that can't be asked for ends the thread, which says so at once.
+        let _ = ready.recv_timeout(Duration::from_secs(2));
+        Some(Self { quit: raw[2], thread: Some(thread) })
     }
 }
 
 impl Drop for Watch {
-    // ponytail: a watch between two reads when told to stop ends with the next change on its drive.
     fn drop(&mut self) {
-        use std::os::windows::io::AsRawHandle;
-        self.stopped.store(true, Ordering::SeqCst);
-        let _ = unsafe { CancelSynchronousIo(HANDLE(self.thread.as_raw_handle())) };
+        let quit = HANDLE(self.quit as *mut _);
+        let _ = unsafe { SetEvent(quit) };
+        // Quick, as the wait wakes at once: then the drive's handle is closed, and `quit` can go.
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+        let _ = unsafe { CloseHandle(quit) };
     }
 }
 
@@ -766,6 +813,12 @@ struct Keeping {
     said: String,
     /// Paused since the last look for drives, so what was walked before is walked again soon.
     rested: bool,
+    /// The journal helper was asked what changed while no Perli ran.
+    caught_up: bool,
+    /// The stamp of the journal's report, to keep once its changes are in the list.
+    reported: Option<String>,
+    /// Of `changed`, those made or moved to their path.
+    fresh: BTreeSet<PathBuf>,
 }
 
 impl Keeping {
@@ -787,6 +840,9 @@ impl Keeping {
             listed: 0,
             said: String::new(),
             rested: false,
+            caught_up: false,
+            reported: None,
+            fresh: BTreeSet::new(),
         }
     }
 
@@ -890,6 +946,24 @@ impl Keeping {
             if self.drives_seen.elapsed() >= DRIVES_AGAIN || self.due.is_empty() {
                 self.look_for_drives(options.network);
             }
+            if !self.caught_up {
+                // Once the drives are known, as what it hears names them.
+                self.caught_up = true;
+                let sender = self.sender.clone();
+                let applied = self.db.meta(JOURNAL_APPLIED);
+                thread::spawn(move || {
+                    let Some((finds, stamp)) = crate::journal::catch_up(applied.as_deref()) else { return };
+                    for found in finds {
+                        let _ = sender.send(match found {
+                            crate::journal::Found::Changed(path) => Heard::Changed(path),
+                            crate::journal::Found::Fresh(path) => Heard::Fresh(path),
+                            crate::journal::Found::Caught(root) => Heard::Caught(root),
+                            crate::journal::Found::Lost(root) => Heard::Lost(root),
+                        });
+                    }
+                    let _ = sender.send(Heard::Reported(stamp));
+                });
+            }
             match self.heard.recv_timeout(Duration::from_millis(250)) {
                 Ok(heard) => self.hear(heard),
                 Err(RecvTimeoutError::Timeout) => {}
@@ -900,7 +974,14 @@ impl Keeping {
             }
             if !self.changed.is_empty() && self.last_change.elapsed() >= SETTLE {
                 let changed = std::mem::take(&mut self.changed);
-                apply_all(&self.db, &changed, &self.skip);
+                let fresh = std::mem::take(&mut self.fresh);
+                apply_all(&self.db, &changed, &fresh, &self.skip);
+            }
+            // Every change of the report came before its end, so with none waiting, all are in.
+            if self.changed.is_empty() {
+                if let Some(stamp) = self.reported.take() {
+                    self.db.set_meta(JOURNAL_APPLIED, &stamp);
+                }
             }
             if options.battery && on_battery() {
                 self.say("battery");
@@ -932,9 +1013,23 @@ impl Keeping {
                 self.changed.insert(path);
                 self.last_change = Instant::now();
             }
+            Heard::Fresh(path) => {
+                self.fresh.insert(path.clone());
+                self.changed.insert(path);
+                self.last_change = Instant::now();
+            }
             Heard::Lost(root) => {
                 for due in self.due.iter_mut().filter(|(due, ..)| *due == root) {
                     due.1 = Instant::now();
+                }
+            }
+            Heard::Reported(stamp) => self.reported = Some(stamp),
+            Heard::Caught(root) => {
+                // The walk to catch up, still to come, isn't needed. One never made is.
+                let root = low(&root.to_string_lossy());
+                let walked: Vec<String> = self.db.0.prepare("SELECT root FROM drives").and_then(|mut rows| rows.query_map([], |row| row.get(0))?.collect()).unwrap_or_default();
+                for due in self.due.iter_mut().filter(|(due, _, again)| !again && low(&due.to_string_lossy()) == root && walked.contains(&root)) {
+                    due.1 = Instant::now() + Duration::from_secs(u64::MAX / 4);
                 }
             }
         }
@@ -1008,6 +1103,19 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_watch_hears_a_change_and_stops_at_once_between_changes() {
+        let tree = Tree::new("watch");
+        let (sender, heard) = mpsc::channel();
+        let watch = Watch::start(tree.0.clone(), sender).unwrap();
+        let made = tree.file("new.txt");
+        let first = heard.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(matches!(first, Heard::Fresh(path) if path == made), "a file made is heard as made");
+        let asked = Instant::now();
+        drop(watch);
+        assert!(asked.elapsed() < Duration::from_secs(2), "a watch told to stop ends with no change on its drive");
+    }
+
     const ALL: Sight = Sight { hidden: true, system: true };
     const PLAIN: Sight = Sight { hidden: false, system: false };
 
@@ -1072,14 +1180,27 @@ mod tests {
         let found = |text: &str| names(&page_in(&db, &inside, text, usize::MAX, ALL, 0, 99).unwrap());
 
         let added = tree.file(r"a\b\two.txt");
-        apply(&db, &added, &[]).unwrap();
+        apply(&db, &added, &[], true).unwrap();
         assert_eq!(found("two"), ["two.txt"], "a file in a folder made after the walk");
         fs::rename(tree.0.join("a"), tree.0.join("moved")).unwrap();
         // As the watch hears it: both names at once, in one batch.
-        apply_all(&db, &[tree.0.join("a"), tree.0.join("moved")].into_iter().collect(), &[]);
+        let renamed: BTreeSet<PathBuf> = [tree.0.join("a"), tree.0.join("moved")].into_iter().collect();
+        apply_all(&db, &renamed, &[tree.0.join("moved")].into_iter().collect(), &[]);
         let (folder, _) = &page_in(&db, &inside, "two", usize::MAX, ALL, 0, 1).unwrap()[0];
         assert_eq!(folder, &tree.0.join(r"moved\b"), "a renamed folder takes all it holds along");
         assert_eq!(found("one"), ["one.txt"]);
+
+        // Renamed away and made again at the old name: the new folder holds nothing of the old.
+        fs::rename(tree.0.join("moved"), tree.0.join("away")).unwrap();
+        fs::create_dir(tree.0.join("moved")).unwrap();
+        let replaced: BTreeSet<PathBuf> = [tree.0.join("moved"), tree.0.join("away")].into_iter().collect();
+        apply_all(&db, &replaced, &replaced, &[]);
+        let (folder, _) = &page_in(&db, &inside, "two", usize::MAX, ALL, 0, 1).unwrap()[0];
+        assert_eq!(folder, &tree.0.join(r"away\b"), "what the old folder held went with it");
+        assert_eq!(page_in(&db, &inside, "one", usize::MAX, ALL, 0, 9).unwrap().len(), 1, "and is listed once");
+        fs::remove_dir(tree.0.join("moved")).unwrap();
+        fs::rename(tree.0.join("away"), tree.0.join("moved")).unwrap();
+        apply_all(&db, &replaced, &replaced, &[]);
 
         fs::remove_file(tree.0.join(r"moved\one.txt")).unwrap();
         tree.file(r"moved/three.txt");
@@ -1098,7 +1219,7 @@ mod tests {
         walk(&db, &tree.0, &skip, &mut || false).unwrap();
         let inside = [Part::inside(&tree.0)];
         assert_eq!(names(&page_in(&db, &inside, ".txt", usize::MAX, ALL, 0, 9).unwrap()), ["a.txt"]);
-        apply(&db, &tree.file(r"out\c.txt"), &skip).unwrap();
+        apply(&db, &tree.file(r"out\c.txt"), &skip, true).unwrap();
         assert_eq!(names(&page_in(&db, &inside, ".txt", usize::MAX, ALL, 0, 9).unwrap()), ["a.txt"], "a change there is left out too");
 
         let other = Tree::new("stopped");

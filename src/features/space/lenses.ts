@@ -4,6 +4,7 @@ import { hueOf, kindOf, type Kind } from "../filelist/fileKinds";
 import { paint, sendComet, step, whereIs, type Aim, type LinkAim, type Palette, type Rgb, type RowAim, type Scene } from "./draw";
 import { packed } from "./pack";
 import type { Pulse } from "./pulses";
+import { watchTheme } from "../../ui/themeWatch";
 import { ageGlow, allNodes, brainLayout, layersLayout, nearestShown, route, tagsLayout, type SpaceNode } from "./space";
 
 /** What each lens wants drawn, built from the tree and the palette. */
@@ -60,20 +61,10 @@ export function readPalette(): Palette {
   };
 }
 
-const darkScheme = matchMedia("(prefers-color-scheme: dark)");
 export const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
 
 /** Hears when the theme or the accent changes. Answers how to stop. */
-export function watchPalette(hear: (palette: Palette) => void) {
-  const changed = () => hear(readPalette());
-  const theme = new MutationObserver(changed);
-  theme.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme", "data-accent", "style"] });
-  darkScheme.addEventListener("change", changed);
-  return () => {
-    theme.disconnect();
-    darkScheme.removeEventListener("change", changed);
-  };
-}
+export const watchPalette = (hear: (palette: Palette) => void) => watchTheme(() => hear(readPalette()));
 
 /**
  * Draws `scene` on `canvas` while anything in it moves, and rests when nothing does. `fps` caps

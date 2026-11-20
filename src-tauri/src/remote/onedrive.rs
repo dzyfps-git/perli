@@ -62,6 +62,7 @@ fn item_of(value: &Value) -> Item {
         version: value["cTag"].as_str().or(value["eTag"].as_str()).unwrap_or_default().to_string(),
         id: value["id"].as_str().unwrap_or_default().to_string(),
         note: if pick("package").is_null() { String::new() } else { "OneNote notebook".into() },
+        cold: false,
     }
 }
 
@@ -254,6 +255,15 @@ impl Service for OneDrive {
         Ok(format!("{drive}:{id}"))
     }
 
+    fn erase(&self, path: &str, item: &Item) -> Result<Option<String>, String> {
+        // Work and school accounts delete for good; a personal one puts it in its recycle bin.
+        let address = Self::then(&self.address(path)?, "/permanentDelete");
+        match self.post(&address, &json!({})) {
+            Ok(_) => Ok(None),
+            Err(_) => self.remove(path, item).map(Some),
+        }
+    }
+
     fn restore(&self, _path: &str, token: &str) -> Result<(), String> {
         let (drive, id) = token.split_once(':').ok_or("Nothing to bring back")?;
         self.post(&format!("{GRAPH}/drives/{drive}/items/{id}/restore"), &json!({}))
@@ -341,6 +351,15 @@ impl Service for OneDrive {
                 modified: super::ticks_from_text(value["lastModifiedDateTime"].as_str().unwrap_or_default()),
             })
             .collect())
+    }
+
+    fn revision(&self, path: &str, item: &Item) -> Result<Option<String>, String> {
+        if item.folder {
+            return Ok(None);
+        }
+        // The first is the file as it is.
+        let values = self.pages(Self::then(&self.address(path)?, "/versions"))?;
+        Ok(values.first().and_then(|value| value["id"].as_str()).map(str::to_string))
     }
 
     fn bring_back(&self, path: &str, _item: &Item, version: &str) -> Result<(), String> {

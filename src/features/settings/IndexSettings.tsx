@@ -1,5 +1,5 @@
 import { createEffect, createSignal, For, onCleanup, Show } from "solid-js";
-import { indexStatus, rebuildIndex, type IndexStatus } from "../../api";
+import { indexStatus, journalStatus, rebuildIndex, setJournal, type IndexStatus, type JournalStatus } from "../../api";
 import { Switch } from "../../ui/Controls";
 import { ago } from "../../ui/dates";
 import { formatSize } from "../../ui/format";
@@ -54,6 +54,25 @@ export function IndexSettings(props: { open: boolean }) {
     if (picked) setIndexSkip(withSkipped(indexSkip(), picked.path));
   }
 
+  // The journal helper: read when Settings opens, and again after each change.
+  const [journal, setJournalShown] = createSignal<JournalStatus>();
+  const [journalBusy, setJournalBusy] = createSignal(false);
+  const [journalFailure, setJournalFailure] = createSignal<string>();
+  const readJournal = () => journalStatus().then(setJournalShown).catch(console.error);
+  createEffect(() => props.open && indexOn() && void readJournal());
+  async function changeJournal(on: boolean) {
+    setJournalBusy(true);
+    setJournalFailure(undefined);
+    try {
+      await setJournal(on);
+    } catch (reason) {
+      setJournalFailure(String(reason));
+    } finally {
+      await readJournal();
+      setJournalBusy(false);
+    }
+  }
+
   async function rebuild() {
     setAsked(true);
     await rebuildIndex().catch(console.error);
@@ -86,6 +105,27 @@ export function IndexSettings(props: { open: boolean }) {
             <Show when={status()?.walked}>{`Last looked through ${ago(status()!.walked!, Date.now())}. `}</Show>
             {`The list takes ${formatSize(status()?.bytes ?? 0)}.`}
           </p>
+        </Show>
+        <Show when={journal()?.possible}>
+          <Switch
+            label="Catch up instantly (asks for admin once)"
+            note="When Perli starts, each NTFS drive's change journal says what changed while it was closed, so only that is read again instead of every drive. Windows asks for admin once, to set up a helper in Program Files that only reads the journals."
+            checked={!!journal()?.on}
+            disabled={journalBusy()}
+            onChange={(on) => void changeJournal(on)}
+          />
+          <Show when={journal()?.old || journalFailure()}>
+            <div class="settings-chips">
+              <p class="settings-note" role="status" classList={{ "properties-failure": !!journalFailure() }}>
+                {journalFailure() ?? "The helper changed with this Perli. Set it up again to keep catching up instantly."}
+              </p>
+              <Show when={journal()?.old && !journalFailure()}>
+                <button class="settings-chip" disabled={journalBusy()} onClick={() => void changeJournal(true)}>
+                  Set up again
+                </button>
+              </Show>
+            </div>
+          </Show>
         </Show>
         <Switch
           label="Wait while on battery"

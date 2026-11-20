@@ -70,6 +70,8 @@ pub struct Item {
     pub id: String,
     /// What else a row says of it: a storage class, or "Google Doc".
     pub note: String,
+    /// In S3 Glacier, to be restored before it can be read.
+    pub cold: bool,
 }
 
 /// An older version of a file the service keeps.
@@ -95,6 +97,11 @@ pub trait Service: Send + Sync {
     fn make_folder(&self, folder: &str, name: &str) -> Result<(), String>;
     /// Deletes it, to the service's own bin where it has one. Gives what brings it back, or `""`.
     fn remove(&self, path: &str, item: &Item) -> Result<String, String>;
+    /// Deletes it for good where the service lets this account, else to its bin as `remove`
+    /// does, giving what brings it back.
+    fn erase(&self, path: &str, item: &Item) -> Result<Option<String>, String> {
+        self.remove(path, item).map(Some)
+    }
     fn restore(&self, path: &str, token: &str) -> Result<(), String>;
     /// Moves it within the place, renamed to `name`.
     fn relocate(&self, path: &str, item: &Item, folder: &str, name: &str) -> Result<(), String>;
@@ -118,6 +125,15 @@ pub trait Service: Send + Sync {
     }
     fn bring_back(&self, _path: &str, _item: &Item, _version: &str) -> Result<(), String> {
         Err("This place keeps no older versions".into())
+    }
+    /// The id `bring_back` takes for the version the file is now, where the service keeps
+    /// versions, so an undo of a write over it brings back that one and no other.
+    fn revision(&self, _path: &str, _item: &Item) -> Result<Option<String>, String> {
+        Ok(None)
+    }
+    /// Asks for a file in cold storage to be made readable again for a while.
+    fn warm(&self, _path: &str, item: &Item) -> Result<(), String> {
+        Err(format!("{} opens as it is", item.name))
     }
 }
 
@@ -513,24 +529,20 @@ pub fn is_offline(path: &Path) -> bool {
     matches!(at(path), Some(Ok(at)) if offline_version(&at).is_some())
 }
 
-/// Keeps a copy of each file on this PC, taken again whenever it changes in the cloud, or lets it go.
-pub fn keep_offline(paths: &[PathBuf], keep: bool) -> Result<(), String> {
-    for path in paths {
-        let Some(found) = at(path) else { continue };
-        let at = found?;
-        let slot = offline_slot(&at).ok_or("There is no folder for Perli's own files")?;
-        if !keep {
-            let _ = fs::remove_dir_all(&slot);
-            continue;
-        }
-        let item = at.item()?;
-        if item.folder {
-            return Err(format!("{} is a folder: keep its files one by one", item.name));
-        }
-        take_down(&at, &item, &slot)?;
-        fs::write(slot.join(".version"), &item.version).map_err(|error| error.to_string())?;
+/// Keeps a copy of one file on this PC, taken again whenever it changes in the cloud, or lets it
+/// go. `tick` hears the bytes taken down so far, and says whether to go on.
+pub fn keep_file(at: &At, item: &Item, keep: bool, tick: Tick) -> Result<(), String> {
+    let slot = offline_slot(at).ok_or("There is no folder for Perli's own files")?;
+    if !keep {
+        let _ = fs::remove_dir_all(&slot);
+        return Ok(());
     }
-    Ok(())
+    // A copy kept of an older version is not this one.
+    if offline_version(at).as_deref() != Some(item.version.as_str()) {
+        let _ = fs::remove_file(slot.join(local_name(&item.name)));
+    }
+    take_down(at, item, &slot, tick)?;
+    fs::write(slot.join(".version"), &item.version).map_err(|error| error.to_string())
 }
 
 /// A name a service gave as one name on this PC: no folder parts and nothing Windows refuses or
@@ -553,7 +565,7 @@ pub fn local_name(name: &str) -> String {
 }
 
 /// Takes the file down into `slot`, under its own name, unless it is there already.
-fn take_down(at: &At, item: &Item, slot: &Path) -> Result<PathBuf, String> {
+fn take_down(at: &At, item: &Item, slot: &Path, tick: Tick) -> Result<PathBuf, String> {
     let name = local_name(&item.name);
     let target = slot.join(&name);
     if target.exists() {
@@ -561,12 +573,33 @@ fn take_down(at: &At, item: &Item, slot: &Path) -> Result<PathBuf, String> {
     }
     fs::create_dir_all(slot).map_err(|error| error.to_string())?;
     let part = slot.join(format!("{name}.part"));
-    let from = fs::metadata(&part).map_or(0, |metadata| metadata.len());
+    let from = resume_at(&part, &item.version)?;
     let mut file = fs::OpenOptions::new().create(true).append(true).open(&part).map_err(|error| error.to_string())?;
-    at.service.read(&at.inner, item, from, &mut file, &mut |_| true)?;
+    at.service.read(&at.inner, item, from, &mut file, &mut |done| tick(from + done))?;
     drop(file);
     fs::rename(&part, &target).map_err(|error| error.to_string())?;
+    let _ = fs::remove_file(part_version(&part));
     Ok(target)
+}
+
+/// Where the revision a part holds bytes of is noted.
+fn part_version(part: &Path) -> PathBuf {
+    let mut noted = part.as_os_str().to_owned();
+    noted.push(".version");
+    PathBuf::from(noted)
+}
+
+/// Where taking down `version` goes on from in `part`: its bytes so far when they are of that
+/// revision, else nothing, as the part starts over. A revision the service names no version for
+/// can't be told from another, so it always starts over.
+fn resume_at(part: &Path, version: &str) -> Result<u64, String> {
+    let noted = part_version(part);
+    if !version.is_empty() && fs::read_to_string(&noted).is_ok_and(|was| was == version) {
+        return Ok(fs::metadata(part).map_or(0, |metadata| metadata.len()));
+    }
+    let _ = fs::remove_file(part);
+    fs::write(&noted, version).map_err(|error| error.to_string())?;
+    Ok(0)
 }
 
 /// A file or folder of a place as a real one on disk: kept offline, or taken down into the
@@ -600,7 +633,7 @@ fn real_at(path: &Path) -> Result<PathBuf, String> {
         take_down_folder(&at, &at.inner, &target)?;
         return Ok(target);
     }
-    let taken = take_down(&at, &item, &slot)?;
+    let taken = take_down(&at, &item, &slot, &mut |_| true)?;
     // A kept file changed in the cloud: its offline copy follows.
     if offline_version(&at).is_some() {
         if let Some(kept) = offline_slot(&at) {
@@ -622,7 +655,7 @@ fn take_down_folder(at: &At, inner: &str, target: &Path) -> Result<(), String> {
             take_down_folder(at, &path, &target.join(local_name(&item.name)))?;
         } else {
             let child = At { place: at.place.clone(), service: at.service.clone(), inner: path };
-            take_down(&child, item, target)?;
+            take_down(&child, item, target, &mut |_| true)?;
         }
     }
     Ok(())
@@ -710,6 +743,17 @@ pub fn versions(path: &Path) -> Result<Vec<Version>, String> {
     at.service.versions(&at.inner, &item)
 }
 
+/// Asks for each file in S3 Glacier to be restored, readable again in a few hours.
+pub fn warm(paths: &[PathBuf]) -> Result<(), String> {
+    for path in paths {
+        let at = at(path).ok_or("Not in a cloud place")??;
+        let item = at.item()?;
+        at.service.warm(&at.inner, &item)?;
+    }
+    forget(paths);
+    Ok(())
+}
+
 pub fn bring_back(path: &Path, version: &str) -> Result<(), String> {
     let at = at(path).ok_or("Not in a cloud place")??;
     let item = at.item()?;
@@ -771,6 +815,23 @@ fn parse_time(text: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_part_goes_on_only_from_bytes_of_the_same_revision() {
+        let folder = std::env::temp_dir().join(format!("perli-part-{}", std::process::id()));
+        fs::create_dir_all(&folder).unwrap();
+        let part = folder.join("a.txt.part");
+        fs::write(&part, "old").unwrap();
+        assert_eq!(resume_at(&part, "v1").unwrap(), 0, "a part with no revision noted starts over");
+        assert!(!part.exists());
+        fs::write(&part, "abc").unwrap();
+        assert_eq!(resume_at(&part, "v1").unwrap(), 3);
+        assert_eq!(resume_at(&part, "v2").unwrap(), 0, "another revision starts over");
+        assert!(!part.exists());
+        fs::write(&part, "abc").unwrap();
+        assert_eq!(resume_at(&part, "").unwrap(), 0, "no version told is never taken as the same");
+        let _ = fs::remove_dir_all(&folder);
+    }
 
     #[test]
     fn a_name_from_a_service_is_one_safe_name_here() {

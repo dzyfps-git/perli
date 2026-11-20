@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { changedSpans, diffLines, endsOpen, linesOf, patchOf, rowsOf, spacesAside, type Line } from "./diff.ts";
+import { changedSpans, cutShort, diffLines, endsOpen, linesOf, patchOf, rowsOf, spacesAside, type Line } from "./diff.ts";
 
 const marks = (lines: Line[], a: string[], b: string[]) =>
   lines.map((line) => (line.kind === "same" ? ` ${a[line.a!]}` : line.kind === "gone" ? `-${a[line.a!]}` : `+${b[line.b!]}`));
@@ -89,6 +89,10 @@ test("many changes in one stretch still find the shortest way", () => {
   const lines = diffLines(a, b, undefined, undefined, Infinity);
   sound(lines, a, b);
   assert.equal(lines.filter((line) => line.kind === "same").length, 7);
+  assert.equal(cutShort, false);
+  // Out of time, it says so, for the worker to work it out in full after.
+  sound(diffLines(a, b, undefined, undefined, 0), a, b);
+  assert.equal(cutShort, true);
 });
 
 test("lines on one side only are set aside and come back where they were", () => {

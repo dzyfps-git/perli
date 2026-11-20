@@ -608,8 +608,9 @@ fn is_message(file: &mut cfb::CompoundFile<std::fs::File>, folder: &str, item: &
     }
 }
 
-/// An embedded object as a file of its own, where Perli can tell what it is: an Office document,
-/// a file packed into the mail, or a Paint picture. Its name and bytes.
+/// An embedded object as a file of its own: an Office document, a file packed into the mail, or a
+/// Paint picture. A kind Perli can't tell comes out as raw data, a .bin to save and open with what
+/// made it. Its name and bytes.
 fn object(file: &mut cfb::CompoundFile<std::fs::File>, item: &str, name: Option<&str>) -> Option<(String, Vec<u8>)> {
     let class = *file.entry(item).ok()?.clsid();
     let named = |extension: &str| {
@@ -620,12 +621,13 @@ fn object(file: &mut cfb::CompoundFile<std::fs::File>, item: &str, name: Option<
         // Its size comes first.
         let data = native.get(4..)?;
         return match class.as_u128() {
-            PACKAGE => packed(data),
+            PACKAGE => packed(data).or_else(|| Some((named("bin"), data.to_vec()))),
             PAINT => Some((named("bmp"), data.to_vec())),
-            _ => None,
+            _ => Some((named("bin"), data.to_vec())),
         };
     }
-    let &(_, extension) = OBJECTS.iter().find(|(id, _)| *id == class.as_u128())?;
+    // Not told apart, it stays a compound file with its class, which what made it can still read.
+    let extension = OBJECTS.iter().find(|(id, _)| *id == class.as_u128()).map_or("bin", |&(_, extension)| extension);
     let bytes = if extension.len() == 4 {
         binary(file, format!("{item}/Package"))?
     } else {
@@ -898,7 +900,7 @@ LjQK\r\n\
             [
                 Attachment { name: "menu.txt".into(), size: 4 },
                 Attachment { name: "Re_ Lunch.msg".into(), size: 18 + 40 },
-                Attachment { name: "Chart".into(), size: 0 },
+                Attachment { name: "Chart.bin".into(), size: attached[2].1.as_ref().unwrap().len() as u64 },
                 Attachment { name: "Sales.xls".into(), size: attached[3].1.as_ref().unwrap().len() as u64 },
                 Attachment { name: "notes.txt".into(), size: 5 },
             ]
@@ -908,7 +910,8 @@ LjQK\r\n\
         assert!(sales.is_stream("/Workbook"));
         assert_eq!(attached[4], ("notes.txt".to_string(), Some(b"hello".to_vec())), "a packed file comes out as itself");
         assert_eq!(attached[0], ("menu.txt".to_string(), Some(b"soup".to_vec())));
-        assert_eq!(attached[2], ("Chart".to_string(), None), "an embedded object has no bytes to pass off as a file");
+        let chart = cfb::CompoundFile::open(std::io::Cursor::new(attached[2].1.clone().unwrap())).unwrap();
+        assert!(chart.is_stream("/\u{1}Ole"), "an object of a kind Perli can't tell comes out as its raw storage");
         assert_eq!(inner.subject, "Re: Lunch", "the Outlook item inside comes out as a .msg of its own");
         assert_eq!(inner.date, 132_000_000_000_000_000, "its properties are read past a top-level header");
         assert_eq!(header.len(), 32 + 16);
@@ -916,7 +919,7 @@ LjQK\r\n\
         assert_eq!(class, MESSAGE);
         assert_eq!(taken, Ok(folder.join("menu.txt")));
         assert_eq!(zone.unwrap(), FROM_ELSEWHERE, "an attachment taken out to open is marked as from the internet");
-        assert!(object.is_err());
+        assert_eq!(object, Ok(folder.join("Chart.bin")), "and can be taken out to save");
     }
 
     #[test]

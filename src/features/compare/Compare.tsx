@@ -8,7 +8,7 @@ import { coloredLines, languageOf } from "../preview/highlight";
 import { lineEnding } from "../preview/table";
 import { sideChips, WHOLE, zoomed, type Lens } from "./comparable";
 import { CONTEXT, changedSpans, diffLines, endsOpen, linesOf, patchOf, rowsOf, spacesAside, type Line, type Row as DiffRow } from "./diff";
-import type { DiffAsk } from "./diffWorker";
+import type { DiffAnswer, DiffAsk } from "./diffWorker";
 import "../preview/preview.css";
 import "./compare.css";
 
@@ -402,9 +402,12 @@ function TextCompare(props: ViewProps) {
   const [copied, setCopied] = createSignal(false);
   let scroller!: HTMLDivElement;
 
-  /** The diff, worked out in a worker of its own so a long one never stops the window. A newer ask stops an older one. */
+  /**
+   * The diff, worked out in a worker of its own so a long one never stops the window. A newer ask
+   * stops an older one. One cut short by time shows at once, and the full one replaces it when done.
+   */
   let worker: Worker | undefined;
-  const [diffed] = createResource(
+  const [diffed, { mutate }] = createResource(
     () => {
       const both = texts();
       return both && { a: both[0].lines, b: both[1].lines, spaces: spaces(), open: [both[0].open, both[1].open] as const };
@@ -412,12 +415,21 @@ function TextCompare(props: ViewProps) {
     (ask: DiffAsk) => {
       worker?.terminate();
       const mine = (worker = new Worker(new URL("./diffWorker.ts", import.meta.url), { type: "module" }));
+      let first = true;
       return new Promise<Line[]>((done) => {
-        mine.onmessage = ({ data }: MessageEvent<Line[]>) => done(data);
+        mine.onmessage = ({ data }: MessageEvent<DiffAnswer>) => {
+          if (data.last) mine.terminate();
+          if (first) done(data.lines);
+          else mutate(data.lines);
+          first = false;
+        };
         // Without its worker, the window works it out itself.
-        mine.onerror = () => done(diffLines(ask.a, ask.b, ask.spaces ? spacesAside : undefined, ask.open));
+        mine.onerror = () => {
+          mine.terminate();
+          if (first) done(diffLines(ask.a, ask.b, ask.spaces ? spacesAside : undefined, ask.open));
+        };
         mine.postMessage(ask);
-      }).finally(() => mine.terminate());
+      });
     },
   );
   onCleanup(() => worker?.terminate());
