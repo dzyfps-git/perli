@@ -67,6 +67,8 @@ export const [grouping, setGrouping] = stored<Grouping>(
   "grouping",
   (saved("grouping") as Grouping | null) ?? "foldersFirst",
 );
+/** Rows dim softly the longer they go unchanged, down to most of a year. */
+export const [ageDim, setAgeDim] = stored("age-dim", saved("age-dim") === true);
 /** Soft bars behind the Size column, as long as each row's share of the biggest. */
 export const [sizeBars, setSizeBars] = stored("size-bars", saved("size-bars") !== false);
 /** Picture folders in the grid show an even wall of pictures, edge to edge, with no names. */

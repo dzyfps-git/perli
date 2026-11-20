@@ -72,6 +72,8 @@ const ICON_ADD = "\uE710";
 const ICON_SYNC = "\uE895";
 
 const FULL_SHARE = 0.9;
+/** How long the tide of newly used space shows in a drive's bar. */
+const TIDE_MS = 1500;
 /** How long a drive's bar takes to make its wave. */
 const WAVE_MS = 1200;
 /** How many recent files the Recent panel lists. */
@@ -123,10 +125,24 @@ function Place(props: {
   reach?: boolean | null;
   /** A small glyph after the label, such as a lock. */
   badge?: string;
+  /** A sync running: specks cross a small bridge, amber while a clash waits for an answer. */
+  bridge?: "flow" | "clash";
   /** Its own icon, drawn in place of the glyph. */
   picture?: Thumb | null;
 }) {
   const used = () => (props.space ? 1 - props.space.free / props.space.total : 0);
+  // Space taken since the last reading rises into the bar like a tide, then settles.
+  const [tide, setTide] = createSignal<{ from: number; to: number }>();
+  let tideTimer: number | undefined;
+  createEffect(
+    on(used, (now, before) => {
+      if (before === undefined || !props.space || now <= before) return;
+      setTide({ from: before, to: now });
+      window.clearTimeout(tideTimer);
+      tideTimer = window.setTimeout(() => setTide(undefined), TIDE_MS);
+    }),
+  );
+  onCleanup(() => window.clearTimeout(tideTimer));
   return (
     <li
       class="place-item"
@@ -155,6 +171,13 @@ function Place(props: {
           </Show>
         </span>
         <span class="place-label">{props.label}</span>
+        <Show when={props.bridge}>
+          <span class="place-bridge" data-clash={props.bridge === "clash" ? "" : undefined} aria-hidden="true">
+            <i />
+            <i />
+            <i />
+          </span>
+        </Show>
         <Show when={props.badge}>
           <span class="place-badge" aria-hidden="true">
             {props.badge}
@@ -177,6 +200,9 @@ function Place(props: {
                   classList={{ "place-used-full": used() >= FULL_SHARE }}
                   style={{ transform: `scaleX(${used()})`, "--used": used() }}
                 />
+                <Show when={tide()} keyed>
+                  {(rise) => <span class="place-tide" style={{ "--from": rise.from, "--to": rise.to }} />}
+                </Show>
               </span>
             </>
           )}
@@ -235,6 +261,8 @@ export function Sidebar(props: {
   onAddCloud: () => void;
   onSync: (pair: SyncPair) => void;
   onSyncMenu: (event: MouseEvent, pair: SyncPair) => void;
+  /** How a pair's sync is going while it runs. */
+  syncing?: (pair: SyncPair) => "flow" | "clash" | undefined;
   onNewSync: () => void;
   report: (failure: unknown) => void;
 }) {
@@ -669,6 +697,7 @@ export function Sidebar(props: {
                 path=""
                 label={syncLabel(pair)}
                 icon={ICON_SYNC}
+                bridge={props.syncing?.(pair)}
                 about={`${pair.mirror ? "Mirror" : "Update"} from ${pair.from} to ${pair.to}${pair.ran ? `, last run ${new Date(pair.ran).toLocaleString()}` : ", not run yet"}`}
                 onOpen={() => props.onSync(pair)}
                 onMenu={(event) => props.onSyncMenu(event, pair)}

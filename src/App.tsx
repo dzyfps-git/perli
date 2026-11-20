@@ -175,6 +175,7 @@ import { ActivityLog } from "./features/reach/ActivityLog";
 import { DropChips } from "./features/reach/DropChips";
 import { Space } from "./features/space/SpaceView";
 import { TimeRiver } from "./features/space/TimeRiver";
+import { CompareThreads } from "./features/compare/Threads";
 import { Twins } from "./features/space/TwinsView";
 import { readTyped } from "./features/reach/lists";
 import {
@@ -1688,6 +1689,29 @@ export function App() {
     tab.setHome(!shown);
   }
 
+  /** How a pair's sync is going, while one runs: flowing, or stopped on a clash. */
+  function syncingOf(pair: SyncPair) {
+    // By the pair's id: a copy between the same two folders, or another pair on them, is not this sync.
+    const card = jobs.cards.find((one) => !one.ended && one.pair === pair.id);
+    if (!card) return undefined;
+    return card.question?.kind === "conflict" ? "clash" : "flow";
+  }
+
+  /** A job running from one pane's folder into the other's, for the stream across the divider. */
+  function streamOf(tab: Tab) {
+    const [first, second] = tab.panes();
+    const one = first?.folder()?.path;
+    const other = second?.folder()?.path;
+    if (!one || !other) return undefined;
+    for (const card of jobs.cards) {
+      if (card.ended || card.paused || card.question || card.waiting || card.recycle || !card.target) continue;
+      const outOf = (path: string) => card.from.some((from) => samePath(from, path));
+      const toSecond = outOf(one) && samePath(card.target, other);
+      if (toSecond || (outOf(other) && samePath(card.target, one))) return { toSecond, speed: card.rate.speed };
+    }
+    return undefined;
+  }
+
   /** Pictures in a gallery wall, ordered by their main colour. */
   function colourWall(view: FolderView) {
     view.setLayout("gallery");
@@ -2718,6 +2742,7 @@ export function App() {
           onAddCloud={() => setAddingPlace(true)}
           onSync={(pair) => (pair.ran === 0 || pair.mirror ? editSync(pair) : runSync(pair.id))}
           onSyncMenu={showSyncMenu}
+          syncing={syncingOf}
           onNewSync={() => newSync(tabs.activeView().folder()?.path ?? "")}
           report={jobs.report}
         />
@@ -2772,7 +2797,10 @@ export function App() {
               >
                 <For each={tab.panes()}>{(view) => <Pane tab={tab} view={view} />}</For>
                 <Show when={tab.panes().length > 1}>
-                  <PaneDivider tab={tab} />
+                  <PaneDivider tab={tab} stream={streamOf(tab)} />
+                </Show>
+                <Show when={tab.panes().length > 1 && tab.comparing()}>
+                  <CompareThreads tab={tab} />
                 </Show>
               </div>
               {/* The column view's last column is the details of what is selected. */}

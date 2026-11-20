@@ -91,6 +91,33 @@ function fanOut(element: HTMLElement, from: DOMRect, order: number, spring: stri
   );
 }
 
+const RIPPLE_MS = 800;
+/** More ripples than this at once would be a storm. */
+const MOST_RIPPLES = 3;
+
+/** A soft ring spreads from a new row's icon, so the eye finds where it landed. */
+function ripple(element: HTMLElement, order: number) {
+  const icon = element.querySelector<HTMLElement>(".file-icon");
+  if (!icon) return;
+  // Measured by layout, which the row's spring-in scale does not move.
+  let x = icon.offsetWidth / 2;
+  let y = icon.offsetHeight / 2;
+  for (let at: HTMLElement | null = icon; at && at !== element; at = at.offsetParent as HTMLElement | null) {
+    x += at.offsetLeft;
+    y += at.offsetTop;
+  }
+  const ring = document.createElement("span");
+  ring.className = "row-ripple";
+  ring.setAttribute("aria-hidden", "true");
+  ring.style.left = `${x}px`;
+  ring.style.top = `${y}px`;
+  element.append(ring);
+  ring
+    .animate({ scale: [0.4, 4], opacity: [0.7, 0] }, { duration: RIPPLE_MS, delay: 180 + order * 90, easing: "cubic-bezier(0.2, 0.7, 0.3, 1)", fill: "backwards" })
+    .finished.catch(() => undefined)
+    .finally(() => ring.remove());
+}
+
 /** A row coming back from an undo slides in from the side it left by, fading up. */
 const BACK_FRAMES: Keyframe[] = [
   { translate: `${-DRIFT_PX * 2}px 0`, opacity: 0 },
@@ -185,6 +212,7 @@ export function playMoves(
   const back = performance.now() - backAt < DELETE_WINDOW_MS;
   const { frames, duration } = LEAVES[deleted ? "fold" : back ? "drift" : leave];
   let arrived = 0;
+  let rippled = 0;
   const here = new Set<string>();
   const archive = unpackingRow(after);
   const from = archive?.getBoundingClientRect();
@@ -206,7 +234,10 @@ export function playMoves(
     if (!was) {
       // Back rows come one after another, so the eye can follow them home.
       if (back) element.animate(BACK_FRAMES, { duration: ARRIVE_MS, delay: Math.min(arrived++, 8) * 40, easing: spring, fill: "backwards" });
-      else if (!quiet) element.animate({ scale: [0.85, 1], opacity: [0, 1] }, { duration: ARRIVE_MS, easing: spring });
+      else if (!quiet) {
+        element.animate({ scale: [0.85, 1], opacity: [0, 1] }, { duration: ARRIVE_MS, easing: spring });
+        if (rippled < MOST_RIPPLES) ripple(element, rippled++);
+      }
       continue;
     }
     const { top, left } = element.getBoundingClientRect();

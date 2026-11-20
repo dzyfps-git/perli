@@ -31,6 +31,8 @@ import {
   setNewTabPlace,
   setSizeBars,
   sizeBars,
+  ageDim,
+  setAgeDim,
   ROW_HEIGHTS,
   rowDensity,
   selectionBar,
@@ -752,6 +754,12 @@ export function Settings(props: {
               note="A soft bar behind each size shows how big it is beside the biggest in the folder."
               checked={sizeBars()}
               onChange={setSizeBars}
+            />
+            <Switch
+              label="Dim old files"
+              note="Rows fade a little the longer they go unchanged, so what is in use stands out. A file untouched for a year is the faintest."
+              checked={ageDim()}
+              onChange={setAgeDim}
             />
             <Switch
               label="Show picture folders as a wall"

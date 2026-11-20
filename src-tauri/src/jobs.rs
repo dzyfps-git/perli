@@ -85,6 +85,8 @@ enum Change {
         target: Option<String>,
         /// The folders its sources are in, for Space to draw where things went.
         from: Vec<String>,
+        /// The saved sync pair the job runs.
+        pair: Option<String>,
     },
     /// Windows is about to ask for permission.
     Elevating,
@@ -686,6 +688,7 @@ fn target_of(job: &Job) -> Option<String> {
             Some(text(folder))
         }
         Job::Unzip { into: Some(into), .. } => Some(text(into)),
+        Job::Sync { pair } => Some(text(&pair.to)),
         Job::Several { jobs } => jobs.first().and_then(target_of),
         Job::Zip { sources: paths, .. } | Job::Unzip { archives: paths, .. } => {
             paths.first().map(|path| text(&ops::sys::parent(path)))
@@ -700,6 +703,7 @@ fn sources_of(job: &Job) -> Vec<String> {
         Job::Copy { sources, .. } | Job::Move { sources, .. } | Job::Zip { sources, .. } => sources.iter().collect(),
         Job::Recycle { paths } | Job::Delete { paths } => paths.iter().collect(),
         Job::Unzip { archives, .. } => archives.iter().collect(),
+        Job::Sync { pair } => return vec![text(&pair.from)],
         Job::Several { jobs } => return jobs.iter().flat_map(sources_of).fold(Vec::new(), |mut all, one| {
             if !all.contains(&one) {
                 all.push(one);
@@ -823,6 +827,10 @@ impl Bridge {
             },
             target: target_of(&plan.job),
             from: sources_of(&plan.job),
+            pair: match &plan.job {
+                Job::Sync { pair } if !pair.id.is_empty() => Some(pair.id.clone()),
+                _ => None,
+            },
         });
 
         let jobs = self.app.state::<Jobs>();

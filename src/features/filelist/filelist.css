@@ -709,37 +709,36 @@ html[data-icon-style] .file-row[data-thumb] .file-icon {
   pointer-events: none;
 }
 
-/* Sits in the row's padding, so it never covers a name. */
+/* Where a cloud file is, as a small ring in the row's padding, so it never covers a name: hollow
+   while it is only online, filled once a copy is here, and ringed again when it is always kept here. */
 .file-row[data-pinned]::after,
 .file-row[data-synced]::after,
 .file-row[data-cloud]::after {
+  content: "";
   position: absolute;
   top: 50%;
-  left: 2px;
-  color: var(--text-muted);
-  font-family: var(--font-icons);
-  font-size: 10px;
-  line-height: 1;
+  left: 3px;
+  box-sizing: border-box;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
   transform: translateY(-50%);
 }
 
-.file-row[data-pinned]::after {
-  content: "\E718";
-}
-
 .file-row[data-cloud]::after {
-  content: "\E753";
+  border: 1.25px solid var(--text-muted);
 }
 
-/* Here in full: a quiet tick, in the green sync apps use for it. */
 .file-row[data-synced]::after {
-  content: "\E73E";
-  color: color-mix(in srgb, var(--tag-3) 70%, var(--text-muted));
+  background: color-mix(in srgb, var(--tag-3) 70%, var(--text-muted));
   opacity: 0.75;
 }
 
 .file-row[data-pinned]::after {
-  color: var(--tag-3);
+  background: var(--tag-3);
+  box-shadow:
+    0 0 0 1.5px var(--surface),
+    0 0 0 2.5px var(--tag-3);
 }
 
 .file-grid[data-layout="grid"] .file-row[data-pinned]::after,
@@ -748,8 +747,15 @@ html[data-icon-style] .file-row[data-thumb] .file-icon {
   top: var(--space-2);
   right: var(--space-2);
   left: auto;
-  font-size: 12px;
+  width: 8px;
+  height: 8px;
   transform: none;
+}
+
+/* Old rows dim when asked, and the bin's rows fade toward the day Storage Sense empties them.
+   Pointing at one or picking it brings it back. */
+.file-row[data-fade]:not([data-cut], [aria-selected="true"], :hover) {
+  opacity: calc(1 - var(--fade) * 0.45);
 }
 
 .file-grid[data-layout="grid"] .file-name {
@@ -939,6 +945,17 @@ html[data-blurred] :is(.empty-float, .empty-shadow) {
 }
 
 /* The small light a deleted row sends to the Recycle Bin. */
+/* A new row's soft ring, spreading from its icon. */
+.row-ripple {
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  margin: -7px 0 0 -7px;
+  border: 1.5px solid color-mix(in srgb, var(--accent) 70%, transparent);
+  border-radius: 50%;
+  pointer-events: none;
+}
+
 .wisp {
   position: fixed;
   inset: 0 auto auto 0;
