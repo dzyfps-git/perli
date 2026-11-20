@@ -355,6 +355,11 @@ impl<R: io::BufRead> Zstd<R> {
         Self { source, frame: ruzstd::decoding::FrameDecoder::new(), frames: 0 }
     }
 
+    /// What it reads from, for what is left after the last frame.
+    pub(crate) fn source_mut(&mut self) -> &mut R {
+        &mut self.source
+    }
+
     /// Starts the next frame. False at the end of the stream, and at bytes after the first frame
     /// that are no frame at all, which zstd's own tools leave be too.
     fn next_frame(&mut self) -> io::Result<bool> {

@@ -496,6 +496,25 @@ export function QuickPreview(props: {
     return { tracks, fonts };
   }
 
+  /**
+   * The row a queued song is on now, by its path: a refresh since the queue was read may have
+   * moved it. Its old row is looked at first.
+   */
+  async function rowOfSong(track: Track) {
+    const { view } = props.at;
+    const shot = props.at.snapshot();
+    const [there] = await fetchRows(view, shot, track.index, 1).catch(() => []);
+    if (there && pathOf(there) === track.path) return track.index;
+    const count = Math.min(props.at.count(), MOST_QUEUE);
+    for (let at = 0; at < count; at += QUEUE_BATCH) {
+      const rows = await fetchRows(view, shot, at, Math.min(QUEUE_BATCH, count - at));
+      const found = rows.findIndex((row) => pathOf(row) === track.path);
+      if (found >= 0) return at + found;
+      if (!rows.length) break;
+    }
+    return undefined;
+  }
+
   function player(item: Row, midi: boolean): PlayerProps {
     const { view } = props.at;
     const here = place;
@@ -515,7 +534,7 @@ export function QuickPreview(props: {
       lyrics: midi || item.isCloud ? undefined : () => besideText(view, here.shot, here.at, "lrc"),
       peaks: midi || item.isCloud ? undefined : (bars) => audioPeaks(view, here.shot, here.at, bars),
       queue: () => folderSongs(view, here.shot),
-      onPick: (target) => step(target - index()),
+      onPick: (track) => void rowOfSong(track).then((at) => at !== undefined && step(at - index()), console.error),
       keys: (handler) => (viewKeys = handler),
       tint: (color) => body.style.setProperty("--player-tint", color ?? "transparent"),
       onNext: () => void nextAudio(),
@@ -775,7 +794,7 @@ export function QuickPreview(props: {
                   path={pathOf(row()!)}
                   {...streamed(row()!)}
                   note={setNote}
-                  saveOver={(staged, seen) => savePdfOver(pathOf(row()!), staged, seen)}
+                  saveOver={savePdfOver}
                 />}
             </>
           )}

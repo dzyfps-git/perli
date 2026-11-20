@@ -115,10 +115,25 @@ pub(crate) fn data<'a>(zip: &'a mut Zip, index: usize, password: Option<&str>) -
         let password = password.ok_or(ZipError::UnsupportedArchive(ZipError::PASSWORD_REQUIRED))?;
         let (extra, length, time) = (raw.extra_data().unwrap_or_default(), raw.compressed_size(), raw.last_modified().map_or(0, |time| time.timepart()));
         let (squeezed, keeps_crc) = crate::unlock::unlocked(raw, length, &extra, password.as_bytes(), want, time)?;
-        let from = packs::Zstd::new(std::io::BufReader::new(squeezed));
+        let from = Sealed(packs::Zstd::new(std::io::BufReader::new(squeezed)));
         return Ok(if keeps_crc { Box::new(Checked { from, sum: flate2::Crc::new(), want }) } else { Box::new(from) });
     }
     Ok(Box::new(Checked { from: packs::Zstd::new(std::io::BufReader::new(raw)), sum: flate2::Crc::new(), want }))
+}
+
+/// A locked Zstandard entry, read to the end of its locked data once the file in it is out: the
+/// decoder stops at its last frame, and only past that does WinZip AES check its code, so a change
+/// to what comes after would go unseen and the file read as fine.
+struct Sealed<R>(packs::Zstd<R>);
+
+impl<R: std::io::BufRead> Read for Sealed<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let count = self.0.read(buffer)?;
+        if count == 0 && !buffer.is_empty() {
+            std::io::copy(self.0.source_mut(), &mut std::io::sink())?;
+        }
+        Ok(count)
+    }
 }
 
 /// A file's data that fails at its end if it doesn't match the checksum the archive keeps.
@@ -958,6 +973,32 @@ pub(crate) mod tests {
     use std::io::Write;
     use zip::write::SimpleFileOptions;
     use zip::ZipWriter;
+
+    #[test]
+    fn a_locked_zstandard_entry_is_checked_past_its_last_frame() {
+        // "hi" as one raw zstd block, then bytes past the frame that zstd's own tools pass over.
+        let mut payload = vec![0x28, 0xB5, 0x2F, 0xFD, 0x20, 0x02, 0x11, 0x00, 0x00, b'h', b'i'];
+        payload.extend_from_slice(b"tail");
+        let mut zip = ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored).with_aes_encryption(zip::AesMode::Aes256, "pw");
+        zip.start_file("a.zst", options).unwrap();
+        zip.write_all(&payload).unwrap();
+        let mut archive = ZipArchive::new(std::io::Cursor::new(zip.finish().unwrap().into_inner())).unwrap();
+        let mut raw = archive.by_index_raw(0).unwrap();
+        let extra = raw.extra_data().unwrap_or_default();
+        let mut data = Vec::new();
+        raw.read_to_end(&mut data).unwrap();
+        let read = |data: &[u8]| {
+            let (squeezed, _) = crate::unlock::unlocked(data, data.len() as u64, &extra, b"pw", 0, 0).unwrap();
+            let mut out = Vec::new();
+            Sealed(packs::Zstd::new(BufReader::new(squeezed))).read_to_end(&mut out).map(|_| out)
+        };
+        assert_eq!(read(&data).unwrap(), b"hi");
+        // The locked data ends in a 10-byte code; two bytes before it is inside "tail".
+        let mut spoiled = data.clone();
+        spoiled[data.len() - 12] ^= 1;
+        assert!(read(&spoiled).is_err(), "a change after the frame fails the code");
+    }
 
     fn archive(name: &str, files: &[(&str, &[u8])]) -> std::path::PathBuf {
         let path = std::env::temp_dir().join(format!("perli-inside-{}-{name}", std::process::id()));

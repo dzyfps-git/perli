@@ -140,10 +140,15 @@ async function start() {
   for (const other of all) if (other !== page) other.close();
   await invoke("plugin:window|set_position", { label: "main", value: { Physical: { x: SPOT.x, y: SPOT.y } } }).catch((e) => note("place", String(e)));
 }
-/** Every process of this build: each window is a process of its own. */
+/**
+ * Every process the harness started: the app and each window it opened since, which is a process
+ * of its own started by it. A Perli the user runs, of this build too, is left be.
+ */
 const killAll = () => {
+  if (!app?.pid) return;
+  const tree = `$all = Get-CimInstance Win32_Process; $mine = @(${app.pid}); do { $more = @($all | Where-Object { $mine -contains $_.ParentProcessId -and $mine -notcontains $_.ProcessId } | ForEach-Object { $_.ProcessId }); $mine += $more } while ($more.Count); $mine | ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }`;
   try {
-    execFileSync("powershell", ["-NoProfile", "-Command", `Get-Process perli -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq '${exe.replaceAll("/", "\\")}' } | Stop-Process -Force`]);
+    execFileSync("powershell", ["-NoProfile", "-Command", tree]);
   } catch {}
 };
 async function stop() {
