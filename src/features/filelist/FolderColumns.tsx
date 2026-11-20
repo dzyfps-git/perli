@@ -1,8 +1,9 @@
 import { createEffect, createMemo, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
-import { subfolders } from "../../api";
+import { folderItems } from "../../api";
 import type { FolderView } from "../navigation/folderView";
 import { baseName, join, parentOf } from "../navigation/path";
-import { folderColumnWidth, setFolderColumnWidth, showHidden, showSystem } from "./prefs";
+import { iconKindOf } from "./fileKinds";
+import { columnFiles, folderColumnWidth, iconTheme, setFolderColumnWidth, showHidden, showSystem } from "./prefs";
 import { createTypeJump } from "./typeJump";
 
 const NARROWEST = 120;
@@ -17,6 +18,9 @@ interface ColumnsProps {
   view: FolderView;
   onMenu: (event: MouseEvent, path: string) => void;
   onNewTab: (path: string) => void;
+  /** A file in a column picked: shown among its folder, or with `look`, previewed. */
+  onFile: (path: string, look: boolean) => void;
+  onFileMenu: (event: MouseEvent, path: string) => void;
 }
 
 /**
@@ -72,6 +76,8 @@ export function FolderColumns(props: ColumnsProps) {
             onOpen={(folder) => void props.view.open(folder)}
             onMenu={props.onMenu}
             onNewTab={props.onNewTab}
+            onFile={props.onFile}
+            onFileMenu={props.onFileMenu}
             onLast={() => props.view.list()?.focus()}
           />
         )}
@@ -88,12 +94,14 @@ interface ColumnProps {
   onOpen: (path: string) => void;
   onMenu: (event: MouseEvent, path: string) => void;
   onNewTab: (path: string) => void;
+  onFile: (path: string, look: boolean) => void;
+  onFileMenu: (event: MouseEvent, path: string) => void;
   /** Right from the last column goes on to the list. */
   onLast: () => void;
 }
 
 function FolderColumn(props: ColumnProps) {
-  const [names, setNames] = createSignal<string[]>();
+  const [names, setNames] = createSignal<[string, boolean][]>();
   const [resizing, setResizing] = createSignal(false);
   const typed = createTypeJump();
   let list!: HTMLDivElement;
@@ -101,9 +109,9 @@ function FolderColumn(props: ColumnProps) {
   let ticket = 0;
 
   createEffect(
-    on([showHidden, showSystem], ([hidden, system]) => {
+    on([showHidden, showSystem, columnFiles], ([hidden, system, files]) => {
       const asked = ++ticket;
-      subfolders(props.path, hidden, system)
+      folderItems(props.path, hidden, system, files)
         .then((found) => asked === ticket && setNames(found))
         .catch(() => asked === ticket && setNames([]));
     }),
@@ -201,11 +209,31 @@ function FolderColumn(props: ColumnProps) {
       </p>
       <div ref={list} class="folder-column-list">
         <Show when={names()?.length === 0}>
-          <p class="folder-column-empty">No folders</p>
+          <p class="folder-column-empty">{columnFiles() ? "Empty" : "No folders"}</p>
         </Show>
         <For each={names()}>
-          {(name) => {
+          {([name, folder]) => {
             const path = join(props.path, name);
+            if (!folder)
+              return (
+                <button
+                  class="folder-column-file"
+                  onClick={() => props.onFile(path, false)}
+                  onKeyDown={(event) => {
+                    if (event.key !== " ") return;
+                    event.preventDefault();
+                    event.stopPropagation();
+                    props.onFile(path, true);
+                  }}
+                  onContextMenu={(event) => {
+                    event.preventDefault();
+                    props.onFileMenu(event, path);
+                  }}
+                >
+                  <span class="file-icon" data-kind={iconKindOf(name, false, iconTheme().extensions)} aria-hidden="true" />
+                  <span class="folder-column-name">{name}</span>
+                </button>
+              );
             return (
               <button
                 aria-current={name.toLowerCase() === litName() ? "true" : undefined}

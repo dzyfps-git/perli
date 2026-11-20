@@ -7,7 +7,8 @@ import { draw } from "../preview/QuickPreview";
 import { coloredLines, languageOf } from "../preview/highlight";
 import { lineEnding } from "../preview/table";
 import { sideChips, WHOLE, zoomed, type Lens } from "./comparable";
-import { CONTEXT, changedSpans, diffLines, endsOpen, linesOf, patchOf, rowsOf, spacesAside, type Row as DiffRow } from "./diff";
+import { CONTEXT, changedSpans, diffLines, endsOpen, linesOf, patchOf, rowsOf, spacesAside, type Line, type Row as DiffRow } from "./diff";
+import type { DiffAsk } from "./diffWorker";
 import "../preview/preview.css";
 import "./compare.css";
 
@@ -401,10 +402,26 @@ function TextCompare(props: ViewProps) {
   const [copied, setCopied] = createSignal(false);
   let scroller!: HTMLDivElement;
 
-  const lines = createMemo(() => {
-    const both = texts();
-    return both ? diffLines(both[0].lines, both[1].lines, spaces() ? spacesAside : undefined, [both[0].open, both[1].open]) : [];
-  });
+  /** The diff, worked out in a worker of its own so a long one never stops the window. A newer ask stops an older one. */
+  let worker: Worker | undefined;
+  const [diffed] = createResource(
+    () => {
+      const both = texts();
+      return both && { a: both[0].lines, b: both[1].lines, spaces: spaces(), open: [both[0].open, both[1].open] as const };
+    },
+    (ask: DiffAsk) => {
+      worker?.terminate();
+      const mine = (worker = new Worker(new URL("./diffWorker.ts", import.meta.url), { type: "module" }));
+      return new Promise<Line[]>((done) => {
+        mine.onmessage = ({ data }: MessageEvent<Line[]>) => done(data);
+        // Without its worker, the window works it out itself.
+        mine.onerror = () => done(diffLines(ask.a, ask.b, ask.spaces ? spacesAside : undefined, ask.open));
+        mine.postMessage(ask);
+      }).finally(() => mine.terminate());
+    },
+  );
+  onCleanup(() => worker?.terminate());
+  const lines = () => diffed() ?? [];
   const rows = createMemo(() => rowsOf(lines()));
   // New lines bring new folds, all shut.
   createEffect(on(rows, () => setUnfolded(new Map()), { defer: true }));
@@ -554,7 +571,10 @@ function TextCompare(props: ViewProps) {
             {failure()}
           </p>
         </Show>
-        <Show when={texts()}>
+        <Show when={texts() && !diffed()}>
+          <p class="preview-note">Comparing…</p>
+        </Show>
+        <Show when={texts() && diffed()}>
           <div class="diff-summary" role="status">
             <Show
               when={changes().length > 0}

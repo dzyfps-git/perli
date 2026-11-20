@@ -224,11 +224,14 @@ impl Run<'_> {
     }
 
     /// A mail's attachments, each under its own name with no folders, marked as from elsewhere.
-    pub(super) fn save_attachments(&mut self, mail: &Path, folder: &Path) -> Flow {
+    pub(super) fn save_attachments(&mut self, mail: &Path, folder: &Path, only: Option<usize>) -> Flow {
         let read = |_: &mut Self| crate::mail::attachments(mail).map_err(|message| Error::new(E_FAIL, message.as_str()));
-        let Some(parts) = self.attempt(mail, None, read)? else {
+        let Some(mut parts) = self.attempt(mail, None, read)? else {
             return Ok(());
         };
+        if let Some(only) = only {
+            parts = parts.into_iter().nth(only).into_iter().collect();
+        }
         self.add_total(parts.len() as u64, parts.iter().map(|(_, bytes)| bytes.as_ref().map_or(0, Vec::len) as u64).sum());
         let mut landing = Landing::new(folder.to_path_buf(), None, Some(FROM_ELSEWHERE.to_vec()));
         for (name, bytes) in parts {

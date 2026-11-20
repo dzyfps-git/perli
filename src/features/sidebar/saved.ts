@@ -1,7 +1,7 @@
 import { NO_FILTER } from "../filelist/filter";
 import { saved, stored } from "../filelist/prefs";
 import { cleanSmart, type SmartFolder } from "../smart/smartList";
-import { groupsOf, holds, lookIn, lookKey, moved, savedPaths, toggled, withGroup, withLook, type Groups, type Look, type Looks } from "./placeLists";
+import { groupsOf, handedFrom, holds, lookIn, lookKey, moved, savedPaths, toggled, withGroup, withLook, type Groups, type Look, type Looks } from "./placeLists";
 
 export type SectionId = "pinned" | "places" | "smart" | "recent" | "tags" | "cloud" | "network" | "drives";
 
@@ -38,6 +38,8 @@ export const lookOf = (path: string): Look | undefined => lookIn(looks(), path);
 
 /** What was set on `path` itself. */
 export const ownLookOf = (path: string): Look | undefined => looks()[lookKey(path)];
+/** The key of the folder above that `path` takes its look from, if any. */
+export const lookSource = (path: string) => handedFrom(looks(), path);
 
 export const setLook = (path: string, change: Look) => setLooks(withLook(looks(), path, change));
 

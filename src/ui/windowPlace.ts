@@ -1,3 +1,5 @@
+import { createSignal } from "solid-js";
+
 /**
  * Where the window was, in physical pixels, and whether it filled its screen. `x` and `y` are its
  * outer corner and the size is its inside, which is what `setPosition` and `setSize` take.
@@ -30,8 +32,11 @@ export const screensKey = (screens: Screen[]) =>
     .join(" | ");
 
 /** True when enough of the window's top edge is on one of `screens` to grab it there. */
-export const onAScreen = (place: WindowPlace, screens: Screen[]) =>
+export const onAScreen = (place: Pick<WindowPlace, "x" | "y" | "width">, screens: Screen[]) =>
   screens.some(({ position, size }) => {
     const across = Math.min(place.x + place.width, position.x + size.width) - Math.max(place.x, position.x);
     return across >= GRAB && place.y >= position.y - FRAME && place.y <= position.y + size.height - GRAB;
   });
+
+/** Where one more window is now, which its session keeps so it comes back there. */
+export const [ownPlace, setOwnPlace] = createSignal<WindowPlace>();

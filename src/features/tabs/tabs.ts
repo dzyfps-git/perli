@@ -1,7 +1,21 @@
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { createEffect, createResource, createSignal, on } from "solid-js";
-import { closeView, compared, openWindow, type Marks } from "../../api";
+import {
+  closeView,
+  compared,
+  compareSettle,
+  compareStop,
+  compareSummary,
+  isFile,
+  MARKS,
+  openWindow,
+  rowNamed,
+  type CompareSummary,
+  type Mark,
+  type Marks,
+} from "../../api";
 import { morph } from "../../ui/morph";
-import { newTabPlace } from "../filelist/prefs";
+import { compareByContent, compareHideSame, compareScroll, newTabPlace } from "../filelist/prefs";
 import { createFolderView, type FolderView } from "../navigation/folderView";
 import { followTarget } from "../navigation/path";
 import type { Place, SavedPane, SavedTab, Session } from "./session";
@@ -45,20 +59,36 @@ function createTab(views: FolderView[], startSwapped = false, saved: Layout = {}
   createEffect(() => {
     if (panes().length < 2) setComparing(false);
   });
+  /** Bumped when the compare learned more, for the marks to be asked for again. */
+  const [learned, setLearned] = createSignal(0);
+  /** The one mark each pane's rows are cut down to, picked from a count in its bar. */
+  const [onlyMarks, setOnlyMarks] = createSignal(new Map<FolderView, Mark>());
+  /** Which marks the rows `view` leaves out have, by their place in `MARKS`. */
+  const hiding = (view: FolderView) => {
+    const only = onlyMarks().get(view);
+    if (only) return MARKS.flatMap((mark, at) => (mark === only ? [] : [at]));
+    return compareHideSame() ? [MARKS.indexOf("same")] : [];
+  };
+  const apart = (summary: CompareSummary) => new Map(summary.folders.map(({ row, ...rest }) => [row, rest]));
   // Either pane reading again, sorting or going elsewhere compares anew. Searches have no marks.
   const [marks] = createResource(
     () => {
       const [one, two] = panes();
       const shown = [one?.folder(), two?.folder()];
       if (!comparing() || !shown[0] || !shown[1] || one.query() || two.query()) return undefined;
-      return [one, shown[0].request, two, shown[1].request] as const;
+      return [one, shown[0].request, two, shown[1].request, compareByContent(), hiding(one), hiding(two), learned()] as const;
     },
-    async ([one, oneRequest, two, twoRequest]): Promise<Map<FolderView, Marks>> => {
+    async ([one, oneRequest, two, twoRequest, content, hideOne, hideTwo]): Promise<Map<FolderView, Marks>> => {
       try {
-        const [first, second] = await Promise.all([compared(one.id, oneRequest, two.id, twoRequest), compared(two.id, twoRequest, one.id, oneRequest)]);
+        const [first, second, firstSaid, secondSaid] = await Promise.all([
+          compared(one.id, oneRequest, two.id, twoRequest, content),
+          compared(two.id, twoRequest, one.id, oneRequest, content),
+          compareSummary(one.id, oneRequest, two.id, twoRequest, content, hideOne),
+          compareSummary(two.id, twoRequest, one.id, oneRequest, content, hideTwo),
+        ]);
         return new Map([
-          [one, { snapshot: oneRequest, marks: first }],
-          [two, { snapshot: twoRequest, marks: second }],
+          [one, { snapshot: oneRequest, marks: first, summary: firstSaid, apart: apart(firstSaid) }],
+          [two, { snapshot: twoRequest, marks: second, summary: secondSaid, apart: apart(secondSaid) }],
         ]);
       } catch {
         // A newer read took the place of one side meanwhile, and it compares in its turn.
@@ -66,6 +96,56 @@ function createTab(views: FolderView[], startSwapped = false, saved: Layout = {}
       }
     },
   );
+  // Rows a pane leaves out go from its listing, and each side still stands against all of the other.
+  createEffect(() => {
+    const now = marks.latest;
+    if (comparing() && now) for (const [view, { summary }] of now) view.setExcept(summary?.hidden ?? []);
+  });
+  // Folders, and files by content, take a while: a round at a time, until no mark waits.
+  let settling = false;
+  createEffect(() => {
+    const now = marks.latest;
+    const [one, two] = panes();
+    const [mine, theirs] = [now?.get(one), now?.get(two)];
+    if (!comparing() || settling || !mine || !theirs) return;
+    const pending = MARKS.indexOf("pending");
+    if (!mine.marks.includes(pending) && !theirs.marks.includes(pending)) return;
+    settling = true;
+    compareSettle(one.id, mine.snapshot, two.id, theirs.snapshot, compareByContent())
+      .catch(() => 0)
+      .then((settled) => {
+        settling = false;
+        // Marks that came meanwhile may wait on more.
+        if (settled > 0 || marks.latest !== now) setLearned(learned() + 1);
+      });
+  });
+  createEffect(
+    on(
+      comparing,
+      (now) => {
+        if (now) return;
+        setOnlyMarks(new Map());
+        for (const view of panes()) view.setExcept([]);
+        const [one, two] = panes();
+        if (one && two) compareStop(one.id, two.id).catch(() => {});
+      },
+      { defer: true },
+    ),
+  );
+
+  /** One line-up at a time. The latest scroll waits its turn, and those between are skipped. */
+  let lining = false;
+  let nextLine: (() => Promise<void>) | undefined;
+  const lineUp = (line: () => Promise<void>) => {
+    if (lining) return void (nextLine = line);
+    lining = true;
+    line().finally(() => {
+      lining = false;
+      const next = nextLine;
+      nextLine = undefined;
+      if (next) lineUp(next);
+    });
+  };
 
   /** Where the tab itself is taking each pane, so getting there leads the other pane nowhere. */
   const led = new Map<FolderView, string>();
@@ -84,9 +164,16 @@ function createTab(views: FolderView[], startSwapped = false, saved: Layout = {}
     const going = led.get(mover);
     led.delete(mover);
     const other = otherPane(panes(), mover);
-    // A pane still on its way follows from where it is going.
-    const target = followTarget(from, to, going, linked(), other && (led.get(other) ?? other.path()));
-    if (other && target) lead(other, target, true);
+    // A pane still on its way follows from where it is going. Compared panes step in and out
+    // together too, where the other side has that folder.
+    const target = followTarget(from, to, going, linked() || comparing(), other && (led.get(other) ?? other.path()));
+    if (!other || !target) return;
+    if (linked()) return void lead(other, target, true);
+    isFile(target)
+      .then((file) => {
+        if (!file && comparing()) void lead(other, target, true);
+      })
+      .catch(() => {});
   };
   const listen = (list: FolderView[]) => {
     for (const view of list) view.setFollower(follow(view));
@@ -127,6 +214,27 @@ function createTab(views: FolderView[], startSwapped = false, saved: Layout = {}
     setComparing,
     /** How the rows of `view` stand against the other pane's, while the two are compared. */
     marksOf: (view: FolderView) => (comparing() ? marks.latest?.get(view) : undefined),
+    /** The one mark `view`'s rows are cut down to, if any. */
+    onlyMark: (view: FolderView) => onlyMarks().get(view),
+    setOnlyMark(view: FolderView, mark: Mark | undefined) {
+      const next = new Map(onlyMarks());
+      if (mark) next.set(view, mark);
+      else next.delete(view);
+      setOnlyMarks(next);
+    },
+    /** The user scrolled `view`: the other compared pane lines up its row of the same name. */
+    scrolled(view: FolderView, tops: { name: string; offset: number }[]) {
+      const other = otherPane(panes(), view);
+      const shown = other?.folder();
+      if (!comparing() || !compareScroll() || !other || !shown || tops.length === 0) return;
+      lineUp(() =>
+        rowNamed(other.id, shown.request, tops.map((top) => top.name))
+          .then((found) => {
+            if (found) other.list()?.scrollToRow(found[1], tops[found[0]].offset);
+          })
+          .catch(() => {}),
+      );
+    },
     /** What to save of how the panes sit. Only what differs from a new tab. */
     layout(): Layout {
       return {
@@ -138,6 +246,17 @@ function createTab(views: FolderView[], startSwapped = false, saved: Layout = {}
     },
   };
 }
+
+/** This window's tabs went to another window, so closing it leaves nothing to reopen. */
+let left = false;
+
+/** Closes this window once its tabs live in another one. */
+export function leaveWindow() {
+  left = true;
+  return getCurrentWindow().close();
+}
+
+export const leftWindow = () => left;
 
 export function createTabs() {
   let nextId = 0;

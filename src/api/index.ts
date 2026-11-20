@@ -115,6 +115,8 @@ export interface Filter {
   tags: number[];
   /** Folders stay whatever `extensions` asks, so a picker can still go through them. */
   foldersStay?: boolean;
+  /** Rows in the folder itself with these names, in lowercase, are left out, as a compare asks. */
+  except?: string[];
 }
 
 /** Which rows a view shows and in what order. */
@@ -142,10 +144,12 @@ export interface Start {
   select: string[];
   session: string | null;
   home: string | null;
-  /** Started by "Move to new window", so it keeps no window place of its own. */
+  /** One more window, which keeps its place in its own session, not the first window's. */
   newWindow: boolean;
   /** A tab moved here from another window, as `parseMoved` reads it. */
   moved: string | null;
+  /** The window keeps its tabs in a file of its own. False for a start on one folder, a detour. */
+  keep: boolean;
 }
 
 export interface DriveSpace {
@@ -221,7 +225,7 @@ export type Task =
   | { kind: "paste"; folder: string }
   | { kind: "pasteShortcut"; folder: string }
   /** Every attachment of a mail file, into `folder`. */
-  | { kind: "saveAttachments"; path: string; folder: string }
+  | { kind: "saveAttachments"; path: string; folder: string; only?: number }
   | { kind: "tag"; target: ShellTarget; tag: number; on: boolean }
   | { kind: "deleteTag"; id: number }
   | { kind: "drop"; folder: string; action?: DropAction; id: number }
@@ -232,6 +236,8 @@ export type Task =
   | { kind: "extractZip"; path: string }
   /** A quick edit's text saved over its file. `seen` is what the preview said of it when read. */
   | { kind: "save"; path: string; text: string; seen?: string }
+  /** A filled-in PDF, staged by `stagePdf`, saved over its file. */
+  | { kind: "savePdf"; path: string; staged: number; seen?: string }
   /** Pictures by path, from a preview, or the selected rows. */
   | { kind: "picture"; paths?: string[]; selection?: Selection; edit: PictureEdit; keep?: PictureKeep }
   | { kind: "wallpaper"; path: string };
@@ -771,21 +777,56 @@ export interface GitStatus {
 }
 
 /** What git says of `folder`'s rows and its branch, or null outside a repository or without git. */
-export const gitStatus = (folder: string) => invoke<GitStatus | null>("git_status", { folder });
+/** `fresh` asks git past what it said for the same index and rows. */
+export const gitStatus = (folder: string, fresh = false) => invoke<GitStatus | null>("git_status", { folder, fresh });
 
-/** How a row stands against the other pane's row of the same name, in the order of `folder::Mark`. */
-export const MARKS = ["none", "only", "newer", "older", "differs", "same"] as const;
+/** How a row stands against the other pane's row of the same name, in the order of `folder::Mark`.
+ *  Pending is a folder whose insides, or a file whose bytes, are still being compared. */
+export const MARKS = ["none", "only", "newer", "older", "differs", "same", "pending"] as const;
 export type Mark = (typeof MARKS)[number];
 
-/** One byte a row of `snapshot`, each an index into `MARKS`. */
+/** What sets a compared folder apart from its twin: how many things under it, and the first few. */
+export interface Apart {
+  count: number;
+  names: string[];
+}
+
+/** What the bar of compared panes says of one: how many rows it could show have each mark (by its
+ *  place in `MARKS`), the names of rows to leave out, and what sets each shown folder apart. */
+export interface CompareSummary {
+  counts: number[];
+  hidden: string[];
+  folders: ({ row: number } & Apart)[];
+}
+
+/** One byte a row of `snapshot`, each an index into `MARKS`, and what the bar says. */
 export interface Marks {
   snapshot: number;
   marks: Uint8Array;
+  summary?: CompareSummary;
+  /** What sets each folder row apart, by row. */
+  apart?: Map<number, Apart>;
 }
 
-/** How each row of one pane stands against the rows of the other. */
-export const compared = (view: number, request: number, other: number, otherRequest: number) =>
-  invoke<ArrayBuffer>("compared", { view, request, other, otherRequest }).then((bytes) => new Uint8Array(bytes));
+/** How each row of one pane stands against the rows of the other. With `content`, files alike in
+ *  size stand by their bytes. */
+export const compared = (view: number, request: number, other: number, otherRequest: number, content = false) =>
+  invoke<ArrayBuffer>("compared", { view, request, other, otherRequest, content }).then((bytes) => new Uint8Array(bytes));
+
+/** What the bar of compared panes says of one, with the names of its rows whose mark is in `hide`. */
+export const compareSummary = (view: number, request: number, other: number, otherRequest: number, content: boolean, hide: number[]) =>
+  invoke<CompareSummary>("compare_summary", { view, request, other, otherRequest, content, hide });
+
+/** Learns for a while what the marks of compared panes wait on. How many pairs it settled. */
+export const compareSettle = (view: number, request: number, other: number, otherRequest: number, content: boolean) =>
+  invoke<number>("compare_settle", { view, request, other, otherRequest, content });
+
+/** Stops learning for two panes' marks, as their compare ended. */
+export const compareStop = (view: number, other: number) => invoke<void>("compare_stop", { view, other });
+
+/** The first of `names` among a view's rows, in any case: which of them, and its row. */
+export const rowNamed = (view: number, request: number, names: string[]) =>
+  invoke<[number, number] | null>("row_named", { view, request, names });
 
 /** How many rows fit `filter`, to tell a folder of songs or pictures by. */
 export const countWhere = (view: number, request: number, filter: Filter) =>
@@ -932,9 +973,13 @@ export const ownTemplates = () => invoke<OwnTemplate[]>("own_templates");
 
 export const templatesFolder = () => invoke<string>("templates_folder");
 
+/** What is right inside `path`, in Explorer's order, as [name, is a folder]: the folders, then with `files` the files. */
+export const folderItems = (path: string, showHidden: boolean, showSystem: boolean, files: boolean) =>
+  invoke<[string, boolean][]>("subfolders", { path, showHidden, showSystem, files });
+
 /** The names of the folders right inside `path`, in Explorer's order. */
 export const subfolders = (path: string, showHidden: boolean, showSystem: boolean) =>
-  invoke<string[]>("subfolders", { path, showHidden, showSystem });
+  folderItems(path, showHidden, showSystem, false).then((items) => items.map(([name]) => name));
 
 /** The apps holding the selected files. */
 export const fileUsers = (selection: Selection) => invoke<string[]>("file_users", { selection });
@@ -947,6 +992,8 @@ export const onFolderChanged = (handler: (view: number) => void) =>
 export interface OpenAsk {
   folder: string | null;
   select: string[];
+  /** For this window, which opened for the folder: select here, and open no window of its own. */
+  here?: boolean;
 }
 
 export const onOpenAsked = (handler: (ask: OpenAsk) => void) =>
@@ -982,10 +1029,30 @@ export function ghostShow(width: number, height: number, rgba: Uint8ClampedArray
 export const ghostMove = () => invoke<void>("ghost_move");
 export const ghostHide = () => invoke<void>("ghost_hide");
 
-/** Starts one more Perli with a window of its own. */
+/** Starts one more Perli with a window of its own, and gives its process id. */
 /** `moved` is a whole tab for the new window to take, as `parseMoved` reads it. */
 export const openWindow = (folder: string, select: string[], moved?: string) =>
-  invoke<void>("open_window", { folder, select, moved: moved ?? null });
+  invoke<number>("open_window", { folder, select, moved: moved ?? null });
+
+/** This window's tabs go on closing: kept to reopen, or dropped when they went to another window. */
+export const forgetSession = (reopenable: boolean) => invoke<void>("forget_session", { reopenable });
+/** Opens again every window that was open when Perli last stopped. */
+export const restoreWindows = () => invoke<void>("restore_windows");
+/** Opens the window closed last. False when none is kept. */
+export const reopenWindow = () => invoke<boolean>("reopen_window");
+/** Tells the back end which workspace this window shows, for other windows to ask. */
+export const setWorkspace = (name: string | undefined) => invoke<void>("set_workspace", { name: name ?? null });
+/** For each name, the other Perli window showing that workspace, or null. */
+export const workspaceWindows = (names: string[]) => invoke<(number | null)[]>("workspace_windows", { names });
+/** Brings another Perli window to the front. */
+export const showWindow = (window: number) => invoke<boolean>("show_window", { window });
+/** Asks the window showing workspace `name` to send it here and close. False when it won't. */
+export const bringWorkspace = (window: number, name: string) => invoke<boolean>("bring_workspace", { window, name });
+/** Sends a workspace, as JSON, to the window that asked for it. */
+export const sendWorkspace = (window: number, text: string) => invoke<boolean>("send_workspace", { window, text });
+/** Selects `select` in `folder` in the window of Perli `process`, once it is up. False if it never came. */
+export const selectInWindow = (process: number, folder: string, select: string[]) =>
+  invoke<boolean>("select_in_window", { process, ask: { folder, select, here: true } });
 
 export const onDrivesChanged = (handler: () => void) => listen("drives-changed", handler);
 
@@ -1096,9 +1163,10 @@ export const fetchBigPicture = (view: number, request: number, row: number, edge
 export const pictureSize = (view: number, request: number, row: number) =>
   invoke<[number, number] | null>("picture_size", { view, request, row });
 
-/** How wide each row of a snapshot shows for its height, turned the way its photo says, for the
- *  gallery. 0 for a row that is no picture. */
-export const pictureAspects = (view: number, request: number) => invoke<number[]>("picture_aspects", { view, request });
+/** How wide each of `count` rows of a snapshot from `from` on shows for its height, turned the way
+ *  its photo or video says, for the gallery. 0 for a row that is no picture. */
+export const pictureAspects = (view: number, request: number, from: number, count: number) =>
+  invoke<number[]>("picture_aspects", { view, request, from, count });
 
 /** A comic page or a book's picture, by its name inside the archive. */
 export const fetchArchivePicture = (view: number, request: number, row: number, entry: string, edge: number, password?: string) =>
@@ -1127,6 +1195,12 @@ export const archiveTest = (view: number, request: number, row: number, password
 export const dragEntry = (view: number, request: number, row: number, entry: string, password?: string) =>
   invoke<void>("drag_entry", { view, request, row, entry, password: password ?? null });
 
+/** One attachment of a mail, taken out to a file of its own to open, show or drag. */
+export const mailAttachment = (path: string, index: number) => invoke<string>("mail_attachment", { path, index });
+
+/** A mail taken out of another, to show in its place. */
+export const readMail = (path: string) => invoke<Mail>("read_mail", { path });
+
 /** The words beside a file under its own name: lyrics (`lrc`) or subtitles (`srt`, `vtt`). */
 /** The loudest point of each of `bars` slices of a sound, from 0 to 1, read a little at a time. */
 export const audioPeaks = (view: number, request: number, row: number, bars: number) =>
@@ -1154,6 +1228,19 @@ export function saveFrame(view: number, request: number, row: number, seconds: n
   body.set(new Uint8Array(png), HEAD);
   return invoke<string>("save_frame", body);
 }
+
+/** A filled-in PDF written beside its file as "name (filled).pdf". Answers the name it took. */
+export function savePdfCopy(path: string, pdf: Uint8Array) {
+  const name = new TextEncoder().encode(path);
+  const body = new Uint8Array(4 + name.length + pdf.length);
+  new DataView(body.buffer).setUint32(0, name.length, true);
+  body.set(name, 4);
+  body.set(pdf, 4 + name.length);
+  return invoke<string>("save_pdf_copy", body);
+}
+
+/** A filled-in PDF kept for a "savePdf" job to write over its file. Answers its ticket. */
+export const stagePdf = (pdf: Uint8Array) => invoke<number>("stage_pdf", pdf);
 
 /** One chapter of a book as safe HTML, by its name inside the archive. */
 export const bookChapter = (view: number, request: number, row: number, entry: string) =>

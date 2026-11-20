@@ -13,6 +13,8 @@ export interface DeleteRequest {
   note?: string;
   cancelLabel?: string;
   confirmLabel?: string;
+  /** Nothing is lost, so the confirm button isn't red. */
+  safe?: boolean;
   confirm: () => void;
 }
 
@@ -55,7 +57,8 @@ export function ConfirmDelete(props: { request: DeleteRequest; onClose: () => vo
           {props.request.cancelLabel ?? "Cancel"}
         </button>
         <button
-          class="job-choice confirm-delete"
+          class="job-choice"
+          classList={{ "confirm-delete": !props.request.safe }}
           disabled={!props.request.note && !measured()}
           onClick={confirm}
         >

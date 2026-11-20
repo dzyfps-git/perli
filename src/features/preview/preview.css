@@ -3395,6 +3395,88 @@ th[aria-sort="descending"] .table-sort::after {
   color: var(--text-muted);
 }
 
+.mail-attachment {
+  cursor: grab;
+}
+
+/* Open and Save sit quietly on each attachment and come up under the pointer or the keyboard. */
+.mail-attachment-buttons {
+  display: flex;
+  gap: 2px;
+  margin-left: 2px;
+  opacity: 0.55;
+  transition: opacity var(--motion);
+}
+
+.mail-attachment:hover .mail-attachment-buttons,
+.mail-attachment:focus-within .mail-attachment-buttons {
+  opacity: 1;
+}
+
+.mail-attachment-button {
+  padding: 1px 6px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  transition: background-color var(--motion), border-color var(--motion);
+}
+
+.mail-attachment-button:hover:not(:disabled),
+.mail-attachment-button:focus-visible {
+  border-color: var(--border);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.mail-attachment-button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* A mail opened from an attachment slides in over the one it came in, with the way back on top. */
+.mail-inner {
+  animation: mail-in var(--motion-slide);
+}
+
+@keyframes mail-in {
+  from {
+    opacity: 0;
+    transform: translateX(16px);
+  }
+}
+
+.mail-back {
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-start;
+  gap: 6px;
+  max-width: 100%;
+  padding: 3px 10px 3px 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.mail-back:hover,
+.mail-back:focus-visible {
+  background: color-mix(in srgb, var(--accent) 12%, var(--surface));
+}
+
+.mail-back-icon {
+  font-family: var(--font-icons);
+  font-size: 11px;
+}
+
 .mail-attachment-actions {
   display: flex;
   flex-wrap: wrap;
@@ -3423,8 +3505,14 @@ th[aria-sort="descending"] .table-sort::after {
 @media (prefers-reduced-motion: reduce) {
   .mail-view,
   .mail-attachment,
-  .mail-saved {
+  .mail-saved,
+  .mail-inner {
     animation: none;
+  }
+
+  .mail-attachment-buttons,
+  .mail-attachment-button {
+    transition: none;
   }
 }
 
@@ -3782,6 +3870,9 @@ th[aria-sort="descending"] .table-sort::after {
 }
 
 .pdf-page {
+  /* pdf.js sizes its layers rounded to these; without them the field layer has no size at all. */
+  --scale-round-x: 1px;
+  --scale-round-y: 1px;
   position: relative;
   flex: none;
   background: white;
@@ -3863,6 +3954,20 @@ th[aria-sort="descending"] .table-sort::after {
   bottom: var(--space-4);
   left: 50%;
   translate: -50% 0;
+}
+
+.pdf-told {
+  position: absolute;
+  top: calc(var(--space-4) + 32px);
+  left: 50%;
+  margin: 0;
+  translate: -50% 0;
+  pointer-events: none;
+}
+
+/* Fields turn with the night pages, so their text stays light on dark. */
+.pdf-scroll[data-night] .annotationLayer {
+  filter: invert(0.88) hue-rotate(180deg);
 }
 
 /* pdf.js's text over each page: clear, there only to be selected and found. */

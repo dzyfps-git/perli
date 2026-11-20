@@ -21,6 +21,12 @@
   pointer-events: none;
 }
 
+.tooltip[data-lines] {
+  max-width: 480px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .tooltip-glide {
   transition:
     left var(--motion-glide),

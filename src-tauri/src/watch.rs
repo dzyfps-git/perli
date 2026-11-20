@@ -49,8 +49,15 @@ impl Watch {
 }
 
 fn stamp(folder: &Path) -> Option<u64> {
-    let entries = sys::read_dir(folder).ok()?;
     let mut hasher = DefaultHasher::new();
+    let Ok(entries) = sys::read_dir(folder) else {
+        // A file watched on its own, as git's index, changes by its size and time.
+        let stat = sys::stat(folder).ok()??;
+        return stat.is_file().then(|| {
+            (stat.size, stat.modified).hash(&mut hasher);
+            hasher.finish()
+        });
+    };
     for (name, stat) in entries {
         // NTFS moves a folder's time in its parent a while after something inside changed,
         // which would read the folder twice for one change. What is inside has its own watch.
@@ -206,6 +213,20 @@ mod tests {
         assert_eq!(watches.changed(), [1]);
 
         fs::write(inner.join("new.txt"), "").unwrap();
+        assert_eq!(watches.changed(), [1]);
+        assert!(watches.changed().is_empty());
+        fs::remove_dir_all(&folder).unwrap();
+    }
+
+    #[test]
+    fn a_file_watched_on_its_own_changes_by_its_size_and_time() {
+        let folder = sandbox("file");
+        let index = folder.join("index");
+        fs::write(&index, "a").unwrap();
+        let watches = Watches::default();
+        watches.set(1, Some(Watch::new([folder.join("missing"), index.clone()])));
+        assert!(watches.changed().is_empty());
+        fs::write(&index, "a longer text").unwrap();
         assert_eq!(watches.changed(), [1]);
         assert!(watches.changed().is_empty());
         fs::remove_dir_all(&folder).unwrap();

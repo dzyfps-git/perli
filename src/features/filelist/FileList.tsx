@@ -1,6 +1,7 @@
 import { createEffect, createMemo, createRoot, createSignal, For, Index, on, onCleanup, onMount, Show } from "solid-js";
 import {
   fetchRows,
+  fetchBigPicture,
   fetchPictureFile,
   fetchThumb,
   findRow,
@@ -85,6 +86,7 @@ const COMPARE_TEXT: Record<Mark, string> = {
   older: "Older than in the other pane",
   differs: "Differs from the one in the other pane",
   same: "Same as in the other pane",
+  pending: "Still being compared with the other pane",
 };
 /** Pages of rows kept per list, the least lately painted going first: 8,192 rows, many screens. */
 const MAX_PAGES = 32;
@@ -165,6 +167,8 @@ interface PooledRow {
   thumb?: HTMLCanvasElement;
   /** What `thumb` is for. */
   thumbKey?: string;
+  /** The edge of the sharper picture `thumb` shows in place of the thumbnail. */
+  sharpEdge?: number;
   /** The lit letters of a search in its name. */
   matches?: Range[];
   /** The arrow that opens a folder in place, made when the list first needs one. */
@@ -322,7 +326,15 @@ function extensionOf(name: string) {
 }
 
 /** How big a folder's cover picture is read, enough for the largest tile. */
-const COVER_EDGE = 256;
+const COVER_EDGE = 512;
+/** The thumbnail's longest side, as `thumbs::EDGE` reads it. */
+const THUMB_EDGE = 256;
+/** The sharper pictures a big tile asks for once its thumbnail shows. */
+const SHARP_EDGES = [512, 1024];
+/** A picture blown up this much still looks sharp, which spares the bigger read. */
+const SHARP_SLACK = 1.25;
+/** Rows a gallery asks the shape of at a time, around its view. */
+const ASPECT_PAGE = 400;
 
 /** Offered while a new file is named, narrowed by what follows the dot. */
 const NEW_EXTENSIONS = [".txt", ".md", ".json", ".csv", ".html", ".css", ".js", ".ts", ".py", ".ps1", ".xml", ".yaml", ".log", ".ini"];
@@ -413,6 +425,8 @@ export function FileList(props: {
   /** `two` holds both rows when exactly two are selected. */
   barItems: (two?: Row[]) => BarItem[];
   connect: (list: ListHandle) => void;
+  /** The user scrolled: the names of the rows on top, each with how far below the top it sits. */
+  onScrolled?: (tops: { name: string; offset: number }[]) => void;
   /** Where to start scrolled to, on coming back to a folder. */
   scrollTo?: number;
   /** The list goes: what was selected, by name, and how far down it was. */
@@ -480,9 +494,12 @@ export function FileList(props: {
   let places: Places | Gallery = placesOf([], 0, 1, 1, HEADER_HEIGHT);
   /** The places again, when the layout is the gallery, for what only it has. */
   let gallery: Gallery | undefined;
-  /** How wide each row's picture shows for its height, read for the snapshot `aspectsOf`. */
+  /** How wide each row's picture shows for its height, read in pages for the snapshot `aspectsOf`. */
   let aspects: number[] = [];
   let aspectsOf = -1;
+  /** The pages of rows of the snapshot `pagesOf` read or on their way. */
+  let pagesOf = -1;
+  const aspectPages = new Set<number>();
   let aspectsAsked = false;
   /** How the gallery's next layout moves its pictures there, if at all. */
   let galleryMotion: "reflow" | "spring" | undefined;
@@ -540,18 +557,69 @@ export function FileList(props: {
     },
   );
 
+  const baseOf = (key: string) => key.slice(0, key.lastIndexOf("|"));
+  const sharpEdgeOf = (key: string) => Number(key.slice(key.lastIndexOf("|") + 1));
+
+  /** A big tile's picture again, sharp for its size on this screen, once its thumbnail shows. */
+  const sharpThumbs = createThumbLoader(
+    (index, key) => fetchBigPicture(props.view, shown, index, sharpEdgeOf(key)),
+    (index, key) => rowShowing(index, baseOf(key)) !== undefined,
+    (index, key) => {
+      const pooled = rowShowing(index, baseOf(key));
+      const sharp = cachedThumb(key);
+      if (!pooled?.thumb || !sharp) return;
+      draw(pooled.thumb, sharp);
+      pooled.sharpEdge = sharpEdgeOf(key);
+      if (!reducedMotion.matches) pooled.thumb.animate({ filter: ["blur(2px)", "blur(0)"] }, { duration: 240, easing: "ease-out" });
+    },
+  );
+
+  function draw(canvas: HTMLCanvasElement, thumb: Thumb) {
+    canvas.width = thumb.width;
+    canvas.height = thumb.height;
+    canvas.getContext("2d")!.putImageData(new ImageData(thumb.pixels, thumb.width, thumb.height), 0, 0);
+  }
+
   function showThumb(pooled: PooledRow, key: string | undefined) {
     const { thumb: canvas } = pooled;
     if (!canvas) return;
     pooled.thumbKey = key;
+    pooled.sharpEdge = undefined;
     const thumb = key ? cachedThumb(key) : null;
     pooled.element.toggleAttribute("data-thumb", !!thumb);
     if (thumb) {
-      canvas.width = thumb.width;
-      canvas.height = thumb.height;
-      canvas.getContext("2d")!.putImageData(new ImageData(thumb.pixels, thumb.width, thumb.height), 0, 0);
+      draw(canvas, thumb);
+      sharpen(pooled);
     } else if (key && thumb === undefined) {
       thumbs.ask(pooled.index, key);
+    }
+  }
+
+  /** The edge a tile's picture wants for its size on this screen, past the thumbnail's, or none. */
+  function sharpEdge(pooled: PooledRow) {
+    if (props.layout !== "grid" && props.layout !== "gallery") return undefined;
+    const box = gallery ? Math.max(gallery.width(pooled.index), gallery.lineHeight(pooled.index)) : itemHeight;
+    const need = box * devicePixelRatio;
+    if (need <= THUMB_EDGE * SHARP_SLACK) return undefined;
+    return SHARP_EDGES.find((edge) => need <= edge * SHARP_SLACK) ?? SHARP_EDGES[SHARP_EDGES.length - 1];
+  }
+
+  /** Swaps a big tile's thumbnail for a sharper picture, when the file has more to give. */
+  function sharpen(pooled: PooledRow) {
+    const key = pooled.thumbKey;
+    if (!pooled.thumb || !key || key.startsWith("stack|") || key.startsWith("cover|")) return;
+    const thumb = cachedThumb(key);
+    // A thumbnail smaller than its edge is the whole picture already.
+    if (!thumb || Math.max(thumb.width, thumb.height) < THUMB_EDGE) return;
+    const edge = sharpEdge(pooled);
+    if (edge === undefined || (pooled.sharpEdge ?? 0) >= edge) return;
+    const sharpKey = `${key}|${edge}`;
+    const sharp = cachedThumb(sharpKey);
+    if (sharp) {
+      draw(pooled.thumb, sharp);
+      pooled.sharpEdge = edge;
+    } else if (sharp === undefined) {
+      sharpThumbs.ask(pooled.index, sharpKey);
     }
   }
 
@@ -728,6 +796,16 @@ export function FileList(props: {
     const mark = row && props.marks?.snapshot === shown ? MARKS[props.marks.marks[index]] : undefined;
     if (mark && mark !== "none") pooled.element.dataset.compare = mark;
     else delete pooled.element.dataset.compare;
+    // A compared folder says how many things under it set it apart, and names them on hover.
+    const apart = mark && mark !== "none" ? props.marks?.apart?.get(index) : undefined;
+    if (apart) {
+      const more = apart.count - apart.names.length;
+      pooled.element.style.setProperty("--compare-count", JSON.stringify(` · ${apart.count}`));
+      pooled.element.dataset.tip = [...apart.names, ...(more > 0 ? [`and ${more} more`] : [])].join("\n");
+    } else if (pooled.element.dataset.tip !== undefined) {
+      pooled.element.style.removeProperty("--compare-count");
+      delete pooled.element.dataset.tip;
+    }
     const gitMark = row && !row.location ? props.git?.get(row.name.toLowerCase()) : undefined;
     if (gitMark) pooled.element.dataset.git = gitMark;
     else delete pooled.element.dataset.git;
@@ -1001,6 +1079,7 @@ export function FileList(props: {
         if (pooled.index < 0) continue;
         pooled.element.style.transform = placeOf(pooled.index);
         sizeOf(pooled.element, pooled.index);
+        sharpen(pooled);
       }
     }
     paint();
@@ -1029,16 +1108,37 @@ export function FileList(props: {
     }
   }
 
-  /** Reads the shape of every picture once per snapshot, and lays the gallery out again with it. */
+  /**
+   * Reads the shape of the pictures a page of rows at a time, the page in view first, and lays the
+   * gallery out again with each. Pages far from the view wait till it comes near them, and the
+   * picture at the top stays put as the lines above it change.
+   */
   function askAspects() {
-    if (!gallery || aspectsOf === shown || aspectsAsked) return;
-    aspectsAsked = true;
+    if (!gallery || aspectsAsked) return;
     const snapshot = shown;
-    pictureAspects(props.view, snapshot)
+    if (pagesOf !== snapshot) {
+      pagesOf = snapshot;
+      aspectPages.clear();
+    }
+    const first = gallery.firstAt(grid.scrollTop);
+    const last = gallery.firstAt(grid.scrollTop + grid.clientHeight);
+    const here = Math.floor(first / ASPECT_PAGE);
+    const ahead = Math.floor(Math.min(props.count - 1, last + ASPECT_PAGE / 4) / ASPECT_PAGE);
+    const behind = Math.floor(Math.max(0, first - ASPECT_PAGE / 4) / ASPECT_PAGE);
+    const near = [here, ...Array.from({ length: Math.max(0, ahead - here) }, (_, step) => here + 1 + step), behind];
+    const page = near.find((page) => page * ASPECT_PAGE < props.count && !aspectPages.has(page));
+    if (page === undefined) return;
+    aspectPages.add(page);
+    aspectsAsked = true;
+    pictureAspects(props.view, snapshot, page * ASPECT_PAGE, ASPECT_PAGE)
       .then((found) => {
         if (snapshot !== shown) return;
-        aspects = found;
-        aspectsOf = snapshot;
+        // A new snapshot starts afresh once its first page is in, so a reload never blinks.
+        if (aspectsOf !== snapshot) {
+          aspects = [];
+          aspectsOf = snapshot;
+        }
+        found.forEach((aspect, at) => (aspects[page * ASPECT_PAGE + at] = aspect));
         galleryMotion = "reflow";
         resize();
       })
@@ -1046,7 +1146,7 @@ export function FileList(props: {
       .catch(() => undefined)
       .finally(() => {
         aspectsAsked = false;
-        if (snapshot !== shown) askAspects();
+        askAspects();
       });
   }
 
@@ -1245,10 +1345,31 @@ export function FileList(props: {
     props.onMenu(new MouseEvent("contextmenu", { clientX: left + rowHeight(), clientY: bottom }), row);
   }
 
+  /** Where the list was last scrolled to for another list, which it then doesn't report. */
+  let ledTop = -1;
+  let topsFrame = 0;
   function onScroll() {
     hideCard(true);
     paint();
+    if (gallery) askAspects();
     if (header) header.scrollLeft = grid.scrollLeft;
+    if (props.onScrolled && Math.abs(grid.scrollTop - ledTop) >= 1) reportTops();
+    ledTop = -1;
+  }
+
+  /** The names of the first rows on screen, once a frame. Rows opened in place have no twin. */
+  function reportTops() {
+    if (topsFrame) return;
+    topsFrame = requestAnimationFrame(() => {
+      topsFrame = 0;
+      const first = places.firstAt(grid.scrollTop);
+      const tops: { name: string; offset: number }[] = [];
+      for (let index = first; index < Math.min(props.count, first + 12); index++) {
+        const row = pages.get(Math.floor(index / PAGE_SIZE))?.[index % PAGE_SIZE];
+        if (row && !row.location) tops.push({ name: row.name, offset: places.top(index) - grid.scrollTop });
+      }
+      props.onScrolled?.(tops);
+    });
   }
 
   function jumpTo(key: string, repeat: boolean) {
@@ -1616,6 +1737,11 @@ export function FileList(props: {
         selectionChanged(true);
       },
       left: () => (grid.isConnected ? { names: selectedNames(), scrollTop: grid.scrollTop } : undefined),
+      scrollToRow(row, offset) {
+        if (row < 0 || row >= props.count) return;
+        grid.scrollTop = places.top(row) - offset;
+        ledTop = grid.scrollTop;
+      },
     });
     if (props.selected?.length) {
       selection.restore(props.selected);

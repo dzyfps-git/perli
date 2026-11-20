@@ -2579,6 +2579,7 @@ dependencies = [
  "tokio",
  "ttf-parser",
  "unrar-ng-sys",
+ "uuid",
  "windows",
  "windows-core",
  "zip",

@@ -458,3 +458,63 @@ html[data-blurred] .tab-active::before {
     animation: none;
   }
 }
+
+/* A step to the next or previous workspace names it for a moment, under the tabs. */
+.workspace-pill-place {
+  position: fixed;
+  top: calc(var(--title-bar-height) + 8px);
+  left: 50%;
+  z-index: 60;
+  pointer-events: none;
+  translate: -50% 0;
+}
+
+.workspace-pill {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px 6px 10px;
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 12%, var(--surface));
+  box-shadow: var(--shadow);
+  color: var(--text);
+  animation: pill-life 1400ms var(--spring) both;
+}
+
+.workspace-pill-count {
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+@keyframes pill-life {
+  0% {
+    opacity: 0;
+    scale: 0.9;
+  }
+  18%,
+  78% {
+    opacity: 1;
+    scale: 1;
+  }
+  100% {
+    opacity: 0;
+    scale: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .workspace-pill {
+    animation: pill-fade 1400ms linear both;
+  }
+}
+
+@keyframes pill-fade {
+  0%,
+  80% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}

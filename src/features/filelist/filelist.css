@@ -1468,8 +1468,13 @@ html[data-blurred] :is(.empty-float, .empty-shadow) {
   --compare-word: "Differs";
 }
 
+[data-compare="pending"] {
+  --compare: var(--accent);
+  --compare-word: "";
+}
+
 .file-row[data-compare]:not([data-compare="same"]) .file-name::after {
-  content: var(--compare-word);
+  content: var(--compare-word) var(--compare-count, "");
   flex: none;
   margin-left: 6px;
   padding: 1px 7px;
@@ -1480,8 +1485,25 @@ html[data-blurred] :is(.empty-float, .empty-shadow) {
   animation: compare-in 360ms var(--spring) backwards;
 }
 
-.file-row[data-compare]:not([data-compare="same"]) {
+.file-row[data-compare]:not([data-compare="same"], [data-compare="pending"]) {
   background-image: linear-gradient(90deg, color-mix(in srgb, var(--compare) 10%, transparent), transparent 45%);
+}
+
+/* A folder still being compared turns a small ring where its word will be. */
+.file-row[data-compare="pending"] .file-name::after {
+  width: 7px;
+  height: 7px;
+  padding: 0;
+  border: 2px solid color-mix(in srgb, var(--compare) 25%, transparent);
+  border-top-color: var(--compare);
+  background: none;
+  animation: compare-turn 900ms linear infinite;
+}
+
+@keyframes compare-turn {
+  to {
+    rotate: 360deg;
+  }
 }
 
 .file-row[data-compare="same"]:not([aria-selected="true"]) :is(.file-name, .file-icon, .file-meta) {

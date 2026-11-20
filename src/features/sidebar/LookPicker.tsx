@@ -7,9 +7,10 @@ import { draw } from "../preview/QuickPreview";
 import { TAG_COLORS, tagColor } from "../tags/tags";
 import { findIcons } from "./folderIcons";
 import { coverPosition, type Look } from "./placeLists";
-import { lookOf, ownLookOf, setLook } from "./saved";
+import { lookOf, lookSource, ownLookOf, setLook } from "./saved";
 import "../settings/settings.css";
 import "../fileops/fileops.css";
+import "../dialogs/dialogs.css";
 import "./sidebar.css";
 
 const ICON_FOLDER = "";
@@ -91,7 +92,7 @@ const CROPS: [Look["coverAt"], string, string][] = [
 ];
 
 /** A folder's color, icon and cover in one sheet, with a search through the icons. */
-export function LookPicker(props: { path: string; onClose: () => void }) {
+export function LookPicker(props: { path: string; onClose: () => void; onOpen: (path: string) => void }) {
   const [typed, setTyped] = createSignal("");
   const look = () => lookOf(props.path);
   const icons = createMemo(() => findIcons(typed()));
@@ -102,6 +103,12 @@ export function LookPicker(props: { path: string; onClose: () => void }) {
   /** Folders inside, at any depth and also ones made later, take this look unless they have their own. */
   const handsDown = () => ownLookOf(props.path)?.inside === true;
   const canHand = () => ownLookOf(props.path)?.color !== undefined || ownLookOf(props.path)?.icon !== undefined;
+  const plain = () => ownLookOf(props.path)?.plain === true;
+  /** The folder above this one takes its look from, with the case it has in this path. */
+  const source = () => {
+    const key = canHand() ? undefined : lookSource(props.path);
+    return key && props.path.slice(0, key.length);
+  };
 
   let strip!: HTMLDivElement;
   let ring!: HTMLSpanElement;
@@ -295,6 +302,28 @@ export function LookPicker(props: { path: string; onClose: () => void }) {
       <Show when={handsDown()}>
         <p class="settings-note" role="status">
           Folders inside look the same, new ones too, unless they have a look of their own.
+        </p>
+      </Show>
+      <Show when={source()} keyed>
+        {(from) => (
+          <p class="settings-note look-source">
+            Takes its look from{" "}
+            <button class="properties-link" data-tip={`Open the look of ${from}`} onClick={() => close(() => props.onOpen(from))}>
+              {baseName(from) || from}
+            </button>
+            {" "}
+            <button class="properties-link" onClick={() => setLook(props.path, { plain: true })}>
+              Keep plain
+            </button>
+          </p>
+        )}
+      </Show>
+      <Show when={plain()}>
+        <p class="settings-note look-source">
+          Kept plain: folders above don't hand it their look, nor to the folders inside.{" "}
+          <button class="properties-link" onClick={() => setLook(props.path, { plain: undefined })}>
+            Take the look from above
+          </button>
         </p>
       </Show>
       <div class="confirm-buttons">

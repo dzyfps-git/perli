@@ -3,8 +3,8 @@ import { availableMonitors, getCurrentWindow, PhysicalPosition, PhysicalSize } f
 import { App } from "./App";
 import { startState } from "./api";
 import { saved, stored } from "./features/filelist/prefs";
-import { parseMoved } from "./features/tabs/session";
-import { onAScreen, screensKey, type WindowPlace } from "./ui/windowPlace";
+import { parseMoved, windowExtras } from "./features/tabs/session";
+import { onAScreen, screensKey, setOwnPlace, type WindowPlace } from "./ui/windowPlace";
 import "./styles/tokens.css";
 import "./styles/base.css";
 
@@ -17,8 +17,9 @@ const [places, setPlaces] = stored<Record<string, WindowPlace>>(
 
 /**
  * The window opens where it was last left on the same screens, maximized if it was, and stays
- * hidden until then so it never jumps. A window started by "Move to new window" opens where
- * Windows puts it and leaves the place alone.
+ * hidden until then so it never jumps. The first window keeps a place for each set of screens.
+ * One more window keeps its own in its session, so it comes back there; one that takes a dragged
+ * tab opens where the tab was let go, and springs in.
  */
 async function keepPlace() {
   const appWindow = getCurrentWindow();
@@ -26,21 +27,32 @@ async function keepPlace() {
   const bounds = async () => ({ ...(await appWindow.outerPosition()), ...(await appWindow.innerSize()) });
   /** Where the window goes back to from maximized. */
   let normal: { x: number; y: number; width: number; height: number } | undefined;
+  let own = false;
+  let springs = false;
   try {
     const start = await startState();
-    if (start.newWindow) return void (await showMoved(parseMoved(start.moved)?.place));
+    own = start.newWindow;
     const screens = await availableMonitors();
-    const place = places()[screensKey(screens)];
-    if (place && onAScreen(place, screens)) {
+    const moved = parseMoved(start.moved)?.place;
+    const kept = own ? windowExtras(start.session).place : places()[screensKey(screens)];
+    const place = moved ?? (kept && onAScreen(kept, screens) ? kept : undefined);
+    if (place) {
       await appWindow.setSize(new PhysicalSize(place.width, place.height));
       await appWindow.setPosition(new PhysicalPosition(place.x, place.y));
       normal = { x: place.x, y: place.y, width: place.width, height: place.height };
       if (place.maximized) await appWindow.maximize();
     }
+    springs = moved !== undefined;
   } catch (failure) {
     console.error(failure);
   }
   await appWindow.show();
+  if (springs && !matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    document.getElementById("root")?.animate(
+      { scale: [0.94, 1], opacity: [0, 1] },
+      { duration: 360, easing: "cubic-bezier(0.3, 1.25, 0.5, 1)" },
+    );
+  }
   // A first start has no place yet: the one Windows gave is the one to go back to.
   if (!normal && !(await appWindow.isMaximized())) normal = await bounds();
 
@@ -49,10 +61,14 @@ async function keepPlace() {
     window.clearTimeout(timer);
     timer = window.setTimeout(async () => {
       if (await appWindow.isMinimized()) return;
-      const key = screensKey(await availableMonitors());
       const maximized = await appWindow.isMaximized();
       if (!maximized) normal = await bounds();
       // A maximized window keeps the place it goes back to, never its maximized size.
+      if (own) {
+        if (normal) setOwnPlace({ ...normal, maximized });
+        return;
+      }
+      const key = screensKey(await availableMonitors());
       const box = normal ?? places()[key];
       if (!box) return;
       const { x, y, width, height } = box;
@@ -61,23 +77,8 @@ async function keepPlace() {
   };
   await appWindow.onMoved(note);
   await appWindow.onResized(note);
-}
-
-/** A window that takes a dragged tab opens where it was let go, and springs in. */
-async function showMoved(place?: { x: number; y: number; width: number; height: number; maximized?: boolean }) {
-  const appWindow = getCurrentWindow();
-  if (place) {
-    await appWindow.setSize(new PhysicalSize(place.width, place.height));
-    await appWindow.setPosition(new PhysicalPosition(place.x, place.y));
-    if (place.maximized) await appWindow.maximize();
-  }
-  await appWindow.show();
-  if (place && !matchMedia("(prefers-reduced-motion: reduce)").matches) {
-    document.getElementById("root")?.animate(
-      { scale: [0.94, 1], opacity: [0, 1] },
-      { duration: 360, easing: "cubic-bezier(0.3, 1.25, 0.5, 1)" },
-    );
-  }
+  // One more window writes its place down from the start, to come back where it opened.
+  if (own) note();
 }
 
 void keepPlace();

@@ -130,16 +130,41 @@ export interface Moved {
 
 const whole = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value);
 
+/** A place as far as usable, or nothing. */
+function cleanPlace(value: Partial<Place> | null | undefined): Place | undefined {
+  const { x, y, width, height, maximized } = value ?? {};
+  if (![x, y, width, height].every(whole) || width! <= 0 || height! <= 0) return undefined;
+  return { x: x!, y: y!, width: width!, height: height!, ...(maximized === true ? { maximized } : {}) };
+}
+
 /** Reads a moved tab's text, or nothing when it holds no folder to open. */
 export function parseMoved(text: string | null | undefined): Moved | undefined {
   try {
     const moved = JSON.parse(text ?? "null");
     const tab = cleanTab(moved.tab);
     if (!tab) return undefined;
-    const { x, y, width, height, maximized } = moved.place ?? {};
-    const placed = [x, y, width, height].every(whole) && width > 0 && height > 0;
-    return { tab, ...(placed ? { place: { x, y, width, height, ...(maximized === true ? { maximized } : {}) } } : {}) };
+    const place = cleanPlace(moved.place);
+    return { tab, ...(place ? { place } : {}) };
   } catch {
     return undefined;
+  }
+}
+
+/** What a window's session keeps besides its tabs. */
+export interface WindowExtras {
+  /** Its workspace, null for none, undefined when the session never said. */
+  workspace: string | null | undefined;
+  /** Where one more window was, to come back there. */
+  place?: Place;
+}
+
+export function windowExtras(text: string | null | undefined): WindowExtras {
+  try {
+    const saved = JSON.parse(text ?? "null");
+    const workspace = saved?.workspace === null || typeof saved?.workspace === "string" ? saved.workspace : undefined;
+    const place = cleanPlace(saved?.place);
+    return { workspace, ...(place ? { place } : {}) };
+  } catch {
+    return { workspace: undefined };
   }
 }

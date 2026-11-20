@@ -2,7 +2,7 @@ export type Layout = "list" | "grid" | "gallery" | "columns";
 
 export const TILE_STEP = 16;
 export const MIN_TILE = 80;
-export const MAX_TILE = 240;
+export const MAX_TILE = 400;
 
 export const clampTile = (size: number) => Math.min(MAX_TILE, Math.max(MIN_TILE, size));
 export const isSmallestTile = (size: number) => size <= MIN_TILE;

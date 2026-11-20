@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { byDay, groupsOf, holds, lookIn, lookKey, moved, movedTo, placeLabel, savedPaths, toggled, withGroup, withLook } from "./placeLists.ts";
+import { byDay, groupsOf, handedFrom, holds, lookIn, lookKey, moved, movedTo, placeLabel, savedPaths, toggled, withGroup, withLook } from "./placeLists.ts";
 
 test("toggling adds at the end and takes out whatever the case", () => {
   const list = toggled(toggled([], "C:\\A"), "D:\\B");
@@ -63,6 +63,20 @@ test("a look handed to the folders inside reaches every depth, but not past thei
   assert.deepEqual(lookIn(looks, "C:\\Work\\Old\\Mine"), { icon: "\uE734" });
   assert.equal(lookIn(looks, "C:\\Workshop"), undefined);
   assert.deepEqual(withLook(looks, "C:\\Work", { color: undefined })["c:\\work"], undefined, "nothing left to hand down");
+});
+
+test("a folder kept plain takes no look from above, nor do the folders inside it", () => {
+  let looks = withLook({}, "C:\\Work", { color: 2, inside: true });
+  looks = withLook(looks, "C:\\Work\\Old", { plain: true });
+  assert.equal(handedFrom(looks, "C:\\Work\\New"), "c:\\work");
+  assert.equal(handedFrom(looks, "C:\\Work\\Old"), undefined);
+  assert.equal(lookIn(looks, "C:\\Work\\Old"), undefined, "plain with nothing of its own shows no look");
+  assert.deepEqual(lookIn(withLook(looks, "C:\\Work\\Old", { cover: "C:\\a.jpg" }), "C:\\Work\\Old"), { plain: true, cover: "C:\\a.jpg" }, "its own cover still shows");
+  assert.equal(lookIn(looks, "C:\\Work\\Old\\Deep"), undefined, "the folders inside stay plain too");
+  looks = withLook(looks, "C:\\Work\\Old", { color: 4, inside: true });
+  assert.deepEqual(lookIn(looks, "C:\\Work\\Old\\Deep"), { color: 4, icon: undefined }, "a plain folder can still hand its own look down");
+  assert.deepEqual(withLook(looks, "C:\\Work\\Old", { plain: false })["c:\\work\\old"], { color: 4, inside: true });
+  assert.deepEqual(withLook({}, "C:\\A", { plain: true }), { "c:\\a": { plain: true } }, "plain alone is kept");
 });
 
 test("bookmark groups are kept by path, whatever its case", () => {

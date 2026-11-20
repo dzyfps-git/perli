@@ -58,6 +58,8 @@ export interface Look {
   coverAt?: "start" | "end";
   /** Every folder inside, at any depth, takes this color and icon unless it has its own. */
   inside?: boolean;
+  /** Folders above don't hand their look to this one, or to the folders inside it. */
+  plain?: boolean;
 }
 
 export type Looks = Record<string, Look>;
@@ -76,6 +78,7 @@ export function withLook(looks: Looks, path: string, change: Look): Looks {
   if (look.coverAt === undefined || look.cover === undefined || ("cover" in change && !("coverAt" in change))) delete look.coverAt;
   // Only a color or an icon has anything to hand down.
   if (!look.inside || (look.color === undefined && look.icon === undefined)) delete look.inside;
+  if (!look.plain) delete look.plain;
   if (Object.keys(look).length > 0) next[key] = look;
   else delete next[key];
   return next;
@@ -85,19 +88,28 @@ export function withLook(looks: Looks, path: string, change: Look): Looks {
  *  along its longer one. */
 export const coverPosition = (at: Look["coverAt"]) => (at === "start" ? "0% 0%" : at === "end" ? "100% 100%" : "");
 
+/** The key of the nearest folder above `path` that hands its look to the folders inside, unless
+ *  `path`, or a folder on the way up, is kept plain. */
+export function handedFrom(looks: Looks, path: string): string | undefined {
+  let key = lookKey(path);
+  if (looks[key]?.plain) return undefined;
+  for (let cut = key.lastIndexOf("\\"); cut > 0; cut = key.lastIndexOf("\\")) {
+    key = key.slice(0, cut);
+    if (looks[key]?.inside) return key;
+    if (looks[key]?.plain) return undefined;
+  }
+  return undefined;
+}
+
 /** The look `path` shows: its own color and icon, or else those of the nearest folder above
  *  that hands its look to the folders inside. A cover is never handed down. */
 export function lookIn(looks: Looks, path: string): Look | undefined {
-  let key = lookKey(path);
-  const own = looks[key];
-  // ponytail: a folder inside can't ask to be plain, only for a color or icon of its own.
+  const own = looks[lookKey(path)];
   if (own?.color !== undefined || own?.icon !== undefined) return own;
-  for (let cut = key.lastIndexOf("\\"); cut > 0; cut = key.lastIndexOf("\\")) {
-    key = key.slice(0, cut);
-    const above = looks[key];
-    if (above?.inside) return { ...own, color: above.color, icon: above.icon };
-  }
-  return own;
+  const from = handedFrom(looks, path);
+  if (from) return { ...own, color: looks[from].color, icon: looks[from].icon };
+  // Kept plain with nothing of its own is no look at all, so the folder shows as any other.
+  return own?.cover !== undefined ? own : undefined;
 }
 
 /** `path` taken out of `list` and put back at `index` of what is left, as a drag drops it. */

@@ -6,7 +6,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, PoisonError};
 
 use pulldown_cmark::{html, CowStr, Event, Options, Parser, Tag, TagEnd};
 use serde::Serialize;
@@ -423,6 +423,54 @@ pub fn beside_text(path: &Path, extension: &str) -> Option<String> {
 }
 
 const FRAME_BYTES: usize = 64 * 1024 * 1024;
+const PDF_BYTES: usize = 1024 * 1024 * 1024;
+
+/// A filled-in PDF waiting for the job that writes it over its file. Only the latest is kept.
+static STAGED_PDF: Mutex<Option<(u64, Vec<u8>)>> = Mutex::new(None);
+static STAGED_TICKETS: AtomicU64 = AtomicU64::new(0);
+
+fn check_pdf(pdf: &[u8]) -> Result<(), String> {
+    match pdf.starts_with(b"%PDF-") && pdf.len() <= PDF_BYTES {
+        true => Ok(()),
+        false => Err("Only a PDF can be saved here".into()),
+    }
+}
+
+/// Keeps a filled-in PDF for the job that saves it over its file, and gives its ticket.
+pub fn stage_pdf(pdf: Vec<u8>) -> Result<u64, String> {
+    check_pdf(&pdf)?;
+    let ticket = STAGED_TICKETS.fetch_add(1, Ordering::Relaxed) + 1;
+    *STAGED_PDF.lock().unwrap_or_else(PoisonError::into_inner) = Some((ticket, pdf));
+    Ok(ticket)
+}
+
+/// The PDF staged under `ticket`, taken out.
+pub fn take_staged_pdf(ticket: u64) -> Result<Vec<u8>, String> {
+    let mut staged = STAGED_PDF.lock().unwrap_or_else(PoisonError::into_inner);
+    match staged.take() {
+        Some((held, pdf)) if held == ticket => Ok(pdf),
+        other => {
+            *staged = other;
+            Err("The filled-in PDF is gone. Save it again.".into())
+        }
+    }
+}
+
+/// Writes a filled-in PDF beside the one it came from, as "name (filled).pdf", and says the name.
+pub fn save_pdf_copy(original: &Path, pdf: &[u8]) -> Result<String, String> {
+    check_pdf(pdf)?;
+    let folder = original.parent().ok_or("The PDF has no folder")?;
+    let stem = original.file_stem().unwrap_or_default().to_string_lossy();
+    let path = crate::ops::free_name(folder, &format!("{stem} (filled)"), ".pdf");
+    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&path).map_err(|error| error.to_string())?;
+    // Half a copy is no copy.
+    std::io::Write::write_all(&mut file, pdf).map_err(|error| {
+        drop(file);
+        let _ = std::fs::remove_file(&path);
+        error.to_string()
+    })?;
+    Ok(path.file_name().unwrap_or_default().to_string_lossy().into_owned())
+}
 
 /// Saves a frame of a film as a PNG beside it, named after the film and the moment, and gives
 /// the new file's name. A file already there is never written over.
@@ -623,12 +671,29 @@ fn date(store: &IPropertyStore, name: &str) -> Option<u64> {
 /// A whole number property, such as a drive's `System.Volume.BitLockerProtection`.
 pub fn whole_number(path: &Path, name: &str) -> Option<i32> {
     let _com = Com::enter();
-    let store = store_of(path)?;
+    number_in(&store_of(path)?, name)
+}
+
+fn number_in(store: &IPropertyStore, name: &str) -> Option<i32> {
     let key = key_of(name)?;
     let mut value = unsafe { store.GetValue(&raw const key) }.ok()?;
     let number = unsafe { PropVariantToInt32(&raw const value) };
     let _ = unsafe { PropVariantClear(&raw mut value) };
     number.ok()
+}
+
+/// A video's width over its height as it plays, turned as its rotation says, from what Windows
+/// reads of it. A phone's tall video is stored wide, with a turn of 90 or 270 degrees.
+pub fn video_aspect(path: &Path) -> Option<f32> {
+    let _com = Com::enter();
+    let store = store_of(path)?;
+    let width = number_in(&store, "System.Video.FrameWidth")?;
+    let height = number_in(&store, "System.Video.FrameHeight")?;
+    if width <= 0 || height <= 0 {
+        return None;
+    }
+    let turned = matches!(number_in(&store, "System.Video.Orientation"), Some(90 | 270));
+    Some(if turned { height as f32 / width as f32 } else { width as f32 / height as f32 })
 }
 
 /// FILETIME ticks since 1601 as milliseconds since 1970. Nothing for a time before 1970 or none.
@@ -770,10 +835,63 @@ fn latest_in(lane: u32) -> u64 {
     LATEST_HASH.lock().unwrap().get_or_insert_default().get(&lane).copied().unwrap_or(0)
 }
 
+/// A file's size and time.
+type Stamp = (u64, u64);
+type Entries<V> = HashMap<String, (Stamp, V)>;
+
+/// What was worked out from files' bytes, by a key such as the file's lowercase path, each with
+/// the size and time the file had then. A file changed since has another time, so what was
+/// known of it is never given, and a look again reads only files that changed.
+// ponytail: a file rewritten with its old time put back reads as unchanged.
+pub struct Known<V> {
+    known: Mutex<Option<Entries<V>>>,
+    /// Past this many, what is known starts over.
+    most: usize,
+}
+
+impl<V: Clone> Known<V> {
+    pub const fn new(most: usize) -> Self {
+        Self { known: Mutex::new(None), most }
+    }
+
+    /// What is known for `key`, if it was worked out for the same size and time.
+    pub fn get(&self, key: &str, stamp: Stamp) -> Option<V> {
+        let known = self.known.lock().unwrap_or_else(PoisonError::into_inner);
+        known.as_ref()?.get(key).filter(|(was, _)| *was == stamp).map(|(_, value)| value.clone())
+    }
+
+    pub fn put(&self, key: String, stamp: Stamp, value: V) {
+        let mut known = self.known.lock().unwrap_or_else(PoisonError::into_inner);
+        let known = known.get_or_insert_default();
+        if known.len() >= self.most {
+            known.clear();
+        }
+        known.insert(key, (stamp, value));
+    }
+}
+
+/// Checksums worked out already, by path and kind.
+static KNOWN_HASHES: Known<String> = Known::new(50_000);
+
 /// The file's checksum by `algorithm` (md5, sha1, sha256 or sha512) in lowercase hex, through
 /// Windows' own crypto. `None` once a newer checksum was asked for in the same `lane`: each place
-/// that shows one has its own, so one never cancels another's.
+/// that shows one has its own, so one never cancels another's. One worked out before, for the
+/// same size and time, is given at once.
 pub fn hash(path: &Path, algorithm: &str, lane: u32) -> std::io::Result<Option<String>> {
+    use std::os::windows::fs::MetadataExt;
+    let stamp = std::fs::metadata(path).map(|data| (data.len(), data.last_write_time()))?;
+    let key = format!("{}\n{algorithm}", path.to_string_lossy().to_lowercase());
+    if let Some(digest) = KNOWN_HASHES.get(&key, stamp) {
+        return Ok(Some(digest));
+    }
+    let digest = hash_anew(path, algorithm, lane)?;
+    if let Some(digest) = &digest {
+        KNOWN_HASHES.put(key, stamp, digest.clone());
+    }
+    Ok(digest)
+}
+
+fn hash_anew(path: &Path, algorithm: &str, lane: u32) -> std::io::Result<Option<String>> {
     let (handle, length) = match algorithm {
         "md5" => (BCRYPT_MD5_ALG_HANDLE, 16),
         "sha1" => (BCRYPT_SHA1_ALG_HANDLE, 20),
@@ -808,6 +926,26 @@ pub fn hash(path: &Path, algorithm: &str, lane: u32) -> std::io::Result<Option<S
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_filled_pdf_lands_beside_its_own_and_a_staged_one_waits_for_its_ticket() {
+        let folder = std::env::temp_dir().join(format!("perli-pdf-save-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let original = folder.join("form.pdf");
+        std::fs::write(&original, b"%PDF-1.7 original").unwrap();
+
+        assert_eq!(super::save_pdf_copy(&original, b"%PDF-1.7 filled").unwrap(), "form (filled).pdf");
+        assert_eq!(std::fs::read(folder.join("form (filled).pdf")).unwrap(), b"%PDF-1.7 filled");
+        assert_ne!(super::save_pdf_copy(&original, b"%PDF-1.7 again").unwrap(), "form (filled).pdf", "a second copy takes a name of its own");
+        assert!(super::save_pdf_copy(&original, b"not a pdf").is_err());
+        assert_eq!(std::fs::read(&original).unwrap(), b"%PDF-1.7 original", "the original stays as it was");
+
+        let ticket = super::stage_pdf(b"%PDF-1.7 over".to_vec()).unwrap();
+        assert!(super::take_staged_pdf(ticket + 1).is_err(), "another ticket takes nothing");
+        assert_eq!(super::take_staged_pdf(ticket).unwrap(), b"%PDF-1.7 over");
+        assert!(super::take_staged_pdf(ticket).is_err(), "taken once");
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
     #[test]
     fn a_shift_jis_piece_never_ends_halfway_through_a_letter() {
         // "日本" in Shift-JIS is 93 FA 96 7B, each letter two bytes.

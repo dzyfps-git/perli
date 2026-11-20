@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod clipboard;
+mod compare;
 mod copies;
 mod default_app;
 mod eject;
@@ -230,8 +231,8 @@ enum Task {
     NewFolderFrom { selection: Selection, folder: String, move_in: bool },
     /// Files that wait on the shelf, by path, since their folder may not be on show.
     CopyPaths { paths: Vec<PathBuf>, folder: String },
-    /// Every attachment of a mail file, into `folder`.
-    SaveAttachments { path: PathBuf, folder: String },
+    /// Every attachment of a mail file, or with `only` the one at that place, into `folder`.
+    SaveAttachments { path: PathBuf, folder: String, only: Option<usize> },
     MovePaths { paths: Vec<PathBuf>, folder: String },
     Template { folder: String, extension: String },
     /// `date` is today as the user writes it, for a `{date}` in the template's names. `called` is
@@ -289,6 +290,8 @@ enum Task {
     Empty,
     /// A quick edit's text saved over `path`. `seen` is how the file stood when it was read.
     Save { path: PathBuf, text: String, seen: Option<String> },
+    /// A filled-in PDF, staged under `staged`, saved over `path`.
+    SavePdf { path: PathBuf, staged: u64, seen: Option<String> },
     /// Pictures by path, from a preview, or the selected rows.
     Picture {
         #[serde(default)]
@@ -356,7 +359,7 @@ impl Task {
             }
             Self::CopyPaths { paths, folder } => copy_job(paths, target(folder)?),
             // A mail in a ZIP is read from the copy its preview took out.
-            Self::SaveAttachments { path, folder } => Job::Attachments { mail: zipped::real(&path)?, folder: target(folder)? },
+            Self::SaveAttachments { path, folder, only } => Job::Attachments { mail: zipped::real(&path)?, folder: target(folder)?, only },
             Self::MovePaths { paths, folder } => {
                 refuse_zipped(&paths)?;
                 Job::Move { sources: paths, folder: target(folder)? }
@@ -449,6 +452,10 @@ impl Task {
                 refuse_zipped(std::slice::from_ref(&path))?;
                 let bytes = preview::encoded(&path, &text)?;
                 Job::Save { path, bytes, read: seen.as_deref().and_then(preview::parse_seen) }
+            }
+            Self::SavePdf { path, staged, seen } => {
+                refuse_zipped(std::slice::from_ref(&path))?;
+                Job::Save { path, bytes: preview::take_staged_pdf(staged)?, read: seen.as_deref().and_then(preview::parse_seen) }
             }
             Self::Picture { mut paths, selection, edit, keep } => {
                 if let Some(selection) = &selection {
@@ -610,6 +617,12 @@ struct Start {
     new_window: bool,
     /// A tab moved here from another window, with where the window goes, as the UI wrote it.
     moved: Option<String>,
+    /// The file this window keeps its tabs in. None for a start on one folder, a detour whose
+    /// tabs must not replace the saved ones.
+    #[serde(skip)]
+    own: Option<PathBuf>,
+    /// The window keeps its tabs for the next start.
+    keep: bool,
 }
 
 /// Windows quotes a drive as `"C:\"`, and the backslash then escapes the closing quote.
@@ -630,7 +643,22 @@ impl Start {
             let _ = std::fs::remove_file(file);
             text
         });
-        let session = (ask.folder.is_none() && moved.is_none()).then(session::read).flatten();
+        // One more window keeps a file of its own: the one it comes back from, or a new one.
+        let own = if ask.new_window {
+            ask.window.as_ref().map(PathBuf::from).or_else(session::window_file)
+        } else if ask.folder.is_none() {
+            session::first_file()
+        } else {
+            None
+        };
+        let session = if ask.new_window {
+            ask.window.as_ref().and_then(|file| std::fs::read_to_string(file).ok())
+        } else {
+            own.as_ref().and_then(|_| session::read())
+        };
+        if let Some(file) = own.as_ref().filter(|_| ask.new_window) {
+            session::hold(file);
+        }
         let home = std::env::var("USERPROFILE").ok();
         Self {
             folder: ask.folder,
@@ -639,6 +667,8 @@ impl Start {
             home,
             new_window: ask.new_window,
             moved,
+            keep: own.is_some(),
+            own,
         }
     }
 
@@ -675,11 +705,43 @@ fn asks_waiting(inbox: State<'_, Inbox>) -> Vec<launch::Ask> {
 }
 
 #[tauri::command]
-async fn save_session(text: String) -> Result<(), String> {
-    async_runtime::spawn_blocking(move || session::save(&text))
-        .await
-        .map_err(|error| error.to_string())?
-        .map_err(|error| error.to_string())
+async fn save_session(text: String, start: State<'_, Start>) -> Result<(), String> {
+    let Some(file) = start.own.clone() else { return Ok(()) };
+    blocking(move || session::write(&file, &text).map_err(|error| error.to_string())).await
+}
+
+/// This window closes while others stay open, so it won't come back at the next start. It can
+/// be reopened, unless its tabs went to another window.
+#[tauri::command]
+async fn forget_session(reopenable: bool, start: State<'_, Start>) -> Result<(), String> {
+    let Some(file) = start.own.clone() else { return Ok(()) };
+    blocking(move || session::forget(&file, reopenable).map_err(|error| error.to_string())).await
+}
+
+/// The windows open when Perli last stopped come back, once the first window shows its own tabs.
+#[tauri::command]
+async fn restore_windows(start: State<'_, Start>) -> Result<(), String> {
+    if start.new_window || !start.keep {
+        return Ok(());
+    }
+    blocking(|| {
+        for file in session::left_windows() {
+            window_command()?.arg("--window").arg(&file).spawn().map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    })
+    .await
+}
+
+/// The window closed last opens again. False when none is left to reopen.
+#[tauri::command]
+async fn reopen_window() -> Result<bool, String> {
+    blocking(|| {
+        let Some(file) = session::reopen() else { return Ok(false) };
+        window_command()?.arg("--window").arg(&file).spawn().map_err(|error| error.to_string())?;
+        Ok(true)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -775,7 +837,9 @@ fn watch_of(path: &str, expanded: &[String]) -> Option<Watch> {
     let resolved = PathBuf::from(folder::resolve(path).ok().filter(|_| path != folder::BIN_PATH)?);
     // A ZIP changes as one file, in the folder it sits in.
     let watched = zipped::outer(&resolved).map_or(resolved, |archive| ops::sys::parent(&archive));
-    Some(Watch::new(std::iter::once(watched).chain(expanded.iter().map(PathBuf::from))))
+    // A commit, a stage or a switch of branch changes git's marks with no row changing.
+    let git = git::watched(&watched);
+    Some(Watch::new(std::iter::once(watched).chain(expanded.iter().map(PathBuf::from)).chain(git)))
 }
 
 /// Puts the shown folder in a new order as a new snapshot, the same way an open would.
@@ -1577,17 +1641,17 @@ async fn picture_size(view: u32, request: u64, row: u32, views: State<'_, Views>
     blocking(move || Ok(inside::pixel_size(&path))).await
 }
 
-/// The most rows the gallery asks the shape of. Past this, pictures show square.
-// ponytail: one pass over the whole folder; read in pages as the gallery scrolls if huge folders lag.
-const MOST_ASPECTS: usize = 5000;
+/// The most rows one ask reads the shape of. The gallery asks for pages around its view.
+const MOST_ASPECTS: u32 = 2000;
 
-/// How wide each row's picture shows for its height, for the gallery to lay out. Folders and
-/// files that are no picture get 0.
+/// How wide each row's picture shows for its height, for `count` rows from `from` on, for the
+/// gallery to lay out. Folders and files that are no picture get 0.
 #[tauri::command]
-async fn picture_aspects(view: u32, request: u64, views: State<'_, Views>) -> Result<Vec<f32>, String> {
+async fn picture_aspects(view: u32, request: u64, from: u32, count: u32, views: State<'_, Views>) -> Result<Vec<f32>, String> {
     let selection = Selection { view, request, rows: Vec::new(), ranges: Vec::new() };
     let paths = views.read(&selection, |listing, _| {
-        let rows: Vec<u32> = (0..listing.len().min(MOST_ASPECTS) as u32).collect();
+        let end = from.saturating_add(count.min(MOST_ASPECTS)).min(listing.len() as u32);
+        let rows: Vec<u32> = (from.min(end)..end).collect();
         listing.row_paths(&rows)
     })?;
     blocking(move || Ok(inside::shown_aspects(&paths))).await
@@ -1669,6 +1733,25 @@ async fn drag_entry(view: u32, request: u64, row: u32, entry: String, password: 
     drag_out(vec![taken], app).await
 }
 
+/// One attachment of a mail, taken out to open, to show in the preview or to drag. It lands in a
+/// drag's folder, which a sweep empties after DRAG_KEEP.
+#[tauri::command]
+async fn mail_attachment(path: PathBuf, index: usize) -> Result<PathBuf, String> {
+    blocking(move || {
+        let path = zipped::real(&path)?;
+        let folder = std::env::temp_dir().join(DRAG_FOLDER).join(since_1970().as_nanos().to_string());
+        std::fs::create_dir_all(&folder).map_err(|error| error.to_string())?;
+        mail::take_out(&path, index, &folder)
+    })
+    .await
+}
+
+/// A mail taken out of another, shown in the preview in its place.
+#[tauri::command]
+async fn read_mail(path: PathBuf) -> Result<mail::Mail, String> {
+    blocking(move || mail::read(&zipped::real(&path)?)).await
+}
+
 /// The loudest point of each slice of a sound, for its waveform, read a little at a time.
 #[tauri::command]
 async fn audio_peaks(view: u32, request: u64, row: u32, bars: usize, views: State<'_, Views>) -> Result<Vec<f32>, String> {
@@ -1708,6 +1791,31 @@ fn save_frame(request: tauri::ipc::Request<'_>, views: State<'_, Views>) -> Resu
     // Nothing lands beside a film in a ZIP.
     refuse_zipped(std::slice::from_ref(&path))?;
     preview::save_frame(&path, float(16).max(0.0) as u64, &body[HEAD..])
+}
+
+const NO_PDF: &str = "The filled-in PDF didn't come through";
+
+/// A filled-in PDF saved as a copy beside its file. The body is the length of the file's path as
+/// a little-endian u32, the path in UTF-8, then the PDF.
+#[tauri::command]
+async fn save_pdf_copy(request: tauri::ipc::Request<'_>) -> Result<String, String> {
+    let tauri::ipc::InvokeBody::Raw(body) = request.body() else {
+        return Err(NO_PDF.into());
+    };
+    let length = body.get(..4).map_or(usize::MAX, |head| u32::from_le_bytes(head.try_into().unwrap()) as usize);
+    let path = body.get(4..4usize.saturating_add(length)).and_then(|path| std::str::from_utf8(path).ok()).map(PathBuf::from).ok_or(NO_PDF)?;
+    refuse_zipped(std::slice::from_ref(&path))?;
+    let pdf = body[4 + length..].to_vec();
+    blocking(move || preview::save_pdf_copy(&path, &pdf)).await
+}
+
+/// A filled-in PDF, the body, kept for the job that saves it over its file. Answers its ticket.
+#[tauri::command]
+async fn stage_pdf(request: tauri::ipc::Request<'_>) -> Result<u64, String> {
+    let tauri::ipc::InvokeBody::Raw(body) = request.body() else {
+        return Err(NO_PDF.into());
+    };
+    preview::stage_pdf(body.to_vec())
 }
 
 /// The file a player asks for: a row of the list, or a path, for a song that plays on after its
@@ -2137,16 +2245,70 @@ fn rows_where(view: u32, request: u64, filter: folder::Filter, views: State<'_, 
 
 /// What git says of `folder`'s rows and its branch, or nothing outside a repository.
 #[tauri::command]
-async fn git_status(folder: String) -> Result<Option<git::Status>, String> {
-    blocking(move || Ok(git::status(Path::new(&folder)))).await
+/// `fresh` asks git past what it said for the same index and rows.
+async fn git_status(folder: String, fresh: bool) -> Result<Option<git::Status>, String> {
+    blocking(move || Ok(git::status(Path::new(&folder), fresh))).await
 }
 
-/// How each row of one pane stands against the other pane's rows, one `folder::Mark` a row.
-#[tauri::command]
-fn compared(view: u32, request: u64, other: u32, other_request: u64, views: State<'_, Views>) -> Result<Response, String> {
+/// The two listings of compared panes, as `work` needs them.
+fn compared_pair<T>(views: &Views, one: (u32, u64), two: (u32, u64), work: impl FnOnce(&folder::Listing, &folder::Listing) -> T) -> Result<T, String> {
     let views = views.0.read().unwrap_or_else(|error| error.into_inner());
-    let listing = |id, request| views.get(&id).and_then(|view| view.listing(request)).ok_or("This folder is no longer open");
-    Ok(Response::new(listing(view, request)?.compared(listing(other, other_request)?)))
+    let listing = |(id, request): (u32, u64)| views.get(&id).and_then(|view| view.listing(request)).ok_or("This folder is no longer open");
+    Ok(work(listing(one)?, listing(two)?))
+}
+
+/// How each row of one pane stands against the other pane's rows, one `folder::Mark` a row. With
+/// `content`, files alike in size stand by their bytes.
+#[tauri::command]
+fn compared(view: u32, request: u64, other: u32, other_request: u64, content: bool, views: State<'_, Views>) -> Result<Response, String> {
+    compared_pair(&views, (view, request), (other, other_request), |mine, theirs| Response::new(mine.compared(theirs, content)))
+}
+
+/// What the bar of compared panes says of one: its counts, the names of rows with a mark in
+/// `hide` for it to leave out, and what sets its folders apart.
+#[tauri::command]
+fn compare_summary(
+    view: u32,
+    request: u64,
+    other: u32,
+    other_request: u64,
+    content: bool,
+    hide: Vec<u8>,
+    views: State<'_, Views>,
+) -> Result<folder::Summary, String> {
+    compared_pair(&views, (view, request), (other, other_request), |mine, theirs| mine.compare_summary(theirs, content, &hide))
+}
+
+/// Learns, for a while, what the marks of two compared panes wait on: what folders on both sides
+/// hold and, with `content`, what files hold. How many pairs it settled, for the marks to be asked
+/// for again; none once a newer round took over.
+#[tauri::command]
+async fn compare_settle(view: u32, request: u64, other: u32, other_request: u64, content: bool, views: State<'_, Views>) -> Result<usize, String> {
+    let (pairs, sight) = compared_pair(&views, (view, request), (other, other_request), |mine, theirs| {
+        let mut pairs = mine.unsettled(theirs, content);
+        // Folders on both sides are the same pairs; files or folders shown only over there aren't.
+        let known: std::collections::HashSet<String> = pairs.iter().map(|pair| pair.theirs.path.to_string_lossy().to_lowercase()).collect();
+        let theirs_too = theirs.unsettled(mine, content).into_iter().filter(|pair| !known.contains(&pair.mine.path.to_string_lossy().to_lowercase()));
+        pairs.extend(theirs_too.map(|pair| compare::Pair { mine: pair.theirs, theirs: pair.mine, folder: pair.folder }));
+        (pairs, mine.sight().either(theirs.sight()))
+    })?;
+    let round = compare::round(view, other);
+    blocking(move || Ok(compare::settle(pairs, content, sight, (view, other), round))).await
+}
+
+/// The first of `names` among a view's rows, in any case: which of them, and its row. Compared
+/// panes scroll together by it.
+#[tauri::command]
+fn row_named(view: u32, request: u64, names: Vec<String>, views: State<'_, Views>) -> Result<Option<(usize, u32)>, String> {
+    let selection = Selection { view, request, rows: Vec::new(), ranges: Vec::new() };
+    views.read(&selection, |listing, _| listing.row_named(&names))
+}
+
+/// Stops learning for the marks of two panes, as their compare ended.
+#[tauri::command]
+fn compare_stop(view: u32, other: u32) {
+    compare::round(view, other);
+    compare::forget_folders();
 }
 
 /// How many rows fit `filter`, to tell a folder of songs or pictures by.
@@ -2241,11 +2403,11 @@ async fn own_templates() -> Vec<templates::Own> {
     templates::own_names()
 }
 
-/// The folders inside one, for a path crumb's menu.
+/// The folders inside one, for a path crumb's menu, and with `files` its files after them.
 #[tauri::command]
-async fn subfolders(path: PathBuf, show_hidden: bool, show_system: bool) -> Result<Vec<String>, String> {
+async fn subfolders(path: PathBuf, show_hidden: bool, show_system: bool, files: Option<bool>) -> Result<Vec<(String, bool)>, String> {
     let sight = folder::Sight { hidden: show_hidden, system: show_system };
-    blocking(move || folder::subfolders(&path, sight).map_err(|error| error.to_string())).await
+    blocking(move || folder::subfolders(&path, sight, files.unwrap_or(false)).map_err(|error| error.to_string())).await
 }
 
 #[tauri::command]
@@ -2379,12 +2541,19 @@ fn come_forward(window: tauri::WebviewWindow) {
     let _ = window.set_focus();
 }
 
-/// Starts one more Perli with a window of its own, for those who want each folder in one. With
-/// `moved`, the window takes a whole tab from this one instead, written to a file it reads once.
-#[tauri::command]
-fn open_window(folder: String, select: Vec<String>, moved: Option<String>) -> Result<(), String> {
+/// One more Perli, with a window of its own.
+fn window_command() -> Result<Command, String> {
     let mut start = Command::new(std::env::current_exe().map_err(|error| error.to_string())?);
     start.arg("--new-window");
+    Ok(start)
+}
+
+/// Starts one more Perli with a window of its own, for those who want each folder in one. With
+/// `moved`, the window takes a whole tab from this one instead, written to a file it reads once.
+/// Gives the new Perli's process number, which reaches its window once it is up.
+#[tauri::command]
+fn open_window(folder: String, select: Vec<String>, moved: Option<String>) -> Result<u32, String> {
+    let mut start = window_command()?;
     if let Some(moved) = moved {
         let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|since| since.as_nanos()).unwrap_or_default();
         let file = session::data_file(&format!("moved-{stamp}.json")).ok_or("No folder for app data")?;
@@ -2396,7 +2565,18 @@ fn open_window(folder: String, select: Vec<String>, moved: Option<String>) -> Re
     for name in &select {
         start.arg("--select").arg(Path::new(&folder).join(name));
     }
-    start.spawn().map(|_| ()).map_err(|error| error.to_string())
+    start.spawn().map(|child| child.id()).map_err(|error| error.to_string())
+}
+
+/// What a later start, or another window, asks to open goes to the UI, or waits till it listens.
+fn deliver(app: &AppHandle, ask: launch::Ask) {
+    // Held while sending, so an ask can't slip between the UI's take and its event.
+    let inbox = app.state::<Inbox>();
+    let mut inbox = inbox.0.lock().unwrap();
+    match inbox.as_mut() {
+        Some(waiting) => waiting.push(ask),
+        None => drop(app.emit("open-asked", ask)),
+    }
 }
 
 /// How long Perli answers for the Explorer window another app expects after it asks Windows to
@@ -2522,15 +2702,7 @@ fn main() {
             });
             if let Some(door) = door {
                 let asked = app.handle().clone();
-                door.listen(move |ask| {
-                    // Held while sending, so an ask can't slip between the UI's take and its event.
-                    let inbox = asked.state::<Inbox>();
-                    let mut inbox = inbox.0.lock().unwrap();
-                    match inbox.as_mut() {
-                        Some(waiting) => waiting.push(ask),
-                        None => drop(asked.emit("open-asked", ask)),
-                    }
-                });
+                door.listen(move |ask| deliver(&asked, ask));
             }
             watch::start(app.handle().clone());
             if let Some(main) = app.get_webview_window("main") {
@@ -2548,6 +2720,9 @@ fn main() {
             start_state,
             asks_waiting,
             save_session,
+            forget_session,
+            restore_windows,
+            reopen_window,
             list_places,
             drive_space,
             type_names,
@@ -2628,6 +2803,12 @@ fn main() {
             archive_password,
             archive_test,
             drag_entry,
+            compare_summary,
+            compare_settle,
+            compare_stop,
+            row_named,
+            mail_attachment,
+            read_mail,
             audio_peaks,
             beside_text,
             mini::mini_open,
@@ -2635,6 +2816,12 @@ fn main() {
             tearoff::send_tab,
             tearoff::other_windows,
             tearoff::ask_for_tabs,
+            tearoff::set_workspace,
+            tearoff::workspace_windows,
+            tearoff::show_window,
+            tearoff::bring_workspace,
+            tearoff::send_workspace,
+            tearoff::select_in_window,
             tearoff::ghost_show,
             tearoff::ghost_move,
             tearoff::ghost_hide,
@@ -2642,6 +2829,8 @@ fn main() {
             mini::mini_take,
             mini::mini_fit,
             save_frame,
+            save_pdf_copy,
+            stage_pdf,
             picture_file,
             preview_row,
             archive_picture,
@@ -2771,7 +2960,7 @@ mod tests {
         zip.write_all(b"Subject: Hi\r\n\r\nHello\r\n").unwrap();
         zip.finish().unwrap();
 
-        let task = Task::SaveAttachments { path: archive.join("note.eml"), folder: folder.to_string_lossy().into_owned() };
+        let task = Task::SaveAttachments { path: archive.join("note.eml"), folder: folder.to_string_lossy().into_owned(), only: None };
         let plan = task.plan(&Views::default(), &Drags::default()).unwrap().unwrap();
         let Job::Attachments { mail, .. } = plan.job else { panic!("expected an attachments job") };
         assert!(mail.is_file(), "{mail:?}");

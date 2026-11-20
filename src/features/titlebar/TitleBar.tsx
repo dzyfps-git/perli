@@ -57,6 +57,7 @@ export function TitleBar(props: {
   /** The workspace on screen, if the tabs are one. */
   workspace?: string;
   onWorkspaces: () => void;
+  onReopenWindow: () => void;
   settings?: SettingsTab;
 }) {
   const appWindow = getCurrentWindow();
@@ -166,6 +167,7 @@ export function TitleBar(props: {
         disabled: closed.length === 0,
         items: closed.map((paths, back) => ({ label: closedTitle(paths), action: () => tabs.reopenClosed(back) })),
       },
+      { label: "Reopen closed window", action: props.onReopenWindow },
       { label: "Search tabs", action: props.onTabSearch, disabled: alone },
       { label: "Workspaces…", action: props.onWorkspaces },
       { label: "Duplicate", action: () => tabs.duplicate(tab) },
