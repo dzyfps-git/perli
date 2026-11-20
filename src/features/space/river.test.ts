@@ -1,18 +1,44 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { addHours, columns, DAY, dayEnd, dayStart, HOUR, LEAST_SPAN, panned, riverOf, softened, sumBetween, ticks, wholeSpan, zoomed } from "./river.ts";
+import { addQuarters, columns, DAY, dayEnd, dayStart, HOUR, hourStart, LEAST_SPAN, panned, QUARTER, riverOf, softened, sumBetween, ticks, wholeSpan, zoomed } from "./river.ts";
 
-const hour = (time: string) => Date.parse(time) / HOUR;
+const quarter = (time: string) => Date.parse(time) / QUARTER;
 
-test("hours counted in pieces add up, and any stretch sums at once", () => {
+test("quarter hours counted in pieces add up, and any stretch sums at once", () => {
   const known = new Map<number, [number, number]>();
-  addHours(known, [[hour("2025-03-01T10:00Z"), 2, 200], [hour("2025-03-02T09:00Z"), 1, 50]]);
-  addHours(known, [[hour("2025-03-01T10:00Z"), 3, 300]]);
+  addQuarters(known, [[quarter("2025-03-01T10:00Z"), 2, 200], [quarter("2025-03-02T09:00Z"), 1, 50]]);
+  addQuarters(known, [[quarter("2025-03-01T10:00Z"), 3, 300]]);
   const river = riverOf(known);
   assert.deepEqual(sumBetween(river, Date.parse("2025-03-01T00:00Z"), Date.parse("2025-03-02T00:00Z")), { files: 5, bytes: 500 });
   assert.deepEqual(sumBetween(river, Date.parse("2025-03-01T00:00Z"), Date.parse("2025-03-03T00:00Z")), { files: 6, bytes: 550 });
   assert.deepEqual(sumBetween(river, Date.parse("2025-03-02T10:00Z"), Date.parse("2025-03-05T00:00Z")), { files: 0, bytes: 0 });
   assert.deepEqual(columns(river, Date.parse("2025-03-01T00:00Z"), Date.parse("2025-03-03T00:00Z"), 2), [5, 1]);
+  // A day that starts at a half hour, as at UTC+05:30, still splits exactly.
+  addQuarters(known, [[quarter("2025-03-03T18:15Z"), 1, 1], [quarter("2025-03-03T18:30Z"), 1, 1]]);
+  const late = riverOf(known);
+  assert.deepEqual(sumBetween(late, Date.parse("2025-03-03T18:30Z"), Date.parse("2025-03-04T18:30Z")), { files: 1, bytes: 1 });
+});
+
+test("a local hour starts where the clock shows it", () => {
+  const at = Date.parse("2025-03-01T10:47:12");
+  assert.equal(new Date(hourStart(at)).getMinutes(), 0);
+  assert.ok(at - hourStart(at) < 3_600_000 && hourStart(at) <= at);
+});
+
+test("an hour starts where the clock shows the hour, also in the hour the clocks repeat", () => {
+  const was = process.env.TZ;
+  try {
+    process.env.TZ = "Europe/Berlin";
+    // 02:30 comes twice on 26 October 2025: first in summer time, then in winter time.
+    assert.equal(hourStart(Date.parse("2025-10-26T02:30+02:00")), Date.parse("2025-10-26T02:00+02:00"));
+    assert.equal(hourStart(Date.parse("2025-10-26T02:30+01:00")), Date.parse("2025-10-26T02:00+01:00"));
+    assert.equal(hourStart(Date.parse("2025-06-10T08:59+02:00")), Date.parse("2025-06-10T08:00+02:00"));
+    process.env.TZ = "Asia/Kolkata";
+    assert.equal(hourStart(Date.parse("2025-06-10T10:45+05:30")), Date.parse("2025-06-10T10:00+05:30"), "a half-hour zone");
+  } finally {
+    if (was === undefined) delete process.env.TZ;
+    else process.env.TZ = was;
+  }
 });
 
 test("a day ends at the next midnight, also on a day the clocks change", () => {
@@ -52,7 +78,7 @@ test("an empty river still has a month to show, and a counted one some room each
   assert.equal(to - from, 30 * DAY);
   const known = new Map<number, [number, number]>([[1000, [1, 1]]]);
   const [first, last] = wholeSpan(riverOf(known));
-  assert.ok(first < 1000 * HOUR && last > 1001 * HOUR);
+  assert.ok(first < 1000 * QUARTER && last > 1001 * QUARTER);
 });
 
 test("softened banks keep their total shape but lose their steps", () => {

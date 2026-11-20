@@ -12,6 +12,8 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 
 use crate::folder::Entry;
+use crate::index;
+use windows::Win32::Storage::FileSystem::WIN32_FIND_DATAW;
 use crate::ops::sys::{self, Stat};
 use crate::session;
 
@@ -121,8 +123,11 @@ fn each_item(folder: &Path, mut visit: impl FnMut(Entry, bool)) {
 /// All the file bytes under `folder`, or nothing if `stop` is set first. Links stay unfollowed,
 /// because one could lead back around or count another drive.
 fn total(folder: &Path, stop: &AtomicBool) -> Option<u64> {
-    let mut waiting = vec![folder.to_path_buf()];
     let mut bytes = 0;
+    if index::each_file_under(folder, stop, |_, data| bytes += Entry::from_find_data(data).map_or(0, |entry| entry.size())) {
+        return (!stop.load(Ordering::SeqCst)).then_some(bytes);
+    }
+    let mut waiting = vec![folder.to_path_buf()];
     while let Some(next) = waiting.pop() {
         if stop.load(Ordering::SeqCst) {
             return None;
@@ -268,7 +273,16 @@ impl Tally {
     }
 
     /// Everything under `folder` added in, or false if `stop` came first. Links stay unfollowed.
+    /// The search index answers at once when it is on.
     fn walk(&mut self, folder: &Path, stop: &AtomicBool) -> bool {
+        let listed = index::each_file_under(folder, stop, |_, data| {
+            if let Some(entry) = Entry::from_find_data(data) {
+                self.file(&entry);
+            }
+        });
+        if listed {
+            return !stop.load(Ordering::SeqCst);
+        }
         let mut waiting = vec![folder.to_path_buf()];
         while let Some(next) = waiting.pop() {
             if stop.load(Ordering::SeqCst) {
@@ -345,16 +359,17 @@ fn weigh_folder(path: &Path, name: String, stop: &AtomicBool) -> Option<Cell> {
     Some(whole.cell(name, true, inner, true))
 }
 
-/// Files by the hour they last changed, for the Time river: hours since 1970 by UTC, how many
-/// files, and their bytes.
-pub type Hours = Vec<(u32, u32, u64)>;
+/// Files by the quarter hour they last changed, for the Time river: quarter hours since 1970 by
+/// UTC, how many files, and their bytes. Every time zone is a whole number of quarter hours off
+/// UTC, so each local day and hour starts on one.
+pub type Quarters = Vec<(u32, u32, u64)>;
 
-/// The hour of a FILETIME since 1970 by UTC, or nothing for one before 1970.
-fn hour_of(ticks: u64) -> Option<u32> {
-    const TICKS_PER_HOUR: u64 = 36_000_000_000;
-    /// Hours from 1601-01-01 to 1970-01-01.
-    const TO_1970: u64 = 134_774 * 24;
-    (ticks / TICKS_PER_HOUR).checked_sub(TO_1970).and_then(|hour| u32::try_from(hour).ok())
+/// The quarter hour of a FILETIME since 1970 by UTC, or nothing for one before 1970.
+fn quarter_of(ticks: u64) -> Option<u32> {
+    const TICKS_PER_QUARTER: u64 = 9_000_000_000;
+    /// Quarter hours from 1601-01-01 to 1970-01-01.
+    const TO_1970: u64 = 134_774 * 96;
+    (ticks / TICKS_PER_QUARTER).checked_sub(TO_1970).and_then(|quarter| u32::try_from(quarter).ok())
 }
 
 /// The one Time river being counted.
@@ -364,20 +379,19 @@ pub fn stop_river() {
     RIVER.lock().unwrap_or_else(PoisonError::into_inner).store(true, Ordering::SeqCst);
 }
 
-/// Counts every file under `folder` by the hour it last changed, on a thread of its own in place
-/// of any count before it. `report` hears the hours counted since it last heard, and whether the
-/// walk is done. Hidden and system files and folders stay out, so a repository's insides don't
-/// drown out the work done in it. Links stay unfollowed.
-pub fn river(folder: PathBuf, report: impl Fn(Hours, bool) + Send + 'static) {
+/// Counts every file under `folder` by the quarter hour it last changed, on a thread of its own in
+/// place of any count before it. `report` hears the quarters counted since it last heard, and
+/// whether the walk is done. Hidden and system files and folders stay out unless `sight` shows
+/// them, so a repository's insides don't drown out the work done in it. Links stay unfollowed.
+pub fn river(folder: PathBuf, sight: crate::folder::Sight, report: impl Fn(Quarters, bool) + Send + 'static) {
     let stop = Arc::new(AtomicBool::new(false));
     mem::replace(&mut *RIVER.lock().unwrap_or_else(PoisonError::into_inner), stop.clone()).store(true, Ordering::SeqCst);
     thread::spawn(move || {
-        let sight = crate::folder::Sight { hidden: false, system: false };
         let mut counted: HashMap<u32, (u32, u64)> = HashMap::new();
         let drained = |counted: &mut HashMap<u32, (u32, u64)>| {
-            let mut hours: Hours = counted.drain().map(|(hour, (files, bytes))| (hour, files, bytes)).collect();
-            hours.sort_unstable();
-            hours
+            let mut quarters: Quarters = counted.drain().map(|(quarter, (files, bytes))| (quarter, files, bytes)).collect();
+            quarters.sort_unstable();
+            quarters
         };
         let mut waiting = vec![folder];
         let mut reported = Instant::now();
@@ -391,8 +405,8 @@ pub fn river(folder: PathBuf, report: impl Fn(Hours, bool) + Send + 'static) {
                 }
                 if is_folder {
                     waiting.push(next.join(entry.file_name()));
-                } else if let Some(hour) = hour_of(entry.modified()) {
-                    let slot = counted.entry(hour).or_default();
+                } else if let Some(quarter) = quarter_of(entry.modified()) {
+                    let slot = counted.entry(quarter).or_default();
                     slot.0 += 1;
                     slot.1 += entry.size();
                 }
@@ -421,9 +435,29 @@ pub fn map(folder: PathBuf, report: impl Fn(Vec<Cell>, bool) + Send + 'static) {
     thread::spawn(move || weigh(&folder, &stop, report));
 }
 
+/// What `folder` holds, each with all the bytes under it and their years, from the search index
+/// with no walk, as This PC shows a drive it hasn't weighed. None when the index can't answer.
+pub fn listed_parts(folder: &Path) -> Option<Vec<Cell>> {
+    parts_of(folder, |visit| index::each_file_under(folder, &AtomicBool::new(false), visit))
+}
+
+/// The parts of `folder` from what `files` hands over: each file with the folder it sits in.
+fn parts_of(folder: &Path, files: impl FnOnce(&mut dyn FnMut(&Path, &WIN32_FIND_DATAW)) -> bool) -> Option<Vec<Cell>> {
+    let depth = folder.components().count();
+    let mut parts: HashMap<String, (bool, Tally)> = HashMap::new();
+    let listed = files(&mut |at, data| {
+        let Some(entry) = Entry::from_find_data(data) else { return };
+        let (name, inside) = match at.components().nth(depth) {
+            Some(part) => (part.as_os_str().to_string_lossy().into_owned(), true),
+            None => (entry.file_name().to_string_lossy().into_owned(), false),
+        };
+        parts.entry(name).or_insert_with(|| (inside, Tally::default())).1.file(&entry);
+    });
+    listed.then(|| parts.into_iter().map(|(name, (inside, tally))| tally.cell(name, inside, Vec::new(), true)).collect())
+}
+
 /// Files are known at once, and folders come first as empty cells that fill as each is added up.
-// ponytail: always walks the disk, even with the search index on, so a whole drive can take a
-// while. The index's `entries` table could answer sizes and years at once if that gets too slow.
+/// With the search index on, each folder adds up at once too.
 fn weigh(folder: &Path, stop: &AtomicBool, report: impl Fn(Vec<Cell>, bool)) {
     let mut cells = Vec::new();
     each_item(folder, |entry, is_folder| {
@@ -622,21 +656,24 @@ mod tests {
     }
 
     #[test]
-    fn a_filetime_gives_its_hour_since_1970() {
-        assert_eq!(hour_of(125_911_584_000_000_000), Some(262_968));
-        assert_eq!(hour_of(125_911_583_990_000_000), Some(262_967));
-        assert_eq!(hour_of(0), None);
+    fn a_filetime_gives_its_quarter_hour_since_1970() {
+        assert_eq!(quarter_of(125_911_584_000_000_000), Some(262_968 * 4));
+        assert_eq!(quarter_of(125_911_583_990_000_000), Some(262_968 * 4 - 1));
+        // 00:45 that day, which starts a local day at UTC-00:45.
+        assert_eq!(quarter_of(125_911_584_000_000_000 + 3 * 9_000_000_000), Some(262_968 * 4 + 3));
+        assert_eq!(quarter_of(0), None);
     }
 
     #[test]
     fn the_river_counts_every_file_once() {
         let tree = Tree::new("river");
         let (told, heard) = mpsc::channel();
-        river(tree.0.clone(), move |hours, done| told.send((hours, done)).unwrap());
+        let all = crate::folder::Sight { hidden: true, system: true };
+        river(tree.0.clone(), all, move |quarters, done| told.send((quarters, done)).unwrap());
         let mut bytes = 0;
         loop {
-            let (hours, done) = heard.recv_timeout(Duration::from_secs(5)).unwrap();
-            bytes += hours.iter().map(|&(_, _, size)| size).sum::<u64>();
+            let (quarters, done) = heard.recv_timeout(Duration::from_secs(5)).unwrap();
+            bytes += quarters.iter().map(|&(_, _, size)| size).sum::<u64>();
             if done {
                 break;
             }
@@ -697,5 +734,24 @@ mod tests {
         heard.recv_timeout(Duration::from_secs(5)).unwrap();
         scans.stop(7);
         assert!(scans.0.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn listed_parts_gather_each_file_into_the_part_it_sits_under() {
+        let folder = Path::new(r"C:\Work");
+        let file = |name: &str, size: u64| crate::index::find_data(name, 0x20, size, 133_000_000_000_000_000, 0);
+        let mut parts = parts_of(folder, |visit| {
+            visit(Path::new(r"C:\Work"), &file("top.txt", 1));
+            visit(Path::new(r"C:\Work\Photos"), &file("a.jpg", 10));
+            visit(Path::new(r"C:\Work\Photos\2020"), &file("b.jpg", 20));
+            true
+        })
+        .unwrap();
+        parts.sort_by(|a, b| a.name.cmp(&b.name));
+        let seen: Vec<(&str, u64, bool)> = parts.iter().map(|cell| (cell.name.as_str(), cell.bytes, cell.folder)).collect();
+        assert_eq!(seen, [("Photos", 30, true), ("top.txt", 1, false)]);
+        assert_eq!(parts[0].exts, [("jpg".to_string(), 30)]);
+        assert_eq!(parts[0].years.iter().map(|(_, bytes)| bytes).sum::<u64>(), 30, "years come along");
+        assert!(parts_of(folder, |_| false).is_none(), "nothing when the index can't answer");
     }
 }

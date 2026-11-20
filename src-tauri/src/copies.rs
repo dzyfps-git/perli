@@ -29,6 +29,7 @@ static KNOWN_HEADS: preview::Known<u64> = preview::Known::new(200_000);
 /// files, files in the cloud (reading would fetch them), links and what `sight` hides take no
 /// part. `lane` is the checksum lane, so another look cancels nothing of this one's.
 pub fn find(folders: &[PathBuf], deep: bool, sight: Sight, lane: u32, stopped: &dyn Fn() -> bool, going: &dyn Fn()) -> Found {
+    let folders = if deep { outermost(folders) } else { folders.to_vec() };
     let mut reported = Instant::now();
     let mut tick = || {
         if reported.elapsed() >= GOING_GAP {
@@ -39,7 +40,7 @@ pub fn find(folders: &[PathBuf], deep: bool, sight: Sight, lane: u32, stopped: &
 
     // Only files of the same size can be the same.
     let mut by_size: HashMap<u64, Vec<Candidate>> = HashMap::new();
-    let mut below = VecDeque::from(folders.to_vec());
+    let mut below = VecDeque::from(folders);
     while let Some(at) = below.pop_front() {
         if stopped() {
             return Found::default();
@@ -121,11 +122,47 @@ fn path_in(location: &[u16]) -> PathBuf {
     PathBuf::from(String::from_utf16_lossy(&location[..location.len() - 1]))
 }
 
+/// The folders, but none inside another or given twice, so a walk under all of them sees each file
+/// once: a file seen twice would look like a copy of itself. Each is taken where it really is, so
+/// a junction to a folder given, or another name for it, counts as that folder.
+pub fn outermost(folders: &[PathBuf]) -> Vec<PathBuf> {
+    let keys: Vec<String> = folders
+        .iter()
+        .map(|folder| {
+            let low = sys::real_path(folder).unwrap_or_else(|_| folder.to_string_lossy().to_lowercase());
+            if low.ends_with('\\') { low } else { format!("{low}\\") }
+        })
+        .collect();
+    let inside = |at: usize| keys.iter().enumerate().any(|(other, key)| other != at && keys[at].starts_with(key.as_str()) && (key.len() < keys[at].len() || other < at));
+    folders.iter().enumerate().filter(|&(at, _)| !inside(at)).map(|(_, folder)| folder.clone()).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
 
     use super::*;
+
+    #[test]
+    fn folders_inside_another_or_given_twice_are_walked_once() {
+        let paths = |all: &[&str]| all.iter().map(PathBuf::from).collect::<Vec<_>>();
+        assert_eq!(outermost(&paths(&[r"C:\Work\Photos", r"C:\Work", r"D:\", r"d:\Old", r"C:\Workshop"])), paths(&[r"C:\Work", r"D:\", r"C:\Workshop"]));
+        assert_eq!(outermost(&paths(&[r"C:\A", r"c:\a\"])), paths(&[r"C:\A"]), "the same folder twice counts once");
+    }
+
+    #[test]
+    fn a_junction_to_a_folder_given_is_that_folder() {
+        let root = std::env::temp_dir().join(format!("perli-copies-junction-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join(r"real\inner")).unwrap();
+        let alias = root.join("alias");
+        let made = std::process::Command::new("cmd").args(["/C", "mklink", "/J"]).args([&alias, &root.join("real")]).output().unwrap();
+        assert!(made.status.success());
+        assert_eq!(outermost(&[root.join("real"), alias.clone()]), [root.join("real")]);
+        assert_eq!(outermost(&[alias.join("inner"), root.join("real")]), [root.join("real")], "inside it through the junction");
+        let _ = fs::remove_dir(&alias);
+        let _ = fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn a_first_bytes_print_is_read_again_once_the_file_changes_even_with_its_old_time_put_back() {

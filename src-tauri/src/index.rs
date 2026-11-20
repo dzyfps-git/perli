@@ -548,6 +548,60 @@ fn page_in(db: &Db, parts: &[Part], text: &str, deepest: usize, sight: Sight, sk
     rows.collect()
 }
 
+/// Every file under `folder` as the list holds it, each with the folder it sits in, so a folder
+/// can be weighed with no walk. False when the list can't answer for all of it, as
+/// `answers_under` tells, and then the caller walks the disk. Ends early when `stop` is set.
+pub fn each_file_under(folder: &Path, stop: &AtomicBool, mut visit: impl FnMut(&Path, &WIN32_FIND_DATAW)) -> bool {
+    let skip = left_out(&options());
+    let Some((db, live)) = live() else { return false };
+    answers_under(&db, &live, &skip, folder) && files_in(&db, folder, stop, &mut visit).is_ok()
+}
+
+/// Whether the list holds all of `folder`: its drive listed, the folder itself in it, which one
+/// past a junction or made since the walk is not, and no folder left out inside it or above it.
+fn answers_under(db: &Db, live: &[String], skip: &[String], folder: &Path) -> bool {
+    let folder_low = low(&folder.to_string_lossy());
+    let inside = inside_of(&folder_low);
+    let overlaps = |skipped: &String| {
+        let skipped = inside_of(skipped);
+        skipped.starts_with(&inside) || inside.starts_with(&skipped)
+    };
+    live.contains(&low(&root_of(folder).to_string_lossy())) && db.folder(&folder_low).is_some() && !skip.iter().any(overlaps)
+}
+
+/// The folders the list leaves out, in lowercase: the user's, and Perli's own, whose list changes
+/// as it is written.
+fn left_out(options: &Options) -> Vec<String> {
+    let mut skip: Vec<String> = options.skip.iter().map(|folder| low(folder.trim_end_matches('\\'))).collect();
+    if let Some(own) = path_of().and_then(|path| path.parent().map(Path::to_path_buf)) {
+        skip.push(low(&own.to_string_lossy()));
+    }
+    skip
+}
+
+fn files_in(db: &Db, folder: &Path, stop: &AtomicBool, visit: &mut dyn FnMut(&Path, &WIN32_FIND_DATAW)) -> rusqlite::Result<()> {
+    let folder_low = low(&folder.to_string_lossy());
+    let start = inside_of(&folder_low);
+    let mut statement = db.0.prepare(
+        "SELECT f.path, e.name, e.attributes, e.size, e.modified, e.created FROM folders f JOIN entries e ON e.folder = f.id
+         WHERE (f.low = ?1 OR (f.low >= ?2 AND f.low < ?3)) AND e.attributes & ?4 = 0",
+    )?;
+    let mut rows = statement.query(params![folder_low.trim_end_matches('\\'), start, past(&start), ATTRIBUTE_DIRECTORY])?;
+    let mut at = PathBuf::new();
+    while let Some(row) = rows.next()? {
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
+        let path: String = row.get(0)?;
+        if at.as_os_str() != path.as_str() {
+            at = PathBuf::from(path);
+        }
+        let name: String = row.get(1)?;
+        visit(&at, &find_data(&name, row.get(2)?, row.get::<_, i64>(3)? as u64, row.get::<_, i64>(4)? as u64, row.get::<_, i64>(5)? as u64));
+    }
+    Ok(())
+}
+
 /// How the list is doing, as Settings shows it.
 #[derive(Clone, Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -917,10 +971,7 @@ impl Keeping {
                 thread::sleep(Duration::from_secs(1));
                 continue;
             }
-            let mut skip: Vec<String> = options.skip.iter().map(|folder| low(folder.trim_end_matches('\\'))).collect();
-            if let Some(own) = path_of().and_then(|path| path.parent().map(Path::to_path_buf)) {
-                skip.push(low(&own.to_string_lossy()));
-            }
+            let skip = left_out(&options);
             if skip != self.skip {
                 // Newly left out goes at once; brought back comes with a walk of its drive.
                 for folder in skip.iter().filter(|folder| !self.skip.contains(folder)) {
@@ -1157,6 +1208,27 @@ mod tests {
     }
 
     #[test]
+    fn the_files_under_a_folder_come_with_their_folders_and_nothing_beside_it() {
+        let tree = Tree::new("under");
+        tree.file(r"deep\inner\one.txt");
+        tree.file(r"deep\two.txt");
+        tree.file(r"deeper\three.txt");
+        tree.file(r"top.txt");
+        let db = tree.db();
+        walk(&db, &tree.0, &[], &mut || false).unwrap();
+        let under = |folder: &Path, stop: bool| {
+            let mut found = Vec::new();
+            files_in(&db, folder, &AtomicBool::new(stop), &mut |at, data| found.push((at.to_path_buf(), name_of(data)))).unwrap();
+            found.sort();
+            found
+        };
+        let deep = tree.0.join("deep");
+        assert_eq!(under(&deep, false), [(deep.clone(), "two.txt".to_string()), (deep.join("inner"), "one.txt".to_string())], "files only, deeper too, not deeper's");
+        assert_eq!(under(&tree.0, false).len(), 4);
+        assert!(under(&tree.0, true).is_empty(), "a stop ends it");
+    }
+
+    #[test]
     fn hidden_folders_count_only_below_where_the_search_starts() {
         let tree = Tree::new("hidden");
         tree.file(r"secret\inner\note.txt");
@@ -1207,6 +1279,23 @@ mod tests {
         walk(&db, &tree.0, &[], &mut || false).unwrap();
         assert!(found("one").is_empty(), "a walk drops what it no longer sees");
         assert_eq!(found("e.t"), ["three.txt"]);
+    }
+
+    #[test]
+    fn the_list_weighs_a_folder_only_when_it_holds_all_of_it() {
+        let tree = Tree::new("answers");
+        tree.file(r"a\b\c.txt");
+        let db = tree.db();
+        walk(&db, &tree.0, &[], &mut || false).unwrap();
+        let live = [low(&root_of(&tree.0).to_string_lossy())];
+        let a = tree.0.join("a");
+        assert!(answers_under(&db, &live, &[], &a));
+        assert!(!answers_under(&db, &[], &[], &a), "a drive not listed");
+        fs::create_dir(tree.0.join("later")).unwrap();
+        assert!(!answers_under(&db, &live, &[], &tree.0.join("later")), "a folder the list doesn't hold yet");
+        assert!(!answers_under(&db, &live, &[low(&a.join("b").to_string_lossy())], &a), "a folder left out inside it");
+        assert!(!answers_under(&db, &live, &[low(&tree.0.to_string_lossy())], &a), "a folder left out above it");
+        assert!(answers_under(&db, &live, &[low(&tree.0.join("ab").to_string_lossy())], &a), "a name that only starts the same");
     }
 
     #[test]

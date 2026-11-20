@@ -75,8 +75,10 @@ cols = home / "cols"
 # Gallery: a tall and a wide video, and a big picture.
 gal = home / "gal"
 gal.mkdir(exist_ok=True)
+# The videos are made by hand and kept out of the repo; without them only the gallery part misses them.
 for name in ("tall.mp4", "wide.mp4"):
-    shutil.copy(here / "vid" / name, gal / name)
+    if (here / "vid" / name).exists():
+        shutil.copy(here / "vid" / name, gal / name)
 
 def chunk(kind, data):
     return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))

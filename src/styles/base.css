@@ -841,3 +841,39 @@ html[data-blurred] .pane-stream i {
     animation: none;
   }
 }
+
+/* Space just taken rises into the bar like a tide in the accent's colours, then settles into it. */
+.tide {
+  position: absolute;
+  inset: 0 auto 0 calc(var(--from) * 100%);
+  z-index: 2;
+  width: calc((var(--to) - var(--from)) * 100%);
+  min-width: 3px;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--accent-start), var(--accent-end));
+  transform-origin: left;
+  animation: tide 1400ms var(--spring) forwards;
+  pointer-events: none;
+}
+
+@keyframes tide {
+  from {
+    scale: 0 1;
+  }
+
+  55% {
+    scale: 1 1;
+    opacity: 1;
+  }
+
+  to {
+    scale: 1 1;
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tide {
+    display: none;
+  }
+}

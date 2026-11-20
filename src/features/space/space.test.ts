@@ -63,6 +63,8 @@ test("This PC holds the drives, each with what it held when last weighed", () =>
   assert.deepEqual(tree.kids[0].kids.map((kid) => kid.path), ["C:\\Users", "C:\\Windows"]);
   assert.equal(tree.kids[1].kids.length, 0);
   assert.equal(allNodes(tree).length, 5);
+  const layered = pcTree([{ path: "C:\\", name: "", used: 1 }], {}, kindOf, { "c:\\": [[2020, 5]] });
+  assert.deepEqual(layered.kids[0].years, [[2020, 5]], "a drive carries its years, for Layers on This PC");
 });
 
 test("paths go up one folder at a time and know what they lie under", () => {

@@ -262,6 +262,22 @@ pub fn final_path(path: &Path) -> Result<String> {
     Ok(String::from_utf16_lossy(&text[..length as usize]).to_lowercase())
 }
 
+/// Where `path` really is, through junctions, links and other names for it, in lowercase and with
+/// its drive letter, as `C:\Work` or `\\server\share\Work`: the form a path never looked up has.
+pub fn real_path(path: &Path) -> Result<String> {
+    let file = open(path, FILE_READ_ATTRIBUTES.0, FILE_FLAG_BACKUP_SEMANTICS)?;
+    let mut text = vec![0; 32768];
+    let length = unsafe { GetFinalPathNameByHandleW(*file, &mut text, FILE_NAME_NORMALIZED) };
+    if length == 0 {
+        return Err(Error::from_thread());
+    }
+    let text = String::from_utf16_lossy(&text[..length as usize]).to_lowercase();
+    Ok(match text.strip_prefix(r"\\?\unc\") {
+        Some(share) => format!(r"\\{share}"),
+        None => text.strip_prefix(r"\\?\").unwrap_or(&text).to_string(),
+    })
+}
+
 /// True when `path` is `folder` or anything under it. Both come from `final_path`.
 pub fn is_inside(path: &str, folder: &str) -> bool {
     path == folder
