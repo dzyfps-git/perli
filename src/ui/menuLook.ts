@@ -132,7 +132,7 @@ const LOOK: Record<string, [icon: string, keys?: string]> = {
   "New folder with selection": ["\uE8F4"],
   "Put on the shelf": ["\uE8F1"],
   "Activity log": ["\uE81C"],
-  "Disk map": ["\uEDA2", "Ctrl+Shift+M"],
+  "Space": ["\uEDA2", "Ctrl+Shift+M"],
   "Send folder to file dialog (experimental)": ["\uE8DE", "Ctrl+Shift+O"],
   "Keyboard shortcuts": ["\uE765"],
   Settings: ["", "Ctrl+,"],

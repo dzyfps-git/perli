@@ -3,7 +3,7 @@
 // mouse and keyboard are never touched), and prints ok or FAIL for each step. run.mjs puts it in
 // front of one set's parts, such as c.mjs, and names the result after that set.
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";

@@ -175,12 +175,174 @@ fn scan(folder: &Path, stop: &AtomicBool, report: impl Fn()) {
     save();
 }
 
-/// One thing right inside a folder, with all the bytes under it, for the disk map.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+/// The kinds of file a cell names, biggest first: enough to tell what fills it.
+const MOST_EXTS: usize = 4;
+/// The biggest things inside a folder that come along with it, for the map's second ring.
+const MOST_INNER: usize = 16;
+
+/// One thing right inside a folder, with all the bytes under it, for Space.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct Cell {
     pub name: String,
     pub bytes: u64,
     pub folder: bool,
+    /// When a file under it last changed, in FILETIME ticks, or 0 with no files.
+    pub newest: u64,
+    /// The biggest things right inside a folder, with nothing deeper of their own.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub inner: Vec<Cell>,
+    /// Bytes by extension, lowercase and without the dot, biggest first.
+    pub exts: Vec<(String, u64)>,
+    /// Bytes by the year files last changed, oldest first. Only the folder's own cells carry it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub years: Vec<(i32, u64)>,
+}
+
+/// An extension as a key that costs no allocation: up to 8 ASCII letters, lowercase. Longer or
+/// odd ones count with the files that have none.
+type Ext = [u8; 8];
+
+fn ext_of(entry: &Entry) -> Ext {
+    let name = entry.name();
+    let mut ext = [0; 8];
+    let Some(dot) = name.iter().rposition(|&unit| unit == u16::from(b'.')) else { return ext };
+    let tail = &name[dot + 1..];
+    if tail.is_empty() || tail.len() > ext.len() || !tail.iter().all(|&unit| unit < 128) {
+        return ext;
+    }
+    for (slot, &unit) in ext.iter_mut().zip(tail) {
+        *slot = (unit as u8).to_ascii_lowercase();
+    }
+    ext
+}
+
+fn ext_text(ext: &Ext) -> String {
+    String::from_utf8_lossy(&ext[..ext.iter().position(|&byte| byte == 0).unwrap_or(ext.len())]).into_owned()
+}
+
+/// The year of a FILETIME, by UTC, or 0 for none. Days to a civil date as in Howard Hinnant's
+/// algorithm, so no date library is needed for one number.
+fn year_of(ticks: u64) -> i32 {
+    const TICKS_PER_DAY: u64 = 864_000_000_000;
+    /// Days from 1601-01-01 to 1970-01-01.
+    const TO_1970: i64 = 134_774;
+    if ticks == 0 {
+        return 0;
+    }
+    let days = (ticks / TICKS_PER_DAY) as i64 - TO_1970 + 719_468;
+    let era = days.div_euclid(146_097);
+    let of_era = days.rem_euclid(146_097);
+    let year_of_era = (of_era - of_era / 1460 + of_era / 36_524 - of_era / 146_096) / 365;
+    let of_year = of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month = (5 * of_year + 2) / 153;
+    (year_of_era + era * 400 + i64::from(month >= 10)) as i32
+}
+
+/// What a walk under a folder adds up for Space.
+#[derive(Default)]
+struct Tally {
+    bytes: u64,
+    newest: u64,
+    exts: HashMap<Ext, u64>,
+    years: HashMap<i32, u64>,
+}
+
+impl Tally {
+    fn file(&mut self, entry: &Entry) {
+        let size = entry.size();
+        self.bytes += size;
+        self.newest = self.newest.max(entry.modified());
+        *self.exts.entry(ext_of(entry)).or_default() += size;
+        *self.years.entry(year_of(entry.modified())).or_default() += size;
+    }
+
+    fn add(&mut self, other: Tally) {
+        self.bytes += other.bytes;
+        self.newest = self.newest.max(other.newest);
+        for (ext, bytes) in other.exts {
+            *self.exts.entry(ext).or_default() += bytes;
+        }
+        for (year, bytes) in other.years {
+            *self.years.entry(year).or_default() += bytes;
+        }
+    }
+
+    /// Everything under `folder` added in, or false if `stop` came first. Links stay unfollowed.
+    fn walk(&mut self, folder: &Path, stop: &AtomicBool) -> bool {
+        let mut waiting = vec![folder.to_path_buf()];
+        while let Some(next) = waiting.pop() {
+            if stop.load(Ordering::SeqCst) {
+                return false;
+            }
+            each_item(&next, |entry, is_folder| {
+                if is_folder {
+                    waiting.push(next.join(entry.file_name()));
+                } else {
+                    self.file(&entry);
+                }
+            });
+        }
+        true
+    }
+
+    /// The `most` biggest extensions.
+    fn top_exts(&self, most: usize) -> Vec<(String, u64)> {
+        let mut exts: Vec<(String, u64)> = self.exts.iter().filter(|(_, &bytes)| bytes > 0).map(|(ext, &bytes)| (ext_text(ext), bytes)).collect();
+        exts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        exts.truncate(most);
+        exts
+    }
+
+    fn cell(self, name: String, folder: bool, inner: Vec<Cell>, years: bool) -> Cell {
+        let exts = self.top_exts(MOST_EXTS);
+        let mut by_year: Vec<(i32, u64)> = if years { self.years.into_iter().filter(|&(year, bytes)| year > 0 && bytes > 0).collect() } else { Vec::new() };
+        by_year.sort_unstable();
+        Cell { name, bytes: self.bytes, folder, newest: self.newest, inner, exts, years: by_year }
+    }
+}
+
+fn file_cell(entry: &Entry, years: bool) -> Cell {
+    let mut tally = Tally::default();
+    tally.file(entry);
+    tally.cell(entry.file_name().to_string_lossy().into_owned(), false, Vec::new(), years)
+}
+
+/// A folder weighed for Space: all of it, with its biggest parts one level down. None if stopped.
+fn weigh_folder(path: &Path, name: String, stop: &AtomicBool) -> Option<Cell> {
+    let mut whole = Tally::default();
+    let mut files = Vec::new();
+    let mut folders = Vec::new();
+    each_item(path, |entry, is_folder| {
+        if is_folder {
+            folders.push(entry.file_name());
+        } else {
+            whole.file(&entry);
+            files.push(entry);
+        }
+    });
+    // Only the biggest files get a cell of their own, so a folder of 100,000 makes 16.
+    files.sort_unstable_by_key(|file| std::cmp::Reverse(file.size()));
+    files.truncate(MOST_INNER);
+    let mut inner: Vec<Cell> = files.iter().map(|entry| file_cell(entry, false)).collect();
+    for folder in folders {
+        let mut part = Tally::default();
+        if !part.walk(&path.join(&folder), stop) {
+            return None;
+        }
+        // The part's biggest kind comes along, so even a small ring tells what fills it.
+        inner.push(Cell {
+            name: folder.to_string_lossy().into_owned(),
+            bytes: part.bytes,
+            folder: true,
+            newest: part.newest,
+            exts: part.top_exts(1),
+            ..Cell::default()
+        });
+        whole.add(part);
+    }
+    inner.sort_by(|a, b| b.bytes.cmp(&a.bytes).then_with(|| a.name.cmp(&b.name)));
+    inner.truncate(MOST_INNER);
+    Some(whole.cell(name, true, inner, true))
 }
 
 /// The one disk map being measured.
@@ -199,11 +361,16 @@ pub fn map(folder: PathBuf, report: impl Fn(Vec<Cell>, bool) + Send + 'static) {
 }
 
 /// Files are known at once, and folders come first as empty cells that fill as each is added up.
+// ponytail: always walks the disk, even with the search index on, so a whole drive can take a
+// while. The index's `entries` table could answer sizes and years at once if that gets too slow.
 fn weigh(folder: &Path, stop: &AtomicBool, report: impl Fn(Vec<Cell>, bool)) {
     let mut cells = Vec::new();
     each_item(folder, |entry, is_folder| {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        cells.push(Cell { name, bytes: if is_folder { 0 } else { entry.size() }, folder: is_folder });
+        cells.push(if is_folder {
+            Cell { name: entry.file_name().to_string_lossy().into_owned(), folder: true, ..Cell::default() }
+        } else {
+            file_cell(&entry, true)
+        });
     });
     let folders: Vec<String> = cells.iter().filter(|cell| cell.folder).map(|cell| cell.name.clone()).collect();
     report(cells, folders.is_empty());
@@ -211,10 +378,10 @@ fn weigh(folder: &Path, stop: &AtomicBool, report: impl Fn(Vec<Cell>, bool)) {
     let mut ready = Vec::new();
     let mut reported = Instant::now();
     for (at, name) in folders.iter().enumerate() {
-        let Some(bytes) = total(&folder.join(name), stop) else {
+        let Some(cell) = weigh_folder(&folder.join(name), name.clone(), stop) else {
             return;
         };
-        ready.push(Cell { name: name.clone(), bytes, folder: true });
+        ready.push(cell);
         let last = at + 1 == folders.len();
         if last || reported.elapsed() >= MAP_GAP {
             report(mem::take(&mut ready), last);
@@ -355,15 +522,25 @@ mod tests {
         weigh(&tree.0, &AtomicBool::new(false), |cells, done| heard.lock().unwrap().push((cells, done)));
         let heard = heard.into_inner().unwrap();
 
-        let cell = |name: &str, bytes, folder| Cell { name: name.into(), bytes, folder };
-        let mut first = heard[0].0.clone();
-        first.sort_by(|a, b| a.name.cmp(&b.name));
-        assert_eq!(first, [cell("empty", 0, true), cell("loose.bin", 9, false), cell("top", 0, true)]);
+        let plain = |cells: &[Cell]| {
+            let mut list: Vec<(String, u64, bool)> = cells.iter().map(|cell| (cell.name.clone(), cell.bytes, cell.folder)).collect();
+            list.sort();
+            list
+        };
+        let cell = |name: &str, bytes, folder| (name.to_string(), bytes, folder);
+        assert_eq!(plain(&heard[0].0), [cell("empty", 0, true), cell("loose.bin", 9, false), cell("top", 0, true)]);
         assert!(!heard[0].1, "the folders are still to come");
-        let mut grown: Vec<Cell> = heard[1..].iter().flat_map(|(cells, _)| cells.clone()).collect();
-        grown.sort_by(|a, b| a.name.cmp(&b.name));
-        assert_eq!(grown, [cell("empty", 0, true), cell("top", 120, true)]);
+        let grown: Vec<Cell> = heard[1..].iter().flat_map(|(cells, _)| cells.clone()).collect();
+        assert_eq!(plain(&grown), [cell("empty", 0, true), cell("top", 120, true)]);
         assert!(heard.last().unwrap().1);
+
+        let top = grown.iter().find(|cell| cell.name == "top").unwrap();
+        assert_eq!(plain(&top.inner), [cell("a.bin", 100, false), cell("inner", 20, true)], "one level down rides along");
+        assert_eq!(top.exts, [("bin".to_string(), 120)]);
+        let this_year = year_of(top.newest);
+        assert!(this_year >= 2024, "{this_year}");
+        assert_eq!(top.years, [(this_year, 120)]);
+        assert!(top.inner.iter().all(|inner| inner.years.is_empty() && inner.inner.is_empty()));
 
         let stopped = Mutex::new(0);
         weigh(&tree.0, &AtomicBool::new(true), |_, _| *stopped.lock().unwrap() += 1);
@@ -371,6 +548,37 @@ mod tests {
         fs::remove_dir_all(tree.0.join("top")).unwrap();
         fs::remove_dir_all(tree.0.join("empty")).unwrap();
         weigh(&tree.0, &AtomicBool::new(false), |cells, done| assert!(done && cells.len() == 1));
+    }
+
+    #[test]
+    fn a_filetime_gives_its_year() {
+        // 2000-01-01 and 1999-12-31 23:59:59 UTC, in FILETIME ticks.
+        assert_eq!(year_of(125_911_584_000_000_000), 2000);
+        assert_eq!(year_of(125_911_583_990_000_000), 1999);
+        // 2024-02-29, a leap day.
+        assert_eq!(year_of(133_535_520_000_000_000), 2024);
+        assert_eq!(year_of(0), 0);
+    }
+
+    #[test]
+    fn a_biggest_folder_keeps_only_its_biggest_parts() {
+        let root = std::env::temp_dir().join(format!("perli-sizes-many-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        for at in 0..MOST_INNER + 5 {
+            fs::write(root.join(format!("{at}.TXT")), vec![0; at + 1]).unwrap();
+        }
+        fs::write(root.join("no-extension"), [0; 3]).unwrap();
+        fs::write(root.join("long.extension9"), [0; 2]).unwrap();
+        let cell = weigh_folder(&root, "many".into(), &AtomicBool::new(false)).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+
+        assert_eq!(cell.inner.len(), MOST_INNER);
+        assert_eq!(cell.inner[0].name, format!("{}.TXT", MOST_INNER + 4));
+        assert_eq!(cell.exts[0].0, "txt", "lowercase");
+        assert_eq!(cell.exts[1], (String::new(), 5), "no extension and an odd one count together");
+
+        let tree = Tree::new("stopped-folder");
+        assert!(weigh_folder(&tree.0, "x".into(), &AtomicBool::new(true)).is_none(), "a stop wins over the folders below");
     }
 
     #[test]

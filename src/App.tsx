@@ -173,7 +173,7 @@ import { comboOf, KEYS } from "./features/keys/keys";
 import { KeySheet } from "./features/keys/KeySheet";
 import { ActivityLog } from "./features/reach/ActivityLog";
 import { DropChips } from "./features/reach/DropChips";
-import { DiskMap } from "./features/diskmap/DiskMap";
+import { Space } from "./features/space/SpaceView";
 import { readTyped } from "./features/reach/lists";
 import {
   forgetNickname,
@@ -521,6 +521,7 @@ export function App() {
   const [keysOpen, setKeysOpen] = createSignal(false);
   const [activityOpen, setActivityOpen] = createSignal(false);
   /** The folder the disk map starts in, while the map is open. */
+  /** The folder Space is open on, "" for This PC, or nothing while it is closed. */
   const [mapping, setMapping] = createSignal<string>();
   /** The New gallery, where it opens and the view it makes things in. */
   const [making, setMaking] = createSignal<{ view: FolderView; x: number; y: number }>();
@@ -536,7 +537,7 @@ export function App() {
     !!previewing() ||
     !!comparing() ||
     keysOpen() ||
-    !!mapping() ||
+    mapping() !== undefined ||
     updateSheet() ||
     activityOpen() ||
     // Every sheet opens as a modal dialog, so one left off the list above still counts.
@@ -1612,7 +1613,7 @@ export function App() {
           ...undo,
           { label: "Undo several…", disabled: jobs.latestStep() === null, action: () => setActivityOpen(true) },
           { label: "Activity log", action: () => setActivityOpen(true) },
-          { label: "Disk map", action: () => setMapping(view.folder()?.path) },
+          { label: "Space", action: () => setMapping(view.folder()?.path ?? "") },
         ];
     const shellItems = view.isBin() || view.isZip() || isPerliCloud(view.folder()?.path ?? "") ? [] : shell.backgroundItems(view, { x, y });
     setMenu({ x, y, items: [...fileItems, ...viewItems(view), ...shellItems] });
@@ -2022,7 +2023,7 @@ export function App() {
     undo: () => actions.undo(here()),
     redo: () => actions.redo(here()),
     activity: () => setActivityOpen(true),
-    diskMap: () => here().isZip() || setMapping(here().folder()?.path),
+    diskMap: () => here().isZip() || setMapping(here().folder()?.path ?? ""),
     toFileDialog: () => {
       const folder = here().folder()?.path;
       if (!folder) return;
@@ -2769,6 +2770,7 @@ export function App() {
             onMenu={(event, path) => showFolderMenu(event, tabs.activeView(), path)}
             onEject={jobs.eject}
             onSearch={(text) => leaveHome((view) => view.search(text))}
+            onOpenSpace={() => setMapping("")}
           />
         </Show>
         <Settings
@@ -2832,15 +2834,16 @@ export function App() {
       <Show when={keysOpen()}>
         <KeySheet onClose={() => setKeysOpen(false)} />
       </Show>
-      <Show when={mapping()} keyed>
-        {(folder) => (
-          <DiskMap
-            folder={folder}
-            onOpen={(path) => void tabs.activeView().open(path)}
-            onShow={(path) => showInFolder(tabs.activeView(), path)}
-            onClose={() => setMapping(undefined)}
-          />
-        )}
+      <Show when={mapping() !== undefined}>
+        <Space
+          folder={mapping()!}
+          drives={places()?.drives ?? []}
+          pictures={places()?.folders.find((folder) => folder.kind === "pictures")?.path}
+          downloads={places()?.folders.find((folder) => folder.kind === "downloads")?.path}
+          onOpen={(path) => void leaveHome((view) => view.open(path))}
+          onShow={(path) => void leaveHome((view) => showInFolder(view, path))}
+          onClose={() => setMapping(undefined)}
+        />
       </Show>
       <Show when={deleting()} keyed>
         {(request) => <ConfirmDelete request={request} onClose={() => setDeleting(undefined)} />}

@@ -17,6 +17,7 @@ Screenshots go to `shots-<set>/` here. Nothing else stays behind.
 | `a2` | A2 (#60) | mail, compare, git, gallery, columns, keep plain, pdf, diff, windows |
 | `b` | B (#61) | mermaid, mail, midi, reload, git, compare, copies, index. The index part walks every drive, which takes several minutes. |
 | `c` | C (#62) | cloud-sheet, sync, s3, note, pdf-scripts |
+| `s` | 9A | open, hover, lenses, into, find, picture, pulse, tags, home. The picture goes to the run's own folder, not your Pictures. |
 
 Each set's fixtures come from `<set>-files.py`. `helpers.js` is loaded into the page for clicks, typing and reading rows.
 

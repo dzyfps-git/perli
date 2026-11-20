@@ -2560,6 +2560,74 @@ fn stop_map() {
     sizes::stop_map();
 }
 
+/// A tagged file under a folder, with its tags, for the Tags lens of Space.
+#[derive(Serialize)]
+struct TaggedFile {
+    path: String,
+    tags: Box<[u32]>,
+}
+
+/// Every tagged file under `root`, or everywhere when it is empty.
+#[tauri::command]
+async fn tagged_under(root: String) -> Result<Vec<TaggedFile>, String> {
+    with_tags(move || {
+        let low = root.to_lowercase();
+        let low = if low.is_empty() || low.ends_with('\\') { low } else { format!("{low}\\") };
+        Ok(tags::every_file()
+            .into_iter()
+            .map(|(path, tags)| TaggedFile { path: path.to_string_lossy().into_owned(), tags })
+            .filter(|file| file.path.to_lowercase().starts_with(&low))
+            .collect())
+    })
+    .await
+}
+
+/// When a folder last gained or lost an item, in FILETIME ticks, so Space can tell a download landed.
+#[tauri::command]
+async fn folder_stamp(path: PathBuf) -> Result<u64, String> {
+    blocking(move || ops::sys::stamp(&path).map(|(_, modified, _)| modified).map_err(|error| error.message())).await
+}
+
+const NO_MAP_PICTURE: &str = "The picture of the map didn't come through";
+
+/// A picture of Space saved as a PNG in a folder, under the lowest free name. The body is the
+/// folder's length as a little-endian u32, the folder in UTF-8, the name's length and the name
+/// the same way, then the PNG. Answers the new file's path.
+#[tauri::command]
+async fn save_space_picture(request: tauri::ipc::Request<'_>) -> Result<String, String> {
+    let tauri::ipc::InvokeBody::Raw(body) = request.body() else {
+        return Err(NO_MAP_PICTURE.into());
+    };
+    /// The text at `at` and where the next part starts.
+    fn text_at(body: &[u8], at: usize) -> Option<(String, usize)> {
+        let length = u32::from_le_bytes(body.get(at..at + 4)?.try_into().ok()?) as usize;
+        let end = at.checked_add(4)?.checked_add(length)?;
+        Some((std::str::from_utf8(body.get(at + 4..end)?).ok()?.to_string(), end))
+    }
+    let (folder, at) = text_at(body, 0).ok_or(NO_MAP_PICTURE)?;
+    let (name, at) = text_at(body, at).ok_or(NO_MAP_PICTURE)?;
+    // A name is one file in the folder, never a way out of it.
+    if name.is_empty() || name.contains(['\\', '/', ':']) || name.contains("..") {
+        return Err(NO_MAP_PICTURE.into());
+    }
+    let png = body[at..].to_vec();
+    if !png.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return Err("Only a PNG picture can be saved".into());
+    }
+    blocking(move || {
+        let folder = PathBuf::from(folder);
+        let path = ops::free_name(&folder, &name, ".png");
+        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&path).map_err(|error| error.to_string())?;
+        std::io::Write::write_all(&mut file, &png).map_err(|error| {
+            drop(file);
+            let _ = std::fs::remove_file(&path);
+            error.to_string()
+        })?;
+        Ok(path.to_string_lossy().into_owned())
+    })
+    .await
+}
+
 #[tauri::command]
 fn stop_sizes(scans: State<'_, Scans>) {
     scans.stop_all();
@@ -3085,6 +3153,9 @@ fn main() {
             map_folder,
             send_to_file_dialog,
             stop_map,
+            tagged_under,
+            folder_stamp,
+            save_space_picture,
             drop_choices,
             measure_drop,
             git_recheck,

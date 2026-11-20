@@ -316,6 +316,8 @@ export type JobEvent = { id: number } & (
       unpack: string[];
       /** The folder the job fills, for what to do when it is done. */
       target: string | null;
+      /** The folders its sources are in, for Space to draw where things went. */
+      from: string[];
     }
   /** Windows is about to ask for permission, with UAC over the whole screen. */
   | { kind: "elevating" }
@@ -987,9 +989,44 @@ export interface MapCell {
   name: string;
   bytes: number;
   folder: boolean;
+  /** When a file under it last changed, in FILETIME ticks, or 0 with no files. */
+  newest: number;
+  /** The biggest things right inside a folder, with nothing deeper of their own. */
+  inner?: MapCell[];
+  /** Bytes by extension, lowercase and without the dot, biggest first. */
+  exts: [string, number][];
+  /** Bytes by the year files last changed, oldest first. Only the folder's own cells carry it. */
+  years?: [number, number][];
 }
 
-/** Weighs what is in `path` for the disk map. Answers come through `onMapGrew` with `ticket`. */
+/** A tagged file, with the IDs of its tags. */
+export interface TaggedFile {
+  path: string;
+  tags: number[];
+}
+
+/** Every tagged file under `root`, or everywhere when it is "". */
+export const taggedUnder = (root: string) => invoke<TaggedFile[]>("tagged_under", { root });
+/** When a folder last gained or lost an item, in FILETIME ticks. */
+export const folderStamp = (path: string) => invoke<number>("folder_stamp", { path });
+
+/** Saves a PNG as `name` in `folder`, under the lowest free name, and gives the new file's path. */
+export function saveSpacePicture(folder: string, name: string, png: ArrayBuffer) {
+  const encoder = new TextEncoder();
+  const parts = [encoder.encode(folder), encoder.encode(name)];
+  const body = new Uint8Array(parts.reduce((sum, part) => sum + 4 + part.length, 0) + png.byteLength);
+  const head = new DataView(body.buffer);
+  let at = 0;
+  for (const part of parts) {
+    head.setUint32(at, part.length, true);
+    body.set(part, at + 4);
+    at += 4 + part.length;
+  }
+  body.set(new Uint8Array(png), at);
+  return invoke<string>("save_space_picture", body);
+}
+
+/** Weighs what is in `path` for Space. Answers come through `onMapGrew` with `ticket`. */
 export const mapFolder = (path: string, ticket: number) => invoke<void>("map_folder", { path, ticket });
 export const stopMap = () => invoke<void>("stop_map");
 /** `cells` are new or have grown. `done` says they were the last. */
