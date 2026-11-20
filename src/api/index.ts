@@ -542,6 +542,10 @@ export interface SyncPreview {
   /** What goes to a bin first. */
   removes: string[];
   bytes: number;
+  /** New folders made before the copies, as they hold something left out. */
+  folders: string[];
+  /** The other side keeps no bin, as S3, so what goes is deleted for good once the run asks. */
+  forGood: boolean;
 }
 
 export const syncPairs = () => invoke<SyncPair[]>("sync_pairs");

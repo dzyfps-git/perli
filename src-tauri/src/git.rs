@@ -112,18 +112,25 @@ fn repository(folder: &Path) -> Option<&Path> {
     folder.ancestors().find(|folder| folder.join(".git").exists())
 }
 
-/// What git's marks on `folder` change with, to watch: its repository's index and HEAD, and its
-/// remote branches, which a push or a fetch moves on for the ahead and behind counts. Nothing
-/// outside a repository, or where `.git` is a file, as in a worktree.
+/// What git's marks on `folder` change with, to watch: its repository's index and HEAD, its
+/// remote branches, which a push or a fetch moves on for the ahead and behind counts, the packed
+/// refs, and the file of the branch HEAD names, which a commit or a soft reset moves while HEAD
+/// stays. Nothing outside a repository, or where `.git` is a file, as in a worktree.
 pub fn watched(folder: &Path) -> Vec<PathBuf> {
     let Some(git) = repository(folder).map(|root| root.join(".git")).filter(|git| git.is_dir()) else { return Vec::new() };
-    vec![git.join("index"), git.join("HEAD"), git.join("packed-refs"), git.join("refs").join("remotes")]
+    let mut files = vec![git.join("index"), git.join("HEAD"), git.join("packed-refs"), git.join("refs").join("remotes")];
+    let head = std::fs::read_to_string(git.join("HEAD")).unwrap_or_default();
+    if let Some(branch) = head.trim().strip_prefix("ref: ") {
+        files.push(git.join(branch.replace('/', "\\")));
+    }
+    files
 }
 
 /// What a read of `folder` stands on: the sizes and times of what `watched` gives, and of the
 /// folder's own rows. Git updates a remote branch by renaming a new file over it, which moves on
 /// the time of the remote's folder, seen in the listing of `refs/remotes`. None when the index or
-/// HEAD is missing, and the read goes unkept.
+/// HEAD is missing, and the read goes unkept. Packed refs and a branch's own file come and go, so
+/// whether each is there counts too.
 fn ground(root: &Path, folder: &Path) -> Option<u64> {
     let mut hasher = DefaultHasher::new();
     let files = watched(root);
@@ -231,7 +238,7 @@ mod tests {
         std::fs::write(root.join(".git").join("index"), "two!").unwrap();
         assert_ne!(ground(&root, &root).unwrap(), with_file);
         let git = root.join(".git");
-        assert_eq!(watched(&root.join("deeper")), [git.join("index"), git.join("HEAD"), git.join("packed-refs"), git.join("refs").join("remotes")]);
+        assert_eq!(watched(&root.join("deeper")), [git.join("index"), git.join("HEAD"), git.join("packed-refs"), git.join("refs").join("remotes"), git.join("refs\\heads\\main")]);
 
         // A push moves the remote branch on as git does it, by renaming a new file over it.
         let origin = git.join("refs").join("remotes").join("origin");
@@ -245,6 +252,17 @@ mod tests {
         assert_ne!(ground(&root, &root).unwrap(), fetched, "the ahead count is asked for again");
         std::fs::write(git.join("packed-refs"), "# pack-refs\n").unwrap();
         assert!(ground(&root, &root).is_some(), "packed branches are watched when there are some");
+
+        // A soft reset moves the branch, HEAD and the index staying as they were.
+        let before_reset = ground(&root, &root).unwrap();
+        std::fs::create_dir_all(git.join("refs").join("heads")).unwrap();
+        std::fs::write(git.join("refs").join("heads").join("main"), "1111\n").unwrap();
+        let on_branch = ground(&root, &root).unwrap();
+        assert_ne!(on_branch, before_reset);
+        std::fs::write(git.join("refs").join("heads").join("main"), "22222\n").unwrap();
+        assert_ne!(ground(&root, &root).unwrap(), on_branch);
+        std::fs::write(git.join("packed-refs"), "# pack-refs with: peeled\n").unwrap();
+        assert_ne!(ground(&root, &root).unwrap(), on_branch, "packed refs count too");
 
         // A worktree's .git is a file that says where the repository is, and its reads go unkept.
         let tree = root.join("tree");
