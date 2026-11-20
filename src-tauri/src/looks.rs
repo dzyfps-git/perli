@@ -2,7 +2,6 @@
 //! alike, how sharp it is, and its main colour. All read from one small copy that Windows'
 //! imaging makes, and kept until the file changes.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
@@ -130,7 +129,9 @@ fn main_colour(rgba: &[u8]) -> ([u8; 3], bool) {
         all[2] += blue;
         let (high, low) = (red.max(green).max(blue), red.min(green).min(blue));
         let saturation = if high > 0.0 { (high - low) / high } else { 0.0 };
-        if saturation < 0.2 || !(30.0..=245.0).contains(&high) {
+        // Too dark to tell a hue. Bright highlights have too little saturation to count already,
+        // while a solid red or blue, as bright as can be, keeps its hue.
+        if saturation < 0.2 || high < 30.0 {
             continue;
         }
         let bin = &mut bins[(hue_of([red, green, blue]) / 30.0) as usize % 12];
@@ -239,9 +240,10 @@ pub fn alike(folders: &[PathBuf], stopped: &(dyn Fn() -> bool + Sync)) -> Vec<Ve
                 return;
             }
             let path = at.join(entry.file_name());
-            if Stat::from_find_data(data).is_folder() {
+            let stat = Stat::from_find_data(data);
+            if stat.is_folder() {
                 waiting.push(path);
-            } else if is_picture(&path) {
+            } else if stat.is_file() && is_picture(&path) {
                 pictures.push((path, entry.size(), entry.modified()));
             }
         });
@@ -272,39 +274,34 @@ pub fn alike(folders: &[PathBuf], stopped: &(dyn Fn() -> bool + Sync)) -> Vec<Ve
     sets
 }
 
-/// Each fingerprint's group, numbered from 0 in order of first member, or nothing for one alike
-/// to no other. Groups join through members: a, b alike and b, c alike put all three in one.
+/// Each fingerprint's group, numbered from 0, or nothing for one in no group. Every member of a
+/// group is alike to every other, so whichever one stays, each that goes looks like it: a, b
+/// alike and b, c alike put c in with them only when a and c are alike too. A group grows from
+/// the first fingerprint not in one yet, taking the nearest first.
 fn group_numbers(hashes: &[u64]) -> Vec<Option<usize>> {
-    let mut parent: Vec<usize> = (0..hashes.len()).collect();
-    fn root(parent: &mut [usize], mut at: usize) -> usize {
-        while parent[at] != at {
-            parent[at] = parent[parent[at]];
-            at = parent[at];
+    let apart = |a: usize, b: usize| (hashes[a] ^ hashes[b]).count_ones();
+    let mut group = vec![None; hashes.len()];
+    let mut count = 0;
+    for seed in 0..hashes.len() {
+        if group[seed].is_some() {
+            continue;
         }
-        at
-    }
-    let mut paired = vec![false; hashes.len()];
-    for a in 0..hashes.len() {
-        for b in a + 1..hashes.len() {
-            if (hashes[a] ^ hashes[b]).count_ones() <= ALIKE {
-                let (ra, rb) = (root(&mut parent, a), root(&mut parent, b));
-                parent[ra.max(rb)] = ra.min(rb);
-                paired[a] = true;
-                paired[b] = true;
+        let mut near: Vec<usize> = (seed + 1..hashes.len()).filter(|&other| group[other].is_none() && apart(seed, other) <= ALIKE).collect();
+        near.sort_by_key(|&other| apart(seed, other));
+        let mut members = vec![seed];
+        for other in near {
+            if members.iter().all(|&member| apart(member, other) <= ALIKE) {
+                members.push(other);
             }
         }
-    }
-    let mut numbers = HashMap::new();
-    (0..hashes.len())
-        .map(|at| {
-            if !paired[at] {
-                return None;
+        if members.len() > 1 {
+            for member in members {
+                group[member] = Some(count);
             }
-            let top = root(&mut parent, at);
-            let next = numbers.len();
-            Some(*numbers.entry(top).or_insert(next))
-        })
-        .collect()
+            count += 1;
+        }
+    }
+    group
 }
 
 #[cfg(test)]
@@ -345,13 +342,22 @@ mod tests {
         assert!(colour_text(&grey).starts_with("0 "));
         assert!(colour_text(&look).starts_with("1 22"));
         assert!(colour_text(&look).ends_with("#285adc"));
+        // As bright as a colour gets: still a colour, not grey.
+        for solid in [[255, 0, 0], [0, 0, 255], [255, 255, 0]] {
+            let look = of_pixels(&painted(|_, _| solid));
+            assert!(!look.grey, "{solid:?}");
+            assert_eq!(look.colour, solid);
+        }
+        assert!(of_pixels(&painted(|_, _| [255, 250, 250])).grey);
     }
 
     #[test]
-    fn alike_fingerprints_join_through_each_other() {
-        // The third is alike only to the second, which brings it into the first group.
+    fn each_in_a_group_is_alike_to_every_other() {
+        // The third is alike to the second only, not to the first, so it stays out.
         let hashes = [0u64, 0b111, 0b1_1111_1111_1111, u64::MAX, u64::MAX ^ 1];
-        assert_eq!(group_numbers(&hashes), vec![Some(0), Some(0), Some(0), Some(1), Some(1)]);
+        assert_eq!(group_numbers(&hashes), vec![Some(0), Some(0), None, Some(1), Some(1)]);
         assert_eq!(group_numbers(&[0, u64::MAX]), vec![None, None]);
+        // Each alike to every other: one group.
+        assert_eq!(group_numbers(&[0, 0b1, 0b11, 0b111]), vec![Some(0); 4]);
     }
 }

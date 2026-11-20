@@ -24,7 +24,7 @@ import {
   type Lens,
 } from "./lenses";
 import { onPulse } from "./pulses";
-import { agoText, allNodes, folderTree, idOf, joinPath, nearestShown, pcTree, useShares } from "./space";
+import { agoText, allNodes, folderTree, idOf, joinPath, nearestShown, pcTree, touches, useShares } from "./space";
 import { keepWeighed, weighed } from "./weighed";
 import "../settings/settings.css";
 import "../fileops/fileops.css";
@@ -167,18 +167,23 @@ export function Space(props: {
     if (grew.done) keepWeighed(idOf(path()), next);
   });
 
+  /** Weighs `folder` afresh, or stops weighing for This PC. */
+  function weigh(folder: string) {
+    ticket = ++tickets;
+    listed = undefined;
+    if (!folder) {
+      setDone(true);
+      stopMap().catch(console.error);
+      return;
+    }
+    setDone(false);
+    mapFolder(folder, ticket).catch(console.error);
+  }
+
   createEffect(
     on(path, (folder) => {
-      ticket = ++tickets;
-      listed = undefined;
       setSavedTo(undefined);
-      if (!folder) {
-        setDone(true);
-        stopMap().catch(console.error);
-        return;
-      }
-      setDone(false);
-      mapFolder(folder, ticket).catch(console.error);
+      weigh(folder);
     }),
   );
 
@@ -213,18 +218,29 @@ export function Space(props: {
     }),
   );
 
-  for (const drive of props.drives) {
-    if (drive.locked) continue;
-    driveSpace(drive.path)
-      .then((space) => space.total > 0 && setUsed({ ...used(), [drive.path]: space.total - space.free }))
-      .catch(() => {});
+  /** Asks how full each drive is: each one as it is first listed, and all of them `again` after a job. */
+  const asked = new Set<string>();
+  function readUsed(again = false) {
+    for (const drive of props.drives) {
+      if (drive.locked || (!again && asked.has(drive.path))) continue;
+      asked.add(drive.path);
+      driveSpace(drive.path)
+        .then((space) => space.total > 0 && setUsed({ ...used(), [drive.path]: space.total - space.free }))
+        .catch(() => {});
+    }
   }
+  // A drive plugged in while Space is open gets its fill too.
+  createEffect(() => readUsed());
 
   const kick = () => loop?.kick();
 
   const offPulse = onPulse((pulse) => {
     pulseIn(scene, pulse, tree().id, lens() === "brain", size().width);
     kick();
+    // A job that changed what shows here has the sizes weighed again, not only drawn as light.
+    if (!touches(pulse, path())) return;
+    if (path()) weigh(path());
+    else readUsed(true);
   });
 
   // Something new in Downloads falls in from above.

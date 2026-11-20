@@ -101,7 +101,7 @@ export function SyncSheet(props: { pair: SyncPair; onRun: (pair: SyncPair) => vo
   const lines = () => {
     const shown = preview();
     if (!shown) return [];
-    const removes = shown.removes.map((path) => `To the bin: ${path}`);
+    const removes = shown.removes.map((path) => `${shown.forGood ? "Deleted for good" : "To the bin"}: ${path}`);
     const copies = shown.copies.map(([source, folder]) => `Copy ${base(source)} into ${folder}`);
     return [...removes, ...copies].slice(0, MOST_LINES);
   };
@@ -111,7 +111,10 @@ export function SyncSheet(props: { pair: SyncPair; onRun: (pair: SyncPair) => vo
     if (!shown) return mustLook() ? "Look first to see every copy and removal before it runs." : "Runs as a job, with Undo.";
     if (!shown.copies.length && !shown.removes.length) return "The two sides are alike. Nothing to do.";
     const copies = `${shown.copies.length.toLocaleString()} to copy (${formatSize(shown.bytes)})`;
-    return shown.removes.length ? `${copies}, ${shown.removes.length.toLocaleString()} to the bin first` : copies;
+    if (!shown.removes.length) return copies;
+    const removes = shown.removes.length.toLocaleString();
+    // S3 keeps no bin: the run asks before it deletes anything for good.
+    return shown.forGood ? `${copies}, ${removes} deleted for good first, once you say so` : `${copies}, ${removes} to the bin first`;
   };
 
   onMount(() => {

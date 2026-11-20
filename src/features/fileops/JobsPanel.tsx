@@ -105,7 +105,7 @@ function factsText(card: JobCard) {
 }
 
 /** Never takes the focus, so Enter in the list can't answer a question nobody has read. */
-function Prompt(props: { question: Question; onAnswer: (answer: Answer, all: boolean) => void }) {
+export function Prompt(props: { question: Question; onAnswer: (answer: Answer, all: boolean) => void }) {
   const [all, setAll] = createSignal(false);
   const conflict = () => (props.question.kind === "conflict" ? props.question : undefined);
   return (

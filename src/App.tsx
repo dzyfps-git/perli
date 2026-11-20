@@ -2910,6 +2910,9 @@ export function App() {
             onShowDay={(path, day) =>
               void leaveHome(async (view) => {
                 await view.open(path);
+                // The day's files anywhere under the river's folder, whatever reach and depth the pane had.
+                view.setScope("below");
+                view.setDepth(null);
                 view.search(FLAT_QUERY);
                 view.setFilterForm({ ...NO_FILTER, from: day, to: day });
               })

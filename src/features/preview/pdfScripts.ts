@@ -33,6 +33,8 @@ interface Sandbox {
   create(data: unknown): void;
   dispatchEvent(event: unknown): void;
   nukeSandbox(): void;
+  /** What pdf.js's side of the sandbox calls for timers, dialogs and what the scripts send. */
+  support: { win: unknown };
 }
 
 /** A PDF's scripts while they run. */
@@ -61,26 +63,28 @@ export async function findScripts(pdf: PDFDocumentProxy): Promise<Found> {
   return { objects, order, actions };
 }
 
-const running = new Set<Scripts>();
-/** The scripts a call into a sandbox is for, while it runs: what the sandbox sends then is theirs. */
-let speaking: Scripts | undefined;
-
-window.addEventListener("updatefromsandbox", (event) => {
-  const detail = (event as CustomEvent).detail as Record<string, unknown>;
-  // ponytail: a script's own timer calls back with no one speaking, so what it sends goes to
-  // every PDF running scripts, each taking only its own fields. Two PDFs with the same field
-  // ids, open at once, could then share a timed change.
-  for (const scripts of speaking ? [speaking] : [...running]) scripts.update(detail);
-});
-
-/** The sandbox calls these on the window, and Perli has no plain browser dialogs. */
-function answerForms() {
-  const say = (text: string) => (speaking ?? [...running].at(-1))?.view.say(text);
-  window.alert = (text?: unknown) => void say(String(text ?? ""));
-  // ponytail: the sandbox wants an answer at once, and Perli's own dialogs answer later, so a
-  // form's question is shown and answered no. A modal answer would need pdf.js to wait for one.
-  window.confirm = (text?: string) => (say(`${text ?? ""}\nThe form asked this, and a preview answers no.`), false);
-  window.prompt = (text?: string) => (say(`${text ?? ""}\nThe form asked this, and a preview leaves it empty.`), null);
+/**
+ * The window one PDF's sandbox sees: what its scripts send, from a timer of theirs too, and what
+ * they say reach only that PDF, however many run at once with the same field ids. Perli has no
+ * plain browser dialogs, so the form's own are answered here.
+ */
+function ownWindow(scripts: () => Scripts, view: ScriptView) {
+  const say = (text: unknown) => view.say(String(text ?? ""));
+  return {
+    CustomEvent,
+    URL,
+    console,
+    setTimeout: window.setTimeout.bind(window),
+    clearTimeout: window.clearTimeout.bind(window),
+    setInterval: window.setInterval.bind(window),
+    clearInterval: window.clearInterval.bind(window),
+    alert: say,
+    // ponytail: the sandbox wants an answer at once, and Perli's own dialogs answer later, so a
+    // form's question is shown and answered no. A modal answer would need pdf.js to wait for one.
+    confirm: (text?: string) => (say(`${text ?? ""}\nThe form asked this, and a preview answers no.`), false),
+    prompt: (text?: string) => (say(`${text ?? ""}\nThe form asked this, and a preview leaves it empty.`), null),
+    dispatchEvent: (event: CustomEvent) => (scripts().update(event.detail as Record<string, unknown>), true),
+  };
 }
 
 /** Starts the PDF's scripts, or gives undefined when it has none. */
@@ -89,27 +93,17 @@ export async function runScripts(pdf: PDFDocumentProxy, found: Found, view: Scri
   const ids = new Set([...(found.objects?.values() ?? [])].flat().map((field) => field.id));
   const { QuickJSSandbox } = (await import(/* @vite-ignore */ sandboxUrl)) as { QuickJSSandbox: (wasm: string) => Promise<Sandbox> };
   const sandbox = await QuickJSSandbox(new URL(wasm, location.href).href);
+  sandbox.support.win = ownWindow(() => scripts, view);
   const [{ info, metadata }, { length }] = await Promise.all([pdf.getMetadata(), pdf.getDownloadInfo()]);
   const visited = new Set<number>();
   const waiting = new Map<string, () => void>();
   let stopped = false;
-  answerForms();
-
-  /** Calls into the sandbox with these scripts speaking. */
-  function call(work: () => void) {
-    speaking = scripts;
-    try {
-      work();
-    } finally {
-      speaking = undefined;
-    }
-  }
 
   const scripts: Scripts = {
     view,
     /** An event from a field, such as a key typed or a value left. Later, so one never runs inside another. */
     send(event: unknown) {
-      setTimeout(() => !stopped && call(() => sandbox.dispatchEvent(event)), 0);
+      setTimeout(() => !stopped && sandbox.dispatchEvent(event), 0);
     },
     /** What the scripts send back: a field's new value, look or focus, or a step for the view. */
     update({ id, siblings, command, value, ...detail }: Record<string, unknown>) {
@@ -156,32 +150,28 @@ export async function runScripts(pdf: PDFDocumentProxy, found: Found, view: Scri
     },
     stop() {
       if (stopped) return;
-      call(() => sandbox.dispatchEvent({ id: "doc", name: "WillClose" }));
+      sandbox.dispatchEvent({ id: "doc", name: "WillClose" });
       stopped = true;
-      running.delete(scripts);
       sandbox.nukeSandbox();
     },
   };
 
-  call(() =>
-    sandbox.create({
-      objects: found.objects,
-      calculationOrder: found.order,
-      appInfo: { platform: navigator.platform, language: navigator.language },
-      docInfo: {
-        ...(info as object),
-        baseURL: "",
-        URL: "",
-        filesize: length,
-        filename: view.name,
-        metadata: metadata?.getRaw(),
-        authors: metadata?.get("dc:creator"),
-        numPages: pdf.numPages,
-        actions: found.actions,
-      },
-    }),
-  );
-  running.add(scripts);
+  sandbox.create({
+    objects: found.objects,
+    calculationOrder: found.order,
+    appInfo: { platform: navigator.platform, language: navigator.language },
+    docInfo: {
+      ...(info as object),
+      baseURL: "",
+      URL: "",
+      filesize: length,
+      filename: view.name,
+      metadata: metadata?.getRaw(),
+      authors: metadata?.get("dc:creator"),
+      numPages: pdf.numPages,
+      actions: found.actions,
+    },
+  });
   scripts.send({ id: "doc", name: "Open" });
   return scripts;
 }

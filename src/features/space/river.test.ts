@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { addHours, columns, DAY, HOUR, LEAST_SPAN, panned, riverOf, softened, sumBetween, ticks, wholeSpan, zoomed } from "./river.ts";
+import { addHours, columns, DAY, dayEnd, dayStart, HOUR, LEAST_SPAN, panned, riverOf, softened, sumBetween, ticks, wholeSpan, zoomed } from "./river.ts";
 
 const hour = (time: string) => Date.parse(time) / HOUR;
 
@@ -13,6 +13,25 @@ test("hours counted in pieces add up, and any stretch sums at once", () => {
   assert.deepEqual(sumBetween(river, Date.parse("2025-03-01T00:00Z"), Date.parse("2025-03-03T00:00Z")), { files: 6, bytes: 550 });
   assert.deepEqual(sumBetween(river, Date.parse("2025-03-02T10:00Z"), Date.parse("2025-03-05T00:00Z")), { files: 0, bytes: 0 });
   assert.deepEqual(columns(river, Date.parse("2025-03-01T00:00Z"), Date.parse("2025-03-03T00:00Z"), 2), [5, 1]);
+});
+
+test("a day ends at the next midnight, also on a day the clocks change", () => {
+  const was = process.env.TZ;
+  process.env.TZ = "Europe/Berlin";
+  try {
+    // Clocks go forward on 30 March 2025 and back on 26 October 2025 there.
+    const spring = dayStart(Date.parse("2025-03-30T12:00+02:00"));
+    assert.equal(dayEnd(spring) - spring, 23 * HOUR);
+    assert.equal(dayEnd(spring), Date.parse("2025-03-31T00:00+02:00"));
+    const autumn = dayStart(Date.parse("2025-10-26T12:00+01:00"));
+    assert.equal(dayEnd(autumn) - autumn, 25 * HOUR);
+    const plain = dayStart(Date.parse("2025-06-10T08:00+02:00"));
+    assert.equal(dayEnd(plain) - plain, DAY);
+    assert.equal(dayEnd(Date.parse("2025-06-10T23:59+02:00")), Date.parse("2025-06-11T00:00+02:00"));
+  } finally {
+    if (was === undefined) delete process.env.TZ;
+    else process.env.TZ = was;
+  }
 });
 
 test("zooming keeps the point under the pointer still and stays within the river", () => {
