@@ -36,7 +36,8 @@ export const syncLabel = (pair: SyncPair) => `${base(pair.from)} → ${base(pair
 
 /** Asks for each scheduled pair once a minute. Only one that is due runs, in one window. */
 export function startSyncTimer(run: (id: string, scheduled: boolean) => void) {
-  const timer = setInterval(() => pairs().forEach((pair) => pair.every > 0 && run(pair.id, true)), LOOK_MS);
+  // The pairs are read again each time, so one saved in another window runs here too.
+  const timer = setInterval(() => void readSyncPairs().then(() => pairs().forEach((pair) => pair.every > 0 && run(pair.id, true))), LOOK_MS);
   onCleanup(() => clearInterval(timer));
 }
 
