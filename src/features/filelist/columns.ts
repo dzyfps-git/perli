@@ -14,6 +14,7 @@ export const PROP_NAMES: Record<PropColumn, string> = {
   dimensions: "System.Image.Dimensions",
   packed: "zip:packed",
   note: "cloud:note",
+  colour: "look:colour",
 };
 
 export const isProp = (id: ColumnId): id is PropColumn => id in PROP_NAMES;
@@ -47,6 +48,7 @@ const EXTRA_COLUMNS: Column[] = [
   { id: "length", label: "Length", width: 80, visible: false },
   { id: "taken", label: "Date taken", width: 160, visible: false },
   { id: "dimensions", label: "Dimensions", width: 110, visible: false },
+  { id: "colour", label: "Colour", width: 70, visible: false },
 ];
 
 const SET_SHOWS: Record<ColumnSet, ColumnId[]> = {

@@ -688,6 +688,8 @@ export function FileList(props: {
       // Nothing saved (stored, or a password made it bigger) shows the packed size alone.
       return value === "" ? "" : saved ? `${formatSize(Number(value))} · ${saved}% less` : formatSize(Number(value));
     }
+    // A picture's main colour shows as a dot in that colour; the cell's text colour is set below.
+    if (id === "colour") return value ? "●" : "";
     return id === "taken" ? dateText(Number(value)) : value;
   }
 
@@ -830,6 +832,7 @@ export function FileList(props: {
     for (const cell of pooled.cells) {
       const { id } = cell;
       cell.element.textContent = !row ? "" : isProp(id) ? propText(row, index, id) : CELL_TEXT[id](row, props.folder);
+      if (id === "colour") cell.element.style.color = (row && propsRead.get(thumbKey(row))?.colour?.slice(-7)) || "";
       if (id === "name") {
         const pills = row && inList ? row.tags.flatMap((id) => tagMark(id, true)) : [];
         // The name shortens on its own, so a long one never hides the pills after it.

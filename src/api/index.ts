@@ -63,7 +63,7 @@ export interface Tag {
 
 export type SortKey = "name" | "modified" | "created" | "type" | "size" | "location";
 /** The extra columns, read from each file's own properties. */
-export type PropKey = "artist" | "album" | "length" | "taken" | "dimensions" | "packed" | "note";
+export type PropKey = "artist" | "album" | "length" | "taken" | "dimensions" | "packed" | "note" | "colour";
 
 export interface Sort {
   /** `found` is the order a search found its rows in, which no column stands for. */
@@ -230,6 +230,8 @@ export type Task =
   | { kind: "deleteTag"; id: number }
   | { kind: "drop"; folder: string; action?: DropAction; id: number }
   | { kind: "recycle" | "delete" | "restore" | "purge"; selection: Selection }
+  /** Files by path to the Recycle Bin, as Twins cleans them. */
+  | { kind: "recyclePaths"; paths: string[] }
   | { kind: "restoreTo"; selection: Selection; folder: string }
   | { kind: "empty" }
   /** Everything in a ZIP, into a folder of its own beside it. */
@@ -706,7 +708,8 @@ export const startJob = (task: Task, origin?: number) => invoke<number | null>("
 
 /** With `step`, this only undoes that step, and only while it is the newest. */
 /** With `back`, undoes every step from the newest down to `step`, as one. */
-export const undoJob = (origin?: number, step?: number, back = false) => invoke<void>("undo_job", { origin, step, back });
+/** Answers with the job that undoes, or null when there was nothing to undo. */
+export const undoJob = (origin?: number, step?: number, back = false) => invoke<number | null>("undo_job", { origin, step, back });
 export const redoJob = (origin?: number) => invoke<void>("redo_job", { origin });
 export const undoState = () => invoke<Undoable>("undo_state");
 
@@ -788,30 +791,37 @@ export const answerJob = (id: number, answer: Answer, all: boolean) =>
 export const onJobEvent = (handler: (event: JobEvent) => void) =>
   listen<JobEvent>("job", (event) => handler(event.payload));
 
-/** Starts a job and waits for it to end: null when there was nothing to do. The job's card,
- *  questions and undo step are the same as any other job's. */
-export async function runJob(task: Task, origin?: number) {
-  type Finished = Extract<JobEvent, { kind: "finished" }>;
-  // A quick job can end before `startJob` comes back, so ends are heard from the start.
-  const ends = new Map<number, Finished>();
+type Finished = Extract<JobEvent, { kind: "finished" }>;
+
+/** Waits for the job `start` starts to end: null when it started none. `watch` hears each of the
+ *  job's events, for a sheet over the job's card that shows its questions itself. */
+export async function endOf(start: () => Promise<number | null>, watch?: (event: JobEvent) => void) {
+  // A quick job can end before `start` comes back, so events are heard from the start.
+  const early: JobEvent[] = [];
   let wanted: { id: number; done: (event: Finished) => void } | undefined;
+  const hear = (event: JobEvent, done: (event: Finished) => void) => {
+    watch?.(event);
+    if (event.kind === "finished") done(event);
+  };
   const stop = await onJobEvent((event) => {
-    if (event.kind !== "finished") return;
-    if (event.id === wanted?.id) wanted.done(event);
-    else ends.set(event.id, event);
+    if (!wanted) early.push(event);
+    else if (event.id === wanted.id) hear(event, wanted.done);
   });
   try {
-    const id = await startJob(task, origin);
+    const id = await start();
     if (id === null) return null;
     return await new Promise<Finished>((done) => {
-      const early = ends.get(id);
-      if (early) done(early);
-      else wanted = { id, done };
+      wanted = { id, done };
+      for (const event of early.splice(0)) if (event.id === id) hear(event, done);
     });
   } finally {
     stop();
   }
 }
+
+/** Starts a job and waits for it to end: null when there was nothing to do. The job's card,
+ *  questions and undo step are the same as any other job's. */
+export const runJob = (task: Task, origin?: number, watch?: (event: JobEvent) => void) => endOf(() => startJob(task, origin), watch);
 
 /** What is wrong with each of `names`, which line up with the selected rows. */
 export const checkRenames = (selection: Selection, names: string[]) =>
@@ -1032,6 +1042,34 @@ export const stopMap = () => invoke<void>("stop_map");
 /** `cells` are new or have grown. `done` says they were the last. */
 export const onMapGrew = (handler: (grew: { ticket: number; cells: MapCell[]; done: boolean }) => void) =>
   listen<{ ticket: number; cells: MapCell[]; done: boolean }>("map-grew", (event) => handler(event.payload));
+
+/** Files by the hour they last changed: hours since 1970 by UTC, how many files, their bytes. */
+export type RiverHour = [hour: number, files: number, bytes: number];
+
+/** Counts every file under `path` by the hour it last changed, for the Time river. */
+export const river = (path: string, ticket: number) => invoke<void>("river", { path, ticket });
+export const stopRiver = () => invoke<void>("stop_river");
+/** Up to 40 files right inside `path` that last changed from `from` up to `to`, newest first. */
+export const changedBetween = (path: string, from: number, to: number) => invoke<string[]>("changed_between", { path, from, to });
+/** `hours` were counted since the last answer. `done` says the walk is over. */
+export const onRiverGrew = (handler: (grew: { ticket: number; hours: RiverHour[]; done: boolean }) => void) =>
+  listen<{ ticket: number; hours: RiverHour[]; done: boolean }>("river-grew", (event) => handler(event.payload));
+
+/** A file of a set of twins. */
+export interface Twin {
+  path: string;
+  bytes: number;
+  /** Milliseconds since 1970. */
+  modified: number;
+  /** How sharp a picture is, higher sharper. Only pictures that look alike say. */
+  sharp: number | null;
+}
+
+/** Files under `path` with the same content as another, or with `photos` pictures that look alike, in sets. */
+export const findTwins = (path: string, photos: boolean) => invoke<Twin[][]>("find_twins", { path, photos });
+export const stopTwins = () => invoke<void>("stop_twins");
+/** For each file, null if it is gone, else whether it is still the file Twins saw: the same size and time. */
+export const twinsNow = (files: Twin[]) => invoke<(boolean | null)[]>("twins_now", { files });
 
 export const onSizesGrew = (handler: (view: number) => void) =>
   listen<number>("sizes-grew", (event) => handler(event.payload));

@@ -345,6 +345,67 @@ fn weigh_folder(path: &Path, name: String, stop: &AtomicBool) -> Option<Cell> {
     Some(whole.cell(name, true, inner, true))
 }
 
+/// Files by the hour they last changed, for the Time river: hours since 1970 by UTC, how many
+/// files, and their bytes.
+pub type Hours = Vec<(u32, u32, u64)>;
+
+/// The hour of a FILETIME since 1970 by UTC, or nothing for one before 1970.
+fn hour_of(ticks: u64) -> Option<u32> {
+    const TICKS_PER_HOUR: u64 = 36_000_000_000;
+    /// Hours from 1601-01-01 to 1970-01-01.
+    const TO_1970: u64 = 134_774 * 24;
+    (ticks / TICKS_PER_HOUR).checked_sub(TO_1970).and_then(|hour| u32::try_from(hour).ok())
+}
+
+/// The one Time river being counted.
+static RIVER: LazyLock<Mutex<Arc<AtomicBool>>> = LazyLock::new(Mutex::default);
+
+pub fn stop_river() {
+    RIVER.lock().unwrap_or_else(PoisonError::into_inner).store(true, Ordering::SeqCst);
+}
+
+/// Counts every file under `folder` by the hour it last changed, on a thread of its own in place
+/// of any count before it. `report` hears the hours counted since it last heard, and whether the
+/// walk is done. Hidden and system files and folders stay out, so a repository's insides don't
+/// drown out the work done in it. Links stay unfollowed.
+pub fn river(folder: PathBuf, report: impl Fn(Hours, bool) + Send + 'static) {
+    let stop = Arc::new(AtomicBool::new(false));
+    mem::replace(&mut *RIVER.lock().unwrap_or_else(PoisonError::into_inner), stop.clone()).store(true, Ordering::SeqCst);
+    thread::spawn(move || {
+        let sight = crate::folder::Sight { hidden: false, system: false };
+        let mut counted: HashMap<u32, (u32, u64)> = HashMap::new();
+        let drained = |counted: &mut HashMap<u32, (u32, u64)>| {
+            let mut hours: Hours = counted.drain().map(|(hour, (files, bytes))| (hour, files, bytes)).collect();
+            hours.sort_unstable();
+            hours
+        };
+        let mut waiting = vec![folder];
+        let mut reported = Instant::now();
+        while let Some(next) = waiting.pop() {
+            if stop.load(Ordering::SeqCst) {
+                return;
+            }
+            each_item(&next, |entry, is_folder| {
+                if !sight.shows(&entry) {
+                    return;
+                }
+                if is_folder {
+                    waiting.push(next.join(entry.file_name()));
+                } else if let Some(hour) = hour_of(entry.modified()) {
+                    let slot = counted.entry(hour).or_default();
+                    slot.0 += 1;
+                    slot.1 += entry.size();
+                }
+            });
+            if reported.elapsed() >= MAP_GAP && !counted.is_empty() {
+                report(drained(&mut counted), false);
+                reported = Instant::now();
+            }
+        }
+        report(drained(&mut counted), true);
+    });
+}
+
 /// The one disk map being measured.
 static MAPPING: LazyLock<Mutex<Arc<AtomicBool>>> = LazyLock::new(Mutex::default);
 
@@ -558,6 +619,29 @@ mod tests {
         // 2024-02-29, a leap day.
         assert_eq!(year_of(133_535_520_000_000_000), 2024);
         assert_eq!(year_of(0), 0);
+    }
+
+    #[test]
+    fn a_filetime_gives_its_hour_since_1970() {
+        assert_eq!(hour_of(125_911_584_000_000_000), Some(262_968));
+        assert_eq!(hour_of(125_911_583_990_000_000), Some(262_967));
+        assert_eq!(hour_of(0), None);
+    }
+
+    #[test]
+    fn the_river_counts_every_file_once() {
+        let tree = Tree::new("river");
+        let (told, heard) = mpsc::channel();
+        river(tree.0.clone(), move |hours, done| told.send((hours, done)).unwrap());
+        let mut bytes = 0;
+        loop {
+            let (hours, done) = heard.recv_timeout(Duration::from_secs(5)).unwrap();
+            bytes += hours.iter().map(|&(_, _, size)| size).sum::<u64>();
+            if done {
+                break;
+            }
+        }
+        assert_eq!(bytes, total(&tree.0, &AtomicBool::new(false)).unwrap());
     }
 
     #[test]

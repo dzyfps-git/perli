@@ -748,7 +748,7 @@ fn replay(
     records: Option<Vec<Done>>,
     origin: Option<u32>,
     history: History,
-) -> Result<(), String> {
+) -> Result<Option<u64>, String> {
     match records {
         Some(records) => start(
             app,
@@ -758,14 +758,15 @@ fn replay(
                 ..Job::Undo { records }.into()
             },
         )
-        .map(drop),
-        None => Ok(()),
+        .map(Some),
+        None => Ok(None),
     }
 }
 
 /// Reverses the newest step. Does nothing if there is none, or if `step` is no longer it. With
-/// `back`, reverses every step from the newest down to `step`, as one.
-pub fn undo(app: &AppHandle, origin: Option<u32>, step: Option<u64>, back: bool) -> Result<(), String> {
+/// `back`, reverses every step from the newest down to `step`, as one. Answers with the job that
+/// does it.
+pub fn undo(app: &AppHandle, origin: Option<u32>, step: Option<u64>, back: bool) -> Result<Option<u64>, String> {
     let jobs = app.state::<Jobs>();
     let mut log = jobs.log();
     let records = match (back, step) {
@@ -779,7 +780,7 @@ pub fn undo(app: &AppHandle, origin: Option<u32>, step: Option<u64>, back: bool)
 /// An undo's own records are the way back, so a redo is an undo of those.
 pub fn redo(app: &AppHandle, origin: Option<u32>) -> Result<(), String> {
     let records = app.state::<Jobs>().log().take_redo();
-    replay(app, records, origin, History::Redo)
+    replay(app, records, origin, History::Redo).map(drop)
 }
 
 /// Connects a running job to the UI.

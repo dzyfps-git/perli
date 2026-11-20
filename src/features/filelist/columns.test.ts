@@ -91,7 +91,7 @@ test("restoreColumns keeps saved widths and ignores unknown columns", () => {
 test("a folder of songs puts artist and length before size, and keeps the rest to add", () => {
   const music = startColumns("music");
   assert.equal(ids(music.filter((column) => column.visible)), "name,modified,artist,length,size");
-  assert.equal(music.length, 10);
+  assert.equal(music.length, 11);
   assert.equal(ids(restoreColumns(undefined, startColumns("pictures")).filter((column) => column.visible)), "name,modified,taken,dimensions,size");
 });
 

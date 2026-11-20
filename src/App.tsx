@@ -174,6 +174,8 @@ import { KeySheet } from "./features/keys/KeySheet";
 import { ActivityLog } from "./features/reach/ActivityLog";
 import { DropChips } from "./features/reach/DropChips";
 import { Space } from "./features/space/SpaceView";
+import { TimeRiver } from "./features/space/TimeRiver";
+import { Twins } from "./features/space/TwinsView";
 import { readTyped } from "./features/reach/lists";
 import {
   forgetNickname,
@@ -335,6 +337,9 @@ const FOLDER_ONLY = new Set([
   "backgroundTab",
   "openToSide",
   "diskMap",
+  "timeRiver",
+  "twins",
+  "colourWall",
   "toFileDialog",
 ]);
 /** Commands that change files, or need a folder on a disk, which a ZIP opened as a folder is not. */
@@ -352,6 +357,9 @@ const ZIP_HIDES = new Set([
   "moveToOther",
   "terminal",
   "diskMap",
+  "timeRiver",
+  "twins",
+  "colourWall",
   "toFileDialog",
 ]);
 /** A key with no Ctrl or Alt in it types a letter, so it must not run a command while typing. */
@@ -523,6 +531,9 @@ export function App() {
   /** The folder the disk map starts in, while the map is open. */
   /** The folder Space is open on, "" for This PC, or nothing while it is closed. */
   const [mapping, setMapping] = createSignal<string>();
+  /** The folder the Time river or Twins is open on. */
+  const [riverOn, setRiverOn] = createSignal<string>();
+  const [twinsOn, setTwinsOn] = createSignal<string>();
   /** The New gallery, where it opens and the view it makes things in. */
   const [making, setMaking] = createSignal<{ view: FolderView; x: number; y: number }>();
   /** A sheet covers the tabs, so nothing behind it may change. */
@@ -538,6 +549,8 @@ export function App() {
     !!comparing() ||
     keysOpen() ||
     mapping() !== undefined ||
+    riverOn() !== undefined ||
+    twinsOn() !== undefined ||
     updateSheet() ||
     activityOpen() ||
     // Every sheet opens as a modal dialog, so one left off the list above still counts.
@@ -1468,6 +1481,7 @@ export function App() {
         action: () => setTileSize(clampTile(tileSize() - TILE_STEP)),
       },
       { label: "Picture folders as a wall", checked: pictureWall(), action: () => setPictureWall(!pictureWall()) },
+      { label: "Colour wall", action: () => colourWall(view) },
       { label: "Picture folders open in gallery", checked: picturesInGallery(), action: () => setPicturesInGallery(!picturesInGallery()) },
     ];
     const own = ownColumns(view);
@@ -1483,6 +1497,7 @@ export function App() {
           sortItem("Type", "type"),
           sortItem("Size", "size"),
           sortItem("Tags", "tags"),
+          ...(view.columnSet() === "pictures" ? [sortItem("Colour", "colour")] : []),
         ];
     return [
       {
@@ -1614,6 +1629,8 @@ export function App() {
           { label: "Undo several…", disabled: jobs.latestStep() === null, action: () => setActivityOpen(true) },
           { label: "Activity log", action: () => setActivityOpen(true) },
           { label: "Space", action: () => setMapping(view.folder()?.path ?? "") },
+          { label: "Time river", action: () => setRiverOn(view.folder()?.path) },
+          { label: "Twins", action: () => setTwinsOn(view.folder()?.path) },
         ];
     const shellItems = view.isBin() || view.isZip() || isPerliCloud(view.folder()?.path ?? "") ? [] : shell.backgroundItems(view, { x, y });
     setMenu({ x, y, items: [...fileItems, ...viewItems(view), ...shellItems] });
@@ -1670,6 +1687,16 @@ export function App() {
     setSettingsShown(false);
     tab.setHome(!shown);
   }
+
+  /** Pictures in a gallery wall, ordered by their main colour. */
+  function colourWall(view: FolderView) {
+    view.setLayout("gallery");
+    setPictureWall(true);
+    view.setSort({ key: "colour", descending: false });
+  }
+
+  /** The folder the Time river and Twins look at: the user's own folder from the home page. */
+  const folderHere = () => (tabs.active().home() ? places()?.folders.find((folder) => folder.kind === "home")?.path : undefined) ?? here().folder()?.path;
 
   /** Leaves the home page for the tab's folder, then does `then` in it. */
   async function leaveHome(then: (view: FolderView) => unknown) {
@@ -2024,6 +2051,9 @@ export function App() {
     redo: () => actions.redo(here()),
     activity: () => setActivityOpen(true),
     diskMap: () => here().isZip() || setMapping(here().folder()?.path ?? ""),
+    timeRiver: () => here().isZip() || here().isBin() || setRiverOn(folderHere()),
+    twins: () => here().isZip() || here().isBin() || setTwinsOn(folderHere()),
+    colourWall: () => colourWall(here()),
     toFileDialog: () => {
       const folder = here().folder()?.path;
       if (!folder) return;
@@ -2844,6 +2874,29 @@ export function App() {
           onShow={(path) => void leaveHome((view) => showInFolder(view, path))}
           onClose={() => setMapping(undefined)}
         />
+      </Show>
+      <Show when={riverOn()} keyed>
+        {(folder) => (
+          <TimeRiver
+            folder={folder}
+            downloads={places()?.folders.find((one) => one.kind === "downloads")?.path}
+            onShowDay={(path, day) =>
+              void leaveHome(async (view) => {
+                await view.open(path);
+                // The day's files anywhere under the river's folder, whatever reach and depth the pane had.
+                view.setScope("below");
+                view.setDepth(null);
+                view.search(FLAT_QUERY);
+                view.setFilterForm({ ...NO_FILTER, from: day, to: day });
+              })
+            }
+            onShow={(path) => void leaveHome((view) => showInFolder(view, path))}
+            onClose={() => setRiverOn(undefined)}
+          />
+        )}
+      </Show>
+      <Show when={twinsOn()} keyed>
+        {(folder) => <Twins folder={folder} onShow={(path) => void leaveHome((view) => showInFolder(view, path))} onClose={() => setTwinsOn(undefined)} />}
       </Show>
       <Show when={deleting()} keyed>
         {(request) => <ConfirmDelete request={request} onClose={() => setDeleting(undefined)} />}
