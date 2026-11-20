@@ -626,7 +626,11 @@ impl Watch {
             return None;
         };
         let raw = [opened.0 as isize, done.0 as isize, quit.0 as isize];
+        // The drive tells only of changes once a read is asked for, so the watch is handed back
+        // only then, and a change made right after it starts is heard too.
+        let (listening, ready) = mpsc::channel::<()>();
         let thread = thread::spawn(move || {
+            let mut listening = Some(listening);
             let [opened, done, quit] = raw.map(|raw| HANDLE(raw as *mut _));
             let mut buffer = vec![0u32; 16 * 1024];
             let filter = FILE_NOTIFY_CHANGE_FILE_NAME
@@ -644,6 +648,9 @@ impl Watch {
                 };
                 if asked.is_err() {
                     break;
+                }
+                if let Some(listening) = listening.take() {
+                    let _ = listening.send(());
                 }
                 if unsafe { WaitForMultipleObjects(&[done, quit], false, INFINITE) } != WAIT_OBJECT_0 {
                     // Told to stop: the read is called off, and waited for, as it writes into `buffer`.
@@ -672,6 +679,8 @@ impl Watch {
             let _ = unsafe { CloseHandle(opened) };
             let _ = unsafe { CloseHandle(done) };
         });
+        // A read that can't be asked for ends the thread, which says so at once.
+        let _ = ready.recv_timeout(Duration::from_secs(2));
         Some(Self { quit: raw[2], thread: Some(thread) })
     }
 }
