@@ -1,4 +1,4 @@
-import { ease, hashOf, type SpaceNode } from "./space";
+import { ease, hashOf, onShape, type SpaceNode } from "./space";
 
 /** Draws Space on a canvas: things that ease from where they were to where a lens wants them. */
 
@@ -110,12 +110,15 @@ export interface Scene {
   driftTarget: number;
   /** Seconds since the scene began, for drift and comets. */
   time: number;
+  /** Reduced motion is on: what changes shows at once, with no light sent along. */
+  calm: boolean;
 }
 
-export const newScene = (): Scene => ({ things: new Map(), links: new Map(), rows: new Map(), comets: [], ripples: [], drift: 0, driftTarget: 0, time: 0 });
+export const newScene = (): Scene => ({ things: new Map(), links: new Map(), rows: new Map(), comets: [], ripples: [], drift: 0, driftTarget: 0, time: 0, calm: false });
 
 /** Sets where everything should go. Things not named fade away; new ones grow from where they came from. */
 export function aim(scene: Scene, aims: Aim[], links: LinkAim[], rows: RowAim[], drift: boolean, calm: boolean) {
+  scene.calm = calm;
   const wanted = new Set<string>();
   for (const one of aims) {
     wanted.add(one.id);
@@ -218,7 +221,7 @@ function onCurve(a: { x: number; y: number }, bow: { x: number; y: number }, b: 
 
 /** Sends light along `path` of IDs, or down from the sky into the one thing named. */
 export function sendComet(scene: Scene, path: string[], away = false, sky?: { x: number; y: number }) {
-  if (path.length === 0) return;
+  if (path.length === 0 || scene.calm) return;
   if (path.length === 1 && !sky) {
     scene.ripples.push({ id: path[0], start: scene.time });
     return;
@@ -465,20 +468,24 @@ export function paint(context: CanvasRenderingContext2D, scene: Scene, palette: 
   });
 }
 
-/** The thing under a point, the smallest first, with a little room around small ones. */
+/**
+ * The thing under a point, the smallest first. Each is hit only where it shows: a pill as a pill,
+ * so a long thin band never reaches past its own ends. Only where nothing is, small things get a
+ * little room around them.
+ */
 export function thingAt(scene: Scene, x: number, y: number): Thing | undefined {
+  return hitAt(scene, x, y, false) ?? hitAt(scene, x, y, true);
+}
+
+function hitAt(scene: Scene, x: number, y: number, roomy: boolean): Thing | undefined {
   let best: Thing | undefined;
   let bestArea = Infinity;
   for (const thing of scene.things.values()) {
     if (thing.alpha === 0 || thing.now.alpha < 0.3) continue;
     const place = placeOf(scene, thing);
     const { w, h, round } = thing.now;
-    const pad = Math.max(0, 9 - Math.min(w, h) / 2);
-    const round_ = round >= Math.min(w, h) / 2 - 0.5;
-    const inside = round_
-      ? Math.hypot(x - place.x, y - place.y) <= Math.max(w, h) / 2 + pad
-      : Math.abs(x - place.x) <= w / 2 + pad && Math.abs(y - place.y) <= h / 2 + pad;
-    if (inside && w * h < bestArea) {
+    const pad = roomy ? Math.max(0, 9 - Math.min(w, h) / 2) : 0;
+    if (onShape(x - place.x, y - place.y, w, h, round, pad) && w * h < bestArea) {
       best = thing;
       bestArea = w * h;
     }

@@ -12,10 +12,12 @@ import {
   layersLayout,
   msOf,
   nearestShown,
+  onShape,
   pcTree,
   PC,
   route,
   tagsLayout,
+  touches,
   upOne,
   useShares,
 } from "./space.ts";
@@ -196,4 +198,35 @@ test("ages read as words", () => {
   assert.equal(agoText(now - 100 * DAY, now), "changed 3 months ago");
   assert.equal(agoText(now - 800 * DAY, now), "changed 2 years ago");
   assert.equal(agoText(0, now), "never changed");
+});
+
+test("a folder of more cells than a call takes arguments still makes its tree", () => {
+  const cells = Array.from({ length: 200_000 }, (_, at) => cell(`f${at}`, at, { folder: false, newest: TICKS_2024 + at }));
+  const tree = folderTree("C:\\Big", "Big", cells, kindOf);
+  assert.equal(tree.newest, msOf(TICKS_2024 + 199_999));
+  assert.equal(tree.kids.at(-1)?.folded, 200_000 - tree.kids.length + 1);
+});
+
+test("a job is weighed again where it changed what shows", () => {
+  const copy = { from: ["C:\\Data\\In"], to: "C:\\Data\\Out\\Deep" };
+  assert.equal(touches(copy, "C:\\Data"), true, "both ends are inside");
+  assert.equal(touches(copy, "c:\\data\\out"), true, "in any case");
+  assert.equal(touches(copy, "C:\\Data\\In"), true, "what it took away from");
+  assert.equal(touches(copy, "C:\\Other"), false);
+  assert.equal(touches(copy, "C:\\Data\\Out\\Deep\\Below"), false, "nothing changed below where it landed");
+  assert.equal(touches({ from: ["D:\\x"], to: null }, ""), true, "This PC shows every drive");
+});
+
+test("a long thin pill is hit only where it shows", () => {
+  // 400 wide and 6 high, fully rounded, as a band of Layers.
+  const on = (dx: number, dy: number, pad = 0) => onShape(dx, dy, 400, 6, 3, pad);
+  assert.equal(on(0, 50, 6), false, "50 below is off it, even with room around");
+  assert.equal(on(0, 80), false);
+  assert.equal(on(0, 3), true);
+  assert.equal(on(199, 0), true, "its round end");
+  assert.equal(on(201, 0), false, "just past its end");
+  assert.equal(on(201, 0, 6), true, "unless there is room around it");
+  assert.equal(onShape(0, 40, 80, 80, 40, 0), true, "a circle is a circle");
+  assert.equal(onShape(39, 39, 80, 80, 40, 0), false, "outside its corner");
+  assert.equal(onShape(39, 39, 80, 80, 2, 0), true, "a box has its corners");
 });

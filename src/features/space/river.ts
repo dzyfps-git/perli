@@ -133,6 +133,13 @@ export function dayStart(time: number) {
   return day.getTime();
 }
 
+/** The start of the next local day: 23 or 25 hours on when the clocks change that day. */
+export function dayEnd(time: number) {
+  const day = new Date(dayStart(time));
+  day.setDate(day.getDate() + 1);
+  return day.getTime();
+}
+
 /** A day as the filter form keeps it: `YYYY-MM-DD`, local. */
 export function dayKey(time: number) {
   const day = new Date(time);

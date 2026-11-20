@@ -288,7 +288,6 @@ watchTheme(() => {
 
 /** After how many days Storage Sense empties the Recycle Bin, read once the bin is first shown. */
 const [cleanDays, setCleanDays] = createSignal<number | null>(null);
-let cleanAsked = false;
 
 /** A few pictures from inside a folder, fanned out like prints on a table. With none, its fingerprint. */
 async function stackOf(folder: string): Promise<Thumb | null> {
@@ -1834,10 +1833,9 @@ export function FileList(props: {
 
     const observer = new ResizeObserver(resize);
     observer.observe(grid);
+    // Read on each visit to the bin, so a change in Settings shows and a failed read is tried again.
     createEffect(() => {
-      if (!isBin(props.folder) || cleanAsked) return;
-      cleanAsked = true;
-      binCleanDays().then(setCleanDays).catch(console.error);
+      if (isBin(props.folder)) binCleanDays().then(setCleanDays).catch(console.error);
     });
     speak();
     // By the time this list goes, the folder it is told about is already the next one.

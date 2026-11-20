@@ -10,7 +10,7 @@ use std::sync::{Mutex, PoisonError};
 
 use serde::{Deserialize, Serialize};
 use windows::core::{w, HSTRING, PCWSTR};
-use windows::Win32::Foundation::{CloseHandle, HANDLE};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_ABANDONED, WAIT_OBJECT_0};
 use windows::Win32::System::Threading::{CreateMutexW, ReleaseMutex, WaitForSingleObject};
 use windows::Win32::UI::Shell::PathMatchSpecW;
 
@@ -18,10 +18,10 @@ use crate::ops::{sys, Job};
 use crate::{remote, session};
 
 const PAIRS_FILE: &str = "sync-pairs.json";
-/// How long a window waits for another to finish saving the pairs before it saves anyway.
-const HOLD_MS: u32 = 5000;
 /// Times this close count as one, as FAT drives and some services keep them in 2 s steps.
 const SAME_TIME: u64 = 2 * 10_000_000;
+/// How long a window waits for another to finish with the pairs.
+const HOLD_MS: u32 = 5000;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -59,6 +59,11 @@ pub struct Preview {
     pub removes: Vec<PathBuf>,
     /// The size of the files that go over. A new folder counts as nothing, not yet read.
     pub bytes: u64,
+    /// New folders made on the other side before the copies, outermost first: those holding
+    /// something left out, which go over piece by piece.
+    pub folders: Vec<PathBuf>,
+    /// The other side keeps no bin, as S3, so what goes is deleted for good, once the run asks.
+    pub for_good: bool,
 }
 
 struct Child {
@@ -100,37 +105,72 @@ pub fn preview(pair: &Pair) -> Result<Preview, String> {
     if holds(&pair.from, &pair.to) || holds(&pair.to, &pair.from) {
         return Err("Neither folder of a sync can hold the other".into());
     }
-    let mut preview = Preview::default();
-    walk(&pair.from, &pair.to, pair.mirror, &patterns(&pair.skip), &mut preview)?;
+    let mut preview = Preview { for_good: matches!(remote::at(&pair.to), Some(Ok(at)) if !at.service.has_bin()), ..Preview::default() };
+    walk(&pair.from, &pair.to, pair.mirror, &patterns(&pair.skip), &mut preview, false)?;
     Ok(preview)
 }
 
-fn walk(from: &Path, to: &Path, mirror: bool, skip: &[HSTRING], preview: &mut Preview) -> Result<(), String> {
+/// What a run does from `from` into `to`. A `fresh` target is a folder the run makes, holding nothing yet.
+fn walk(from: &Path, to: &Path, mirror: bool, skip: &[HSTRING], preview: &mut Preview, fresh: bool) -> Result<(), String> {
     let ours = children(from)?;
     // A target on this PC not made yet holds nothing; the first run makes it.
-    let theirs = if !remote::is_remote(to) && !to.exists() { Vec::new() } else { children(to)? };
+    let theirs = if fresh || !remote::is_remote(to) && !to.exists() { Vec::new() } else { children(to)? };
     let there = |name: &str| theirs.iter().find(|child| child.name.eq_ignore_ascii_case(name));
     for child in ours.iter().filter(|child| !skipped(skip, &child.name)) {
         let source = from.join(&child.name);
         match there(&child.name) {
-            Some(old) if old.folder && child.folder => walk(&source, &to.join(&old.name), mirror, skip, preview)?,
+            Some(old) if old.folder && child.folder => walk(&source, &to.join(&old.name), mirror, skip, preview, false)?,
             // A copy made earlier is as new as its source or newer, as an upload takes the time it went up.
             Some(old) if !old.folder && !child.folder && old.size == child.size && old.modified + SAME_TIME >= child.modified => {}
             found => {
                 if let Some(old) = found {
                     preview.removes.push(to.join(&old.name));
                 }
-                preview.copies.push((source, to.to_path_buf()));
-                preview.bytes += child.size;
+                if child.folder && leaves_out(&source, skip)? {
+                    // A copy of the whole folder would take what is left out along, so the folder
+                    // is made there and the rest goes in piece by piece.
+                    let made = to.join(&child.name);
+                    preview.folders.push(made.clone());
+                    walk(&source, &made, false, skip, preview, true)?;
+                } else {
+                    preview.copies.push((source, to.to_path_buf()));
+                    preview.bytes += child.size;
+                }
             }
         }
     }
     if mirror {
         for old in theirs.iter().filter(|old| !skipped(skip, &old.name)) {
             if !ours.iter().any(|child| child.name.eq_ignore_ascii_case(&old.name)) {
-                preview.removes.push(to.join(&old.name));
+                take_away(&to.join(&old.name), old.folder, skip, preview)?;
             }
         }
+    }
+    Ok(())
+}
+
+/// Whether anything under `folder` has a name left out, which a copy or removal of it whole would touch.
+fn leaves_out(folder: &Path, skip: &[HSTRING]) -> Result<bool, String> {
+    if skip.is_empty() {
+        return Ok(false);
+    }
+    for child in children(folder)? {
+        if skipped(skip, &child.name) || child.folder && leaves_out(&folder.join(&child.name), skip)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// What a mirror takes away of `path`, gone from the source: all of it, or of a folder holding
+/// something left alone, the rest, so that stays and so does the folder.
+fn take_away(path: &Path, folder: bool, skip: &[HSTRING], preview: &mut Preview) -> Result<(), String> {
+    if !folder || !leaves_out(path, skip)? {
+        preview.removes.push(path.to_path_buf());
+        return Ok(());
+    }
+    for child in children(path)?.into_iter().filter(|child| !skipped(skip, &child.name)) {
+        take_away(&path.join(&child.name), child.folder, skip, preview)?;
     }
     Ok(())
 }
@@ -166,32 +206,37 @@ fn read_from(file: &Path) -> Vec<Pair> {
 }
 
 /// A mutex every Perli window shares, held while one reads, changes and saves the pairs. Each
-/// window is a process of its own, so without it two saving at once would keep only the last.
+/// window is a process of its own, so without it two could both take one run, or two saving at
+/// once keep only the last.
 struct Held(HANDLE);
 
 impl Held {
-    fn take() -> Self {
-        let mutex = unsafe { CreateMutexW(None, false, w!("Local\\PerliSyncPairs")) }.unwrap_or_default();
-        if !mutex.is_invalid() {
-            // A window that died holding it leaves it abandoned, which is taken as free.
-            unsafe { WaitForSingleObject(mutex, HOLD_MS) };
+    /// Fails when another window holds it too long, and then nothing is read or changed.
+    fn take() -> Result<Self, String> {
+        let mutex = unsafe { CreateMutexW(None, false, w!("Local\\PerliSyncPairs")) }.map_err(|error| error.message())?;
+        // A window that died holding it leaves it abandoned, which is taken as free.
+        match unsafe { WaitForSingleObject(mutex, HOLD_MS) } {
+            WAIT_OBJECT_0 | WAIT_ABANDONED => Ok(Self(mutex)),
+            _ => {
+                let _ = unsafe { CloseHandle(mutex) };
+                Err("Another Perli window is busy with the syncs. Try again in a moment.".into())
+            }
         }
-        Self(mutex)
     }
 }
 
 impl Drop for Held {
     fn drop(&mut self) {
-        if !self.0.is_invalid() {
-            let _ = unsafe { ReleaseMutex(self.0) };
-            let _ = unsafe { CloseHandle(self.0) };
-        }
+        let _ = unsafe { ReleaseMutex(self.0) };
+        let _ = unsafe { CloseHandle(self.0) };
     }
 }
 
 /// A watch on the source of a pair that runs when something changes, and when this window last
-/// heard one there that hasn't run yet.
+/// heard one there that hasn't run yet. Each pair has its own, so two pairs from one folder each
+/// hear every change.
 struct Heard {
+    pair: String,
     from: PathBuf,
     _watch: crate::index::Watch,
     heard: Receiver<crate::index::Heard>,
@@ -208,11 +253,11 @@ static HEARD: Mutex<Vec<Heard>> = Mutex::new(Vec::new());
 fn has_changed(all: &[Pair], pair: &Pair, now: u64) -> bool {
     let mut heard = HEARD.lock().unwrap_or_else(PoisonError::into_inner);
     // A watch goes with its pair.
-    heard.retain(|one| all.iter().any(|pair| pair.changed && pair.from == one.from));
-    let Some(one) = heard.iter_mut().find(|one| one.from == pair.from) else {
+    heard.retain(|one| all.iter().any(|pair| pair.changed && pair.id == one.pair && pair.from == one.from));
+    let Some(one) = heard.iter_mut().find(|one| one.pair == pair.id) else {
         let (sender, receiver) = mpsc::channel();
         if let Some(watch) = crate::index::Watch::start(pair.from.clone(), sender) {
-            heard.push(Heard { from: pair.from.clone(), _watch: watch, heard: receiver, last: None });
+            heard.push(Heard { pair: pair.id.clone(), from: pair.from.clone(), _watch: watch, heard: receiver, last: None });
         }
         return false;
     };
@@ -226,7 +271,7 @@ fn has_changed(all: &[Pair], pair: &Pair, now: u64) -> bool {
 /// Reads the pairs in `file`, lets `change` change them and saves them if it did, all while
 /// holding the windows' mutex.
 fn change_in<T>(file: &Path, change: impl FnOnce(&mut Vec<Pair>) -> Result<T, String>) -> Result<T, String> {
-    let _held = Held::take();
+    let _held = Held::take()?;
     let mut all = read_from(file);
     let before = serde_json::to_string_pretty(&all).map_err(|error| error.to_string())?;
     let answer = change(&mut all)?;
@@ -300,6 +345,32 @@ pub fn take_run(id: &str, scheduled: bool) -> Result<Option<Pair>, String> {
 mod tests {
     use super::*;
 
+    /// The watches are one list for all pairs, which each test's look trims to its own.
+    static WATCHING: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn two_pairs_from_one_folder_each_hear_a_change() {
+        let _one = WATCHING.lock().unwrap_or_else(PoisonError::into_inner);
+        let from = std::env::temp_dir().join(format!("perli-sync-two-heard-{}", std::process::id()));
+        fs::create_dir_all(&from).unwrap();
+        let pair = |id: &str| Pair { id: id.into(), from: from.clone(), to: "D:\\to".into(), mirror: false, skip: String::new(), every: 0, changed: true, ran: 0 };
+        let all = [pair("heard-a"), pair("heard-b")];
+        for one in &all {
+            assert!(!has_changed(&all, one, 1), "the first look starts the watch");
+        }
+        fs::write(from.join("new.txt"), "x").unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        for one in &all {
+            assert!(!has_changed(&all, one, 2), "heard, and not settled yet");
+        }
+        for one in &all {
+            assert!(has_changed(&all, one, 3), "{} runs too", one.id);
+        }
+        // The watches hold the folder open.
+        HEARD.lock().unwrap_or_else(PoisonError::into_inner).clear();
+        let _ = fs::remove_dir_all(&from);
+    }
+
     #[test]
     fn windows_saving_pairs_at_once_each_keep_theirs() {
         let file = std::env::temp_dir().join(format!("perli-sync-pairs-{}.json", std::process::id()));
@@ -324,6 +395,7 @@ mod tests {
 
     #[test]
     fn a_sync_on_change_runs_once_a_change_has_settled() {
+        let _one = WATCHING.lock().unwrap_or_else(PoisonError::into_inner);
         let root = std::env::temp_dir().join(format!("perli-sync-heard-{}", std::process::id()));
         let from = root.join("from");
         fs::create_dir_all(&from).unwrap();
@@ -407,6 +479,38 @@ mod tests {
 
         pair.to = from.join("sub");
         assert!(preview(&pair).is_err());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn what_is_left_out_stays_left_out_inside_new_and_gone_folders() {
+        let root = std::env::temp_dir().join(format!("perli-sync-skip-{}", std::process::id()));
+        let (from, to) = (root.join("from"), root.join("to"));
+        for folder in [from.join("new").join("deep"), from.join("plain"), to.join("gone").join("deep")] {
+            fs::create_dir_all(folder).unwrap();
+        }
+        for (path, text) in [
+            (from.join("new").join("keep.txt"), "k"),
+            (from.join("new").join("cache.tmp"), "c"),
+            (from.join("new").join("deep").join("also.txt"), "a"),
+            (from.join("plain").join("p.txt"), "p"),
+            (to.join("gone").join("x.txt"), "x"),
+            (to.join("gone").join("deep").join("y.tmp"), "y"),
+            (to.join("gone").join("deep").join("z.txt"), "z"),
+        ] {
+            fs::write(path, text).unwrap();
+        }
+        let pair = Pair { id: String::new(), from: from.clone(), to: to.clone(), mirror: true, skip: "*.tmp".into(), every: 0, changed: false, ran: 0 };
+        let look = preview(&pair).unwrap();
+        let rel = |path: &Path| path.strip_prefix(&root).unwrap().to_string_lossy().replace('\\', "/");
+        let mut copies: Vec<String> = look.copies.iter().map(|(source, folder)| format!("{} -> {}", rel(source), rel(folder))).collect();
+        copies.sort();
+        assert_eq!(copies, ["from/new/deep -> to/new", "from/new/keep.txt -> to/new", "from/plain -> to"]);
+        assert_eq!(look.folders.iter().map(|path| rel(path)).collect::<Vec<_>>(), ["to/new"]);
+        let mut removes: Vec<String> = look.removes.iter().map(|path| rel(path)).collect();
+        removes.sort();
+        assert_eq!(removes, ["to/gone/deep/z.txt", "to/gone/x.txt"], "what is left out stays, and the folders holding it");
+        assert!(!look.for_good);
         let _ = fs::remove_dir_all(root);
     }
 }

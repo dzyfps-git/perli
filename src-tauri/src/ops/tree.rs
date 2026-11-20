@@ -83,7 +83,7 @@ impl Run<'_> {
         // or Dropbox account has no way to, so there it goes to the service's bin.
         let (cloud, paths): (Vec<_>, Vec<_>) = paths.iter().cloned().partition(|path| crate::remote::is_remote(path));
         self.add_total(cloud.len() as u64, 0);
-        self.cloud_remove(&cloud, true)?;
+        self.cloud_remove(&cloud, super::cloud::Removal::Delete)?;
         for node in self.scan_all(&paths)? {
             self.touched.insert(sys::parent(&node.path));
             self.delete_node(&node)?;

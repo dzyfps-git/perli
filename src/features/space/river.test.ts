@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { addQuarters, columns, DAY, hourStart, LEAST_SPAN, panned, QUARTER, riverOf, softened, sumBetween, ticks, wholeSpan, zoomed } from "./river.ts";
+import { addQuarters, columns, DAY, dayEnd, dayStart, HOUR, hourStart, LEAST_SPAN, panned, QUARTER, riverOf, softened, sumBetween, ticks, wholeSpan, zoomed } from "./river.ts";
 
 const quarter = (time: string) => Date.parse(time) / QUARTER;
 
@@ -23,6 +23,25 @@ test("a local hour starts where the clock shows it", () => {
   const at = Date.parse("2025-03-01T10:47:12");
   assert.equal(new Date(hourStart(at)).getMinutes(), 0);
   assert.ok(at - hourStart(at) < 3_600_000 && hourStart(at) <= at);
+});
+
+test("a day ends at the next midnight, also on a day the clocks change", () => {
+  const was = process.env.TZ;
+  process.env.TZ = "Europe/Berlin";
+  try {
+    // Clocks go forward on 30 March 2025 and back on 26 October 2025 there.
+    const spring = dayStart(Date.parse("2025-03-30T12:00+02:00"));
+    assert.equal(dayEnd(spring) - spring, 23 * HOUR);
+    assert.equal(dayEnd(spring), Date.parse("2025-03-31T00:00+02:00"));
+    const autumn = dayStart(Date.parse("2025-10-26T12:00+01:00"));
+    assert.equal(dayEnd(autumn) - autumn, 25 * HOUR);
+    const plain = dayStart(Date.parse("2025-06-10T08:00+02:00"));
+    assert.equal(dayEnd(plain) - plain, DAY);
+    assert.equal(dayEnd(Date.parse("2025-06-10T23:59+02:00")), Date.parse("2025-06-11T00:00+02:00"));
+  } finally {
+    if (was === undefined) delete process.env.TZ;
+    else process.env.TZ = was;
+  }
 });
 
 test("zooming keeps the point under the pointer still and stays within the river", () => {

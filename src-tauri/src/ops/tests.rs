@@ -302,6 +302,27 @@ fn exists(path: &Path) -> bool {
     matches!(sys::stat(path), Ok(Some(_)))
 }
 
+#[test]
+fn a_listing_stops_as_soon_as_its_visitor_says_so() {
+    let sandbox = Sandbox::new();
+    let folder = sandbox.path("list");
+    fs::create_dir(&folder).unwrap();
+    for at in 0..6 {
+        fs::write(folder.join(format!("{at}.txt")), "x").unwrap();
+    }
+    let mut seen = 0;
+    sys::each_entry_while(&sys::extended(&folder.join("*")), |_| {
+        seen += 1;
+        seen < 3
+    })
+    .unwrap();
+    assert_eq!(seen, 3);
+    let mut all = 0;
+    sys::each_entry(&sys::extended(&folder.join("*")), |_| all += 1).unwrap();
+    // The six files, and "." and "..".
+    assert_eq!(all, 8);
+}
+
 // The guard.
 
 #[test]
@@ -3003,4 +3024,20 @@ fn the_wallpaper_goes_back_on_undo_to_each_screen_still_there() {
     let undone = go(Job::Undo { records: set.done });
     assert!(undone.failed.is_empty());
     assert_eq!(shown(), [sea]);
+}
+
+#[test]
+fn a_sync_makes_its_folders_with_an_undo_and_leaves_out_what_it_skips() {
+    let sandbox = Sandbox::new();
+    sandbox.file(r"from\new\keep.txt", "k");
+    sandbox.file(r"from\new\cache.tmp", "c");
+    let to = sandbox.path(r"to\deeper");
+    let pair = crate::sync::Pair { id: String::new(), from: sandbox.path("from"), to: to.clone(), mirror: false, skip: "*.tmp".into(), every: 0, changed: false, ran: 0 };
+    let outcome = go(Job::Sync { pair });
+    assert!(outcome.failed.is_empty());
+    assert_eq!(read(&to.join(r"new\keep.txt")), "k");
+    assert!(!to.join(r"new\cache.tmp").exists(), "what is left out stays out of a new folder");
+    let undone = go(Job::Undo { records: outcome.done });
+    assert!(undone.failed.is_empty());
+    assert!(!sandbox.path("to").exists(), "Undo takes away the folders the run made");
 }

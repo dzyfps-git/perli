@@ -1713,7 +1713,8 @@ export function App() {
 
   /** How a pair's sync is going, while one runs: flowing, or stopped on a clash. */
   function syncingOf(pair: SyncPair) {
-    const card = jobs.cards.find((one) => !one.ended && !!one.target && samePath(one.target, pair.to) && one.from.some((from) => samePath(from, pair.from)));
+    // By the pair's id: a copy between the same two folders, or another pair on them, is not this sync.
+    const card = jobs.cards.find((one) => !one.ended && one.pair === pair.id);
     if (!card) return undefined;
     return card.question?.kind === "conflict" ? "clash" : "flow";
   }
@@ -1725,7 +1726,7 @@ export function App() {
     const other = second?.folder()?.path;
     if (!one || !other) return undefined;
     for (const card of jobs.cards) {
-      if (card.ended || card.paused || card.question || card.recycle || !card.target) continue;
+      if (card.ended || card.paused || card.question || card.waiting || card.recycle || !card.target) continue;
       // Sources and target may sit deeper than the panes' folders, as from a search or into a folder shown there.
       const target = card.target;
       const between = (from: string, to: string) => card.from.length > 0 && card.from.every((source) => isInside(source, from)) && isInside(target, to);
@@ -2950,6 +2951,9 @@ export function App() {
             onShowDay={(path, day) =>
               void leaveHome(async (view) => {
                 await view.open(path);
+                // The day's files anywhere under the river's folder, whatever reach and depth the pane had.
+                view.setScope("below");
+                view.setDepth(null);
                 view.search(FLAT_QUERY);
                 view.setFilterForm({ ...NO_FILTER, from: day, to: day });
               })

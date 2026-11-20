@@ -480,6 +480,15 @@ impl Service for Google {
         Ok(versions)
     }
 
+    fn revision(&self, path: &str, item: &Item) -> Result<Option<String>, String> {
+        let found = self.find(path)?;
+        if item.folder || found.mime.starts_with("application/vnd.google-apps.") {
+            return Ok(None);
+        }
+        let head = self.get(&format!("{API}/files/{}?fields=headRevisionId&supportsAllDrives=true", found.id))?;
+        Ok(head["headRevisionId"].as_str().map(str::to_string))
+    }
+
     fn bring_back(&self, path: &str, item: &Item, version: &str) -> Result<(), String> {
         let found = self.find(path)?;
         let staged = std::env::temp_dir().join(format!("perli-revision-{}", http::random_text(8)));

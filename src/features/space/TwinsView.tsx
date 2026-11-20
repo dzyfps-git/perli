@@ -1,13 +1,14 @@
 import { batch, createEffect, createMemo, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
-import { fetchPictureFile, findTwins, onJobEvent, runJob, stopTwins, undoJob, type Twin } from "../../api";
+import { answerJob, endOf, fetchPictureFile, findTwins, runJob, stopTwins, twinsNow, undoJob, type JobEvent, type Question, type Twin } from "../../api";
 import { formatSize } from "../../ui/format";
 import { openSheet } from "../../ui/sheet";
+import { Prompt } from "../fileops/JobsPanel";
 import { kindOf } from "../filelist/fileKinds";
 import { saved, stored } from "../filelist/prefs";
 import { baseName, parentOf } from "../navigation/path";
 import { aim, newScene, thingAt, whereIs, type Aim, type LinkAim, type Palette, type Thing } from "./draw";
 import { kindRgb, readPalette, reducedMotion, sceneLoop, watchPalette } from "./lenses";
-import { goers, idOf, setsOf, twinsLayout, wasted, without, type TwinSet } from "./twins";
+import { goers, idOf, setsOf, stillGoing, twinsLayout, wasted, without, type TwinSet } from "./twins";
 import "../settings/settings.css";
 import "../fileops/fileops.css";
 import "./space.css";
@@ -59,6 +60,11 @@ export function Twins(props: {
   const [counted, setCounted] = createSignal(0);
   /** The undo step of the last clean. */
   const [step, setStep] = createSignal<number | null>(null);
+  const [undoing, setUndoing] = createSignal(false);
+  /** A question the clean or its undo asks. The sheet covers the job's card, so it asks here. */
+  const [asking, setAsking] = createSignal<{ id: number; question: Question }>();
+  /** What became of a clean or an undo that did not go as asked. */
+  const [note, setNote] = createSignal("");
   const [looks, setLooks] = createSignal(0);
   const scene = newScene();
   const asked = new Set<string>();
@@ -73,6 +79,11 @@ export function Twins(props: {
   const nameOf = (path: string) => props.more.find((one) => idOf(one.path) === idOf(path))?.name || baseName(path) || path;
   const title = () => (places().length === 1 ? `Twins in ${nameOf(places()[0])}` : `Twins in ${places().length} places`);
   const offers = () => props.more.filter((one) => !places().some((place) => idOf(place) === idOf(one.path))).slice(0, MOST_OFFERS);
+  const busy = () => merging() || undoing();
+  /** The files the last clean sent to the Recycle Bin, which its undo brings back. */
+  let cleaned: Twin[] = [];
+  const bytesOf = (files: Twin[]) => files.reduce((sum, file) => sum + file.bytes, 0);
+  const watch = (event: JobEvent) => setAsking(event.kind === "asked" ? { id: event.id, question: event.question } : undefined);
   const kick = () => loop?.kick();
 
   createEffect(
@@ -190,56 +201,77 @@ export function Twins(props: {
   /** Makes `thing` the one its set keeps. */
   function keep(thing: Thing) {
     const found = whereOf(thing.id);
-    if (!found || merging() || found.index === found.set.keep) return;
+    if (!found || busy() || found.index === found.set.keep) return;
     setSets(sets()!.map((set, at) => (at === found.at ? { ...set, keep: found.index } : set)));
     setSpoken(`${thing.about?.path ? baseName(thing.about.path) : ""} stays`);
   }
 
   async function clean() {
     const all = sets();
-    if (!all || merging()) return;
-    const going = all.flatMap(goers);
-    if (going.length === 0) return;
+    if (!all || busy()) return;
+    const meant = all.flatMap(goers);
+    if (meant.length === 0) return;
     setMerging(true);
+    setNote("");
     try {
-      const end = await runJob({ kind: "recyclePaths", paths: going.map((file) => file.path) });
-      if (!end) return;
-      if (end.cancelled) {
-        // Some may have gone before the stop. Looking again tells which.
-        setLooks(looks() + 1);
-        return;
-      }
-      const failed = new Set(end.failed.map((retry) => idOf(retry.source)));
-      const gone = going.filter((file) => !failed.has(idOf(file.path)));
+      // The look can be old by now. Only files still as they were go, and only by a keeper still
+      // there as it was, so nothing goes whose twin has changed or gone.
+      const seen = all.flatMap((set) => [set.files[set.keep], ...goers(set)]);
+      const now = await twinsNow(seen);
+      const same = new Set(seen.filter((_, at) => now[at] === true).map((file) => idOf(file.path)));
+      const going = stillGoing(all, same);
+      const end = going.length > 0 ? await runJob({ kind: "recyclePaths", paths: going.map((file) => file.path) }, undefined, watch) : null;
+      setAsking(undefined);
+      // Only the files that are gone now count, not ones skipped, stopped or kept after a question.
+      const after = going.length > 0 ? await twinsNow(going) : [];
+      const gone = going.filter((_, at) => after[at] === null);
+      // A clean that sent nothing keeps the last one's undo.
+      if (gone.length > 0) cleaned = gone;
       batch(() => {
         setSets(without(all, new Set(gone.map((file) => idOf(file.path)))));
-        setFreed(freed() + gone.reduce((sum, file) => sum + file.bytes, 0));
-        setStep(end.step);
+        setFreed(freed() + bytesOf(gone));
+        if (gone.length > 0) setStep(end?.step ?? null);
         setMerging(false);
       });
       setSpoken(`${gone.length.toLocaleString()} moved to the Recycle Bin`);
+      if (gone.length < meant.length) {
+        const stayed = meant.length - gone.length;
+        setNote(`${stayed.toLocaleString()} ${stayed === 1 ? "file was" : "files were"} left, changed or kept`);
+        // The sets as they are now, without the ones that stayed for a reason.
+        setLooks(looks() + 1);
+      }
     } catch (error) {
       console.error(error);
     } finally {
+      setAsking(undefined);
       setMerging(false);
     }
   }
 
   async function undo() {
     const at = step();
-    if (at === null) return;
+    if (at === null || busy()) return;
     setStep(null);
-    // The files are back once the undo's job ends; then the sets are looked for again.
-    const stop = await onJobEvent((event) => {
-      if (event.kind !== "finished") return;
-      stop();
-      setFreed(0);
+    setUndoing(true);
+    setNote("");
+    try {
+      const end = await endOf(() => undoJob(undefined, at), watch);
+      setAsking(undefined);
+      if (!end) return setNote("Undo other changes made since first");
+      // A restore can be declined or stopped part way: only the files back count.
+      const now = await twinsNow(cleaned);
+      const back = cleaned.filter((_, index) => now[index] !== null);
+      const left = cleaned.length - back.length;
+      setFreed(Math.max(0, freed() - bytesOf(back)));
+      cleaned = [];
+      if (left > 0) setNote(`${left.toLocaleString()} ${left === 1 ? "stays" : "stay"} in the Recycle Bin`);
       setLooks(looks() + 1);
-    });
-    undoJob(undefined, at).catch((error) => {
-      stop();
+    } catch (error) {
       console.error(error);
-    });
+    } finally {
+      setAsking(undefined);
+      setUndoing(false);
+    }
   }
 
   function hintOf(thing: Thing) {
@@ -381,6 +413,10 @@ export function Twins(props: {
                 {formatSize(Math.round(counted()))} freed
               </span>
             </Show>
+            <Show when={note()}>
+              {status() || counted() > 0.5 ? " · " : ""}
+              {note()}
+            </Show>
           </p>
           <div class="twins-places" role="group" aria-label="Look in">
             <For each={places()}>
@@ -414,19 +450,19 @@ export function Twins(props: {
           <span class="space-lens-pill" aria-hidden="true" />
           <For each={MODES}>
             {(one) => (
-              <button role="radio" aria-checked={one.id === mode()} disabled={merging()} onClick={() => setMode(one.id)}>
+              <button role="radio" aria-checked={one.id === mode()} disabled={busy()} onClick={() => setMode(one.id)}>
                 {one.name}
               </button>
             )}
           </For>
         </div>
         <Show when={step() !== null}>
-          <button class="space-button" onClick={undo}>
+          <button class="space-button" disabled={busy()} onClick={undo}>
             Undo
           </button>
         </Show>
         <Show when={goingCount() > 0}>
-          <button class="space-button twins-clean" disabled={merging()} onClick={clean}>
+          <button class="space-button twins-clean" disabled={busy()} onClick={clean}>
             Clean {goingCount().toLocaleString()} ({formatSize(toFree())})
           </button>
         </Show>
@@ -484,6 +520,17 @@ export function Twins(props: {
           {spoken()}
         </p>
       </div>
+      <Show when={asking()} keyed>
+        {(open) => (
+          <Prompt
+            question={open.question}
+            onAnswer={(answer, all) => {
+              setAsking(undefined);
+              answerJob(open.id, answer, all).catch(console.error);
+            }}
+          />
+        )}
+      </Show>
       <footer class="twins-foot">
         <p class="settings-note">The ringed one of each set stays: the oldest copy, or the sharpest picture. Click another to keep it instead. Cleaning moves the rest to the Recycle Bin.</p>
         <Show when={paging()}>

@@ -297,7 +297,8 @@ impl S3 {
     }
 
     /// Every key under `prefix`, with no folders made of the slashes, as (key, size).
-    fn keys(&self, prefix: &str) -> Result<Vec<(String, u64)>, String> {
+    /// Each key under `prefix`, with its size and ETag.
+    fn keys(&self, prefix: &str) -> Result<Vec<(String, u64, String)>, String> {
         let mut keys = Vec::new();
         let mut token = String::new();
         loop {
@@ -307,7 +308,11 @@ impl S3 {
             }
             let xml = self.text(Method::GET, "", &query, &[], None)?;
             for fields in records(&xml, "Contents") {
-                keys.push((fields.get("Key").cloned().unwrap_or_default(), fields.get("Size").and_then(|size| size.parse().ok()).unwrap_or(0)));
+                keys.push((
+                    fields.get("Key").cloned().unwrap_or_default(),
+                    fields.get("Size").and_then(|size| size.parse().ok()).unwrap_or(0),
+                    fields.get("ETag").cloned().unwrap_or_default(),
+                ));
             }
             match first(&xml, "NextContinuationToken") {
                 Some(next) if first(&xml, "IsTruncated").as_deref() == Some("true") && keys.len() < MOST_SEARCHED => token = next,
@@ -316,14 +321,22 @@ impl S3 {
         }
     }
 
-    /// A copy made by the service: in one request up to 5 GB, in parts past that.
-    fn copy_key(&self, from: &str, to: &str, version: Option<&str>, size: u64) -> Result<(), String> {
+    /// A copy made by the service: in one request up to 5 GB, in parts past that. With an `etag`,
+    /// every request copies only that content, so a key written to meanwhile fails the copy and
+    /// never gives one of parts from two versions.
+    fn copy_key(&self, from: &str, to: &str, version: Option<&str>, size: u64, etag: &str) -> Result<(), String> {
         let mut source = format!("/{}/{}", self.setup.bucket, encode_path(from));
         if let Some(version) = version {
             source.push_str(&format!("?versionId={}", encode(version)));
         }
+        let pinned = |mut headers: Vec<(&'static str, String)>| {
+            if !etag.is_empty() {
+                headers.push(("x-amz-copy-source-if-match", etag.to_string()));
+            }
+            headers
+        };
         if size <= COPY_MOST {
-            return self.text(Method::PUT, to, &[], &[("x-amz-copy-source", source)], None).map(|_| ());
+            return self.text(Method::PUT, to, &[], &pinned(vec![("x-amz-copy-source", source)]), None).map(|_| ());
         }
         let xml = self.text(Method::POST, to, &[("uploads", String::new())], &[], None)?;
         let id = first(&xml, "UploadId").ok_or("The service didn't start the copy")?;
@@ -332,7 +345,7 @@ impl S3 {
             .enumerate()
             .map(|(at, (start, end))| {
                 let query = [("partNumber", (at + 1).to_string()), ("uploadId", id.clone())];
-                let headers = [("x-amz-copy-source", source.clone()), ("x-amz-copy-source-range", format!("bytes={start}-{end}"))];
+                let headers = pinned(vec![("x-amz-copy-source", source.clone()), ("x-amz-copy-source-range", format!("bytes={start}-{end}"))]);
                 first(&self.text(Method::PUT, to, &query, &headers, None)?, "ETag").ok_or_else(|| "The service didn't copy a part".to_string())
             })
             .collect::<Result<Vec<_>, _>>();
@@ -347,13 +360,33 @@ impl S3 {
         done
     }
 
-    /// Each key of a file or of everything in a folder, with where it goes under `to` and its size.
-    fn under(&self, path: &str, item: &Item, to: &str) -> Result<Vec<(String, String, u64)>, String> {
+    /// Each key of a file or of everything in a folder, with where it goes under `to`, its size
+    /// and its ETag.
+    fn under(&self, path: &str, item: &Item, to: &str) -> Result<Vec<(String, String, u64, String)>, String> {
         if !item.folder {
-            return Ok(vec![(path.to_string(), to.to_string(), item.size)]);
+            return Ok(vec![(path.to_string(), to.to_string(), item.size, item.version.clone())]);
         }
         let prefix = format!("{path}/");
-        Ok(self.keys(&prefix)?.into_iter().map(|(key, size)| (key.clone(), format!("{to}/{}", &key[prefix.len()..]), size)).collect())
+        Ok(self.keys(&prefix)?.into_iter().map(|(key, size, etag)| (key.clone(), format!("{to}/{}", &key[prefix.len()..]), size, etag)).collect())
+    }
+
+    /// A key's ETag as it is now.
+    fn etag_of(&self, key: &str) -> Result<String, String> {
+        let response = self.send(Method::HEAD, key, &[], &[], None)?;
+        Ok(response.headers().get("etag").and_then(|value| value.to_str().ok()).unwrap_or_default().to_string())
+    }
+
+    /// Copies a file, or each key of a folder, as listed. Gives what it copied.
+    fn copy_under(&self, path: &str, item: &Item, folder: &str, name: &str) -> Result<Vec<(String, String, u64, String)>, String> {
+        let to = join(folder, name);
+        if item.folder {
+            self.make_folder(folder, name)?;
+        }
+        let keys = self.under(path, item, &to)?;
+        for (from, into, size, etag) in &keys {
+            self.copy_key(from, into, None, *size, etag)?;
+        }
+        Ok(keys)
     }
 
     /// Deletes each key, up to 1000 in one request. A service that won't take that, or says no to
@@ -503,7 +536,7 @@ impl Service for S3 {
     }
 
     fn remove(&self, path: &str, item: &Item) -> Result<String, String> {
-        let mut keys = self.under(path, item, "")?.into_iter().map(|(key, _, _)| key).collect::<Vec<_>>();
+        let mut keys = self.under(path, item, "")?.into_iter().map(|(key, ..)| key).collect::<Vec<_>>();
         if item.folder {
             keys.push(format!("{path}/"));
         }
@@ -516,19 +549,24 @@ impl Service for S3 {
     }
 
     fn relocate(&self, path: &str, item: &Item, folder: &str, name: &str) -> Result<(), String> {
-        self.duplicate(path, item, folder, name)?;
-        self.remove(path, item).map(|_| ())
+        let copied = self.copy_under(path, item, folder, name)?;
+        // Only what went over goes, and only as it went: a key written to since stays, and so
+        // does one added meanwhile, which was never copied.
+        let same = |listed: &str, now: &str| listed.trim_matches('"') == now.trim_matches('"');
+        for (key, _, _, etag) in &copied {
+            if !etag.is_empty() && !same(etag, &self.etag_of(key)?) {
+                return Err(format!("{} changed while it moved, so it stays where it was too", key.rsplit('/').next().unwrap_or(key)));
+            }
+        }
+        let mut keys: Vec<String> = copied.into_iter().map(|(key, ..)| key).collect();
+        if item.folder {
+            keys.push(format!("{path}/"));
+        }
+        self.delete_keys(&keys)
     }
 
     fn duplicate(&self, path: &str, item: &Item, folder: &str, name: &str) -> Result<(), String> {
-        let to = join(folder, name);
-        if item.folder {
-            self.make_folder(folder, name)?;
-        }
-        for (from, into, size) in self.under(path, item, &to)? {
-            self.copy_key(&from, &into, None, size)?;
-        }
-        Ok(())
+        self.copy_under(path, item, folder, name).map(drop)
     }
 
     fn has_bin(&self) -> bool {
@@ -541,7 +579,7 @@ impl Service for S3 {
         Ok(self
             .keys(&prefix)?
             .into_iter()
-            .filter_map(|(key, size)| {
+            .filter_map(|(key, size, _)| {
                 let (parent, name) = key.rsplit_once('/').unwrap_or(("", &key));
                 (!name.is_empty() && name.to_lowercase().contains(&wanted)).then(|| (parent.to_string(), Item { name: name.to_string(), size, id: key.clone(), ..Item::default() }))
             })
@@ -549,7 +587,7 @@ impl Service for S3 {
     }
 
     fn space(&self) -> Result<Option<(u64, u64)>, String> {
-        Ok(Some((self.keys("")?.iter().map(|(_, size)| size).sum(), 0)))
+        Ok(Some((self.keys("")?.iter().map(|(_, size, _)| size).sum(), 0)))
     }
 
     fn share(&self, path: &str, _item: &Item) -> Result<String, String> {
@@ -590,7 +628,20 @@ impl Service for S3 {
 
     fn bring_back(&self, path: &str, item: &Item, version: &str) -> Result<(), String> {
         let size = self.versions(path, item)?.into_iter().find(|old| old.id == version).map_or(0, |old| old.size);
-        self.copy_key(path, path, Some(version), size)
+        // A version id names one content already.
+        self.copy_key(path, path, Some(version), size, "")
+    }
+
+    fn revision(&self, path: &str, item: &Item) -> Result<Option<String>, String> {
+        if item.folder {
+            return Ok(None);
+        }
+        let xml = self.text(Method::GET, "", &[("versions", String::new()), ("prefix", path.to_string())], &[], None)?;
+        Ok(records(&xml, "Version")
+            .into_iter()
+            .find(|fields| fields.get("Key").map(String::as_str) == Some(path) && fields.get("IsLatest").map(String::as_str) == Some("true"))
+            .and_then(|fields| fields.get("VersionId").cloned())
+            .filter(|id| !id.is_empty() && id != "null"))
     }
 
     fn warm(&self, path: &str, item: &Item) -> Result<(), String> {

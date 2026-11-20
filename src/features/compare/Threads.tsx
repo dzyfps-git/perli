@@ -47,6 +47,8 @@ export function CompareThreads(props: { tab: Tab }) {
   const [threads, setThreads] = createSignal<Thread[]>();
   let layer!: HTMLDivElement;
   let shownFor = "";
+  /** The folders whose threads wait for the next paint. */
+  let measuring = "";
   let timer: number | undefined;
 
   function measure(one: number, other: number, stacked: boolean): Thread[] {
@@ -77,14 +79,23 @@ export function CompareThreads(props: { tab: Tab }) {
     const [one, other] = props.tab.panes();
     if (!one || !other || reducedMotion.matches) return;
     const stacked = props.tab.stacked();
-    const ready = props.tab.marksOf(one) && props.tab.marksOf(other);
-    const key = `${one.folder()?.path}|${other.folder()?.path}`;
-    if (!ready || key === shownFor) return;
-    shownFor = key;
+    const [mine, theirs] = [props.tab.marksOf(one), props.tab.marksOf(other)];
+    // Marks of the folders shown now, not of ones a pane has just left.
+    const ready = mine && theirs && mine.snapshot === one.folder()?.request && theirs.snapshot === other.folder()?.request;
+    const keyOf = () => `${one.folder()?.path}|${other.folder()?.path}`;
+    const key = keyOf();
+    if (!ready || key === shownFor || key === measuring) return;
+    measuring = key;
     // The rows wear their marks from the next paint on.
     requestAnimationFrame(() =>
       requestAnimationFrame(() => {
-        setThreads(measure(one.id, other.id, stacked));
+        measuring = "";
+        if (keyOf() !== key) return;
+        const found = measure(one.id, other.id, stacked);
+        // Rows not drawn with their marks yet get another look when the marks next change.
+        if (found.length === 0) return;
+        shownFor = key;
+        setThreads(found);
         window.clearTimeout(timer);
         timer = window.setTimeout(() => setThreads(undefined), SHOWN_MS);
       }),

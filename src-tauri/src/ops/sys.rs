@@ -128,6 +128,15 @@ pub fn extended(path: &Path) -> HSTRING {
 
 /// Visits everything that matches `pattern`, including `.` and `..`.
 pub fn each_entry(pattern: &HSTRING, mut visit: impl FnMut(&WIN32_FIND_DATAW)) -> Result<()> {
+    each_entry_while(pattern, |data| {
+        visit(data);
+        true
+    })
+}
+
+/// `each_entry` that stops once `visit` answers false, so a sample of a huge folder reads no more
+/// of it than the sample takes.
+pub fn each_entry_while(pattern: &HSTRING, mut visit: impl FnMut(&WIN32_FIND_DATAW) -> bool) -> Result<()> {
     let mut data = WIN32_FIND_DATAW::default();
     let found = unsafe {
         FindFirstFileExW(
@@ -147,7 +156,9 @@ pub fn each_entry(pattern: &HSTRING, mut visit: impl FnMut(&WIN32_FIND_DATAW)) -
     };
 
     let finished = loop {
-        visit(&data);
+        if !visit(&data) {
+            break Ok(());
+        }
         if let Err(error) = unsafe { FindNextFileW(handle, &mut data) } {
             break if error.code() == ERROR_NO_MORE_FILES.to_hresult() {
                 Ok(())

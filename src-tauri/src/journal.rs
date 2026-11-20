@@ -44,7 +44,11 @@ pub const TAKE_AWAY: &str = "--journal-take-away";
 /// What the uninstaller runs: takes the helper away, asking for admin, only if it is set up.
 pub const OFF: &str = "--journal-off";
 /// Goes up whenever what the helper does changes, so an older copy is set up again.
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
+/// Journal reasons and the attribute that make a record a folder made or moved to its path.
+const MADE: u32 = 0x0000_0100;
+const MOVED_HERE: u32 = 0x0000_2000;
+const FOLDER_ATTRIBUTE: u32 = 0x10;
 const FOLDER: &str = "Perli Helper";
 const EXE: &str = "perli.exe";
 /// Past this many changed paths on a drive, it is walked again instead.
@@ -58,6 +62,8 @@ const BUFFER: usize = 1 << 20;
 pub enum Found {
     /// Something there changed, made or went: its path.
     Changed(PathBuf),
+    /// A folder made or moved to this path, which may have held another folder before.
+    Fresh(PathBuf),
     /// Every change on this drive is in the list.
     Caught(PathBuf),
     /// Its changes aren't known: its journal started over, or too much changed.
@@ -168,23 +174,44 @@ pub fn off() -> Result<(), String> {
     Ok(())
 }
 
-/// Runs the task and reads what it found, or `None` when the helper isn't set up or didn't answer.
-pub fn catch_up() -> Option<Vec<Found>> {
+/// Runs the task and reads what it found, with the stamp of its report for the index to keep once
+/// it has taken all of it in, or `None` when the helper isn't set up or didn't answer.
+///
+/// The helper moves on from each report as it writes it, so a Perli that stopped before its index
+/// took one in would lose those changes. So the last report comes along too, unless `applied`, the
+/// stamp the index kept, says it was taken in. Its drives caught up count only through the new one.
+pub fn catch_up(applied: Option<&str>) -> Option<(Vec<Found>, String)> {
     let (folder, sid) = (folder()?, crate::ops::user_sid().ok()?);
     let finds = finds_of(&folder, &sid);
     let before = fs::metadata(&finds).and_then(|meta| meta.modified()).ok()?;
+    let mut found = if applied == Some(stamp_of(before).as_str()) { Vec::new() } else { not_taken_in(&fs::read_to_string(&finds).unwrap_or_default()) };
     let started = schtasks().args(["/run", "/tn", &task_name(&sid)]).status().ok()?;
     if !started.success() {
         return None;
     }
     let deadline = Instant::now() + TASK_WAIT;
-    while fs::metadata(&finds).and_then(|meta| meta.modified()).ok()? <= before {
+    let after = loop {
+        let now = fs::metadata(&finds).and_then(|meta| meta.modified()).ok()?;
+        if now > before {
+            break now;
+        }
         if Instant::now() > deadline {
             return None;
         }
         std::thread::sleep(Duration::from_millis(250));
-    }
-    Some(read_finds(&fs::read_to_string(&finds).ok()?))
+    };
+    found.extend(read_finds(&fs::read_to_string(&finds).ok()?));
+    Some((found, stamp_of(after)))
+}
+
+fn stamp_of(time: std::time::SystemTime) -> String {
+    time.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos().to_string()
+}
+
+/// What a report the index never took in still tells: its changes, and its drives lost. That a
+/// drive was caught up then says nothing of now.
+fn not_taken_in(text: &str) -> Vec<Found> {
+    read_finds(text).into_iter().filter(|found| !matches!(found, Found::Caught(_))).collect()
 }
 
 /// The finds as the helper writes them: a header, then a line for each.
@@ -193,6 +220,7 @@ fn read_finds(text: &str) -> Vec<Found> {
         .skip(1)
         .filter_map(|line| match line.split_once('\t') {
             Some(("caught", root)) => Some(Found::Caught(root.into())),
+            Some(("fresh", path)) => Some(Found::Fresh(path.into())),
             Some(("lost", root)) => Some(Found::Lost(root.into())),
             _ if !line.is_empty() => Some(Found::Changed(line.into())),
             _ => None,
@@ -281,8 +309,9 @@ fn report(folder: &Path, sid: &str, fresh: bool) -> Result<(), String> {
         let known = state.get(&root).copied().filter(|&(id, usn)| !fresh && id == journal.UsnJournalID && usn >= journal.FirstUsn);
         let read = known.map(|(_, usn)| volume.changes(&root, usn, journal.NextUsn, journal.UsnJournalID));
         match read {
-            Some(Some((paths, next))) => {
+            Some(Some((paths, fresh, next))) => {
                 lines.extend(paths.iter().map(|path| path.to_string_lossy().into_owned()));
+                lines.extend(fresh.iter().map(|path| format!("fresh\t{}", path.to_string_lossy())));
                 lines.push(format!("caught\t{root}"));
                 state.insert(root, (journal.UsnJournalID, next));
             }
@@ -365,10 +394,11 @@ impl Volume {
         .map(|()| data)
     }
 
-    /// The path of each thing changed from `from` up to `to`, and where the journal was read to.
-    /// `None` past `MOST_PATHS`.
-    fn changes(&self, root: &str, from: i64, to: i64, journal: u64) -> Option<(Vec<PathBuf>, i64)> {
+    /// The path of each thing changed from `from` up to `to`, those of folders made or moved
+    /// there, and where the journal was read to. `None` past `MOST_PATHS`.
+    fn changes(&self, root: &str, from: i64, to: i64, journal: u64) -> Option<(Vec<PathBuf>, Vec<PathBuf>, i64)> {
         let mut named: HashSet<(u64, String)> = HashSet::new();
+        let mut fresh: HashSet<(u64, String)> = HashSet::new();
         let mut ask = READ_USN_JOURNAL_DATA_V0 { StartUsn: from, ReasonMask: u32::MAX, ReturnOnlyOnClose: 0, Timeout: 0, BytesToWaitFor: 0, UsnJournalID: journal };
         let mut buffer = vec![0u64; BUFFER / 8];
         while ask.StartUsn < to {
@@ -378,7 +408,12 @@ impl Volume {
             unsafe { DeviceIoControl(self.device, FSCTL_READ_USN_JOURNAL, Some(asked), size, Some(buffer.as_mut_ptr().cast()), BUFFER as u32, Some(&mut bytes), None) }.ok()?;
             let read = unsafe { std::slice::from_raw_parts(buffer.as_ptr().cast::<u8>(), bytes as usize) };
             let (next, found) = records(read)?;
-            named.extend(found);
+            for (parent, name, made) in found {
+                if made {
+                    fresh.insert((parent, name.clone()));
+                }
+                named.insert((parent, name));
+            }
             if named.len() > MOST_PATHS {
                 return None;
             }
@@ -389,15 +424,12 @@ impl Volume {
         }
         // Each folder named once, by its id.
         let mut folders: HashMap<u64, Option<PathBuf>> = HashMap::new();
-        let mut paths: Vec<PathBuf> = named
-            .into_iter()
-            .filter_map(|(parent, name)| {
-                let folder = folders.entry(parent).or_insert_with(|| self.path_of(parent, root)).clone()?;
-                Some(folder.join(name))
-            })
-            .collect();
+        let mut path_of = |(parent, name): (u64, String)| Some(folders.entry(parent).or_insert_with(|| self.path_of(parent, root)).clone()?.join(name));
+        let mut paths: Vec<PathBuf> = named.into_iter().filter_map(&mut path_of).collect();
+        let mut fresh: Vec<PathBuf> = fresh.into_iter().filter_map(&mut path_of).collect();
         paths.sort();
-        Some((paths, ask.StartUsn))
+        fresh.sort();
+        Some((paths, fresh, ask.StartUsn))
     }
 
     /// Where the folder with this id is now, if it still is.
@@ -424,9 +456,14 @@ impl Drop for Volume {
     }
 }
 
+/// A journal record: the id of the folder it is in, its name, and whether it is a folder made or
+/// moved there.
+type Record = (u64, String, bool);
+
 /// What a read of the journal gave: the USN to read on from, then each record as the id of the
-/// folder it is in and its name. `None` when it isn't laid out as a journal read is.
-fn records(read: &[u8]) -> Option<(i64, Vec<(u64, String)>)> {
+/// folder it is in, its name, and whether it is a folder made or moved there. `None` when it
+/// isn't laid out as a journal read is.
+fn records(read: &[u8]) -> Option<(i64, Vec<Record>)> {
     let next = i64::from_le_bytes(read.get(..8)?.try_into().ok()?);
     let (u16_at, u32_at, u64_at) = (
         |at: usize| -> Option<u16> { Some(u16::from_le_bytes(read.get(at..at + 2)?.try_into().ok()?)) },
@@ -443,27 +480,33 @@ fn records(read: &[u8]) -> Option<(i64, Vec<(u64, String)>)> {
         // Only version 2 records, the ones NTFS writes, hold 64-bit ids.
         if u16_at(at + 4)? == 2 {
             let parent = u64_at(at + 16)?;
+            let made = u32_at(at + 40)? & (MADE | MOVED_HERE) != 0 && u32_at(at + 52)? & FOLDER_ATTRIBUTE != 0;
             let (name_length, name_at) = (u16_at(at + 56)? as usize, u16_at(at + 58)? as usize);
             let name = read.get(at + name_at..at + name_at + name_length)?;
             let units: Vec<u16> = (0..name.len() / 2).map(|unit| u16::from_le_bytes([name[2 * unit], name[2 * unit + 1]])).collect();
-            found.push((parent, String::from_utf16_lossy(&units)));
+            found.push((parent, String::from_utf16_lossy(&units), made));
         }
         at += length;
     }
     Some((next, found))
 }
 
-/// For the tests: a journal read of records, each a folder id and a name.
+/// For the tests: a journal read of records, each a folder id, a name, and whether it is a folder
+/// made there.
 #[cfg(test)]
-fn journal_read(next: i64, records: &[(u64, &str)]) -> Vec<u8> {
+fn journal_read(next: i64, records: &[(u64, &str, bool)]) -> Vec<u8> {
     let mut read = next.to_le_bytes().to_vec();
-    for (parent, name) in records {
+    for &(parent, name, made) in records {
         let units: Vec<u8> = name.encode_utf16().flat_map(u16::to_le_bytes).collect();
         let length = (60 + units.len()).div_ceil(8) * 8;
         let mut record = vec![0u8; length];
         record[..4].copy_from_slice(&(length as u32).to_le_bytes());
         record[4..6].copy_from_slice(&2u16.to_le_bytes());
         record[16..24].copy_from_slice(&parent.to_le_bytes());
+        if made {
+            record[40..44].copy_from_slice(&MADE.to_le_bytes());
+            record[52..56].copy_from_slice(&FOLDER_ATTRIBUTE.to_le_bytes());
+        }
         record[56..58].copy_from_slice(&(units.len() as u16).to_le_bytes());
         record[58..60].copy_from_slice(&60u16.to_le_bytes());
         record[60..60 + units.len()].copy_from_slice(&units);
@@ -478,8 +521,8 @@ mod tests {
 
     #[test]
     fn a_journal_read_gives_each_folder_and_name() {
-        let read = journal_read(4096, &[(7, "notes.txt"), (9, "Fotos")]);
-        assert_eq!(records(&read), Some((4096, vec![(7, "notes.txt".to_string()), (9, "Fotos".to_string())])));
+        let read = journal_read(4096, &[(7, "notes.txt", false), (9, "Fotos", true)]);
+        assert_eq!(records(&read), Some((4096, vec![(7, "notes.txt".to_string(), false), (9, "Fotos".to_string(), true)])));
         assert_eq!(records(&4096i64.to_le_bytes()), Some((4096, Vec::new())), "a read at the end has no records");
         let mut broken = read.clone();
         broken[8..12].copy_from_slice(&3u32.to_le_bytes());
@@ -487,11 +530,17 @@ mod tests {
     }
 
     #[test]
+    fn a_report_never_taken_in_keeps_its_changes_and_losses_but_not_its_catch_up() {
+        let text = "perli-journal 1\nC:\\a.txt\ncaught\tC:\\\nlost\tD:\\\n";
+        assert_eq!(not_taken_in(text), vec![Found::Changed(r"C:\a.txt".into()), Found::Lost(r"D:\".into())]);
+    }
+
+    #[test]
     fn finds_read_back_as_written() {
-        let text = format!("{}\nC:\\Users\\a\\b.txt\ncaught\tC:\\\nlost\tD:\\\n", header());
+        let text = format!("{}\nC:\\Users\\a\\b.txt\nfresh\tC:\\Users\\a\ncaught\tC:\\\nlost\tD:\\\n", header());
         assert_eq!(
             read_finds(&text),
-            [Found::Changed("C:\\Users\\a\\b.txt".into()), Found::Caught("C:\\".into()), Found::Lost("D:\\".into())]
+            [Found::Changed("C:\\Users\\a\\b.txt".into()), Found::Fresh("C:\\Users\\a".into()), Found::Caught("C:\\".into()), Found::Lost("D:\\".into())]
         );
     }
 

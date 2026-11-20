@@ -65,6 +65,21 @@ export function isUnder(id: string, folder: string) {
   return id.startsWith(folder.endsWith("\\") ? folder : `${folder}\\`);
 }
 
+/** Whether a job that took from `from` and put into `to` changed what is under `folder`, or anywhere for This PC's "". */
+export const touches = ({ from, to }: { from: string[]; to: string | null }, folder: string) =>
+  [...from, to].some((one) => !!one && (folder === "" || isUnder(idOf(one), idOf(folder))));
+
+/**
+ * Whether a point `dx`, `dy` from the middle of a `w` by `h` box with corners rounded by `round`
+ * is on it, or within `pad` of it. Fully rounded it is a pill: a straight middle with half
+ * circles at its ends, so a long thin one reaches no further than it shows.
+ */
+export function onShape(dx: number, dy: number, w: number, h: number, round: number, pad: number) {
+  const short = Math.min(w, h);
+  if (round < short / 2 - 0.5) return Math.abs(dx) <= w / 2 + pad && Math.abs(dy) <= h / 2 + pad;
+  return Math.hypot(Math.max(0, Math.abs(dx) - (w - short) / 2), Math.max(0, Math.abs(dy) - (h - short) / 2)) <= short / 2 + pad;
+}
+
 /** A node for `cell` inside `parent`, with its inner cells as its own kids if it brings them. */
 function nodeOf(cell: MapCell, parent: SpaceNode, kindOf: (cell: MapCell) => string, inner: number): SpaceNode {
   const path = joinPath(parent.path, cell.name);
@@ -85,6 +100,9 @@ function nodeOf(cell: MapCell, parent: SpaceNode, kindOf: (cell: MapCell) => str
   return node;
 }
 
+/** The newest time among `cells`, in ms. A loop: a big folder has more cells than a call takes arguments. */
+const newestOf = (cells: MapCell[]) => cells.reduce((most, cell) => Math.max(most, msOf(cell.newest)), 0);
+
 const biggest = (cells: MapCell[], most: number) =>
   [...cells].sort((a, b) => b.bytes - a.bytes || a.name.localeCompare(b.name)).slice(0, most);
 
@@ -97,7 +115,7 @@ function foldedOf(cells: MapCell[], parent: SpaceNode): SpaceNode | undefined {
     name: `${cells.length.toLocaleString("en-US")} more`,
     bytes: cells.reduce((sum, cell) => sum + cell.bytes, 0),
     folder: false,
-    newest: Math.max(0, ...cells.map((cell) => msOf(cell.newest))),
+    newest: newestOf(cells),
     kind: "file",
     depth: parent.depth + 1,
     parent,
@@ -115,7 +133,7 @@ export function folderTree(path: string, name: string, cells: MapCell[], kindOf:
     name,
     bytes: cells.reduce((sum, cell) => sum + cell.bytes, 0),
     folder: true,
-    newest: Math.max(0, ...cells.map((cell) => msOf(cell.newest))),
+    newest: newestOf(cells),
     kind: "folder",
     depth: 0,
     kids: [],
@@ -155,7 +173,7 @@ export function pcTree(
     };
     const cells = weighed[idOf(drive.path)] ?? [];
     node.kids = biggest(cells, MOST_INNER).map((cell) => nodeOf(cell, node, kindOf, 0));
-    node.newest = Math.max(0, ...cells.map((cell) => msOf(cell.newest)));
+    node.newest = newestOf(cells);
     return node;
   });
   root.bytes = root.kids.reduce((sum, drive) => sum + drive.bytes, 0);

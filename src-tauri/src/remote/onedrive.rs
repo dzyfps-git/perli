@@ -353,6 +353,15 @@ impl Service for OneDrive {
             .collect())
     }
 
+    fn revision(&self, path: &str, item: &Item) -> Result<Option<String>, String> {
+        if item.folder {
+            return Ok(None);
+        }
+        // The first is the file as it is.
+        let values = self.pages(Self::then(&self.address(path)?, "/versions"))?;
+        Ok(values.first().and_then(|value| value["id"].as_str()).map(str::to_string))
+    }
+
     fn bring_back(&self, path: &str, _item: &Item, version: &str) -> Result<(), String> {
         let address = Self::then(&self.address(path)?, &format!("/versions/{}/restoreVersion", super::http::encode(version)));
         self.post(&address, &json!({}))?;
