@@ -43,7 +43,8 @@ export function toCrumbs(path: string): Crumb[] {
   const network = path.startsWith("\\\\");
   if (network) parts[0] = `\\\\${parts[0]}`;
   return parts.map((label, index) => ({
-    label,
+    // Perli's own cloud places sit under a server name of its own.
+    label: index === 0 && network && label.toLowerCase() === "\\\\perli cloud" ? "Cloud" : label,
     path: index === 0 && !network ? `${label}\\` : parts.slice(0, index + 1).join("\\"),
   }));
 }

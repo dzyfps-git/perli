@@ -344,6 +344,10 @@ pub fn whole(archive: &Path) -> Option<PathBuf> {
 /// A file or folder of an archive as a real one on disk, taken out to a cache once for each
 /// version of the archive. Paths outside an archive come back as they are, and so does its top.
 pub fn real(path: &Path) -> Result<PathBuf, String> {
+    // A cloud file comes down the same way, so everything that opens one goes through here.
+    if let Some(taken) = crate::remote::real(path) {
+        return taken;
+    }
     match split(path) {
         Some((archive, inner)) => real_in(&archive, &inner),
         None => Ok(path.to_path_buf()),
@@ -481,12 +485,12 @@ fn mark(path: &Path, zone: &[u8]) {
 }
 
 /// FILETIME ticks as a time. None before 1970, which no ZIP can hold.
-fn time_of(ticks: u64) -> Option<SystemTime> {
+pub(crate) fn time_of(ticks: u64) -> Option<SystemTime> {
     const UNIX_START: u64 = 116_444_736_000_000_000;
     Some(UNIX_EPOCH + Duration::from_nanos(ticks.checked_sub(UNIX_START)?.checked_mul(100)?))
 }
 
-fn cache_root() -> PathBuf {
+pub(crate) fn cache_root() -> PathBuf {
     static SWEPT: Mutex<Option<Instant>> = Mutex::new(None);
     let root = std::env::temp_dir().join(CACHE_FOLDER);
     let mut swept = SWEPT.lock().unwrap_or_else(PoisonError::into_inner);

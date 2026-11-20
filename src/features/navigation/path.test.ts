@@ -57,6 +57,10 @@ test("samePath ignores case and handles no folder yet", () => {
   assert.equal(samePath(undefined, "C:\\"), false);
 });
 
+test("Perli's own cloud places show as Cloud", () => {
+  assert.deepEqual(toCrumbs("\\\\Perli Cloud\\Work").map((crumb) => crumb.label), ["Cloud", "Work"]);
+});
+
 test("toCrumbs starts at the drive root", () => {
   assert.deepEqual(toCrumbs("C:\\Users\\me"), [
     { label: "C:", path: "C:\\" },

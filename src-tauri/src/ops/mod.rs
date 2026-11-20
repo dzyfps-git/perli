@@ -3,6 +3,7 @@
 
 mod archive;
 mod bin;
+mod cloud;
 mod edits;
 mod incoming;
 mod names;
@@ -82,6 +83,8 @@ pub enum Job {
     Attachments { mail: PathBuf, folder: PathBuf, only: Option<usize> },
     /// One after another under one card, such as rows of two archives and a folder copied at once.
     Several { jobs: Vec<Job> },
+    /// A run of a sync pair: the two sides are compared first, then what differs goes over.
+    Sync { pair: crate::sync::Pair },
 }
 
 /// How hard a new archive squeezes its files.
@@ -441,6 +444,31 @@ impl<'a> Run<'a> {
             Job::Wallpaper { picture } => self.set_wallpaper(&picture),
             // ponytail: each part has the same share of the bar, as a part's total is known only once it
             // starts; weigh them by size if one dwarfs the others.
+            Job::Sync { pair } => {
+                let compared = self.attempt(&pair.from, None, |_| crate::sync::preview(&pair).map_err(|message| Error::new(E_FAIL, message.as_str())))?;
+                let Some(preview) = compared else { return Ok(()) };
+                // The first run into a folder on this PC not made yet makes it, and a new folder
+                // holding something left out is made before what goes in it, each with an undo.
+                let mut made: Vec<PathBuf> = if crate::remote::is_remote(&pair.to) {
+                    Vec::new()
+                } else {
+                    pair.to.ancestors().take_while(|folder| matches!(sys::stat(folder), Ok(None))).map(Path::to_path_buf).collect()
+                };
+                made.reverse();
+                made.extend(preview.folders.iter().cloned());
+                if preview.copies.is_empty() && preview.removes.is_empty() {
+                    return Ok(());
+                }
+                for folder in &made {
+                    if !self.make_sync_folder(folder)? {
+                        return Ok(());
+                    }
+                }
+                match crate::sync::job(preview) {
+                    Some(job) => self.job(job),
+                    None => Ok(()),
+                }
+            }
             Job::Several { jobs } => {
                 let parts = jobs.len() as u32;
                 jobs.into_iter().enumerate().try_for_each(|(part, job)| {
@@ -451,8 +479,30 @@ impl<'a> Run<'a> {
         }
     }
 
+    /// Makes one folder a sync run needs, on this PC or in a place, noted so Undo takes it away.
+    /// False when it couldn't be made, and the run stops there.
+    fn make_sync_folder(&mut self, folder: &Path) -> Flow<bool> {
+        let name = folder.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+        let made = self.attempt(folder, None, |_| match crate::remote::at(&sys::parent(folder)) {
+            Some(at) => {
+                let at = at.map_err(|message| Error::new(E_FAIL, message.as_str()))?;
+                at.service.make_folder(&at.inner, &name).map_err(|message| Error::new(E_FAIL, message.as_str()))
+            }
+            None => sys::create_dir(folder),
+        })?;
+        if made.is_none() {
+            return Ok(false);
+        }
+        self.done.push(Done::Created { path: folder.to_path_buf() });
+        crate::remote::forget(&[folder.to_path_buf()]);
+        Ok(true)
+    }
+
     fn rename(&mut self, path: &Path, name: &str) -> Flow {
         self.add_total(1, 0);
+        if crate::remote::is_remote(path) {
+            return self.cloud_moves(vec![(path.to_path_buf(), path.with_file_name(name))]);
+        }
         self.rename_to(path, &path.with_file_name(name), true)?;
         self.step(1, 0);
         Ok(())
@@ -477,6 +527,9 @@ impl<'a> Run<'a> {
     }
 
     fn new_item(&mut self, folder: &Path, directory: bool) -> Flow {
+        if crate::remote::is_remote(folder) {
+            return self.cloud_new(folder, directory);
+        }
         self.add_total(1, 0);
         let target = names::new_item(folder, directory);
         let elevated = Elevated::New {
@@ -548,6 +601,9 @@ impl<'a> Run<'a> {
     }
 
     fn shortcuts(&mut self, sources: &[PathBuf], folder: &Path) -> Flow {
+        if crate::remote::is_remote(folder) {
+            return self.refuse(folder, crate::remote::ON_THIS_PC);
+        }
         self.add_total(sources.len() as u64, 0);
         for source in sources {
             // A drive has no name of its own to go by.

@@ -4,14 +4,15 @@ import solid from "vite-plugin-solid";
 
 /**
  * pdf.js's own files, which it fetches as a PDF needs them: character maps for Asian text, the
- * 14 standard fonts, and the image decoders it uses in place of WebAssembly. The dev server
- * serves them straight from node_modules.
+ * 14 standard fonts, and its WebAssembly: image decoders, colour profiles and the sandbox a
+ * PDF's own scripts run in. The dev server serves them straight from node_modules.
  */
 function pdfFiles(): Plugin {
   const folders: [string, (name: string) => boolean][] = [
     ["cmaps", () => true],
     ["standard_fonts", () => true],
-    ["wasm", (name) => name.endsWith("_nowasm_fallback.js") || name.startsWith("LICENSE")],
+    // The decoders and colour profiles as WebAssembly, and the engine a PDF's scripts run in.
+    ["wasm", (name) => name.endsWith(".wasm") || name === "quickjs-eval.js" || name.startsWith("LICENSE")],
     // The icons of notes left on a page.
     ["web/images", (name) => name.startsWith("annotation-")],
   ];

@@ -11,6 +11,8 @@ import {
   type Task,
 } from "../../api";
 import type { FolderView } from "../navigation/folderView";
+import { isPerliCloud } from "../cloud/cloud";
+import { keepsNoBin, placeOf, readCloudPlaces } from "../cloud/cloudState";
 import { dayText } from "./renameRules";
 import type { RenameRequest } from "./BatchRename";
 import { forgetCut, markCut } from "./clipboard";
@@ -170,6 +172,23 @@ export function createFileActions(
     remove(view: FolderView, permanently: boolean) {
       const selection = view.isZip() ? changeable(view) : selected(view);
       if (!selection) return;
+      const folder = view.folder()?.path ?? "";
+      // A cloud place's own bin is its last stop, and S3 storage has none, so only that asks.
+      if (isPerliCloud(folder)) {
+        const decide = () => {
+          // A place still unknown here, say as the places couldn't be read, goes to the bin as a
+          // recycle, which the job itself never lets delete for good without asking.
+          if (!keepsNoBin(folder)) return void start(view, { kind: "recycle", selection });
+          confirmDelete({
+            title: "Delete for good?",
+            note: "S3 storage keeps no bin, so these can't be brought back.",
+            confirm: () => start(view, { kind: "delete", selection }),
+          });
+        };
+        // A place added in another window is new to this one, which reads them again before it
+        // decides, so an S3 delete never skips the ask.
+        return void (placeOf(folder) ? decide() : readCloudPlaces().then(decide));
+      }
       if (!permanently && !view.isBin()) {
         start(view, { kind: "recycle", selection });
         return;

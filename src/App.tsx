@@ -61,7 +61,25 @@ import {
   type OpenAsk,
   type Tag,
   type Terminal,
+  renamePlace,
+  removePlace,
+  shareLink,
+  type CloudPlace,
+  type SyncPair,
 } from "./api";
+import { AddPlace, Versions } from "./features/cloud/CloudDialogs";
+import {
+  closeSync,
+  editingSync,
+  editSync,
+  forgetSync,
+  newSync,
+  readSyncPairs,
+  startSyncTimer,
+  SyncSheet,
+} from "./features/sync/SyncSheet";
+import { isPerliCloud, isPlaceRoot, placeName, placePath } from "./features/cloud/cloud";
+import { addingPlace, placeOf, readCloudPlaces, setAddingPlace } from "./features/cloud/cloudState";
 import { createFileActions } from "./features/fileops/actions";
 import { BatchRename, type RenameRequest } from "./features/fileops/BatchRename";
 import { ZipOptions, type ZipRequest } from "./features/fileops/ZipOptions";
@@ -496,6 +514,8 @@ export function App() {
   const [showingProperties, setShowingProperties] = createSignal<{ target: ShellTarget; at: { x: number; y: number } }>();
   const [pickingApp, setPickingApp] = createSignal<string[]>();
   const [drives, setDrives] = createSignal<"map" | "disconnect">();
+  /** The cloud file whose older versions show. */
+  const [versioning, setVersioning] = createSignal<{ path: string; view: FolderView }>();
   const [previewing, setPreviewing] = createSignal<{ view: FolderView; at: PreviewAt }>();
   const [comparing, setComparing] = createSignal<{ view: FolderView; snapshot: number; kind: "picture" | "text"; sides: [CompareSide, CompareSide] }>();
   const [keysOpen, setKeysOpen] = createSignal(false);
@@ -782,6 +802,7 @@ export function App() {
 
   function showFolderMenu(event: MouseEvent, view: FolderView, path: string) {
     event.preventDefault();
+    if (isPerliCloud(path)) return showCloudFolderMenu(event, view, path);
     const items = [
       { label: "Open", action: () => view.open(path) },
       { label: "Open in new tab", action: () => tabs.add([path]) },
@@ -792,6 +813,7 @@ export function App() {
             { label: "Search here", action: () => searchIn(view, path) },
             { label: "Find copies here", action: async () => void ((await view.open(path)) && findCopies(view)) },
             { label: "Copy path", action: () => quietly(copyFolderPath(path)) },
+            { label: "Sync this folder…", action: () => newSync(path) },
             {
               label: "New tabs open here",
               checked: newTabOpens() === "folder" && samePath(newTabFolder() ?? "", path),
@@ -810,6 +832,119 @@ export function App() {
           ]),
     ];
     setMenu({ x: event.clientX, y: event.clientY, items });
+  }
+
+  /** A sync runs as a job. One the timer asks for runs only if it is due. */
+  const runSync = (id: string, scheduled = false) =>
+    startJob({ kind: "sync", id, scheduled }, tabs.activeView().id)
+      .then(readSyncPairs)
+      .catch(scheduled ? console.error : jobs.report);
+  startSyncTimer(runSync);
+
+  function showSyncMenu(event: MouseEvent, pair: SyncPair) {
+    event.preventDefault();
+    const items: MenuItem[] = [
+      { label: "Run now", action: () => (pair.mirror ? editSync(pair) : runSync(pair.id)) },
+      { label: "Look first…", action: () => editSync({ ...pair, ran: 0 }) },
+      { label: "Edit…", action: () => editSync(pair) },
+      { label: "Open the source", divider: true, action: () => tabs.activeView().open(pair.from) },
+      { label: "Open the target", action: () => tabs.activeView().open(pair.to) },
+      { label: "Remove sync", divider: true, action: () => quietly(forgetSync(pair)) },
+    ];
+    setMenu({ x: event.clientX, y: event.clientY, items });
+  }
+
+  /** A cloud place of Perli's own, or a folder in one. Windows knows nothing of them. */
+  function showCloudFolderMenu(event: MouseEvent, view: FolderView, path: string) {
+    const place = placeOf(path);
+    const items: MenuItem[] = [
+      { label: "Open", action: () => view.open(path) },
+      { label: "Open in new tab", action: () => tabs.add([path]) },
+      { label: "Open to side", action: () => tabs.openToSide(path) },
+      ...(placeName(path)
+        ? [
+            { label: "Search here", action: () => searchIn(view, path) },
+            { label: "Sync this folder…", action: () => newSync(path) },
+          ]
+        : []),
+      ...(place && isPlaceRoot(path)
+        ? [
+            {
+              label: "Rename place…",
+              divider: true,
+              action: () =>
+                setNaming({ title: "Rename cloud place", confirm: "Rename", start: place.name, done: (name) => quietly(renameCloudPlace(place, name)) }),
+            },
+            { label: "Remove place…", action: () => askRemovePlace(place) },
+          ]
+        : []),
+      { label: "Add a cloud place…", divider: true, action: () => setAddingPlace(true) },
+    ];
+    setMenu({ x: event.clientX, y: event.clientY, items });
+  }
+
+  /** Tabs in the place follow it to its new name. */
+  async function renameCloudPlace(place: CloudPlace, name: string) {
+    const [before, renamed] = [placePath(place), await renamePlace(place.id, name)];
+    await readCloudPlaces();
+    for (const each of tabs.allViews()) {
+      const shown = each.folder()?.path;
+      if (shown && isPerliCloud(shown) && placeName(shown)?.toLowerCase() === place.name.toLowerCase()) {
+        void each.open(placePath(renamed) + shown.slice(before.length));
+      }
+    }
+  }
+
+  function askRemovePlace(place: CloudPlace) {
+    setDeleting({
+      title: `Remove ${place.name}?`,
+      note: "Perli forgets the place and its key. Nothing in the cloud changes, and adding it again brings it back.",
+      confirmLabel: "Remove",
+      safe: true,
+      async confirm() {
+        await removePlace(place.id).then(readCloudPlaces).catch(jobs.report);
+      },
+    });
+  }
+
+  /** Rows of a cloud place: what Windows' own menu would do there needs a file on this PC. */
+  async function showCloudRowMenu(view: FolderView, row: Row, path: string, x: number, y: number) {
+    const canPaste = await clipboardCanPaste();
+    const one = view.list()?.selection().rows.length === 1;
+    const two = view.list()?.selection().rows.length === 2 && !row.isDir;
+    const copyLink = () =>
+      shareLink(path)
+        .then((link) => navigator.clipboard.writeText(link))
+        .then(() => jobs.notify("Link copied", "It opens the file in a browser."));
+    const items: MenuItem[] = [
+      { label: "Open", action: () => openRow(view, row, false) },
+      { label: "Quick preview", action: () => previewSelected(view) },
+      ...(row.isDir
+        ? [
+            { label: "Open to side", action: () => openRow(view, row, true) },
+            { label: "Open in background tab", action: () => openBehind(view, row) },
+            { label: "Search here", action: () => searchIn(view, path) },
+          ]
+        : [shell.openWithItem(view)]),
+      { label: "Cut", divider: true, action: () => actions.cut(view) },
+      { label: "Copy", action: () => actions.copy(view) },
+      { label: "Paste", disabled: !canPaste, action: () => actions.paste(view, row.isDir ? path : undefined) },
+      { label: "Rename", action: () => actions.startRename(view) },
+      { label: "Delete", action: () => actions.remove(view, false) },
+      { label: "Copy link", divider: true, disabled: !one, action: () => quietly(copyLink()) },
+      ...(row.isDir ? [] : [{ label: "Versions…", disabled: !one, action: () => setVersioning({ path, view }) }]),
+      { label: "Always keep on this device", checked: row.isPinned, action: () => keepHere(view, !row.isPinned) },
+      { label: "Copy name", divider: true, action: () => quietly(copyName(view)) },
+      { label: "Select same", items: sameItems(view, row) },
+      ...(two ? [{ label: "Compare", keys: keyText("compare"), action: () => quietly(compare(view)) }] : []),
+      ...(tabs.active().other()
+        ? [
+            { label: "Copy to other pane", divider: true, action: () => actions.toOtherPane(view, "copy") },
+            { label: "Move to other pane", action: () => actions.toOtherPane(view, "move") },
+          ]
+        : []),
+    ];
+    setMenu({ x, y, items });
   }
 
   /** The bookmarks of a group, under its button on the bar. Each has its own menu to the side. */
@@ -1081,6 +1216,7 @@ export function App() {
       ];
       return setMenu({ x, y, items });
     }
+    if (isPerliCloud(path)) return showCloudRowMenu(view, row, path, x, y);
     const [canPaste, toolItems] = await Promise.all([clipboardCanPaste(), shell.fileToolItems(view, row, { x, y })]);
     const iconKind = iconKindOf(row.name, row.isDir, iconTheme().extensions);
     const items: MenuItem[] = [
@@ -1478,7 +1614,7 @@ export function App() {
           { label: "Activity log", action: () => setActivityOpen(true) },
           { label: "Disk map", action: () => setMapping(view.folder()?.path) },
         ];
-    const shellItems = view.isBin() || view.isZip() ? [] : shell.backgroundItems(view, { x, y });
+    const shellItems = view.isBin() || view.isZip() || isPerliCloud(view.folder()?.path ?? "") ? [] : shell.backgroundItems(view, { x, y });
     setMenu({ x, y, items: [...fileItems, ...viewItems(view), ...shellItems] });
   }
 
@@ -2320,6 +2456,11 @@ export function App() {
     const { tab, view } = props;
     const activate = () => tab.activate(view);
     const [retrying, setRetrying] = createSignal(false);
+    // A folder that couldn't be read, such as a cloud place while offline, is read again as soon
+    // as the network is back.
+    const backOnline = () => view.error() && void view.retry();
+    window.addEventListener("online", backOnline);
+    onCleanup(() => window.removeEventListener("online", backOnline));
     return (
       <section
         class="pane"
@@ -2366,6 +2507,9 @@ export function App() {
           <Show when={view.error()}>
             <div class="message" role="alert">
               <p>{view.error()}</p>
+              <Show when={!navigator.onLine}>
+                <p class="settings-note">This PC is offline. Perli tries again by itself when the network is back.</p>
+              </Show>
               <button
                 class="job-choice"
                 disabled={retrying()}
@@ -2540,6 +2684,10 @@ export function App() {
           onSmartMenu={showSmartMenu}
           onPlaces={setPlaces}
           onEject={jobs.eject}
+          onAddCloud={() => setAddingPlace(true)}
+          onSync={(pair) => (pair.ran === 0 || pair.mirror ? editSync(pair) : runSync(pair.id))}
+          onSyncMenu={showSyncMenu}
+          onNewSync={() => newSync(tabs.activeView().folder()?.path ?? "")}
           report={jobs.report}
         />
         <MiniPlayer onOpen={() => void backToPlayer().catch(jobs.report)} />
@@ -2745,6 +2893,20 @@ export function App() {
           onWindows={() => mapDrive().then(refreshPlaces).catch(jobs.report)}
           onClose={() => setDrives(undefined)}
         />
+      </Show>
+      <Show when={addingPlace()}>
+        <AddPlace
+          onAdded={(place) => {
+            jobs.notify(`Added ${place.name}`, "It is under Cloud in the sidebar.");
+            void tabs.activeView().open(placePath(place));
+          }}
+        />
+      </Show>
+      <Show when={editingSync()} keyed>
+        {(pair) => <SyncSheet pair={pair} onRun={(saved) => runSync(saved.id)} onClose={closeSync} />}
+      </Show>
+      <Show when={versioning()} keyed>
+        {(ask) => <Versions path={ask.path} onBack={() => void ask.view.reload()} onClose={() => setVersioning(undefined)} />}
       </Show>
       <Show when={drives() === "disconnect"}>
         <DisconnectDrive

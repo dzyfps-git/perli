@@ -20,6 +20,7 @@ import {
 import { filterActive, NO_FILTER, toFilter } from "../filelist/filter";
 import type { Layout } from "../filelist/layout";
 import type { ColumnSet } from "../filelist/columns";
+import { isPerliCloud } from "../cloud/cloud";
 import { extensionsOf, type Kind } from "../filelist/fileKinds";
 import { dateGroups, KIND_GROUPS } from "../filelist/groups";
 import {
@@ -378,6 +379,10 @@ export function createFolderView(id: number, saved?: SavedPane, fixed?: Filter) 
       if (isBin(opened.path) || opened.archive) {
         setColumnSet("plain");
         pictureLayout("plain");
+      } else if (isPerliCloud(opened.path)) {
+        // A cloud folder keeps columns of its own, with what the service says of each row.
+        setColumnSet("cloud");
+        pictureLayout("cloud");
       } else noteColumnSet(opened).catch(console.error);
       return opened;
     } catch (failure) {

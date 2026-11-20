@@ -2996,3 +2996,19 @@ fn the_wallpaper_goes_back_on_undo_to_each_screen_still_there() {
     assert!(undone.failed.is_empty());
     assert_eq!(shown(), [sea]);
 }
+
+#[test]
+fn a_sync_makes_its_folders_with_an_undo_and_leaves_out_what_it_skips() {
+    let sandbox = Sandbox::new();
+    sandbox.file(r"from\new\keep.txt", "k");
+    sandbox.file(r"from\new\cache.tmp", "c");
+    let to = sandbox.path(r"to\deeper");
+    let pair = crate::sync::Pair { id: String::new(), from: sandbox.path("from"), to: to.clone(), mirror: false, skip: "*.tmp".into(), every: 0, ran: 0 };
+    let outcome = go(Job::Sync { pair });
+    assert!(outcome.failed.is_empty());
+    assert_eq!(read(&to.join(r"new\keep.txt")), "k");
+    assert!(!to.join(r"new\cache.tmp").exists(), "what is left out stays out of a new folder");
+    let undone = go(Job::Undo { records: outcome.done });
+    assert!(undone.failed.is_empty());
+    assert!(!sandbox.path("to").exists(), "Undo takes away the folders the run made");
+}

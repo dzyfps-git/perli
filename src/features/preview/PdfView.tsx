@@ -7,7 +7,8 @@ import { ConfirmDelete } from "../fileops/ConfirmDelete";
 import { saved, stored } from "../filelist/prefs";
 import { findIn, scrollToRange } from "./FindBar";
 import { Minimap } from "./Minimap";
-import { minimapShown, setMinimapShown } from "./viewerPrefs";
+import { findScripts, hasScripts, runScripts, type Scripts } from "./pdfScripts";
+import { minimapShown, pdfScripts, setMinimapShown, setPdfScripts } from "./viewerPrefs";
 import { seenPart, type ViewRect } from "./zoomView";
 import "./pdfFields.css";
 import "./pdfXfa.css";
@@ -28,8 +29,8 @@ const ICON_ZOOM_OUT = "";
 
 const ICON_CLEAR = "\uE75C";
 
-/** pdf.js's own files: character maps for Asian text, the 14 standard fonts, and the image
- *  decoders it uses in place of WebAssembly, which the window's security rules leave out. */
+/** pdf.js's own files: character maps for Asian text, the 14 standard fonts, and its WebAssembly:
+ *  image decoders, colour profiles, and the engine a PDF's own scripts run in. */
 const FILES = import.meta.env.DEV ? "/node_modules/pdfjs-dist/" : "/pdfjs/";
 /** CSS pixels per PDF point, so 100% is the page's printed size. */
 const CSS_UNITS = pdfjs.PixelsPerInch.PDF_TO_CSS_UNITS;
@@ -153,6 +154,9 @@ export function PdfView(live: PdfViewProps) {
   let readAs: string | undefined;
   /** Every field of the form, by name, for its own Reset buttons to know what they clear. */
   let fieldObjects: Promise<Map<string, object[]> | null> = Promise.resolve(null);
+  /** The PDF's own scripts while they run, and whether it has any. */
+  let scripts: Scripts | undefined;
+  const [scripted, setScripted] = createSignal(false);
   let toldTimer: number | undefined;
   const savedPage = places()[props.path] ?? 0;
 
@@ -206,7 +210,6 @@ export function PdfView(live: PdfViewProps) {
       cMapUrl: `${FILES}cmaps/`,
       standardFontDataUrl: `${FILES}standard_fonts/`,
       wasmUrl: `${FILES}wasm/`,
-      useWasm: false,
       // A form made only of XFA, which most readers but Acrobat show as a page saying so, shows
       // and fills in as it was laid out.
       enableXfa: true,
@@ -235,6 +238,7 @@ export function PdfView(live: PdfViewProps) {
       if (!before && savedPage > 0 && savedPage < opened.numPages) setOffer(savedPage);
     });
     void before?.loadingTask.destroy();
+    void startScripts(opened).catch(console.error);
     void opened.getOutline().then((found) => !gone && setOutline((found as Heading[] | null) ?? []));
     void opened.getMetadata().then(({ info }) => {
       const known = info as Record<string, unknown>;
@@ -270,8 +274,47 @@ export function PdfView(live: PdfViewProps) {
     );
   }, FILE_LOOK_MS);
 
+  /** Runs the PDF's own scripts while the setting is on, and draws the fields again to match. */
+  async function startScripts(opened: pdfjs.PDFDocumentProxy) {
+    const found = await findScripts(opened);
+    if (gone || doc() !== opened) return;
+    const had = !!scripts;
+    scripts?.stop();
+    scripts = undefined;
+    setScripted(hasScripts(found));
+    if (pdfScripts() && hasScripts(found)) {
+      const started = await runScripts(opened, found, scriptView, `${FILES}wasm/`).catch((reason) => void tell(`This PDF's scripts didn't start: ${reason instanceof Error ? reason.message : reason}`));
+      if (gone || doc() !== opened) return void started?.stop();
+      scripts = started;
+      void scripts?.pageOpen(current() + 1);
+    }
+    if (had || scripts) setFieldsRound(fieldsRound() + 1);
+  }
+
+  const scriptView = {
+    box: () => scroller,
+    go: (page: number) => go(page),
+    count,
+    current,
+    say: (text: string) => tell(text),
+    name: props.path.split(/[\/]/).pop() ?? "",
+  };
+
+  createEffect(on(pdfScripts, () => doc() && void startScripts(doc()!).catch(console.error), { defer: true }));
+  createEffect(
+    on(
+      current,
+      (at, before) => {
+        if (before !== undefined) scripts?.pageClose(before + 1);
+        void scripts?.pageOpen(at + 1).catch(console.error);
+      },
+      { defer: true },
+    ),
+  );
+
   onCleanup(() => {
     gone = true;
+    scripts?.stop();
     clearInterval(looking);
     watch.disconnect();
     props.keys(undefined);
@@ -440,8 +483,6 @@ export function PdfView(live: PdfViewProps) {
         structTreeLayer: null,
         commentManager: null,
       });
-      // ponytail: no scripting, so a PDF's own field scripts, such as a total that adds itself up,
-      // do nothing. pdf.js runs them in a sandbox built as WebAssembly, which the app's rules don't let run.
       await fields.render({
         annotations,
         viewport: fitted,
@@ -451,7 +492,10 @@ export function PdfView(live: PdfViewProps) {
         annotationStorage: storage,
         imageResourcesPath: `${FILES}web/images/`,
         renderForms: true,
-        enableScripting: false,
+        // Fields drawn before the scripts started are drawn again once they have.
+        enableScripting: !!scripts,
+        // pdf.js wires a field's keys and focus to its scripts only when told the PDF has some.
+        hasJSActions: !!scripts,
         // A Reset button in the form clears the fields it names.
         fieldObjects: await fieldObjects,
       });
@@ -642,6 +686,10 @@ export function PdfView(live: PdfViewProps) {
       else if (action === "GoBack") goBack();
     },
     executeSetOCGState() {},
+    /** What a field tells its scripts: a key typed, a value left, a button pressed. */
+    eventBus: {
+      dispatch: (name: string, event: { detail?: unknown }) => name === "dispatcheventinsandbox" && scripts?.send(event.detail),
+    },
   };
 
   /** pdf.js's own hover text moves to Perli's, and each link to a place in the PDF says its page. */
@@ -668,8 +716,10 @@ export function PdfView(live: PdfViewProps) {
     if (!opened || saving()) return;
     setSaving(true);
     try {
+      await scripts?.willSave();
       const written = fieldsNow(opened);
       const name = await savePdfCopy(props.path, await opened.saveDocument());
+      scripts?.didSave();
       // A field filled in while the copy was written is not in it, so it stays unsaved.
       if (fieldsNow(opened) === written) (opened.annotationStorage.resetModified(), setChanged(false));
       tell(`Saved as ${name}`);
@@ -686,8 +736,10 @@ export function PdfView(live: PdfViewProps) {
     if (!opened || saving()) return;
     setSaving(true);
     try {
+      await scripts?.willSave();
       const written = fieldsNow(opened);
       if (!(await props.saveOver(props.path, await stagePdf(await opened.saveDocument()), readAs))) return;
+      scripts?.didSave();
       if (fieldsNow(opened) === written) {
         opened.annotationStorage.resetModified();
         batch(() => (setChanged(false), setEdited(false)));
@@ -932,6 +984,20 @@ export function PdfView(live: PdfViewProps) {
       </Show>
       <div class="pdf-main">
         <div class="preview-tools pdf-tools" role="toolbar" aria-label="PDF">
+          <Show when={scripted()}>
+            <button
+              class="zoom-chip pdf-scripts"
+              aria-pressed={pdfScripts()}
+              data-tip={
+                pdfScripts()
+                  ? "This PDF runs scripts of its own, such as totals that add up. They run shut off from your files and the web. Click to stop them."
+                  : "This PDF has scripts of its own, such as totals that add up. Click to run them, shut off from your files and the web."
+              }
+              onClick={() => setPdfScripts(!pdfScripts())}
+            >
+              {pdfScripts() ? "Scripts on" : "Scripts off"}
+            </button>
+          </Show>
           <Show when={changed()}>
             <button class="zoom-chip pdf-save" disabled={saving()} aria-keyshortcuts="Control+S" data-tip="Keeps the original as it was" onClick={() => void saveCopy()}>
               Save a filled copy

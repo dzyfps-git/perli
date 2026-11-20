@@ -966,6 +966,7 @@ fn title(job: &Job) -> String {
             paths,
         ),
         Job::Wallpaper { picture } => named("Setting as the wallpaper:", &[picture.as_path()]),
+        Job::Sync { pair } => named("Syncing", &[pair.from.as_path()]),
     }
 }
 

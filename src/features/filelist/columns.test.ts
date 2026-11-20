@@ -95,6 +95,11 @@ test("a folder of songs puts artist and length before size, and keeps the rest t
   assert.equal(ids(restoreColumns(undefined, startColumns("pictures")).filter((column) => column.visible)), "name,modified,taken,dimensions,size");
 });
 
+test("a cloud folder shows each row's note, and only a cloud folder has one to add", () => {
+  assert.equal(ids(startColumns("cloud").filter((column) => column.visible)), "name,modified,note,size");
+  assert.equal(startColumns("plain").some((column) => column.id === "note"), false);
+});
+
 test("restoreColumns never hides the name column", () => {
   const restored = restoreColumns([{ id: "name", width: 0, visible: false }]);
   assert.equal(restored[0].visible, true);

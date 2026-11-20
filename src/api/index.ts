@@ -63,7 +63,7 @@ export interface Tag {
 
 export type SortKey = "name" | "modified" | "created" | "type" | "size" | "location";
 /** The extra columns, read from each file's own properties. */
-export type PropKey = "artist" | "album" | "length" | "taken" | "dimensions" | "packed";
+export type PropKey = "artist" | "album" | "length" | "taken" | "dimensions" | "packed" | "note";
 
 export interface Sort {
   /** `found` is the order a search found its rows in, which no column stands for. */
@@ -240,7 +240,9 @@ export type Task =
   | { kind: "savePdf"; path: string; staged: number; seen?: string }
   /** Pictures by path, from a preview, or the selected rows. */
   | { kind: "picture"; paths?: string[]; selection?: Selection; edit: PictureEdit; keep?: PictureKeep }
-  | { kind: "wallpaper"; path: string };
+  | { kind: "wallpaper"; path: string }
+  /** `scheduled` runs only if it is due, so of several windows only one runs it. */
+  | { kind: "sync"; id: string; scheduled?: boolean };
 
 /** What a copy keeps of a photo's facts. A turn saved into the file keeps them all. */
 export interface PictureKeep {
@@ -474,6 +476,91 @@ export const startState = () => invoke<Start>("start_state");
 export const saveSession = (text: string) => invoke<void>("save_session", { text });
 
 export const listPlaces = () => invoke<Places>("list_places");
+
+export type CloudKind = "s3" | "oneDrive" | "dropbox" | "google";
+
+/** Where an S3 place's bucket is, and the key's id. Its secret stays with Windows. */
+export interface S3Setup {
+  preset: string;
+  endpoint: string;
+  region: string;
+  bucket: string;
+  pathStyle: boolean;
+  keyId: string;
+}
+
+/** A cloud place of Perli's own, which opens as a folder of its own. */
+export interface CloudPlace {
+  id: string;
+  name: string;
+  kind: CloudKind;
+  /** Who signed in, or the bucket. */
+  account: string;
+  s3: S3Setup | null;
+  /** Google's Docs, Sheets and Slides come down as PDFs. */
+  pdf: boolean;
+}
+
+export interface CloudAbout {
+  used: number | null;
+  total: number | null;
+  hasBin: boolean;
+  kind: CloudKind;
+}
+
+/** An older version of a file, which Bring back makes the current one again. */
+export interface CloudVersion {
+  id: string;
+  size: number;
+  /** FILETIME ticks. */
+  modified: number;
+}
+
+/** Two folders kept alike from one side, either of which may be in the cloud. */
+export interface SyncPair {
+  /** Empty before it is saved. */
+  id: string;
+  from: string;
+  to: string;
+  /** Also takes away what `from` no longer has. */
+  mirror: boolean;
+  /** Names left alone on both sides, as `*.tmp; node_modules`. */
+  skip: string;
+  /** Minutes between runs while Perli is open. 0 is never. */
+  every: number;
+  /** When it last ran, in ms since 1970. 0 is never. */
+  ran: number;
+}
+
+export interface SyncPreview {
+  /** Each file or folder that goes over, with the folder it lands in. */
+  copies: [string, string][];
+  /** What goes to a bin first. */
+  removes: string[];
+  bytes: number;
+  /** New folders made before the copies, as they hold something left out. */
+  folders: string[];
+  /** The other side keeps no bin, as S3, so what goes is deleted for good once the run asks. */
+  forGood: boolean;
+}
+
+export const syncPairs = () => invoke<SyncPair[]>("sync_pairs");
+export const saveSyncPair = (pair: SyncPair) => invoke<SyncPair>("save_sync_pair", { pair });
+export const removeSyncPair = (id: string) => invoke<void>("remove_sync_pair", { id });
+export const syncPreview = (pair: SyncPair) => invoke<SyncPreview>("sync_preview", { pair });
+
+export const cloudPlaces = () => invoke<CloudPlace[]>("cloud_places");
+export const addS3 = (setup: S3Setup, secret: string, name: string) => invoke<CloudPlace>("add_s3", { setup, secret, name });
+export const signInCloud = (kind: CloudKind) => invoke<CloudPlace>("sign_in_cloud", { kind });
+export const cancelSignIn = () => invoke<void>("cancel_sign_in");
+export const renamePlace = (id: string, name: string) => invoke<CloudPlace>("rename_place", { id, name });
+export const removePlace = (id: string) => invoke<void>("remove_place", { id });
+export const reorderPlaces = (ids: string[]) => invoke<void>("reorder_places", { ids });
+export const setCloudPdf = (id: string, pdf: boolean) => invoke<void>("set_cloud_pdf", { id, pdf });
+export const cloudAbout = (path: string) => invoke<CloudAbout>("cloud_about", { path });
+export const shareLink = (path: string) => invoke<string>("share_link", { path });
+export const cloudVersions = (path: string) => invoke<CloudVersion[]>("cloud_versions", { path });
+export const bringBack = (path: string, version: string) => invoke<void>("bring_back", { path, version });
 
 /** How an eject went. A busy drive says what still holds it. */
 export type Ejected = { kind: "done" } | { kind: "busy"; reason: string };

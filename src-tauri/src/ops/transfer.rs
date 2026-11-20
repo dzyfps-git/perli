@@ -39,7 +39,7 @@ fn copy_filled(from: &Path, to: &Path, tokens: &[(String, String)]) -> io::Resul
 }
 
 /// A copy is written here and renamed when whole, so a real name never holds half a file.
-fn temp_path(folder: &Path) -> PathBuf {
+pub(super) fn temp_path(folder: &Path) -> PathBuf {
     let number = TEMP_NUMBER.fetch_add(1, Ordering::Relaxed);
     folder.join(format!("{TEMP_PREFIX}{}-{number}.part", std::process::id()))
 }
@@ -120,6 +120,9 @@ struct Crossing {
 
 impl Run<'_> {
     pub(super) fn copy(&mut self, sources: Vec<PathBuf>, folder: &Path) -> Flow {
+        if crate::remote::is_remote(folder) || sources.iter().any(|source| crate::remote::is_remote(source)) {
+            return self.cloud(sources, folder, false);
+        }
         let Some(identity) = self.folder_identity(folder)? else {
             return Ok(());
         };
@@ -205,6 +208,9 @@ impl Run<'_> {
     }
 
     pub(super) fn move_sources(&mut self, sources: Vec<PathBuf>, folder: &Path) -> Flow {
+        if crate::remote::is_remote(folder) || sources.iter().any(|source| crate::remote::is_remote(source)) {
+            return self.cloud(sources, folder, true);
+        }
         self.count_clashes(&sources, folder);
         let moves = sources
             .into_iter()
@@ -219,6 +225,10 @@ impl Run<'_> {
     /// Moves each source to the exact path paired with it.
     pub(super) fn move_all(&mut self, moves: Vec<(PathBuf, PathBuf)>) -> Flow {
         self.add_total(moves.len() as u64, 0);
+        let (cloud, moves): (Vec<_>, Vec<_>) = moves.into_iter().partition(|(source, target)| crate::remote::is_remote(source) || crate::remote::is_remote(target));
+        if !cloud.is_empty() {
+            self.cloud_moves(cloud)?;
+        }
         let mut crossing = Vec::new();
         let moved = self
             .move_each(moves, &mut crossing)

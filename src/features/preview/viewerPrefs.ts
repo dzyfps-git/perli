@@ -39,6 +39,8 @@ export const [sharpPixels, setSharpPixels] = stored("picture-sharp", saved("pict
 export const [copyFacts, setCopyFacts] = stored("picture-copy-facts", saved("picture-copy-facts") !== false);
 export const [copyNoPlace, setCopyNoPlace] = stored("picture-copy-no-place", saved("picture-copy-no-place") !== false);
 export const pictureKeep = () => ({ camera: copyFacts(), place: !copyNoPlace() });
+/** A PDF's own scripts run, such as a total that adds itself up, shut off from files and the web. */
+export const [pdfScripts, setPdfScripts] = stored("pdf-scripts", saved("pdf-scripts") !== false);
 /** A small map of the whole picture, page or film shows while zoomed in. */
 export const [minimapShown, setMinimapShown] = stored("minimap", saved("minimap") !== false);
 /** A song's lyrics from the `.lrc` file beside it. */
@@ -104,6 +106,7 @@ export const VIEWER_SETTINGS = {
     item("Open JSON as a tree", asTree, setAsTree),
   ],
   "Documents and books": [
+    item("Run a PDF's own form scripts", pdfScripts, setPdfScripts),
     item("Contents open", contentsOpen, setContentsOpen),
     item("Markdown as written, not as a page", asSource, setAsSource),
     item("Books turn page by page", bookPaged, setBookPaged),

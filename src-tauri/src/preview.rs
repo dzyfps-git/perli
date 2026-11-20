@@ -648,6 +648,10 @@ pub struct Tags {
 
 /// A file's property store, or nothing where Windows can't read one.
 fn store_of(path: &Path) -> Option<IPropertyStore> {
+    // Windows can't read a cloud place, and each try costs a failed network call.
+    if crate::remote::is_remote(path) {
+        return None;
+    }
     let flags = if thumbs::is_online_only(path) { GPS_FASTPROPERTIESONLY } else { GPS_DEFAULT };
     unsafe { SHGetPropertyStoreFromParsingName::<_, _, IPropertyStore>(&HSTRING::from(path.as_os_str()), None, flags) }.ok()
 }
@@ -730,6 +734,9 @@ pub fn tags(path: &Path) -> Tags {
 /// What `names` read for each of `paths`, as Windows shows them, for the list's extra columns. A
 /// name that starts with `date:` is a date, read as milliseconds since 1970 so the UI writes it
 /// its own way.
+/// The column of a cloud folder's rows that shows what the service says of each.
+pub const CLOUD_NOTE: &str = "cloud:note";
+
 pub fn props_of(paths: &[PathBuf], names: &[String]) -> Vec<Vec<Option<String>>> {
     let _com = Com::enter();
     let read = |store: &IPropertyStore, name: &String| match name.strip_prefix("date:") {
@@ -737,6 +744,8 @@ pub fn props_of(paths: &[PathBuf], names: &[String]) -> Vec<Vec<Option<String>>>
         None => shown(store, name),
     };
     let each = |path: &PathBuf| match store_of(path) {
+        // A cloud row's own column comes from its service, as Windows can't read the cloud.
+        None if crate::remote::is_remote(path) => names.iter().map(|name| (name == CLOUD_NOTE).then(|| crate::remote::note(path)).flatten()).collect(),
         Some(store) => names.iter().map(|name| read(&store, name)).collect(),
         None => vec![None; names.len()],
     };

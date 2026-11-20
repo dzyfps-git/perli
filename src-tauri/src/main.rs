@@ -30,6 +30,7 @@ mod preview;
 mod props;
 mod recent;
 mod registry;
+mod remote;
 mod search;
 mod session;
 mod shell;
@@ -40,6 +41,7 @@ mod tables;
 mod tags;
 mod tearoff;
 mod templates;
+mod sync;
 mod thumbs;
 mod unlock;
 mod watch;
@@ -305,35 +307,53 @@ enum Task {
         keep: picture::Keep,
     },
     Wallpaper { path: PathBuf },
+    /// `scheduled` runs only if it is due.
+    Sync {
+        id: String,
+        #[serde(default)]
+        scheduled: bool,
+    },
 }
 
 impl Task {
     /// The job to run, if there is anything to do.
     fn plan(self, views: &Views, drags: &Drags) -> Result<Option<Plan>, String> {
-        // Nothing lands in a ZIP opened as a folder.
-        let target = |folder: String| -> Result<PathBuf, String> {
+        // Nothing lands in a ZIP opened as a folder. Copies, moves and new items land in the
+        // cloud too, with `landing`; the rest only on this PC.
+        let landing = |folder: String| -> Result<PathBuf, String> {
             let folder: PathBuf = folder::resolve(&folder).map_err(|error| error.message())?.into();
             if zipped::split(&folder).is_some() {
                 return Err(zipped::READ_ONLY.into());
             }
             Ok(folder)
         };
-        // Rows a job changes, which can't be in a ZIP. A copy reads them with `sources`.
+        let target = |folder: String| -> Result<PathBuf, String> {
+            let folder = landing(folder)?;
+            refuse_zipped(std::slice::from_ref(&folder))?;
+            Ok(folder)
+        };
+        // Rows a job changes, which can't be in a ZIP or, but for `movable` ones, in the cloud.
+        // A copy reads them with `sources`.
         let paths = |selection: &Selection| -> Result<Vec<PathBuf>, String> {
             let paths = views.read(selection, folder::Listing::paths)?;
             refuse_zipped(&paths)?;
             Ok(paths)
         };
+        let movable = |selection: &Selection| -> Result<Vec<PathBuf>, String> {
+            let paths = views.read(selection, folder::Listing::paths)?;
+            refuse_in_zip(&paths)?;
+            Ok(paths)
+        };
         let sources = |selection: &Selection| views.read(selection, folder::Listing::paths);
         let items = |selection: &Selection| views.read(selection, folder::Listing::bin_items);
         let job = match self {
-            Self::Copy { selection, folder } => copy_job(sources(&selection)?, target(folder)?),
+            Self::Copy { selection, folder } => copy_job(sources(&selection)?, landing(folder)?),
             Self::Move { selection, folder } => Job::Move {
-                sources: paths(&selection)?,
-                folder: target(folder)?,
+                sources: movable(&selection)?,
+                folder: landing(folder)?,
             },
             Self::Rename { selection, name } => {
-                let path = paths(&selection)?.pop().ok_or("Nothing to rename")?;
+                let path = movable(&selection)?.pop().ok_or("Nothing to rename")?;
                 ops::check_rename(&path, &name)?;
                 Job::Rename { path, name }
             }
@@ -345,7 +365,7 @@ impl Task {
                 Job::RenameAll { renames }
             }
             Self::New { folder, directory } => Job::New {
-                folder: target(folder)?,
+                folder: landing(folder)?,
                 directory,
             },
             Self::NewFolderFrom { selection, folder, move_in } => {
@@ -359,12 +379,12 @@ impl Task {
                     folder: target(folder)?,
                 }
             }
-            Self::CopyPaths { paths, folder } => copy_job(paths, target(folder)?),
+            Self::CopyPaths { paths, folder } => copy_job(paths, landing(folder)?),
             // A mail in a ZIP is read from the copy its preview took out.
             Self::SaveAttachments { path, folder, only } => Job::Attachments { mail: zipped::real(&path)?, folder: target(folder)?, only },
             Self::MovePaths { paths, folder } => {
-                refuse_zipped(&paths)?;
-                Job::Move { sources: paths, folder: target(folder)? }
+                refuse_in_zip(&paths)?;
+                Job::Move { sources: paths, folder: landing(folder)? }
             }
             Self::Template { folder, extension } => Job::Template {
                 folder: target(folder)?,
@@ -411,14 +431,14 @@ impl Task {
                 let into = (zip.levels.len() > 1).then(|| ops::sys::parent(&zip.levels[0]));
                 Job::Unzip { archives: vec![zip.archive], own_folder: false, smart: true, only: Vec::new(), password, into }
             }
-            Self::Paste { folder } => return paste(target(folder)?),
+            Self::Paste { folder } => return paste(landing(folder)?),
             Self::PasteShortcut { folder } => {
                 let files = clipboard::read().map_err(|error| error.message())?;
                 let files = files.ok_or("The clipboard holds no files")?;
                 Job::Shortcut { sources: files.paths, folder: target(folder)? }
             }
             Self::Drop { folder, action, id } => {
-                return Ok(drags.job(id, Path::new(&target(folder)?), action).map(Plan::from));
+                return Ok(drags.job(id, Path::new(&landing(folder)?), action).map(Plan::from));
             }
             Self::Tag { target, tag, on } => {
                 let paths = match target {
@@ -426,14 +446,17 @@ impl Task {
                     ShellTarget::Folder { path } => vec![PathBuf::from(path)],
                     ShellTarget::Paths { paths } => paths,
                 };
+                if paths.iter().any(|path| remote::is_remote(path)) {
+                    return Err(remote::ON_THIS_PC.into());
+                }
                 Job::Tag { paths, tag, on }
             }
             Self::DeleteTag { id } => Job::DeleteTag { id },
             Self::Recycle { selection } => Job::Recycle {
-                paths: paths(&selection)?,
+                paths: movable(&selection)?,
             },
             Self::Delete { selection } => Job::Delete {
-                paths: paths(&selection)?,
+                paths: movable(&selection)?,
             },
             Self::Restore { selection } => Job::Restore {
                 items: items(&selection)?,
@@ -473,12 +496,25 @@ impl Task {
                 refuse_zipped(std::slice::from_ref(&path))?;
                 Job::Wallpaper { picture: path }
             }
+            Self::Sync { id, scheduled } => match sync::take_run(&id, scheduled)? {
+                Some(pair) => Job::Sync { pair },
+                None => return Ok(None),
+            },
         };
         Ok(Some(job.into()))
     }
 }
 
+/// Refuses rows in a ZIP or in the cloud, for jobs that change files in place.
 fn refuse_zipped(paths: &[PathBuf]) -> Result<(), String> {
+    refuse_in_zip(paths)?;
+    match paths.iter().any(|path| remote::is_remote(path)) {
+        true => Err(remote::ON_THIS_PC.into()),
+        false => Ok(()),
+    }
+}
+
+fn refuse_in_zip(paths: &[PathBuf]) -> Result<(), String> {
     match paths.iter().any(|path| zipped::is_inside(path)) {
         true => Err(zipped::READ_ONLY.into()),
         false => Ok(()),
@@ -488,6 +524,10 @@ fn refuse_zipped(paths: &[PathBuf]) -> Result<(), String> {
 /// A copy of `sources` into `folder`. Rows of one ZIP opened as a folder come out of it the
 /// way Extract takes them, with its progress, questions and undo.
 fn copy_job(sources: Vec<PathBuf>, folder: PathBuf) -> Job {
+    // Into the cloud, rows of a ZIP go up from the copy opening them takes out.
+    if remote::is_remote(&folder) {
+        return Job::Copy { sources, folder };
+    }
     let mut plain = Vec::new();
     let mut archives: Vec<(PathBuf, Vec<String>)> = Vec::new();
     for path in sources {
@@ -526,6 +566,9 @@ fn copy_job(sources: Vec<PathBuf>, folder: PathBuf) -> Job {
 fn paste(folder: PathBuf) -> Result<Option<Plan>, String> {
     let sequence = clipboard::sequence();
     let Some(files) = clipboard::read().map_err(|error| error.message())? else {
+        if remote::is_remote(&folder) {
+            return Err(remote::ON_THIS_PC.into());
+        }
         let content = clipboard::content().map_err(|error| error.message())?;
         return Ok(content.map(|template| Job::Template { folder, template, named: false }.into()));
     };
@@ -837,6 +880,10 @@ async fn open_folder(
 /// drops can't keep the watch either: the next read starts by going back to the rows shown.
 fn watch_of(path: &str, expanded: &[String]) -> Option<Watch> {
     let resolved = PathBuf::from(folder::resolve(path).ok().filter(|_| path != folder::BIN_PATH)?);
+    // A cloud folder is watched through the count of Perli's own jobs there, and read again on F5.
+    if remote::is_remote(&resolved) {
+        return Some(Watch::new(std::iter::once(resolved).chain(expanded.iter().map(PathBuf::from))));
+    }
     // A ZIP changes as one file, in the folder it sits in.
     let watched = zipped::outer(&resolved).map_or(resolved, |archive| ops::sys::parent(&archive));
     // A commit, a stage or a switch of branch changes git's marks with no row changing.
@@ -1613,6 +1660,9 @@ async fn on_disk(paths: Vec<PathBuf>) -> Result<Vec<PathBuf>, String> {
 /// so pictures never taken out leave nothing behind in Windows' thumbnail cache.
 async fn row_picture(views: &Views, view: u32, request: u64, row: u32, edge: u32) -> Result<Response, String> {
     let path = row_path(views, view, request, row)?;
+    if remote::is_remote(&path) {
+        return Ok(Response::new(blocking(move || Ok(remote::picture(&path, edge))).await?));
+    }
     let bytes = match zipped::split(&path).filter(|(_, inner)| !inner.is_empty()) {
         Some((archive, inner)) => blocking(move || Ok(zipped::picture(&archive, &inner, edge))).await?,
         None => thumbs::read(path, edge).await,
@@ -1676,6 +1726,89 @@ async fn picture_aspects(view: u32, request: u64, from: u32, count: u32, views: 
         listing.row_paths(&rows)
     })?;
     blocking(move || Ok(inside::shown_aspects(&paths))).await
+}
+
+/// The cloud places, in the order the sidebar shows them.
+#[tauri::command]
+fn cloud_places() -> Vec<remote::Place> {
+    remote::places()
+}
+
+#[tauri::command]
+async fn add_s3(setup: remote::s3::Setup, secret: String, name: String) -> Result<remote::Place, String> {
+    blocking(move || remote::add_s3(setup, &secret, &name)).await
+}
+
+/// Opens a service's sign-in in the browser and waits for it to come back.
+#[tauri::command]
+async fn sign_in_cloud(kind: remote::Kind) -> Result<remote::Place, String> {
+    blocking(move || remote::sign_in(kind)).await
+}
+
+#[tauri::command]
+fn cancel_sign_in() {
+    remote::http::cancel_sign_in();
+}
+
+#[tauri::command]
+fn rename_place(id: String, name: String) -> Result<remote::Place, String> {
+    remote::rename_place(&id, &name)
+}
+
+#[tauri::command]
+fn remove_place(id: String) -> Result<(), String> {
+    remote::remove_place(&id)
+}
+
+#[tauri::command]
+fn reorder_places(ids: Vec<String>) -> Result<(), String> {
+    remote::reorder_places(&ids)
+}
+
+#[tauri::command]
+fn set_cloud_pdf(id: String, pdf: bool) -> Result<(), String> {
+    remote::set_pdf(&id, pdf)
+}
+
+#[tauri::command]
+async fn cloud_about(path: PathBuf) -> Result<remote::About, String> {
+    blocking(move || remote::about(&path)).await
+}
+
+#[tauri::command]
+async fn share_link(path: PathBuf) -> Result<String, String> {
+    blocking(move || remote::share(&path)).await
+}
+
+#[tauri::command]
+async fn cloud_versions(path: PathBuf) -> Result<Vec<remote::Version>, String> {
+    blocking(move || remote::versions(&path)).await
+}
+
+#[tauri::command]
+async fn bring_back(path: PathBuf, version: String) -> Result<(), String> {
+    blocking(move || remote::bring_back(&path, &version)).await
+}
+
+#[tauri::command]
+fn sync_pairs() -> Vec<sync::Pair> {
+    sync::pairs()
+}
+
+#[tauri::command]
+fn save_sync_pair(pair: sync::Pair) -> Result<sync::Pair, String> {
+    sync::save_pair(pair)
+}
+
+#[tauri::command]
+fn remove_sync_pair(id: String) -> Result<(), String> {
+    sync::remove_pair(&id)
+}
+
+/// What a run of the pair would do now, for the look before its first run.
+#[tauri::command]
+async fn sync_preview(pair: sync::Pair) -> Result<sync::Preview, String> {
+    blocking(move || sync::preview(&pair)).await
 }
 
 /// A picture a Markdown file points to, beside it on this PC.
@@ -2240,6 +2373,10 @@ async fn restore_tagged(files: Vec<(PathBuf, Vec<u32>)>) -> Result<usize, String
 #[tauri::command]
 async fn keep_on_device(selection: Selection, keep: bool, views: State<'_, Views>) -> Result<(), String> {
     let paths = views.read(&selection, folder::Listing::paths)?;
+    // Perli's own cloud places keep a copy here; a sync app's folders ask Windows.
+    if paths.iter().any(|path| remote::is_remote(path)) {
+        return blocking(move || remote::keep_offline(&paths, keep)).await;
+    }
     off_main(move || props::keep_on_device(&paths, keep)).await
 }
 
@@ -2760,6 +2897,22 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             start_state,
+            cloud_places,
+            add_s3,
+            sign_in_cloud,
+            cancel_sign_in,
+            rename_place,
+            remove_place,
+            reorder_places,
+            set_cloud_pdf,
+            cloud_about,
+            share_link,
+            cloud_versions,
+            bring_back,
+            sync_pairs,
+            save_sync_pair,
+            remove_sync_pair,
+            sync_preview,
             asks_waiting,
             save_session,
             forget_session,
