@@ -197,6 +197,8 @@ export function PdfView(live: PdfViewProps) {
   });
 
   async function load() {
+    // How the file stood before it was read: a change while it reads shows at the next look.
+    const stamp = await fileSeen(props.path).catch(() => null);
     const url = convertFileSrc(await props.open());
     if (gone) return;
     task = pdfjs.getDocument({
@@ -214,14 +216,18 @@ export function PdfView(live: PdfViewProps) {
     const opened = await task.promise;
     if (gone) return void opened.loadingTask.destroy();
     setLocked(undefined);
+    const first = (await opened.getPage(1)).getViewport({ scale: 1 });
+    if (gone) return void opened.loadingTask.destroy();
+    const before = doc();
+    // Read again: fields filled in or a save begun meanwhile win over what was read, which goes.
+    if (before && (changed() || saving())) {
+      task = before.loadingTask;
+      return void opened.loadingTask.destroy();
+    }
     fieldObjects = opened.getFieldObjects().catch(() => null);
     (opened.annotationStorage as unknown as { onSetModified: () => void }).onSetModified = () => batch(() => (setChanged(true), setEdited(true)));
-    void fileSeen(props.path).then(
-      (stamp) => (readAs = stamp ?? undefined),
-      () => {},
-    );
-    const first = (await opened.getPage(1)).getViewport({ scale: 1 });
-    const before = doc();
+    // The stamp a save over it checks goes with the document it saves, never ahead of it.
+    readAs = stamp ?? undefined;
     batch(() => {
       // Read again, the pages keep the sizes they have and the place stays.
       if (!before || sizes().length !== opened.numPages) setSizes(Array.from({ length: opened.numPages }, () => ({ width: first.width, height: first.height })));
@@ -248,13 +254,17 @@ export function PdfView(live: PdfViewProps) {
 
   // The file changed on disk, as an Undo of a save over it does when it puts the old one back:
   // with nothing filled in here since, it is read again, so the page shows what the file holds.
+  let reloading = false;
   const looking = setInterval(() => {
-    if (gone || !doc() || changed() || saving() || document.hidden) return;
+    if (gone || !doc() || changed() || saving() || reloading || document.hidden) return;
     void fileSeen(props.path).then(
       (stamp) => {
-        if (!stamp || !readAs || stamp === readAs || changed() || saving()) return;
-        readAs = stamp;
-        void load().catch(console.error);
+        if (!stamp || !readAs || stamp === readAs || changed() || saving() || reloading) return;
+        reloading = true;
+        // One that fails, say while the file is still being written, is tried again next look.
+        void load()
+          .catch(console.error)
+          .finally(() => (reloading = false));
       },
       () => {},
     );
