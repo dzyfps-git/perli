@@ -708,7 +708,8 @@ export const startJob = (task: Task, origin?: number) => invoke<number | null>("
 
 /** With `step`, this only undoes that step, and only while it is the newest. */
 /** With `back`, undoes every step from the newest down to `step`, as one. */
-export const undoJob = (origin?: number, step?: number, back = false) => invoke<void>("undo_job", { origin, step, back });
+/** Answers with the job that undoes, or null when there was nothing to undo. */
+export const undoJob = (origin?: number, step?: number, back = false) => invoke<number | null>("undo_job", { origin, step, back });
 export const redoJob = (origin?: number) => invoke<void>("redo_job", { origin });
 export const undoState = () => invoke<Undoable>("undo_state");
 
@@ -790,30 +791,37 @@ export const answerJob = (id: number, answer: Answer, all: boolean) =>
 export const onJobEvent = (handler: (event: JobEvent) => void) =>
   listen<JobEvent>("job", (event) => handler(event.payload));
 
-/** Starts a job and waits for it to end: null when there was nothing to do. The job's card,
- *  questions and undo step are the same as any other job's. */
-export async function runJob(task: Task, origin?: number) {
-  type Finished = Extract<JobEvent, { kind: "finished" }>;
-  // A quick job can end before `startJob` comes back, so ends are heard from the start.
-  const ends = new Map<number, Finished>();
+type Finished = Extract<JobEvent, { kind: "finished" }>;
+
+/** Waits for the job `start` starts to end: null when it started none. `watch` hears each of the
+ *  job's events, for a sheet over the job's card that shows its questions itself. */
+export async function endOf(start: () => Promise<number | null>, watch?: (event: JobEvent) => void) {
+  // A quick job can end before `start` comes back, so events are heard from the start.
+  const early: JobEvent[] = [];
   let wanted: { id: number; done: (event: Finished) => void } | undefined;
+  const hear = (event: JobEvent, done: (event: Finished) => void) => {
+    watch?.(event);
+    if (event.kind === "finished") done(event);
+  };
   const stop = await onJobEvent((event) => {
-    if (event.kind !== "finished") return;
-    if (event.id === wanted?.id) wanted.done(event);
-    else ends.set(event.id, event);
+    if (!wanted) early.push(event);
+    else if (event.id === wanted.id) hear(event, wanted.done);
   });
   try {
-    const id = await startJob(task, origin);
+    const id = await start();
     if (id === null) return null;
     return await new Promise<Finished>((done) => {
-      const early = ends.get(id);
-      if (early) done(early);
-      else wanted = { id, done };
+      wanted = { id, done };
+      for (const event of early.splice(0)) if (event.id === id) hear(event, done);
     });
   } finally {
     stop();
   }
 }
+
+/** Starts a job and waits for it to end: null when there was nothing to do. The job's card,
+ *  questions and undo step are the same as any other job's. */
+export const runJob = (task: Task, origin?: number, watch?: (event: JobEvent) => void) => endOf(() => startJob(task, origin), watch);
 
 /** What is wrong with each of `names`, which line up with the selected rows. */
 export const checkRenames = (selection: Selection, names: string[]) =>
@@ -1060,6 +1068,8 @@ export interface Twin {
 /** Files under `path` with the same content as another, or with `photos` pictures that look alike, in sets. */
 export const findTwins = (path: string, photos: boolean) => invoke<Twin[][]>("find_twins", { path, photos });
 export const stopTwins = () => invoke<void>("stop_twins");
+/** For each file, null if it is gone, else whether it is still the file Twins saw: the same size and time. */
+export const twinsNow = (files: Twin[]) => invoke<(boolean | null)[]>("twins_now", { files });
 
 export const onSizesGrew = (handler: (view: number) => void) =>
   listen<number>("sizes-grew", (event) => handler(event.payload));

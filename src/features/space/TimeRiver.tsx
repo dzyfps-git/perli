@@ -6,7 +6,7 @@ import { baseName, join } from "../navigation/path";
 import { rememberRecent } from "../reach/reach";
 import type { Palette, Rgb } from "./draw";
 import { readPalette, reducedMotion, watchPalette } from "./lenses";
-import { addHours, columns, DAY, dayKey, dayStart, HOUR, panned, riverOf, softened, sumBetween, ticks, wholeSpan, zoomed, type River } from "./river";
+import { addHours, columns, DAY, dayEnd, dayKey, dayStart, HOUR, panned, riverOf, softened, sumBetween, ticks, wholeSpan, zoomed, type River } from "./river";
 import "../settings/settings.css";
 import "./space.css";
 
@@ -89,11 +89,11 @@ export function TimeRiver(props: {
     const day = picked();
     setDownloaded([]);
     if (day === undefined || !props.downloads) return;
-    changedBetween(props.downloads, day, day + DAY).then(setDownloaded).catch(() => setDownloaded([]));
+    changedBetween(props.downloads, day, dayEnd(day)).then(setDownloaded).catch(() => setDownloaded([]));
   });
 
   /** The stretch of the river at the pointer: a day, or an hour when zoomed in close. */
-  const stretchAt = (time: number): [number, number] => (fine() ? [Math.floor(time / HOUR) * HOUR, Math.floor(time / HOUR) * HOUR + HOUR] : [dayStart(time), dayStart(time) + DAY]);
+  const stretchAt = (time: number): [number, number] => (fine() ? [Math.floor(time / HOUR) * HOUR, Math.floor(time / HOUR) * HOUR + HOUR] : [dayStart(time), dayEnd(time)]);
 
   function paint(seconds: number) {
     const context = canvas.getContext("2d");
@@ -116,7 +116,7 @@ export function TimeRiver(props: {
 
     const picks = picked();
     if (picks !== undefined) {
-      const [left, right] = [xOf(picks), xOf(picks + DAY)];
+      const [left, right] = [xOf(picks), xOf(dayEnd(picks))];
       context.fillStyle = rgba(colors.accent[1], 0.1);
       context.fillRect(left, area.top - 8, Math.max(2, right - left), area.height + 16);
     }
@@ -272,7 +272,7 @@ export function TimeRiver(props: {
   const day = createMemo(() => {
     const start = picked();
     if (start === undefined) return undefined;
-    const end = start + DAY;
+    const end = dayEnd(start);
     const within = (time: number) => time >= start && time < end;
     return {
       start,

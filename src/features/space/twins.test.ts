@@ -1,12 +1,22 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { CELL, goers, idOf, keeperOf, setsOf, twinsLayout, wasted, without } from "./twins.ts";
+import { CELL, goers, idOf, keeperOf, setsOf, stillGoing, twinsLayout, wasted, without } from "./twins.ts";
 
 const twin = (path: string, modified: number, sharp: number | null = null, bytes = 100) => ({ path, bytes, modified, sharp });
 
 test("the oldest copy stays, and of pictures that look alike the sharpest", () => {
   assert.equal(keeperOf([twin("a", 30), twin("b", 10), twin("c", 20)]), 1);
   assert.equal(keeperOf([twin("a", 10, 5), twin("b", 30, 900), twin("c", 20, 40)]), 1);
+});
+
+test("only files still as they were go, and none whose keeper changed or went", () => {
+  const sets = setsOf([
+    [twin("C:\\A\\keep.jpg", 1), twin("C:\\A\\b.jpg", 2), twin("C:\\A\\changed.jpg", 3)],
+    [twin("C:\\B\\gone-keeper.jpg", 1), twin("C:\\B\\d.jpg", 2)],
+  ]);
+  const same = new Set(["C:\\A\\keep.jpg", "C:\\A\\b.jpg", "C:\\B\\d.jpg"].map(idOf));
+  assert.deepEqual(stillGoing(sets, same).map((file) => file.path), ["C:\\A\\b.jpg"]);
+  assert.deepEqual(stillGoing(sets, new Set()), []);
 });
 
 test("cleaning frees all but the keeper of each set, and a set of one is no set", () => {
