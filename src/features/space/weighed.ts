@@ -15,6 +15,8 @@ const MOST_FOLDERS = 12;
 const MOST_CELLS = 24;
 /** A drive the search index answers for is asked again once what is kept of it is this old. */
 const LISTED_AGAIN = 10 * 60_000;
+/** How often an open view looks whether a drive is due again. */
+const LOOK_AGAIN = 60_000;
 
 function keptOf(value: unknown): Kept {
   if (!value || typeof value !== "object") return {};
@@ -53,6 +55,14 @@ export function keepWeighed(id: string, cells: MapCell[]) {
   const next = { ...kept(), [id]: { at: Date.now(), cells: small, years: yearsOf(cells) } };
   const ids = Object.keys(next).sort((a, b) => next[b].at - next[a].at).slice(0, MOST_FOLDERS);
   setKept(Object.fromEntries(ids.map((one) => [one, next[one]])));
+}
+
+/** `listDrives` now and each minute while a view shows the drives, so one the index could not
+ *  answer for yet, or whose kept look grew old, is asked again with the view open. Gives the stop. */
+export function keepListing(drives: () => { path: string; id: string }[]) {
+  listDrives(drives());
+  const timer = setInterval(() => listDrives(drives()), LOOK_AGAIN);
+  return () => clearInterval(timer);
 }
 
 /** Drives the search index answers for show what fills them at once, with nothing weighed. */

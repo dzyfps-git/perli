@@ -2046,7 +2046,7 @@ export function App() {
 
   /** Twins looks across the folders picked in the list when there are two or more, else in the folder itself. */
   async function openTwins(view: FolderView, folder = view.folder()?.path) {
-    const chosen = tabs.active().home() ? [] : await pickedFolders(view);
+    const chosen = tabs.active().home() ? [] : await pickedFolders(view, Infinity);
     const where = chosen.length > 1 ? chosen : folder ? [folder] : [];
     if (where.length > 0) setTwinsOn(where);
   }
@@ -2058,13 +2058,13 @@ export function App() {
     return [...(other ? [{ path: other, name: baseName(other) || other }] : []), ...drives];
   };
 
-  /** The selected folders, as paths. Files are left out. */
-  async function pickedFolders(view: FolderView) {
+  /** The selected folders, as paths, the first `most` of them. Files are left out first. */
+  async function pickedFolders(view: FolderView, most = MOST_TABS_BEHIND) {
     const selection = picked(view);
     if (!selection) return [];
-    const paths = (await selectionPaths(selection)).slice(0, MOST_TABS_BEHIND);
+    const paths = await selectionPaths(selection);
     const files = await Promise.all(paths.map((path) => isFile(path)));
-    return paths.filter((_, at) => !files[at]);
+    return paths.filter((_, at) => !files[at]).slice(0, most);
   }
 
   /** Each folder gets a tab, in order, and the tab on show stays where it is. */

@@ -119,11 +119,12 @@ function within([from, to]: [number, number], [first, last]: [number, number]): 
   return [from, to];
 }
 
-/** The start of the local hour `time` falls in, which in some time zones is not a UTC hour. */
+/** The start of the local hour `time` falls in, which in some time zones is not a UTC hour. It
+ *  goes by the offset at that instant, so of the hour the clocks repeat when they go back, each
+ *  time is in its own. */
 export function hourStart(time: number) {
-  const hour = new Date(time);
-  hour.setMinutes(0, 0, 0);
-  return hour.getTime();
+  const local = time - new Date(time).getTimezoneOffset() * 60_000;
+  return time - (((local % HOUR) + HOUR) % HOUR);
 }
 
 /** The start of the local day `time` falls in. */

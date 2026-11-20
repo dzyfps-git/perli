@@ -25,7 +25,7 @@ import {
 } from "./lenses";
 import { onPulse } from "./pulses";
 import { agoText, allNodes, folderTree, idOf, joinPath, nearestShown, pcTree, touches, useShares } from "./space";
-import { keepWeighed, listDrives, weighed, weighedYears } from "./weighed";
+import { keepListing, keepWeighed, weighed, weighedYears } from "./weighed";
 import "../settings/settings.css";
 import "../fileops/fileops.css";
 import "./space.css";
@@ -174,7 +174,6 @@ export function Space(props: {
     if (!folder) {
       setDone(true);
       stopMap().catch(console.error);
-      listDrives(drives().map((drive) => ({ path: drive.path, id: idOf(drive.path) })));
       return;
     }
     setDone(false);
@@ -187,6 +186,11 @@ export function Space(props: {
       weigh(folder);
     }),
   );
+
+  // On This PC, drives the search index answers for show what fills them, asked again while it shows.
+  createEffect(() => {
+    if (!path()) onCleanup(keepListing(() => drives().map((drive) => ({ path: drive.path, id: idOf(drive.path) }))));
+  });
 
   /** Steps into a folder, starting from what is known of it so it shows at once. */
   function enter(folder: string) {

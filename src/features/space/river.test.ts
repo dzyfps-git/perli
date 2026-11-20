@@ -25,6 +25,22 @@ test("a local hour starts where the clock shows it", () => {
   assert.ok(at - hourStart(at) < 3_600_000 && hourStart(at) <= at);
 });
 
+test("an hour starts where the clock shows the hour, also in the hour the clocks repeat", () => {
+  const was = process.env.TZ;
+  try {
+    process.env.TZ = "Europe/Berlin";
+    // 02:30 comes twice on 26 October 2025: first in summer time, then in winter time.
+    assert.equal(hourStart(Date.parse("2025-10-26T02:30+02:00")), Date.parse("2025-10-26T02:00+02:00"));
+    assert.equal(hourStart(Date.parse("2025-10-26T02:30+01:00")), Date.parse("2025-10-26T02:00+01:00"));
+    assert.equal(hourStart(Date.parse("2025-06-10T08:59+02:00")), Date.parse("2025-06-10T08:00+02:00"));
+    process.env.TZ = "Asia/Kolkata";
+    assert.equal(hourStart(Date.parse("2025-06-10T10:45+05:30")), Date.parse("2025-06-10T10:00+05:30"), "a half-hour zone");
+  } finally {
+    if (was === undefined) delete process.env.TZ;
+    else process.env.TZ = was;
+  }
+});
+
 test("a day ends at the next midnight, also on a day the clocks change", () => {
   const was = process.env.TZ;
   process.env.TZ = "Europe/Berlin";

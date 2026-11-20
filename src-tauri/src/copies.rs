@@ -123,12 +123,13 @@ fn path_in(location: &[u16]) -> PathBuf {
 }
 
 /// The folders, but none inside another or given twice, so a walk under all of them sees each file
-/// once: a file seen twice would look like a copy of itself.
+/// once: a file seen twice would look like a copy of itself. Each is taken where it really is, so
+/// a junction to a folder given, or another name for it, counts as that folder.
 pub fn outermost(folders: &[PathBuf]) -> Vec<PathBuf> {
     let keys: Vec<String> = folders
         .iter()
         .map(|folder| {
-            let low = folder.to_string_lossy().to_lowercase();
+            let low = sys::real_path(folder).unwrap_or_else(|_| folder.to_string_lossy().to_lowercase());
             if low.ends_with('\\') { low } else { format!("{low}\\") }
         })
         .collect();
@@ -147,6 +148,20 @@ mod tests {
         let paths = |all: &[&str]| all.iter().map(PathBuf::from).collect::<Vec<_>>();
         assert_eq!(outermost(&paths(&[r"C:\Work\Photos", r"C:\Work", r"D:\", r"d:\Old", r"C:\Workshop"])), paths(&[r"C:\Work", r"D:\", r"C:\Workshop"]));
         assert_eq!(outermost(&paths(&[r"C:\A", r"c:\a\"])), paths(&[r"C:\A"]), "the same folder twice counts once");
+    }
+
+    #[test]
+    fn a_junction_to_a_folder_given_is_that_folder() {
+        let root = std::env::temp_dir().join(format!("perli-copies-junction-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join(r"real\inner")).unwrap();
+        let alias = root.join("alias");
+        let made = std::process::Command::new("cmd").args(["/C", "mklink", "/J"]).args([&alias, &root.join("real")]).output().unwrap();
+        assert!(made.status.success());
+        assert_eq!(outermost(&[root.join("real"), alias.clone()]), [root.join("real")]);
+        assert_eq!(outermost(&[alias.join("inner"), root.join("real")]), [root.join("real")], "inside it through the junction");
+        let _ = fs::remove_dir(&alias);
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

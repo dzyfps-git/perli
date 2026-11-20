@@ -5,7 +5,7 @@ import { aim, newScene } from "./draw";
 import { brainAims, kindOfCell, pulseIn, readPalette, reducedMotion, sceneLoop, watchPalette } from "./lenses";
 import { onPulse } from "./pulses";
 import { allNodes, idOf, pcTree, useShares } from "./space";
-import { listDrives, weighed } from "./weighed";
+import { keepListing, weighed } from "./weighed";
 import "./space.css";
 
 /** Frames a second for the home page's small Space, which should cost next to nothing. */
@@ -48,7 +48,7 @@ export function SpaceMini(props: { drives: Places["drives"]; spaces: Record<stri
   });
 
   // With the search index on, each drive shows what fills it before it is ever weighed.
-  createEffect(() => listDrives(props.drives.filter((drive) => !drive.locked).map((drive) => ({ path: drive.path, id: idOf(drive.path) }))));
+  createEffect(() => onCleanup(keepListing(() => props.drives.filter((drive) => !drive.locked).map((drive) => ({ path: drive.path, id: idOf(drive.path) })))));
 
   onMount(() => {
     running = sceneLoop(canvas, scene, palette, MINI_FPS);
