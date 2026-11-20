@@ -302,6 +302,27 @@ fn exists(path: &Path) -> bool {
     matches!(sys::stat(path), Ok(Some(_)))
 }
 
+#[test]
+fn a_listing_stops_as_soon_as_its_visitor_says_so() {
+    let sandbox = Sandbox::new();
+    let folder = sandbox.path("list");
+    fs::create_dir(&folder).unwrap();
+    for at in 0..6 {
+        fs::write(folder.join(format!("{at}.txt")), "x").unwrap();
+    }
+    let mut seen = 0;
+    sys::each_entry_while(&sys::extended(&folder.join("*")), |_| {
+        seen += 1;
+        seen < 3
+    })
+    .unwrap();
+    assert_eq!(seen, 3);
+    let mut all = 0;
+    sys::each_entry(&sys::extended(&folder.join("*")), |_| all += 1).unwrap();
+    // The six files, and "." and "..".
+    assert_eq!(all, 8);
+}
+
 // The guard.
 
 #[test]

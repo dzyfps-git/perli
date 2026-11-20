@@ -320,6 +320,8 @@ export type JobEvent = { id: number } & (
       target: string | null;
       /** The folders its sources are in, for Space to draw where things went. */
       from: string[];
+      /** The saved sync pair the job runs. */
+      pair: string | null;
     }
   /** Windows is about to ask for permission, with UAC over the whole screen. */
   | { kind: "elevating" }

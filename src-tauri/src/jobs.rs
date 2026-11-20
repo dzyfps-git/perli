@@ -85,6 +85,8 @@ enum Change {
         target: Option<String>,
         /// The folders its sources are in, for Space to draw where things went.
         from: Vec<String>,
+        /// The saved sync pair the job runs.
+        pair: Option<String>,
     },
     /// Windows is about to ask for permission.
     Elevating,
@@ -825,6 +827,10 @@ impl Bridge {
             },
             target: target_of(&plan.job),
             from: sources_of(&plan.job),
+            pair: match &plan.job {
+                Job::Sync { pair } if !pair.id.is_empty() => Some(pair.id.clone()),
+                _ => None,
+            },
         });
 
         let jobs = self.app.state::<Jobs>();

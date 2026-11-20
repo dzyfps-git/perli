@@ -1488,15 +1488,13 @@ pub(crate) const PICTURE_TYPES: [&str; 10] = ["jpg", "jpeg", "png", "gif", "webp
 /// out, and so do ones in the cloud, which reading would fetch.
 pub fn pictures_in(folder: &Path, most: usize) -> Vec<PathBuf> {
     let mut found = Vec::new();
-    let _ = ops::sys::each_entry(&ops::sys::extended(&folder.join("*")), |data| {
-        if found.len() == most {
-            return;
-        }
+    let _ = ops::sys::each_entry_while(&ops::sys::extended(&folder.join("*")), |data| {
         if let Some(entry) = Entry::from_find_data(data) {
             if !entry.is_dir && !entry.hidden && !entry.cloud && PICTURE_TYPES.contains(&entry.extension_text().as_str()) {
                 found.push(folder.join(entry.file_name()));
             }
         }
+        found.len() < most
     });
     found
 }
@@ -1507,17 +1505,14 @@ pub fn pictures_in(folder: &Path, most: usize) -> Vec<PathBuf> {
 pub fn kinds_in(folder: &Path, most: usize) -> Vec<(String, u32)> {
     let mut counts: HashMap<String, u32> = HashMap::new();
     let mut seen = 0;
-    let _ = ops::sys::each_entry(&ops::sys::extended(&folder.join("*")), |data| {
-        if seen == most {
-            return;
-        }
+    let _ = ops::sys::each_entry_while(&ops::sys::extended(&folder.join("*")), |data| {
         if let Some(entry) = Entry::from_find_data(data) {
-            if entry.hidden {
-                return;
+            if !entry.hidden {
+                seen += 1;
+                *counts.entry(if entry.is_dir { "/".into() } else { entry.extension_text() }).or_default() += 1;
             }
-            seen += 1;
-            *counts.entry(if entry.is_dir { "/".into() } else { entry.extension_text() }).or_default() += 1;
         }
+        seen < most
     });
     let mut kinds: Vec<_> = counts.into_iter().collect();
     kinds.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
