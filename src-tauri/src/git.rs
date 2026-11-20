@@ -84,24 +84,34 @@ fn repository(folder: &Path) -> Option<&Path> {
     folder.ancestors().find(|folder| folder.join(".git").exists())
 }
 
-/// What git's marks on `folder` change with, to watch: its repository's index and HEAD. Nothing
-/// outside a repository, or where `.git` is a file, as in a worktree.
+/// What git's marks on `folder` change with, to watch: its repository's index and HEAD, the
+/// packed refs, and the file of the branch HEAD names, which a commit or a soft reset moves while
+/// HEAD stays. Nothing outside a repository, or where `.git` is a file, as in a worktree.
 pub fn watched(folder: &Path) -> Vec<PathBuf> {
     let Some(git) = repository(folder).map(|root| root.join(".git")).filter(|git| git.is_dir()) else { return Vec::new() };
-    vec![git.join("index"), git.join("HEAD")]
+    let mut files = vec![git.join("index"), git.join("HEAD"), git.join("packed-refs")];
+    let head = std::fs::read_to_string(git.join("HEAD")).unwrap_or_default();
+    if let Some(branch) = head.trim().strip_prefix("ref: ") {
+        files.push(git.join(branch.replace('/', "\\")));
+    }
+    files
 }
 
-/// What a read of `folder` stands on: the sizes and times of its repository's index and HEAD,
-/// and of the folder's own rows. None when either file is missing, and the read goes unkept.
+/// What a read of `folder` stands on: the sizes and times of what `watched` names, and of the
+/// folder's own rows. None when the index or HEAD is missing, and the read goes unkept. Packed
+/// refs and a branch's own file come and go, so whether each is there counts too.
 fn ground(root: &Path, folder: &Path) -> Option<u64> {
     let mut hasher = DefaultHasher::new();
     let files = watched(root);
     if files.is_empty() {
         return None;
     }
-    for file in files {
-        let stat = sys::stat(&file).ok()??;
-        (stat.size, stat.modified).hash(&mut hasher);
+    for (at, file) in files.iter().enumerate() {
+        let stat = sys::stat(file).ok().flatten();
+        if at < 2 && stat.is_none() {
+            return None;
+        }
+        stat.map(|stat| (stat.size, stat.modified)).hash(&mut hasher);
     }
     for (name, stat) in sys::read_dir(folder).ok()? {
         (name, stat.size, stat.modified, stat.is_dir()).hash(&mut hasher);
@@ -191,7 +201,19 @@ mod tests {
         assert_ne!(with_file, before);
         std::fs::write(root.join(".git").join("index"), "two!").unwrap();
         assert_ne!(ground(&root, &root).unwrap(), with_file);
-        assert_eq!(watched(&root.join("deeper")), [root.join(".git").join("index"), root.join(".git").join("HEAD")]);
+        let git = root.join(".git");
+        assert_eq!(watched(&root.join("deeper")), [git.join("index"), git.join("HEAD"), git.join("packed-refs"), git.join("refs\\heads\\main")]);
+
+        // A soft reset moves the branch, HEAD and the index staying as they were.
+        let before_reset = ground(&root, &root).unwrap();
+        std::fs::create_dir_all(git.join("refs").join("heads")).unwrap();
+        std::fs::write(git.join("refs").join("heads").join("main"), "1111\n").unwrap();
+        let on_branch = ground(&root, &root).unwrap();
+        assert_ne!(on_branch, before_reset);
+        std::fs::write(git.join("refs").join("heads").join("main"), "22222\n").unwrap();
+        assert_ne!(ground(&root, &root).unwrap(), on_branch);
+        std::fs::write(git.join("packed-refs"), "# pack-refs\n").unwrap();
+        assert_ne!(ground(&root, &root).unwrap(), on_branch, "packed refs count too");
 
         // A worktree's .git is a file that says where the repository is, and its reads go unkept.
         let tree = root.join("tree");

@@ -103,7 +103,7 @@ export interface PdfViewProps {
   keys: (handler: ((event: KeyboardEvent) => boolean) | undefined) => void;
   note: (text: string | undefined) => void;
   /** Writes a filled-in PDF, staged by `stagePdf`, over the file as a job with an Undo. Says whether it went. */
-  saveOver: (staged: number, seen: string | undefined) => Promise<boolean>;
+  saveOver: (path: string, staged: number, seen: string | undefined) => Promise<boolean>;
 }
 
 /**
@@ -607,15 +607,19 @@ export function PdfView(live: PdfViewProps) {
     }
   }
 
+  /** A fingerprint of the fields as filled in right now, to tell whether one changed during a save. */
+  const fieldsNow = (opened: pdfjs.PDFDocumentProxy) => opened.annotationStorage.serializable.hash;
+
   /** The fields as filled in, written as a copy beside the file: "name (filled).pdf". */
   async function saveCopy() {
     const opened = doc();
     if (!opened || saving()) return;
     setSaving(true);
     try {
+      const written = fieldsNow(opened);
       const name = await savePdfCopy(props.path, await opened.saveDocument());
-      opened.annotationStorage.resetModified();
-      setChanged(false);
+      // A field filled in while the copy was written is not in it, so it stays unsaved.
+      if (fieldsNow(opened) === written) (opened.annotationStorage.resetModified(), setChanged(false));
       tell(`Saved as ${name}`);
     } catch (reason) {
       tell(`Not saved: ${reason instanceof Error ? reason.message : reason}`);
@@ -630,9 +634,12 @@ export function PdfView(live: PdfViewProps) {
     if (!opened || saving()) return;
     setSaving(true);
     try {
-      if (!(await props.saveOver(await stagePdf(await opened.saveDocument()), readAs))) return;
-      opened.annotationStorage.resetModified();
-      batch(() => (setChanged(false), setEdited(false)));
+      const written = fieldsNow(opened);
+      if (!(await props.saveOver(props.path, await stagePdf(await opened.saveDocument()), readAs))) return;
+      if (fieldsNow(opened) === written) {
+        opened.annotationStorage.resetModified();
+        batch(() => (setChanged(false), setEdited(false)));
+      }
       readAs = (await fileSeen(props.path).catch(() => null)) ?? undefined;
       tell("Saved over the original. Undo puts it back.");
     } catch (reason) {

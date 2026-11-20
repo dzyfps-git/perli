@@ -784,7 +784,7 @@ export function QuickPreview(props: {
                   path={pathOf(row()!)}
                   {...streamed(row()!)}
                   note={setNote}
-                  saveOver={(staged, seen) => savePdfOver(pathOf(row()!), staged, seen)}
+                  saveOver={savePdfOver}
                 />}
             </>
           )}

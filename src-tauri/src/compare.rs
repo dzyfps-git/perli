@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use crate::folder::{Entry, Mark, Sight};
 use crate::ops::sys::{self, Stat};
-use crate::preview;
+use crate::{preview, zipped};
 
 /// A walk past this many entries on its two sides together gives up: no mark beats a long wait.
 // ponytail: such a folder shows no mark at all; a "too big to tell" word would say why.
@@ -54,12 +54,13 @@ pub struct Pair {
     pub folder: bool,
 }
 
-type Key = (String, String, bool);
+/// Two folders, whether by content, and what the walk showed of what is hidden.
+type Key = (String, String, bool, Sight);
 type Known<K, V> = Mutex<Option<HashMap<K, V>>>;
 /// Folder pairs walked already, with the folders' times then. A folder's time changes when
 /// something right inside it does.
 // ponytail: a change deeper down leaves a folder's time be, so its mark holds until compare is
-// turned off and on again.
+// turned off and on again, which forgets them all.
 static FOLDERS: Known<Key, (u64, u64, Insides)> = Mutex::new(None);
 /// File pairs read already, with their sizes and times then: the same content or not, or None
 /// for a pair that couldn't be read.
@@ -107,16 +108,22 @@ pub fn files(mine: &Side, theirs: &Side, content: bool) -> Mark {
     })
 }
 
-/// What two folders were found to hold, if walked since either changed right inside.
-pub fn folders(mine: &Side, theirs: &Side, content: bool) -> Option<Insides> {
+/// What two folders were found to hold, if walked with `sight` since either changed right inside.
+pub fn folders(mine: &Side, theirs: &Side, content: bool, sight: Sight) -> Option<Insides> {
     let known = FOLDERS.lock().unwrap_or_else(PoisonError::into_inner);
-    let (a, b, insides) = known.as_ref()?.get(&(lower(&mine.path), lower(&theirs.path), content))?;
+    let (a, b, insides) = known.as_ref()?.get(&(lower(&mine.path), lower(&theirs.path), content, sight))?;
     (*a == mine.modified && *b == theirs.modified).then(|| insides.clone())
 }
 
 /// The two panes' ids, in either order.
 fn panes(one: u32, two: u32) -> (u32, u32) {
     (one.min(two), one.max(two))
+}
+
+/// Forgets every folder pair walked, as a compare ended: a change deep down that left the
+/// folders' own times be shows once compare is turned on again.
+pub fn forget_folders() {
+    FOLDERS.lock().unwrap_or_else(PoisonError::into_inner).take();
 }
 
 /// Starts a round for two panes, which stops any older one of theirs.
@@ -149,8 +156,8 @@ pub fn settle(pairs: Vec<Pair>, content: bool, sight: Sight, (one, two): (u32, u
             if known.len() > MOST_KNOWN {
                 known.clear();
             }
-            known.insert((mine.clone(), theirs.clone(), content), (pair.mine.modified, pair.theirs.modified, insides));
-            known.insert((theirs, mine, content), (pair.theirs.modified, pair.mine.modified, mirrored));
+            known.insert((mine.clone(), theirs.clone(), content, sight), (pair.mine.modified, pair.theirs.modified, insides));
+            known.insert((theirs, mine, content, sight), (pair.theirs.modified, pair.mine.modified, mirrored));
         } else {
             let same = same_content(&pair.mine, &pair.theirs, lane);
             if !live() {
@@ -193,10 +200,26 @@ struct Item {
     link: bool,
 }
 
-/// What `sight` shows right inside `folder`. One that can't be read holds nothing.
-fn listed(folder: &Path, sight: Sight) -> HashMap<String, Item> {
+/// What `sight` shows right inside `folder`, a folder inside an archive too. None when it can't be
+/// read, which no compare can call the same as anything.
+fn listed(folder: &Path, sight: Sight) -> Option<HashMap<String, Item>> {
     let mut items = HashMap::new();
-    let _ = sys::each_entry(&sys::extended(&folder.join("*")), |data| {
+    if let Some(zip) = zipped::opened(folder) {
+        if zip.failed.is_some() {
+            return None;
+        }
+        let (nodes, locked) = zipped::list(&zip.archive, &zip.inner, false).ok()?;
+        // An archive whose names are locked lists nothing it could be told by.
+        if locked && nodes.is_empty() {
+            return None;
+        }
+        for node in nodes {
+            let side = Side { path: folder.join(&node.name), size: node.size, modified: node.modified, cloud: false };
+            items.insert(node.name.to_lowercase(), Item { name: node.name, side, dir: node.folder, link: false });
+        }
+        return Some(items);
+    }
+    sys::each_entry(&sys::extended(&folder.join("*")), |data| {
         let Some(entry) = Entry::from_find_data(data) else { return };
         if !sight.shows(&entry) {
             return;
@@ -205,13 +228,15 @@ fn listed(folder: &Path, sight: Sight) -> HashMap<String, Item> {
         let name = entry.file_name().to_string_lossy().into_owned();
         let side = Side { path: folder.join(&name), size: entry.size(), modified: entry.modified(), cloud: entry.is_cloud() };
         items.insert(name.to_lowercase(), Item { name, side, dir: entry.is_dir(), link: stat.is_link() });
-    });
-    items
+    })
+    .ok()?;
+    Some(items)
 }
 
 /// Everything under two folders, side by side. Only on this side reads as newer and only on that
 /// side as older, as Copy over would see it: what all leans one way makes the folder lean that way.
-/// Links to folders aren't walked into. None once `live` says to stop.
+/// Links to folders aren't walked into, and a folder that can't be read on either side leaves no
+/// mark. None once `live` says to stop.
 fn walk(mine: &Path, theirs: &Path, content: bool, sight: Sight, lane: u32, live: &dyn Fn() -> bool) -> Option<Insides> {
     let (mut newer, mut older, mut count, mut names) = (false, false, 0, Vec::new());
     let mut note = |inside: &Path, mark: Mark| {
@@ -232,10 +257,13 @@ fn walk(mine: &Path, theirs: &Path, content: bool, sight: Sight, lane: u32, live
         if !live() {
             return None;
         }
-        let (a, b) = (listed(&mine.join(&relative), sight), listed(&theirs.join(&relative), sight));
+        let unknown = Insides { mark: Mark::None, count: 0, names: Vec::new() };
+        let (Some(a), Some(b)) = (listed(&mine.join(&relative), sight), listed(&theirs.join(&relative), sight)) else {
+            return Some(unknown);
+        };
         seen += a.len() + b.len();
         if seen > MOST_ENTRIES {
-            return Some(Insides { mark: Mark::None, count: 0, names: Vec::new() });
+            return Some(unknown);
         }
         let mut sorted: Vec<(&String, &Item)> = a.iter().collect();
         sorted.sort_by(|x, y| x.0.cmp(y.0));
@@ -286,5 +314,29 @@ mod tests {
         assert_eq!(lean(&side("x:/a", 3, 200), &b, true, || Some(Some(true))), Mark::Same, "same bytes, whatever the time");
         assert_eq!(lean(&a, &b, true, || Some(None)), Mark::Same, "unreadable falls back on time and size");
         assert_eq!(mirror(Mark::Newer), Mark::Older);
+    }
+
+    #[test]
+    fn a_folder_that_cant_be_read_is_never_the_same_and_a_walk_is_forgotten_when_compare_ends() {
+        let root = std::env::temp_dir().join(format!("perli-compare-{}", std::process::id()));
+        let (mine, empty) = (root.join("mine"), root.join("empty"));
+        std::fs::create_dir_all(mine.join("deep")).unwrap();
+        std::fs::create_dir_all(&empty).unwrap();
+        std::fs::write(mine.join("deep").join("a.txt"), b"a").unwrap();
+        let sight = Sight::default();
+        let always = || true;
+        let missing = root.join("missing");
+        assert_eq!(walk(&missing, &empty, false, sight, LANES, &always).unwrap().mark, Mark::None, "unreadable is not empty");
+        assert_eq!(walk(&missing, &root.join("gone"), false, sight, LANES, &always).unwrap().mark, Mark::None);
+        assert_eq!(walk(&mine, &empty, false, sight, LANES, &always).unwrap().mark, Mark::Newer);
+
+        let (a, b) = (side(mine.to_str().unwrap(), 0, 1), side(empty.to_str().unwrap(), 0, 1));
+        let round = round(900, 901);
+        assert_eq!(settle(vec![Pair { mine: a.clone(), theirs: b.clone(), folder: true }], false, sight, (900, 901), round), 1);
+        assert!(folders(&a, &b, false, sight).is_some());
+        assert!(folders(&a, &b, false, Sight { hidden: true, system: false }).is_none(), "walked with other sight");
+        forget_folders();
+        assert!(folders(&a, &b, false, sight).is_none(), "forgotten once compare ends");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
