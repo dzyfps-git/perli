@@ -1,4 +1,4 @@
-import { createEffect, createSignal, For, onCleanup, onMount, Show, type JSX } from "solid-js";
+import { createEffect, createSignal, For, on, onCleanup, onMount, Show, type JSX } from "solid-js";
 import { driveSpace, fetchPictureFile, recentFiles, type DriveSpace, type Places, type Recent, type Thumb } from "../../api";
 import { formatSize } from "../../ui/format";
 import { morph } from "../../ui/morph";
@@ -23,6 +23,8 @@ import {
   type SpaceLog,
 } from "./home";
 import "./home.css";
+import { landed } from "../fileops/landed";
+import { tideOf } from "../../ui/tide";
 
 const ICON_DRIVE = "";
 const ICON_REMOVABLE = "";
@@ -103,9 +105,10 @@ export function HomePage(props: {
   const [today, setToday] = createSignal<Recent[]>([]);
   const [dragged, setDragged] = createSignal<HomeSectionId>();
 
-  createEffect(() => {
+  /** Reads each drive's space, all of them, or only `again` once more. */
+  function readSpaces(again?: string[]) {
     for (const drive of props.drives ?? []) {
-      if (drive.locked || drive.path in spaces()) continue;
+      if (drive.locked || (again ? !again.includes(drive.path) : drive.path in spaces())) continue;
       driveSpace(drive.path)
         .then((space) => {
           if (space.total <= 0) return;
@@ -115,7 +118,16 @@ export function HomePage(props: {
         })
         .catch(() => undefined);
     }
-  });
+  }
+  createEffect(() => readSpaces());
+  // A copy or a move that lands on a drive rises into its card's bar.
+  createEffect(
+    on(
+      landed,
+      (job) => readSpaces((props.drives ?? []).map((drive) => drive.path).filter((path) => job?.folders.some((folder) => folder.toLowerCase().startsWith(path.toLowerCase())))),
+      { defer: true },
+    ),
+  );
 
   createEffect(() => {
     if (!rememberRecent()) return setToday([]);
@@ -289,6 +301,7 @@ export function HomePage(props: {
               const space = () => spaces()[drive.path];
               const used = () => (space() ? 1 - space()!.free / space()!.total : 0);
               const low = () => !!space() && space()!.free / space()!.total < LOW_SHARE;
+              const tide = tideOf(() => (space() ? used() : undefined));
               const full = () => {
                 const days = daysToFull(spaceLog()[drive.path.toLowerCase()] ?? [], Date.now());
                 return days === undefined ? "" : ` · ${fullText(days)}`;
@@ -314,7 +327,11 @@ export function HomePage(props: {
                             : drive.path}
                       </span>
                     </span>
-                    <span class="home-bar" data-low={low() ? "" : undefined} style={{ "--used": used() }} aria-hidden="true" />
+                    <span class="home-bar" data-low={low() ? "" : undefined} style={{ "--used": used() }} aria-hidden="true">
+                      <Show when={tide()} keyed>
+                        {(rise) => <span class="tide" style={{ "--from": rise.from, "--to": rise.to }} />}
+                      </Show>
+                    </span>
                   </button>
                   <Show when={drive.removable}>
                     <button class="home-eject" aria-label={`Eject ${drive.name || drive.path}`} onClick={() => props.onEject(drive.path)}>

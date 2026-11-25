@@ -44,6 +44,7 @@ import {
   type SectionId,
 } from "./saved";
 import "./sidebar.css";
+import { tideOf } from "../../ui/tide";
 
 const ICON_DRIVE = "";
 const ICON_BIN = "";
@@ -72,8 +73,6 @@ const ICON_ADD = "\uE710";
 const ICON_SYNC = "\uE895";
 
 const FULL_SHARE = 0.9;
-/** How long the tide of newly used space shows in a drive's bar. */
-const TIDE_MS = 1500;
 /** How long a drive's bar takes to make its wave. */
 const WAVE_MS = 1200;
 /** How many recent files the Recent panel lists. */
@@ -131,18 +130,7 @@ function Place(props: {
   picture?: Thumb | null;
 }) {
   const used = () => (props.space ? 1 - props.space.free / props.space.total : 0);
-  // Space taken since the last reading rises into the bar like a tide, then settles.
-  const [tide, setTide] = createSignal<{ from: number; to: number }>();
-  let tideTimer: number | undefined;
-  createEffect(
-    on(used, (now, before) => {
-      if (before === undefined || !props.space || now <= before) return;
-      setTide({ from: before, to: now });
-      window.clearTimeout(tideTimer);
-      tideTimer = window.setTimeout(() => setTide(undefined), TIDE_MS);
-    }),
-  );
-  onCleanup(() => window.clearTimeout(tideTimer));
+  const tide = tideOf(() => (props.space ? used() : undefined));
   return (
     <li
       class="place-item"
@@ -201,7 +189,7 @@ function Place(props: {
                   style={{ transform: `scaleX(${used()})`, "--used": used() }}
                 />
                 <Show when={tide()} keyed>
-                  {(rise) => <span class="place-tide" style={{ "--from": rise.from, "--to": rise.to }} />}
+                  {(rise) => <span class="tide" style={{ "--from": rise.from, "--to": rise.to }} />}
                 </Show>
               </span>
             </>

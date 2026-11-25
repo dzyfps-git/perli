@@ -2,6 +2,7 @@
 //! alike, how sharp it is, and its main colour. All read from one small copy that Windows'
 //! imaging makes, and kept until the file changes.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
@@ -224,12 +225,10 @@ pub struct Seen {
 
 /// The pictures under `folders` that look alike, in sets, the set with most pictures first.
 /// Hidden ones and ones only in the cloud stay out.
-// ponytail: compares every pair, fine for some thousands of pictures; a BK-tree over the
-// fingerprints if folders of hundreds of thousands are asked for.
 pub fn alike(folders: &[PathBuf], stopped: &(dyn Fn() -> bool + Sync)) -> Vec<Vec<Seen>> {
     let sight = Sight { hidden: false, system: false };
     let mut pictures: Vec<(PathBuf, u64, u64)> = Vec::new();
-    let mut waiting = folders.to_vec();
+    let mut waiting = crate::copies::outermost(folders);
     while let Some(at) = waiting.pop() {
         if stopped() {
             return Vec::new();
@@ -280,14 +279,28 @@ pub fn alike(folders: &[PathBuf], stopped: &(dyn Fn() -> bool + Sync)) -> Vec<Ve
 /// the first fingerprint not in one yet, taking the nearest first.
 fn group_numbers(hashes: &[u64]) -> Vec<Option<usize>> {
     let apart = |a: usize, b: usize| (hashes[a] ^ hashes[b]).count_ones();
+    // Each fingerprint goes in the tree once, standing for every picture that has it.
+    let mut by_hash: HashMap<u64, Vec<usize>> = HashMap::new();
+    for (at, &hash) in hashes.iter().enumerate() {
+        by_hash.entry(hash).or_default().push(at);
+    }
+    let mut tree = Near::default();
+    for (&hash, all) in &by_hash {
+        tree.add(hash, all[0]);
+    }
     let mut group = vec![None; hashes.len()];
     let mut count = 0;
     for seed in 0..hashes.len() {
         if group[seed].is_some() {
             continue;
         }
-        let mut near: Vec<usize> = (seed + 1..hashes.len()).filter(|&other| group[other].is_none() && apart(seed, other) <= ALIKE).collect();
-        near.sort_by_key(|&other| apart(seed, other));
+        let mut near: Vec<usize> = tree
+            .near(hashes[seed], ALIKE)
+            .into_iter()
+            .flat_map(|first| by_hash[&hashes[first]].iter().copied())
+            .filter(|&other| other > seed && group[other].is_none())
+            .collect();
+        near.sort_by_key(|&other| (apart(seed, other), other));
         let mut members = vec![seed];
         for other in near {
             if members.iter().all(|&member| apart(member, other) <= ALIKE) {
@@ -302,6 +315,51 @@ fn group_numbers(hashes: &[u64]) -> Vec<Option<usize>> {
         }
     }
     group
+}
+
+/// A BK-tree of fingerprints by how many bits differ, so each finds those near it without
+/// looking at every other: a child sits under the branch of its own distance from its parent,
+/// and only branches within reach of the asked distance can hold anything near.
+#[derive(Default)]
+struct Near {
+    /// The first is the top.
+    nodes: Vec<Node>,
+}
+
+/// A fingerprint, what it stands for, and its branches: each a distance and the node under it.
+type Node = (u64, usize, Vec<(u32, usize)>);
+
+impl Near {
+    fn add(&mut self, hash: u64, of: usize) {
+        let new = self.nodes.len();
+        let mut at = 0;
+        while at < new {
+            let far = (self.nodes[at].0 ^ hash).count_ones();
+            match self.nodes[at].2.iter().find(|(distance, _)| *distance == far) {
+                Some(&(_, child)) => at = child,
+                None => {
+                    self.nodes[at].2.push((far, new));
+                    break;
+                }
+            }
+        }
+        self.nodes.push((hash, of, Vec::new()));
+    }
+
+    /// What every fingerprint at most `most` bits from `hash` stands for.
+    fn near(&self, hash: u64, most: u32) -> Vec<usize> {
+        let mut found = Vec::new();
+        let mut waiting = if self.nodes.is_empty() { Vec::new() } else { vec![0] };
+        while let Some(at) = waiting.pop() {
+            let (own, of, branches) = &self.nodes[at];
+            let far = (own ^ hash).count_ones();
+            if far <= most {
+                found.push(*of);
+            }
+            waiting.extend(branches.iter().filter(|(distance, _)| distance.abs_diff(far) <= most).map(|&(_, child)| child));
+        }
+        found
+    }
 }
 
 #[cfg(test)]
@@ -357,7 +415,41 @@ mod tests {
         let hashes = [0u64, 0b111, 0b1_1111_1111_1111, u64::MAX, u64::MAX ^ 1];
         assert_eq!(group_numbers(&hashes), vec![Some(0), Some(0), None, Some(1), Some(1)]);
         assert_eq!(group_numbers(&[0, u64::MAX]), vec![None, None]);
+        assert_eq!(group_numbers(&[5, 5, u64::MAX]), vec![Some(0), Some(0), None], "the same fingerprint twice");
         // Each alike to every other: one group.
         assert_eq!(group_numbers(&[0, 0b1, 0b11, 0b111]), vec![Some(0); 4]);
+    }
+
+    #[test]
+    fn the_tree_finds_just_what_comparing_every_pair_finds() {
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        // Some near each other: a few bits flipped from a handful of bases.
+        let bases: Vec<u64> = (0..8).map(|_| next()).collect();
+        let hashes: Vec<u64> = (0..600).map(|at| bases[at % 8] ^ (next() & next() & next() & next())).collect();
+        let mut tree = Near::default();
+        for (at, &hash) in hashes.iter().enumerate() {
+            tree.add(hash, at);
+        }
+        for (a, &hash) in hashes.iter().enumerate().step_by(7) {
+            let mut found = tree.near(hash, ALIKE);
+            found.sort_unstable();
+            let every: Vec<usize> = (0..hashes.len()).filter(|&b| (hashes[b] ^ hash).count_ones() <= ALIKE).collect();
+            assert_eq!(found, every, "near {a}");
+        }
+        let groups = group_numbers(&hashes);
+        assert!(groups.iter().flatten().count() > 0);
+        for a in 0..hashes.len() {
+            for b in a + 1..hashes.len() {
+                if groups[a].is_some() && groups[a] == groups[b] {
+                    assert!((hashes[a] ^ hashes[b]).count_ones() <= ALIKE, "{a} and {b} are in one set");
+                }
+            }
+        }
     }
 }

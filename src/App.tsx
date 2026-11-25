@@ -161,7 +161,7 @@ import {
 import { SelectPattern } from "./features/filelist/SelectPattern";
 import { COPIES_QUERY, FLAT_QUERY, type FolderView, type RowAt } from "./features/navigation/folderView";
 import { indexOptions } from "./features/settings/indexPrefs";
-import { BIN_PATH, isBin, isDriveRoot, isArchiveName, join, parentOf, baseName, relativeTo, samePath, type Crumb } from "./features/navigation/path";
+import { BIN_PATH, isBin, isDriveRoot, isArchiveName, isInside, join, parentOf, baseName, relativeTo, samePath, type Crumb } from "./features/navigation/path";
 import { Palette, type Command } from "./features/palette/Palette";
 import { wordsFor, type Verb } from "./features/palette/words";
 import { PaneDivider } from "./features/tabs/PaneDivider";
@@ -535,7 +535,8 @@ export function App() {
   const [mapping, setMapping] = createSignal<string>();
   /** The folder the Time river or Twins is open on. */
   const [riverOn, setRiverOn] = createSignal<string>();
-  const [twinsOn, setTwinsOn] = createSignal<string>();
+  /** The folders Twins looks across, or nothing while it is closed. */
+  const [twinsOn, setTwinsOn] = createSignal<string[]>();
   /** The New gallery, where it opens and the view it makes things in. */
   const [making, setMaking] = createSignal<{ view: FolderView; x: number; y: number }>();
   /** A sheet covers the tabs, so nothing behind it may change. */
@@ -1652,7 +1653,7 @@ export function App() {
           { label: "Activity log", action: () => setActivityOpen(true) },
           { label: "Space", action: () => setMapping(view.folder()?.path ?? "") },
           { label: "Time river", action: () => setRiverOn(view.folder()?.path) },
-          { label: "Twins", action: () => setTwinsOn(view.folder()?.path) },
+          { label: "Twins", action: () => void openTwins(view) },
         ];
     const shellItems = view.isBin() || view.isZip() || isPerliCloud(view.folder()?.path ?? "") ? [] : shell.backgroundItems(view, { x, y });
     setMenu({ x, y, items: [...fileItems, ...viewItems(view), ...shellItems] });
@@ -1726,9 +1727,11 @@ export function App() {
     if (!one || !other) return undefined;
     for (const card of jobs.cards) {
       if (card.ended || card.paused || card.question || card.waiting || card.recycle || !card.target) continue;
-      const outOf = (path: string) => card.from.some((from) => samePath(from, path));
-      const toSecond = outOf(one) && samePath(card.target, other);
-      if (toSecond || (outOf(other) && samePath(card.target, one))) return { toSecond, speed: card.rate.speed };
+      // Sources and target may sit deeper than the panes' folders, as from a search or into a folder shown there.
+      const target = card.target;
+      const between = (from: string, to: string) => card.from.length > 0 && card.from.every((source) => isInside(source, from)) && isInside(target, to);
+      const toSecond = between(one, other);
+      if (toSecond || between(other, one)) return { toSecond, speed: card.rate.speed };
     }
     return undefined;
   }
@@ -2041,13 +2044,27 @@ export function App() {
     if (selection) startJob({ kind, selection, folder }, view.id).catch(jobs.report);
   }
 
-  /** The selected folders, as paths. Files are left out. */
-  async function pickedFolders(view: FolderView) {
+  /** Twins looks across the folders picked in the list when there are two or more, else in the folder itself. */
+  async function openTwins(view: FolderView, folder = view.folder()?.path) {
+    const chosen = tabs.active().home() ? [] : await pickedFolders(view, Infinity);
+    const where = chosen.length > 1 ? chosen : folder ? [folder] : [];
+    if (where.length > 0) setTwinsOn(where);
+  }
+
+  /** Places Twins adds with one click: the other pane's folder, then each drive. */
+  const twinOffers = () => {
+    const other = tabs.active().other()?.folder()?.path;
+    const drives = (places()?.drives ?? []).filter((drive) => !drive.locked).map((drive) => ({ path: drive.path, name: drive.name || drive.path }));
+    return [...(other ? [{ path: other, name: baseName(other) || other }] : []), ...drives];
+  };
+
+  /** The selected folders, as paths, the first `most` of them. Files are left out first. */
+  async function pickedFolders(view: FolderView, most = MOST_TABS_BEHIND) {
     const selection = picked(view);
     if (!selection) return [];
-    const paths = (await selectionPaths(selection)).slice(0, MOST_TABS_BEHIND);
+    const paths = await selectionPaths(selection);
     const files = await Promise.all(paths.map((path) => isFile(path)));
-    return paths.filter((_, at) => !files[at]);
+    return paths.filter((_, at) => !files[at]).slice(0, most);
   }
 
   /** Each folder gets a tab, in order, and the tab on show stays where it is. */
@@ -2097,7 +2114,7 @@ export function App() {
     activity: () => setActivityOpen(true),
     diskMap: () => here().isZip() || setMapping(here().folder()?.path ?? ""),
     timeRiver: () => here().isZip() || here().isBin() || setRiverOn(folderHere()),
-    twins: () => here().isZip() || here().isBin() || setTwinsOn(folderHere()),
+    twins: () => here().isZip() || here().isBin() || void openTwins(here(), folderHere()),
     colourWall: () => colourWall(here()),
     toFileDialog: () => {
       const folder = here().folder()?.path;
@@ -2928,6 +2945,8 @@ export function App() {
         {(folder) => (
           <TimeRiver
             folder={folder}
+            showHidden={showHidden()}
+            showSystem={showHidden() && showSystem()}
             downloads={places()?.folders.find((one) => one.kind === "downloads")?.path}
             onShowDay={(path, day) =>
               void leaveHome(async (view) => {
@@ -2945,7 +2964,7 @@ export function App() {
         )}
       </Show>
       <Show when={twinsOn()} keyed>
-        {(folder) => <Twins folder={folder} onShow={(path) => void leaveHome((view) => showInFolder(view, path))} onClose={() => setTwinsOn(undefined)} />}
+        {(folders) => <Twins folders={folders} more={twinOffers()} onShow={(path) => void leaveHome((view) => showInFolder(view, path))} onClose={() => setTwinsOn(undefined)} />}
       </Show>
       <Show when={deleting()} keyed>
         {(request) => <ConfirmDelete request={request} onClose={() => setDeleting(undefined)} />}

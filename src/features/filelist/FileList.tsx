@@ -47,6 +47,7 @@ import {
 import { clampTile, GALLERY_GAP, groupedMove, justifiedPlaces, moveTarget, nextShapes, placesOf, rowsAround, TILE_STEP, type Gallery, type Layout, type Places } from "./layout";
 import { ageShare, hasPicture, iconKindOf, iconSheet, kindOf } from "./fileKinds";
 import { kindRgb, readPalette } from "../space/lenses";
+import { watchTheme } from "../../ui/themeWatch";
 import type { Rgb } from "../space/draw";
 import {
   ageDim,
@@ -249,8 +250,7 @@ const GOLDEN_TURN = Math.PI * (3 - Math.sqrt(5));
 
 /**
  * A folder with no pictures shows what is inside as a small cluster of dots, one colour for each
- * kind and as many dots as its share.
- * ponytail: the colours are the theme's when first drawn, so a cached tile keeps them until the folder changes.
+ * kind and as many dots as its share, in the theme's colours: a new theme draws them again.
  */
 async function fingerprintOf(folder: string): Promise<Thumb | null> {
   const kinds = await folderKinds(folder);
@@ -276,6 +276,15 @@ async function fingerprintOf(folder: string): Promise<Thumb | null> {
   });
   return { width: STACK_EDGE, height: STACK_EDGE, pixels: context.getImageData(0, 0, STACK_EDGE, STACK_EDGE).data };
 }
+
+/** Counts theme and accent changes, which a folder tile's key holds, so its dots are drawn again. A
+ *  run of changes, as while an accent is dragged, counts once. */
+const [themeTurn, setThemeTurn] = createSignal(0);
+let themeSoon: number | undefined;
+watchTheme(() => {
+  window.clearTimeout(themeSoon);
+  themeSoon = window.setTimeout(() => setThemeTurn(themeTurn() + 1), 250);
+});
 
 /** After how many days Storage Sense empties the Recycle Bin, read once the bin is first shown. */
 const [cleanDays, setCleanDays] = createSignal<number | null>(null);
@@ -928,7 +937,7 @@ export function FileList(props: {
     const stacked = !!row?.isDir && !inList && !look && !row.isCustom;
     pooled.element.toggleAttribute("data-stack", stacked);
     const path = row && join(row.location || props.folder, row.name);
-    const key = look?.cover ? `cover|${look.cover}` : stacked ? `stack|${path}|${row!.modified}` : pictured ? thumbKey(row) : undefined;
+    const key = look?.cover ? `cover|${look.cover}` : stacked ? `stack|${path}|${row!.modified}|${themeTurn()}` : pictured ? thumbKey(row) : undefined;
     if (pooled.thumb) pooled.thumb.style.objectPosition = look?.cover ? coverPosition(look.coverAt) : "";
     showThumb(pooled, key);
     const runs = gallery && row && kindOf(row.name, row.isDir) === "video" ? propText(row, index, "length") : "";
@@ -1878,7 +1887,7 @@ export function FileList(props: {
 
   createEffect(
     on(
-      [typesLearned, () => props.cut, () => props.marks, () => props.git, () => props.match, () => props.synced, tags, allLooks, windowsIcons, dateForm, nests, readProgress, sizeBars, iconTheme, ageDim, cleanDays],
+      [typesLearned, () => props.cut, () => props.marks, () => props.git, () => props.match, () => props.synced, tags, allLooks, windowsIcons, dateForm, nests, readProgress, sizeBars, iconTheme, ageDim, cleanDays, themeTurn],
       () => {
         for (const pooled of pool) pooled.filled = false;
         paint();

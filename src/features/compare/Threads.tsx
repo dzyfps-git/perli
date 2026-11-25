@@ -9,25 +9,30 @@ const MOST_THREADS = 60;
 const SHOWN_MS = 1800;
 const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
 
+/** The gap between a name and the thread that starts after it, in stacked panes. */
+const AFTER_NAME = 8;
+
 interface Thread {
-  x1: number;
-  y1: number;
-  x2: number;
-  y2: number;
+  /** The SVG path. */
+  d: string;
   mark: string;
 }
 
-/** The rows of a pane in sight with a compare mark, by lowercase name, with their middles. */
-function markedRows(pane: HTMLElement, top: number) {
-  const found = new Map<string, { y: number; mark: string }>();
+/** The rows of a pane in sight with a compare mark, by lowercase name, with their middles and
+ *  where their names end. */
+function markedRows(pane: HTMLElement, pair: DOMRect) {
+  const found = new Map<string, { x: number; y: number; mark: string }>();
   const list = pane.querySelector(".file-grid")?.getBoundingClientRect();
   if (!list) return found;
   for (const row of pane.querySelectorAll<HTMLElement>(".file-row[data-compare]")) {
     if (row.dataset.ghost !== undefined) continue;
     const box = row.getBoundingClientRect();
     if (box.bottom < list.top || box.top > list.bottom) continue;
-    const name = row.querySelector(".file-name")?.textContent?.trim().toLowerCase();
-    if (name) found.set(name, { y: box.top + box.height / 2 - top, mark: row.dataset.compare! });
+    const label = row.querySelector<HTMLElement>(".file-name");
+    const name = label?.textContent?.trim().toLowerCase();
+    if (!label || !name) continue;
+    const end = label.getBoundingClientRect().left + Math.min(label.scrollWidth, label.clientWidth) + AFTER_NAME;
+    found.set(name, { x: end - pair.left, y: box.top + box.height / 2 - pair.top, mark: row.dataset.compare! });
   }
   return found;
 }
@@ -35,7 +40,8 @@ function markedRows(pane: HTMLElement, top: number) {
 /**
  * When two folders are first compared, a thread runs across the divider from each row to the row
  * of the same name on the other side, tinted by how they differ, then they fade. Rows that sit
- * level give a straight thread, ones far apart a long curve.
+ * level give a straight thread, ones far apart a long curve. In stacked panes the threads fall
+ * from the end of each name down to its match.
  */
 export function CompareThreads(props: { tab: Tab }) {
   const [threads, setThreads] = createSignal<Thread[]>();
@@ -45,27 +51,34 @@ export function CompareThreads(props: { tab: Tab }) {
   let measuring = "";
   let timer: number | undefined;
 
-  function measure(one: number, other: number): Thread[] {
+  function measure(one: number, other: number, stacked: boolean): Thread[] {
     const pair = layer.parentElement!.getBoundingClientRect();
     const paneOf = (id: number) => layer.parentElement!.querySelector<HTMLElement>(`.pane[data-view="${id}"]`);
     const first = paneOf(one);
     const second = paneOf(other);
     if (!first || !second) return [];
-    const [left, right] = first.getBoundingClientRect().left <= second.getBoundingClientRect().left ? [first, second] : [second, first];
-    const x1 = left.getBoundingClientRect().right - pair.left - INSET;
-    const x2 = right.getBoundingClientRect().left - pair.left + INSET;
-    const there = markedRows(right, pair.top);
+    const place = (pane: HTMLElement) => (stacked ? pane.getBoundingClientRect().top : pane.getBoundingClientRect().left);
+    const [near, far] = place(first) <= place(second) ? [first, second] : [second, first];
+    const x1 = near.getBoundingClientRect().right - pair.left - INSET;
+    const x2 = far.getBoundingClientRect().left - pair.left + INSET;
+    const there = markedRows(far, pair);
     const found: Thread[] = [];
-    for (const [name, { y, mark }] of markedRows(left, pair.top)) {
-      const match = there.get(name);
-      if (match && found.length < MOST_THREADS) found.push({ x1, y1: y, x2, y2: match.y, mark });
+    for (const [name, from] of markedRows(near, pair)) {
+      const to = there.get(name);
+      if (!to || found.length >= MOST_THREADS) continue;
+      const middle = stacked ? (from.y + to.y) / 2 : (x1 + x2) / 2;
+      const d = stacked
+        ? `M ${from.x} ${from.y} C ${from.x} ${middle}, ${to.x} ${middle}, ${to.x} ${to.y}`
+        : `M ${x1} ${from.y} C ${middle} ${from.y}, ${middle} ${to.y}, ${x2} ${to.y}`;
+      found.push({ d, mark: from.mark });
     }
     return found;
   }
 
   createEffect(() => {
     const [one, other] = props.tab.panes();
-    if (!one || !other || props.tab.stacked() || reducedMotion.matches) return;
+    if (!one || !other || reducedMotion.matches) return;
+    const stacked = props.tab.stacked();
     const [mine, theirs] = [props.tab.marksOf(one), props.tab.marksOf(other)];
     // Marks of the folders shown now, not of ones a pane has just left.
     const ready = mine && theirs && mine.snapshot === one.folder()?.request && theirs.snapshot === other.folder()?.request;
@@ -78,7 +91,7 @@ export function CompareThreads(props: { tab: Tab }) {
       requestAnimationFrame(() => {
         measuring = "";
         if (keyOf() !== key) return;
-        const found = measure(one.id, other.id);
+        const found = measure(one.id, other.id, stacked);
         // Rows not drawn with their marks yet get another look when the marks next change.
         if (found.length === 0) return;
         shownFor = key;
@@ -95,17 +108,7 @@ export function CompareThreads(props: { tab: Tab }) {
         {(shown) => (
           <svg class="compare-threads">
             <For each={shown}>
-              {(thread, at) => {
-                const middle = (thread.x1 + thread.x2) / 2;
-                return (
-                  <path
-                    d={`M ${thread.x1} ${thread.y1} C ${middle} ${thread.y1}, ${middle} ${thread.y2}, ${thread.x2} ${thread.y2}`}
-                    pathLength="1"
-                    data-compare={thread.mark}
-                    style={{ "--at": at() }}
-                  />
-                );
-              }}
+              {(thread, at) => <path d={thread.d} pathLength="1" data-compare={thread.mark} style={{ "--at": at() }} />}
             </For>
           </svg>
         )}

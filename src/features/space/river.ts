@@ -1,4 +1,4 @@
-import type { RiverHour } from "../../api";
+import type { RiverQuarter } from "../../api";
 
 /**
  * The Time river: every file under a folder by when it last changed, as a river of days that is
@@ -6,44 +6,46 @@ import type { RiverHour } from "../../api";
  */
 
 export const HOUR = 3_600_000;
+/** What the river counts by, which every time zone's hours and days start on. */
+export const QUARTER = HOUR / 4;
 export const DAY = 24 * HOUR;
 /** The narrowest stretch the river zooms in to. */
 export const LEAST_SPAN = 12 * HOUR;
 
-/** The hours counted so far, as sorted times with running sums, to add up any stretch at once. */
+/** The quarter hours counted so far, as sorted times with running sums, to add up any stretch at once. */
 export interface River {
-  /** Each counted hour's start, in milliseconds since 1970, oldest first. */
+  /** Each counted quarter hour's start, in milliseconds since 1970, oldest first. */
   times: number[];
-  /** Files and bytes up to and including each hour. */
+  /** Files and bytes up to and including each quarter hour. */
   files: number[];
   bytes: number[];
 }
 
-/** Adds what a walk counted into `known`, by hour. */
-export function addHours(known: Map<number, [number, number]>, hours: RiverHour[]) {
-  for (const [hour, files, bytes] of hours) {
-    const held = known.get(hour);
-    known.set(hour, held ? [held[0] + files, held[1] + bytes] : [files, bytes]);
+/** Adds what a walk counted into `known`, by quarter hour. */
+export function addQuarters(known: Map<number, [number, number]>, quarters: RiverQuarter[]) {
+  for (const [quarter, files, bytes] of quarters) {
+    const held = known.get(quarter);
+    known.set(quarter, held ? [held[0] + files, held[1] + bytes] : [files, bytes]);
   }
 }
 
 export function riverOf(known: Map<number, [number, number]>): River {
-  const hours = [...known.keys()].sort((a, b) => a - b);
+  const quarters = [...known.keys()].sort((a, b) => a - b);
   const river: River = { times: [], files: [], bytes: [] };
   let files = 0;
   let bytes = 0;
-  for (const hour of hours) {
-    const [more, size] = known.get(hour)!;
+  for (const quarter of quarters) {
+    const [more, size] = known.get(quarter)!;
     files += more;
     bytes += size;
-    river.times.push(hour * HOUR);
+    river.times.push(quarter * QUARTER);
     river.files.push(files);
     river.bytes.push(bytes);
   }
   return river;
 }
 
-/** How many hours start before `time`. */
+/** How many counted quarter hours start before `time`. */
 function before(times: number[], time: number) {
   let low = 0;
   let high = times.length;
@@ -86,14 +88,14 @@ export function softened(values: number[], reach: number): number[] {
   });
 }
 
-/** From the first hour counted to the end of the last, with a little room each side. */
+/** From the first quarter hour counted to the end of the last, with a little room each side. */
 export function wholeSpan(river: River): [number, number] {
   if (river.times.length === 0) {
     const now = Date.now();
     return [now - 30 * DAY, now];
   }
   const first = river.times[0];
-  const last = river.times[river.times.length - 1] + HOUR;
+  const last = river.times[river.times.length - 1] + QUARTER;
   const room = Math.max(DAY, (last - first) * 0.03);
   return [first - room, last + room];
 }
@@ -115,6 +117,14 @@ function within([from, to]: [number, number], [first, last]: [number, number]): 
   if (from < first) return [first, first + span];
   if (to > last) return [last - span, last];
   return [from, to];
+}
+
+/** The start of the local hour `time` falls in, which in some time zones is not a UTC hour. It
+ *  goes by the offset at that instant, so of the hour the clocks repeat when they go back, each
+ *  time is in its own. */
+export function hourStart(time: number) {
+  const local = time - new Date(time).getTimezoneOffset() * 60_000;
+  return time - (((local % HOUR) + HOUR) % HOUR);
 }
 
 /** The start of the local day `time` falls in. */
@@ -177,9 +187,9 @@ export function ticks(from: number, to: number, width: number, room = 90): Tick[
     }
   } else {
     const every = [1, 2, 3, 6, 12].find((hours) => span / (hours * HOUR) <= most) ?? 24;
-    for (let hour = Math.ceil(from / HOUR) * HOUR; hour <= to; hour += HOUR) {
+    for (let hour = hourStart(from); hour <= to; hour += HOUR) {
       const at = new Date(hour);
-      if (at.getHours() % every) continue;
+      if (hour < from || at.getHours() % every) continue;
       const midnight = at.getHours() === 0;
       found.push({ time: hour, label: midnight ? `${MONTHS[at.getMonth()]} ${at.getDate()}` : `${String(at.getHours()).padStart(2, "0")}:00`, major: midnight });
     }

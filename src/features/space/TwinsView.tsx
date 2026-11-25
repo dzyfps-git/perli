@@ -23,6 +23,10 @@ const [mode, setMode] = stored<Mode>("twins-mode", saved("twins-mode") === "alik
 const PICTURE_EDGE = 96;
 const MOST_NAME = 26;
 const COUNT_MS = 900;
+/** Places one click adds to the look, at most. */
+const MOST_OFFERS = 5;
+const ICON_ADD = "\uE710";
+const ICON_REMOVE = "\uE711";
 
 const short = (name: string) => (name.length > MOST_NAME ? `${name.slice(0, MOST_NAME - 2)}…` : name);
 const dayOf = (time: number) => new Date(time).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" });
@@ -33,13 +37,17 @@ const dayOf = (time: number) => new Date(time).toLocaleDateString(undefined, { d
  * and sends them to the Recycle Bin, with Undo.
  */
 export function Twins(props: {
-  folder: string;
+  /** Where to look, all at once, so twins in two places are found too. */
+  folders: string[];
+  /** Places one click adds: the other pane's folder and the drives. */
+  more: { path: string; name: string }[];
   /** Shows a file in its folder. */
   onShow: (path: string) => void;
   onClose: () => void;
 }) {
   /** Undefined while looking. */
   const [sets, setSets] = createSignal<TwinSet[]>();
+  const [places, setPlaces] = createSignal(props.folders);
   const [first, setFirst] = createSignal(0);
   const [size, setSize] = createSignal({ width: 0, height: 0 });
   const [palette, setPalette] = createSignal<Palette>(readPalette());
@@ -68,23 +76,25 @@ export function Twins(props: {
   let ticket = 0;
 
   const photos = () => mode() === "alike";
+  const nameOf = (path: string) => props.more.find((one) => idOf(one.path) === idOf(path))?.name || baseName(path) || path;
+  const title = () => (places().length === 1 ? `Twins in ${nameOf(places()[0])}` : `Twins in ${places().length} places`);
+  const offers = () => props.more.filter((one) => !places().some((place) => idOf(place) === idOf(one.path))).slice(0, MOST_OFFERS);
   const busy = () => merging() || undoing();
   /** The files the last clean sent to the Recycle Bin, which its undo brings back. */
   let cleaned: Twin[] = [];
   const bytesOf = (files: Twin[]) => files.reduce((sum, file) => sum + file.bytes, 0);
   const watch = (event: JobEvent) => setAsking(event.kind === "asked" ? { id: event.id, question: event.question } : undefined);
-  const title = () => `Twins in ${baseName(props.folder) || props.folder}`;
   const kick = () => loop?.kick();
 
   createEffect(
-    on([mode, looks], ([now]) => {
+    on([mode, looks, places], ([now, , where]) => {
       const mine = ++ticket;
       batch(() => {
         setSets(undefined);
         setFirst(0);
         setHovered(undefined);
       });
-      findTwins(props.folder, now === "alike")
+      findTwins(where, now === "alike")
         .then((found) => mine === ticket && setSets(setsOf(found)))
         .catch((error) => {
           if (mine !== ticket) return;
@@ -408,6 +418,33 @@ export function Twins(props: {
               {note()}
             </Show>
           </p>
+          <div class="twins-places" role="group" aria-label="Look in">
+            <For each={places()}>
+              {(place) => (
+                <span class="twins-place">
+                  {nameOf(place)}
+                  <Show when={places().length > 1}>
+                    <button
+                      class="twins-place-off"
+                      aria-label={`Stop looking in ${nameOf(place)}`}
+                      disabled={merging()}
+                      onClick={() => setPlaces(places().filter((one) => one !== place))}
+                    >
+                      {ICON_REMOVE}
+                    </button>
+                  </Show>
+                </span>
+              )}
+            </For>
+            <For each={offers()}>
+              {(one) => (
+                <button class="twins-place twins-place-add" aria-label={`Look in ${one.name} too`} disabled={merging()} onClick={() => setPlaces([...places(), one.path])}>
+                  <span aria-hidden="true">{ICON_ADD}</span>
+                  {one.name}
+                </button>
+              )}
+            </For>
+          </div>
         </div>
         <div class="space-lenses" role="radiogroup" aria-label="Twins of" style={{ "--at": modeAt(), "--of": MODES.length }}>
           <span class="space-lens-pill" aria-hidden="true" />

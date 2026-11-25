@@ -25,7 +25,7 @@ import {
 } from "./lenses";
 import { onPulse } from "./pulses";
 import { agoText, allNodes, folderTree, idOf, joinPath, nearestShown, pcTree, touches, useShares } from "./space";
-import { keepWeighed, weighed } from "./weighed";
+import { keepListing, keepWeighed, weighed, weighedYears } from "./weighed";
 import "../settings/settings.css";
 import "../fileops/fileops.css";
 import "./space.css";
@@ -99,7 +99,7 @@ export function Space(props: {
   };
   const total = () => (atPc() ? Object.values(used()).reduce((sum, bytes) => sum + bytes, 0) : cells().reduce((sum, cell) => sum + cell.bytes, 0));
 
-  const pc = () => pcTree(drives().map((drive) => ({ path: drive.path, name: drive.name, used: used()[drive.path] ?? 0 })), weighed(), kindOfCell);
+  const pc = () => pcTree(drives().map((drive) => ({ path: drive.path, name: drive.name, used: used()[drive.path] ?? 0 })), weighed(), kindOfCell, weighedYears());
   const treeOf = (most?: number) => (atPc() ? pc() : folderTree(path(), title(), cells(), kindOfCell, most));
   /** The tree Brain draws, which also finds where pulses go. */
   const tree = createMemo(() => treeOf());
@@ -116,7 +116,7 @@ export function Space(props: {
       case "cells":
         return cellsAims(treeOf(MOST_CELLS), width, height, palette(), now);
       case "layers":
-        return atPc() ? EMPTY : layersAims(treeOf(cells().length), width, height, palette());
+        return layersAims(atPc() ? pc() : treeOf(cells().length), width, height, palette());
       case "tags":
         return tagsAims(tags(), tagged(), width, height, palette());
     }
@@ -186,6 +186,11 @@ export function Space(props: {
       weigh(folder);
     }),
   );
+
+  // On This PC, drives the search index answers for show what fills them, asked again while it shows.
+  createEffect(() => {
+    if (!path()) onCleanup(keepListing(() => drives().map((drive) => ({ path: drive.path, id: idOf(drive.path) }))));
+  });
 
   /** Steps into a folder, starting from what is known of it so it shows at once. */
   function enter(folder: string) {
@@ -445,7 +450,7 @@ export function Space(props: {
 
   const empty = () => {
     if (drawn().aims.length > 0 || !size().width) return "";
-    if (lens() === "layers" && atPc()) return "Open a drive to see its years in layers.";
+    if (lens() === "layers" && atPc()) return "Open a drive once to see its years in layers.";
     if (lens() === "tags") return "Nothing here wears a tag yet.";
     if (!done()) return "Adding up…";
     return "Nothing in this folder.";
