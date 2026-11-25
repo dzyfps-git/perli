@@ -28,6 +28,8 @@ pub const WRONG_PASSWORD: &str = "Wrong password";
 const MOST_PART_BYTES: u64 = 96 * 1024 * 1024;
 /// The most a locked file may be, since it is unlocked in memory.
 const MOST_LOCKED_BYTES: u64 = 256 * 1024 * 1024;
+/// A saved thumbnail bigger than this is not a thumbnail.
+const MOST_THUMBNAIL_BYTES: u64 = 8 * 1024 * 1024;
 /// How many unlocked files stay in memory, for their pictures and a step back to them.
 const MOST_UNLOCKED: usize = 2;
 const COMPOUND: &[u8] = b"\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1";
@@ -179,6 +181,28 @@ pub fn picture(path: &Path, entry: &str, edge: u32) -> Result<Vec<u8>, String> {
     crate::inside::decode(&bytes, edge.clamp(1, 4096)).map_err(|error| error.message())
 }
 
+/// The small picture Office or LibreOffice saved into the file, for a tile when Windows has
+/// none. Read straight from the file, so a locked one never shows what is under its password.
+/// EMF and WMF pictures are left out, since Perli can't draw them.
+pub fn thumbnail(path: &Path, edge: u32) -> Option<Vec<u8>> {
+    family_of(path)?;
+    let mut zip = zip::ZipArchive::new(std::io::BufReader::new(File::open(path).ok()?)).ok()?;
+    let name = zip.file_names().filter_map(Result::ok).find(|name| is_thumbnail(name))?.to_string();
+    let entry = zip.by_name(&name).ok()?;
+    if entry.size() > MOST_THUMBNAIL_BYTES {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    entry.take(MOST_THUMBNAIL_BYTES).read_to_end(&mut bytes).ok()?;
+    crate::inside::decode(&bytes, edge.clamp(1, 4096)).ok()
+}
+
+fn is_thumbnail(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    (name.starts_with("docprops/thumbnail.") || name.starts_with("thumbnails/thumbnail."))
+        && [".png", ".jpg", ".jpeg", ".gif", ".bmp"].iter().any(|kind| name.ends_with(kind))
+}
+
 /// Lets go of an unlocked document kept in memory.
 pub fn forget(path: &Path) {
     UNLOCKED.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).retain(|(kept, _, _)| kept != path);
@@ -319,7 +343,7 @@ impl Package {
         for (name, label) in [("Pages", "Pages"), ("Words", "Words"), ("Slides", "Slides"), ("Notes", "Notes")] {
             let value = get(&app, name);
             if value.parse::<u64>().is_ok_and(|count| count > 0) {
-                add(label, value.parse::<u64>().map(|count| group(count)).unwrap_or(value));
+                add(label, value.parse::<u64>().map(group).unwrap_or(value));
             }
         }
         add("Author", get(&core, "creator"));
@@ -406,7 +430,7 @@ pub(crate) fn group(number: u64) -> String {
     let digits = number.to_string();
     let mut out = String::new();
     for (at, digit) in digits.chars().enumerate() {
-        if at > 0 && (digits.len() - at) % 3 == 0 {
+        if at > 0 && (digits.len() - at).is_multiple_of(3) {
             out.push(',');
         }
         out.push(digit);
@@ -505,6 +529,16 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_saved_thumbnail_is_found_but_not_a_metafile() {
+        assert!(is_thumbnail("docProps/thumbnail.jpeg"));
+        assert!(is_thumbnail("Thumbnails/thumbnail.png"));
+        assert!(!is_thumbnail("docProps/thumbnail.wmf"));
+        assert!(!is_thumbnail("word/media/thumbnail.png"));
+        let path = package("plain.docx", &[("word/document.xml", b"<w:document/>")]);
+        assert!(thumbnail(&path, 64).is_none());
+    }
+
+    #[test]
     fn resolves_targets_from_their_folder() {
         assert_eq!(resolve("word", "media/image1.png"), "word/media/image1.png");
         assert_eq!(resolve("ppt/slides", "../media/image2.jpeg"), "ppt/media/image2.jpeg");
@@ -568,7 +602,8 @@ pub(crate) mod tests {
             println!("{}
   facts {:?}
   {shown}
-  note {:?}", path.display(), facts.facts, read.note);
+  note {:?}
+  thumbnail {:?}", path.display(), facts.facts, read.note, thumbnail(path, 256).map(|bytes| (u32::from_le_bytes(bytes[..4].try_into().unwrap()), u32::from_le_bytes(bytes[4..8].try_into().unwrap()))));
         }
     }
 

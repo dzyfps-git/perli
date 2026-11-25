@@ -108,6 +108,8 @@ const FontView = lazy(() => import("./FontView").then((module) => ({ default: mo
 const MailView = lazy(() => import("./MailView").then((module) => ({ default: module.MailView })));
 const PdfView = lazy(() => import("./PdfView").then((module) => ({ default: module.PdfView })));
 const VideoView = lazy(() => import("./VideoView").then((module) => ({ default: module.VideoView })));
+const OfficeView = lazy(() => import("./OfficeView").then((module) => ({ default: module.OfficeView })));
+const WindowsView = lazy(() => import("./OfficeView").then((module) => ({ default: module.WindowsView })));
 
 /** Files the player plays, for Play next to skip to. */
 /** The films the window plays, as Rust's preview kinds name them. */
@@ -155,6 +157,23 @@ export function draw(canvas: HTMLCanvasElement, picture: Thumb) {
   canvas.width = picture.width;
   canvas.height = picture.height;
   canvas.getContext("2d")!.putImageData(new ImageData(picture.pixels, picture.width, picture.height), 0, 0);
+}
+
+/** Fills each picture placeholder in `root` with what `load` gives for its name. */
+export function fillPictures(root: HTMLElement, load: (name: string) => Promise<Thumb | null>) {
+  for (const canvas of root.querySelectorAll<HTMLCanvasElement>("canvas[data-picture]")) {
+    // Nothing takes room until the picture is drawn, and a missing one says so.
+    canvas.width = canvas.height = 0;
+    const missing = () => {
+      const note = document.createElement("span");
+      note.className = "md-blocked";
+      note.textContent = canvas.getAttribute("aria-label") || "Missing picture";
+      canvas.replaceWith(note);
+    };
+    load(canvas.dataset.picture!)
+      .then((picture) => (picture ? draw(canvas, picture) : missing()))
+      .catch(missing);
+  }
 }
 
 /**
@@ -409,23 +428,6 @@ export function QuickPreview(props: {
     };
   }
 
-  /** Fills each picture placeholder in `root` with what `load` gives for its name. */
-  function fillPictures(root: HTMLElement, load: (name: string) => Promise<Thumb | null>) {
-    for (const canvas of root.querySelectorAll<HTMLCanvasElement>("canvas[data-picture]")) {
-      // Nothing takes room until the picture is drawn, and a missing one says so.
-      canvas.width = canvas.height = 0;
-      const missing = () => {
-        const note = document.createElement("span");
-        note.className = "md-blocked";
-        note.textContent = canvas.getAttribute("aria-label") || "Missing picture";
-        canvas.replaceWith(note);
-      };
-      load(canvas.dataset.picture!)
-        .then((picture) => (picture ? draw(canvas, picture) : missing()))
-        .catch(missing);
-    }
-  }
-
   /** Pictures beside the file draw from this PC, and links go to the browser, never in here. */
   function markdown(item: Row, html: string, source: string, seen?: string) {
     return {
@@ -606,6 +608,12 @@ export function QuickPreview(props: {
       note: setNote,
       onNextVolume: () => nextOf(COMICS),
     };
+  }
+
+  /** Esc inside Windows' previewer: the keys come back to Perli, and the preview over the list closes. */
+  function escapeHosted() {
+    if (!props.docked) return shut();
+    document.querySelector<HTMLElement>(".file-list[role=grid]")?.focus();
   }
 
   function onBodyClick(event: MouseEvent) {
@@ -790,6 +798,12 @@ export function QuickPreview(props: {
               {preview.kind === "parquet" && <ParquetView {...streamed(row()!)} />}
               {preview.kind === "font" && <FontView {...font(preview.faces)} />}
               {preview.kind === "mail" && <MailView {...mail(row()!, preview)} />}
+              {preview.kind === "office" && (
+                <OfficeView facts={preview} view={props.at.view} place={place} keys={(handler) => (viewKeys = handler)} onEscape={escapeHosted} />
+              )}
+              {preview.kind === "windows" && (
+                <WindowsView marked={preview.marked} view={props.at.view} place={place} onEscape={escapeHosted} picture={<PictureView {...picture(row()!)} />} />
+              )}
               {preview.kind === "pdf" && <PdfView
                   path={pathOf(row()!)}
                   {...streamed(row()!)}

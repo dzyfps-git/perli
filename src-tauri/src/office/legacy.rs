@@ -113,7 +113,7 @@ fn word(file: &mut Compound) -> Result<Reading, String> {
             }
         } else {
             let from = place as usize;
-            let units: Vec<u16> = fib.get(from..from + length * 2).unwrap_or_default().chunks_exact(2).map(|pair| u16::from_le_bytes([pair[0], pair[1]])).collect();
+            let units: Vec<u16> = fib.get(from..from + length * 2).unwrap_or_default().as_chunks::<2>().0.iter().map(|pair| u16::from_le_bytes(*pair)).collect();
             text.push_str(&String::from_utf16_lossy(&units));
         }
     }
@@ -196,7 +196,7 @@ fn unicode(bytes: &[u8], count: usize, at: usize) -> Option<(String, usize)> {
     let wide = bytes.get(at)? & 1 != 0;
     let start = at + 1;
     if wide {
-        let units: Vec<u16> = bytes.get(start..start + count * 2)?.chunks_exact(2).map(|pair| u16::from_le_bytes([pair[0], pair[1]])).collect();
+        let units: Vec<u16> = bytes.get(start..start + count * 2)?.as_chunks::<2>().0.iter().map(|pair| u16::from_le_bytes(*pair)).collect();
         Some((String::from_utf16_lossy(&units), start + count * 2))
     } else {
         Some((bytes.get(start..start + count)?.iter().map(|&byte| char::from(byte)).collect(), start + count))
@@ -437,7 +437,7 @@ fn slides(file: &mut Compound) -> Result<Reading, String> {
                 TEXT_CHARS | TEXT_BYTES => {
                     let body = document.get(start..end.min(document.len())).unwrap_or_default();
                     let text = if kind == TEXT_CHARS {
-                        String::from_utf16_lossy(&body.chunks_exact(2).map(|pair| u16::from_le_bytes([pair[0], pair[1]])).collect::<Vec<_>>())
+                        String::from_utf16_lossy(&body.as_chunks::<2>().0.iter().map(|pair| u16::from_le_bytes(*pair)).collect::<Vec<_>>())
                     } else {
                         body.iter().map(|&byte| char::from(byte)).collect()
                     };

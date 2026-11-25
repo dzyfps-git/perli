@@ -1879,6 +1879,7 @@ async fn office_forget(view: u32, request: u64, row: u32, views: State<'_, Views
 
 /// Shows a row through Windows' own previewer, over `place` in physical pixels of the window.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 async fn previewer_open(
     view: u32,
     request: u64,
@@ -1886,11 +1887,12 @@ async fn previewer_open(
     place: previewers::Place,
     back: u32,
     fore: u32,
+    ticket: u64,
     window: tauri::WebviewWindow,
     views: State<'_, Views>,
 ) -> Result<(), String> {
     let path = row_file(&views, view, request, row).await?;
-    blocking(move || previewers::open(&window, path, place, back, fore)).await
+    blocking(move || previewers::open(&window, path, place, back, fore, ticket)).await
 }
 
 /// Moves the previewer with the page, or hides it while something covers it.
@@ -1906,9 +1908,9 @@ async fn previewer_snapshot() -> Result<Response, String> {
 }
 
 #[tauri::command]
-async fn previewer_close(app: AppHandle) -> Result<(), String> {
+async fn previewer_close(ticket: u64, app: AppHandle) -> Result<(), String> {
     blocking(move || {
-        previewers::close(&app);
+        previewers::close(&app, ticket);
         Ok(())
     })
     .await

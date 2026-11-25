@@ -118,8 +118,8 @@ impl Cipher {
     fn chained(&self, data: &[u8], start: &[u8]) -> Vec<u8> {
         let mut out = data.to_vec();
         let mut before: [u8; 16] = start.get(..16).and_then(|start| start.try_into().ok()).unwrap_or([0; 16]);
-        for block in out.chunks_exact_mut(16) {
-            let sealed: [u8; 16] = block.try_into().unwrap_or([0; 16]);
+        for block in out.as_chunks_mut::<16>().0 {
+            let sealed = *block;
             self.block(block);
             for (byte, mask) in block.iter_mut().zip(before) {
                 *byte ^= mask;
@@ -131,7 +131,7 @@ impl Cipher {
 
     fn each(&self, data: &[u8]) -> Vec<u8> {
         let mut out = data.to_vec();
-        for block in out.chunks_exact_mut(16) {
+        for block in out.as_chunks_mut::<16>().0 {
             self.block(block);
         }
         out
@@ -260,7 +260,7 @@ mod tests {
         let mut padded = data.to_vec();
         padded.resize(data.len().div_ceil(16) * 16, 0);
         let mut before: [u8; 16] = start.map(|start| start[..16].try_into().unwrap()).unwrap_or([0; 16]);
-        for chunk in padded.chunks_exact_mut(16) {
+        for chunk in padded.as_chunks_mut::<16>().0 {
             if start.is_some() {
                 for (byte, mask) in chunk.iter_mut().zip(before) {
                     *byte ^= mask;
@@ -269,7 +269,7 @@ mod tests {
             let mut block = aes::Block::try_from(&chunk[..]).unwrap();
             cipher(&mut block);
             chunk.copy_from_slice(&block);
-            before = chunk.try_into().unwrap();
+            before = *chunk;
         }
         padded
     }

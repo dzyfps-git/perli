@@ -1338,7 +1338,82 @@ export type Preview =
   | { kind: "video" }
   | { kind: "picture" }
   /** Only in the cloud, so nothing was read. Windows' picture of it shows, if it has one. */
-  | { kind: "cloud" };
+  | { kind: "cloud" }
+  /** A Word, Excel or PowerPoint file, or a LibreOffice one, before it is read. */
+  | ({ kind: "office" } & OfficeFacts)
+  /** A file Windows has a previewer for and Perli has no viewer of its own for. */
+  | { kind: "windows"; marked: boolean };
+
+export type OfficeFamily = "word" | "sheet" | "slides";
+
+export interface OfficeFacts {
+  family: OfficeFamily;
+  /** Label and value pairs, such as "Pages" and "12". */
+  facts: [string, string][];
+  /** It carries macros, which nothing in Perli runs. */
+  macros: boolean;
+  /** It is under a password. */
+  locked: boolean;
+  /** It came from the internet. */
+  marked: boolean;
+  /** Windows has a previewer for it, such as Office's. */
+  handler: boolean;
+}
+
+/** A cell of a sheet: a number sorts as one, and an empty cell is null. */
+export type OfficeCell = string | number | null;
+
+export interface OfficeSheet {
+  name: string;
+  hidden: boolean;
+  rows: OfficeCell[][];
+  totalRows: number;
+  totalColumns: number;
+}
+
+export interface OfficeSlide {
+  title: string;
+  lines: { text: string; depth: number }[];
+  pictures: string[];
+  notes: string;
+  hidden: boolean;
+}
+
+/** A document as Perli's own reader shows it, and what was left out of it, if anything. */
+export type OfficeDoc = (
+  | { family: "word"; html: string; text: string }
+  | { family: "sheet"; sheets: OfficeSheet[] }
+  | { family: "slides"; slides: OfficeSlide[] }
+) & { note: string | null };
+
+export const officeRead = (view: number, request: number, row: number, password?: string) =>
+  invoke<OfficeDoc>("office_read", { view, request, row, password: password ?? null });
+
+export const officePicture = (view: number, request: number, row: number, entry: string, edge: number) =>
+  invoke<ArrayBuffer>("office_picture", { view, request, row, entry, edge }).then(decodeThumb);
+
+export const officeForget = (view: number, request: number, row: number) => invoke<void>("office_forget", { view, request, row });
+
+/** Where a previewer sits, in physical pixels inside the window. */
+export interface PreviewerPlace {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/** `back` and `fore` are colours as Windows writes them, red in the low byte. */
+export const previewerOpen = (view: number, request: number, row: number, place: PreviewerPlace, back: number, fore: number, ticket: number) =>
+  invoke<void>("previewer_open", { view, request, row, place, back, fore, ticket });
+
+export const previewerPlace = (place: PreviewerPlace, shown: boolean) => invoke<void>("previewer_place", { place, shown });
+
+export const previewerSnapshot = () => invoke<ArrayBuffer>("previewer_snapshot").then(decodeThumb);
+
+export const previewerClose = (ticket: number) => invoke<void>("previewer_close", { ticket });
+
+/** Esc pressed inside a previewer, which hands it back to Perli. */
+export const onPreviewerKey = (handler: (key: string) => void) => listen<string>("previewer-key", (event) => handler(event.payload));
 
 /** A mail saved as a file. `date` is FILETIME ticks, or 0 when the mail doesn't say. */
 export interface Mail {

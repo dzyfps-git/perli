@@ -4265,3 +4265,353 @@ th[aria-sort="descending"] .table-sort::after {
   margin: 0 var(--space-1);
   animation: tools-in var(--motion-spring);
 }
+
+/* Office files: a quiet strip of what the file is over the document, then the document. */
+.office-view {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.office-strip {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 36px;
+  padding: var(--space-1) var(--space-3);
+  border-bottom: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.office-kind {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.office-facts {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.office-chips {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  margin-left: auto;
+}
+
+.office-chip {
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.office-chip.office-warn {
+  border-color: color-mix(in srgb, var(--danger) 45%, transparent);
+  color: var(--danger);
+}
+
+.office-note {
+  flex: none;
+  margin: 0;
+  padding: var(--space-1) var(--space-3);
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.office-view > .doc-view,
+.office-view > .office-sheet,
+.office-view > .office-slides,
+.office-view > .hosted-preview,
+.office-view > .preview-picture {
+  flex: 1;
+  min-height: 0;
+}
+
+/* Windows draws the previewer over this box; until it does, the box shows the page's colours. */
+.hosted-preview {
+  position: relative;
+  background: var(--surface);
+  color: var(--text);
+}
+
+.hosted-still {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.hosted-wait {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  margin: 0;
+  color: var(--text-muted);
+}
+
+.preview-markdown .office-table {
+  width: auto;
+}
+
+.preview-markdown .office-table p {
+  margin: 0;
+}
+
+.preview-markdown .office-item {
+  margin: 2px 0;
+  padding-left: calc(var(--depth) * 22px + 22px);
+  text-indent: -18px;
+}
+
+.preview-markdown .office-marker {
+  display: inline-block;
+  width: 18px;
+  text-indent: 0;
+  color: var(--text-muted);
+}
+
+.preview-markdown .office-gap {
+  height: 0.6em;
+  margin: 0;
+}
+
+.preview-markdown .office-tab {
+  display: inline-block;
+  width: 2em;
+}
+
+.preview-markdown .office-center {
+  text-align: center;
+}
+
+.preview-markdown .office-page {
+  margin: var(--space-4) 0;
+  border: none;
+  border-top: 1px dashed var(--border);
+}
+
+.preview-markdown .office-link {
+  color: var(--accent);
+  text-decoration: underline dotted;
+  cursor: help;
+}
+
+.office-sheet {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+}
+
+.office-sheet-tools {
+  position: absolute;
+  top: var(--space-2);
+  right: var(--space-3);
+  z-index: 2;
+  display: flex;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--overlay-tint);
+  backdrop-filter: var(--blur);
+}
+
+.office-sheet-tools .strip-icon {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  font-size: 13px;
+}
+
+.office-goto {
+  width: 170px;
+  height: 28px;
+  border-radius: 999px;
+}
+
+.office-goto[data-missing] {
+  border-color: var(--danger);
+}
+
+.office-grid {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.office-grid td[data-flash] {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  animation: office-flash 1.6s ease-out;
+}
+
+@keyframes office-flash {
+  from {
+    background: color-mix(in srgb, var(--accent) 30%, transparent);
+  }
+}
+
+.office-tabs {
+  display: flex;
+  flex: none;
+  gap: 2px;
+  padding: var(--space-1) var(--space-2);
+  overflow-x: auto;
+  border-top: 1px solid var(--border);
+}
+
+.office-tab-button {
+  padding: 3px 12px;
+  border-radius: var(--radius);
+  color: var(--text-muted);
+  white-space: nowrap;
+  transition: background-color var(--motion), color var(--motion);
+}
+
+.office-tab-button:hover {
+  background: var(--surface-hover);
+}
+
+.office-tab-button[aria-current="true"] {
+  background: var(--surface-selected);
+  color: var(--text);
+}
+
+.office-tab-button[data-hidden],
+.office-slide-item[data-hidden] {
+  opacity: 0.55;
+  font-style: italic;
+}
+
+.office-slides {
+  position: relative;
+  display: flex;
+}
+
+.office-slide-strip {
+  flex: none;
+  width: 200px;
+  padding: var(--space-2);
+  overflow-y: auto;
+  border-right: 1px solid var(--border);
+}
+
+.office-slide-item {
+  display: flex;
+  gap: var(--space-2);
+  width: 100%;
+  padding: 6px var(--space-2);
+  border-radius: var(--radius);
+  color: var(--text-muted);
+  text-align: left;
+  transition: background-color var(--motion), color var(--motion);
+}
+
+.office-slide-item:hover {
+  background: var(--surface-hover);
+}
+
+.office-slide-item[aria-current="true"] {
+  background: var(--surface-selected);
+  color: var(--text);
+}
+
+.office-slide-number {
+  flex: none;
+  min-width: 1.6em;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.office-slide-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.office-slide-stage {
+  flex: 1;
+  min-width: 0;
+  padding: var(--space-4);
+  overflow: auto;
+}
+
+.office-slide {
+  max-width: 900px;
+  margin: 0 auto;
+  padding: var(--space-4) calc(var(--space-4) * 1.5);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-large);
+  background: var(--surface);
+  aspect-ratio: 16 / 9;
+  overflow: auto;
+}
+
+.office-slide-heading {
+  margin: 0 0 var(--space-3);
+  font-size: 1.6em;
+}
+
+.office-slide-line {
+  margin: 4px 0;
+  padding-left: calc(var(--depth) * 24px);
+  white-space: pre-wrap;
+}
+
+.office-slide-pictures {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+}
+
+.office-slide-picture {
+  max-width: 100%;
+  max-height: 320px;
+  border-radius: var(--radius);
+  object-fit: contain;
+}
+
+.office-slide-notes {
+  max-width: 900px;
+  margin: var(--space-3) auto 0;
+  padding: var(--space-3);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius);
+  background: var(--surface-hover);
+  white-space: pre-wrap;
+}
+
+.office-slide-count {
+  align-self: center;
+  padding: 0 var(--space-2);
+  color: var(--text-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.preview-docked .office-slide-strip {
+  width: 132px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .office-grid td[data-flash] {
+    animation: none;
+  }
+}
+
+.office-switch {
+  flex: none;
+}
+
+.office-switch[aria-pressed="true"] {
+  border-color: color-mix(in srgb, var(--accent) 50%, transparent);
+  color: var(--accent);
+}

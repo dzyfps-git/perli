@@ -9,6 +9,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
@@ -71,9 +72,9 @@ pub struct Place {
 }
 
 enum Job {
-    Open { path: PathBuf, clsid: GUID, host: isize, size: (i32, i32), back: u32, fore: u32, done: Sender<Result<(), String>> },
+    Open { path: PathBuf, clsid: GUID, host: isize, size: (i32, i32), back: u32, fore: u32, ticket: u64, done: Sender<Result<(), String>> },
     Size(i32, i32),
-    Close,
+    Close(u64),
 }
 
 /// The window a previewer draws in, and the thread that talks to the previewer.
@@ -85,6 +86,10 @@ struct Host {
 }
 
 static HOST: Mutex<Option<Host>> = Mutex::new(None);
+/// The page numbers each preview, so a close for one already replaced leaves the new one alone,
+/// and an open that comes after its own close shows nothing.
+static CURRENT: AtomicU64 = AtomicU64::new(0);
+static CLOSED: AtomicU64 = AtomicU64::new(0);
 static APP: OnceLock<AppHandle> = OnceLock::new();
 /// The page's background while the previewer loads, as a COLORREF.
 static BACK: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x0020_2020);
@@ -105,8 +110,12 @@ fn on_main<T: Send + 'static>(app: &AppHandle, work: impl FnOnce() -> T + Send +
 
 /// Shows `path` through its previewer over `place` in `window`. Fails when there is none, it
 /// won't open the file, or it takes too long; the page then shows Perli's own reader.
-pub fn open(window: &tauri::WebviewWindow, path: PathBuf, place: Place, back: u32, fore: u32) -> Result<(), String> {
+pub fn open(window: &tauri::WebviewWindow, path: PathBuf, place: Place, back: u32, fore: u32, ticket: u64) -> Result<(), String> {
     let clsid = find(&path).ok_or("Windows has no previewer for it")?;
+    if ticket <= CLOSED.load(Ordering::SeqCst) {
+        return Err("It was closed".into());
+    }
+    CURRENT.store(ticket, Ordering::SeqCst);
     let app = window.app_handle().clone();
     let _ = APP.set(app.clone());
     let parent = window.hwnd().map_err(failed)?.0 as isize;
@@ -128,7 +137,7 @@ pub fn open(window: &tauri::WebviewWindow, path: PathBuf, place: Place, back: u3
     };
     place_window(&app, host, place, true)?;
     let (done, answer) = channel();
-    jobs.send(Job::Open { path, clsid, host, size: (place.width, place.height), back, fore, done }).map_err(failed)?;
+    jobs.send(Job::Open { path, clsid, host, size: (place.width, place.height), back, fore, ticket, done }).map_err(failed)?;
     unsafe { PostMessageW(Some(HWND(wake as _)), WAKE, WPARAM(0), LPARAM(0)) }.map_err(failed)?;
     match answer.recv_timeout(OPEN_WAIT) {
         Ok(result) => result.inspect_err(|_| hide(&app)),
@@ -171,10 +180,13 @@ fn hide(app: &AppHandle) {
     }
 }
 
-/// Lets the previewer go and hides its window.
-pub fn close(app: &AppHandle) {
-    send(Job::Close);
-    hide(app);
+/// Lets the previewer go and hides its window, unless a newer preview took its place.
+pub fn close(app: &AppHandle, ticket: u64) {
+    CLOSED.fetch_max(ticket, Ordering::SeqCst);
+    if CURRENT.load(Ordering::SeqCst) == ticket {
+        send(Job::Close(ticket));
+        hide(app);
+    }
 }
 
 /// Gives up on a previewer that hangs: its window is hidden and dropped with it, and the next
@@ -230,7 +242,7 @@ pub fn snapshot() -> Result<Vec<u8>, String> {
             return Err("The screen couldn't be read".into());
         }
         // Blue, green, red to red, green, blue, and no see-through.
-        for pixel in out[8..].chunks_exact_mut(4) {
+        for pixel in out[8..].as_chunks_mut::<4>().0 {
             pixel.swap(0, 2);
             pixel[3] = 255;
         }
@@ -294,6 +306,7 @@ thread_local! {
     static BUSY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// The window this thread's previewer draws in, destroyed when the thread ends.
     static WINDOW: std::cell::Cell<isize> = const { std::cell::Cell::new(0) };
+    static SHOWN_TICKET: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 fn worker(taken: Receiver<Job>, ready: Sender<Result<isize, String>>) {
@@ -372,9 +385,10 @@ fn unload() {
 
 fn run(job: Job) {
     match job {
-        Job::Open { path, clsid, host, size, back, fore, done } => {
+        Job::Open { path, clsid, host, size, back, fore, ticket, done } => {
             unload();
             WINDOW.set(host);
+            SHOWN_TICKET.set(ticket);
             let result = show(&path, clsid, HWND(host as _), size, back, fore).map_err(|error| error.message());
             let _ = done.send(result);
         }
@@ -384,7 +398,9 @@ fn run(job: Job) {
                 let _ = unsafe { handler.SetRect(&rect) };
             }
         }
-        Job::Close => unload(),
+        // Only the preview it was for: a newer one may have come first.
+        Job::Close(ticket) if ticket == SHOWN_TICKET.get() => unload(),
+        Job::Close(_) => {}
     }
 }
 
