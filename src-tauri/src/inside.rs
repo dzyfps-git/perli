@@ -645,7 +645,7 @@ fn percent_decoded(text: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-fn attribute(start: &BytesStart, name: &str) -> Option<String> {
+pub(crate) fn attribute(start: &BytesStart, name: &str) -> Option<String> {
     start
         .attributes()
         .flatten()
@@ -655,7 +655,7 @@ fn attribute(start: &BytesStart, name: &str) -> Option<String> {
 }
 
 /// The named characters books use most. Others are left out.
-fn entity(name: &str) -> Option<&'static str> {
+pub(crate) fn entity(name: &str) -> Option<&'static str> {
     Some(match name {
         "amp" => "&",
         "lt" => "<",
