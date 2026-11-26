@@ -1765,6 +1765,16 @@ async fn add_s3(setup: remote::s3::Setup, secret: String, name: String) -> Resul
     blocking(move || remote::add_s3(setup, &secret, &name)).await
 }
 
+#[tauri::command]
+async fn test_server(kind: remote::Kind, server: remote::Server, secret: String) -> Result<(), String> {
+    blocking(move || remote::test_server(kind, &server, &secret)).await
+}
+
+#[tauri::command]
+async fn add_server(kind: remote::Kind, server: remote::Server, secret: String, name: String) -> Result<remote::Place, String> {
+    blocking(move || remote::add_server(kind, server, &secret, &name)).await
+}
+
 /// Opens a service's sign-in in the browser and waits for it to come back.
 #[tauri::command]
 async fn sign_in_cloud(kind: remote::Kind) -> Result<remote::Place, String> {
@@ -3243,6 +3253,8 @@ fn main() {
             start_state,
             cloud_places,
             add_s3,
+            test_server,
+            add_server,
             sign_in_cloud,
             cancel_sign_in,
             rename_place,

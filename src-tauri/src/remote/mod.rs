@@ -12,6 +12,7 @@ pub mod http;
 pub const ON_THIS_PC: &str = "This works on files on this PC. Copy them here first.";
 mod onedrive;
 mod phone;
+mod webdav;
 pub use phone::{import_plan, mark_imported, Batch};
 pub mod s3;
 
@@ -42,6 +43,32 @@ pub enum Kind {
     Google,
     /// A phone, camera or player plugged in now, never saved.
     Phone,
+    WebDav,
+}
+
+/// Where a server is and who signs in to it.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Server {
+    /// A host name, or for WebDAV the whole address.
+    pub host: String,
+    /// 0 for the protocol's own.
+    #[serde(default)]
+    pub port: u16,
+    #[serde(default)]
+    pub user: String,
+    /// The folder it opens at, `""` for the top.
+    #[serde(default)]
+    pub folder: String,
+    /// FTP over TLS.
+    #[serde(default)]
+    pub secure: bool,
+    /// An SSH key file to sign in with, the secret being its passphrase.
+    #[serde(default)]
+    pub key_file: String,
+    /// The SHA-256 of the SSH host key taken when the place was added, which it must show again.
+    #[serde(default)]
+    pub host_key: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -58,6 +85,8 @@ pub struct Place {
     /// Google's own Docs, Sheets and Slides come down as PDFs rather than Office files.
     #[serde(default)]
     pub pdf: bool,
+    #[serde(default)]
+    pub server: Option<Server>,
 }
 
 /// One file or folder of a place.
@@ -327,10 +356,10 @@ fn free_place_name(wanted: &str) -> String {
 }
 
 /// Adds a place, its secret kept by Windows. Gives it as saved.
-pub fn add_place(kind: Kind, name: &str, account: String, s3: Option<s3::Setup>, secret: &str) -> Result<Place, String> {
+pub fn add_place(kind: Kind, name: &str, account: String, s3: Option<s3::Setup>, server: Option<Server>, secret: &str) -> Result<Place, String> {
     let id = http::random_text(12);
     http::keep_secret(&id, secret)?;
-    let place = Place { id, name: free_place_name(name), kind, account, s3, pdf: false };
+    let place = Place { id, name: free_place_name(name), kind, account, s3, pdf: false, server };
     let mut all = places();
     all.push(place.clone());
     save_places(&all)?;
@@ -341,7 +370,33 @@ pub fn add_place(kind: Kind, name: &str, account: String, s3: Option<s3::Setup>,
 pub fn add_s3(setup: s3::Setup, secret: &str, name: &str) -> Result<Place, String> {
     s3::S3::new(setup.clone(), secret.to_string()).list("")?;
     let account = setup.bucket.clone();
-    add_place(Kind::S3, name, account, Some(setup), secret)
+    add_place(Kind::S3, name, account, Some(setup), None, secret)
+}
+
+fn server_service(kind: Kind, server: &Server, secret: &str) -> Result<Arc<dyn Service>, String> {
+    match kind {
+        Kind::WebDav => Ok(Arc::new(webdav::WebDav::new(server, secret)?)),
+        _ => Err("That isn't a server".into()),
+    }
+}
+
+/// Who a server place signs in as, shown under its name.
+fn server_account(server: &Server) -> String {
+    let host = server.host.split("://").last().unwrap_or(&server.host).trim_end_matches('/');
+    if server.user.is_empty() { host.to_string() } else { format!("{}@{host}", server.user) }
+}
+
+/// Looks at a server once, as the Add sheet's Test does, so a wrong address or password shows
+/// before it is added.
+pub fn test_server(kind: Kind, server: &Server, secret: &str) -> Result<(), String> {
+    server_service(kind, server, secret)?.list("").map(drop)
+}
+
+/// Adds a server once a look at it works.
+pub fn add_server(kind: Kind, server: Server, secret: &str, name: &str) -> Result<Place, String> {
+    test_server(kind, &server, secret)?;
+    let account = server_account(&server);
+    add_place(kind, name, account, None, Some(server), secret)
 }
 
 /// Signs in to a service in the browser and adds the place it opens.
@@ -352,8 +407,9 @@ pub fn sign_in(kind: Kind) -> Result<Place, String> {
         Kind::Google => (gdrive::Google::sign_in()?, "Google Drive"),
         Kind::S3 => return Err("S3 storage opens with a key, not a sign-in".into()),
         Kind::Phone => return Err("A phone shows here while it is plugged in".into()),
+        Kind::WebDav => return Err("A server opens with a password, not a sign-in".into()),
     };
-    add_place(kind, name, account, None, &refresh)
+    add_place(kind, name, account, None, None, &refresh)
 }
 
 pub fn rename_place(id: &str, name: &str) -> Result<Place, String> {
@@ -413,6 +469,7 @@ fn service(place: &Place) -> Result<Arc<dyn Service>, String> {
         Kind::Dropbox => Arc::new(dropbox::Dropbox::new(&place.id, &secret)?),
         Kind::Google => Arc::new(gdrive::Google::new(&place.id, &secret, place.pdf)?),
         Kind::Phone => unreachable!("a phone is made above"),
+        Kind::WebDav => server_service(place.kind, place.server.as_ref().ok_or("This place lost its settings")?, &secret)?,
     };
     lock(services()).insert(place.id.clone(), made.clone());
     Ok(made)
@@ -877,10 +934,11 @@ mod tests {
             account: bucket.into(),
             s3: Some(s3::Setup { preset: String::new(), endpoint: endpoint.into(), region: String::new(), bucket: bucket.into(), path_style: false, key_id: String::new() }),
             pdf: false,
+            server: None,
         };
         assert!(same_store(&s3("a", "https://s3.example.com/", "photos"), &s3("b", "https://S3.example.com", "photos")));
         assert!(!same_store(&s3("a", "https://s3.example.com", "photos"), &s3("b", "https://s3.example.com", "films")));
-        let drive = |id: &str, account: &str| Place { id: id.into(), name: id.into(), kind: Kind::OneDrive, account: account.into(), s3: None, pdf: false };
+        let drive = |id: &str, account: &str| Place { id: id.into(), name: id.into(), kind: Kind::OneDrive, account: account.into(), s3: None, pdf: false, server: None };
         assert!(same_store(&drive("a", "me@example.com"), &drive("b", "Me@Example.com")));
         assert!(!same_store(&drive("a", "OneDrive"), &drive("b", "OneDrive")), "no address said is never the same");
         assert!(!same_store(&drive("a", "me@example.com"), &drive("b", "you@example.com")));
