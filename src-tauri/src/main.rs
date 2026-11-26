@@ -1766,7 +1766,8 @@ async fn add_s3(setup: remote::s3::Setup, secret: String, name: String) -> Resul
 }
 
 #[tauri::command]
-async fn test_server(kind: remote::Kind, server: remote::Server, secret: String) -> Result<(), String> {
+/// Gives the SSH host key the server showed, `""` for other servers.
+async fn test_server(kind: remote::Kind, server: remote::Server, secret: String) -> Result<String, String> {
     blocking(move || remote::test_server(kind, &server, &secret)).await
 }
 

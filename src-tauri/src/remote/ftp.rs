@@ -5,12 +5,12 @@ use std::fs::File;
 use std::io::{Read, Write};
 use std::net::ToSocketAddrs;
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, UNIX_EPOCH};
 
 use suppaftp::list::{File as Listed, ListParser};
 use suppaftp::types::FileType;
-use suppaftp::{FtpError, NativeTlsConnector, NativeTlsFtpStream};
+use suppaftp::{FtpError, RustlsConnector, RustlsFtpStream as FtpStream};
 
 use super::{http, join, lock, Item, Server, Service, Tick, STOPPED};
 
@@ -21,7 +21,7 @@ const SEARCH_LIMIT: usize = 20_000;
 pub struct Ftp {
     server: Server,
     password: String,
-    open: Mutex<Option<NativeTlsFtpStream>>,
+    open: Mutex<Option<FtpStream>>,
 }
 
 fn said(error: FtpError) -> String {
@@ -48,19 +48,35 @@ fn item_of(line: &str, facts: bool) -> Option<Item> {
     Some(Item { name: super::local_name(&name), folder: found.is_directory(), size, modified, version: format!("{size}-{modified}"), ..Item::default() })
 }
 
+/// One TLS setup for every connection, so each data connection takes up the control
+/// connection's session again, as FileZilla Server and vsftpd ask.
+fn tls() -> Result<Arc<rustls::ClientConfig>, String> {
+    static CONFIG: OnceLock<Result<Arc<rustls::ClientConfig>, String>> = OnceLock::new();
+    CONFIG
+        .get_or_init(|| {
+            let mut roots = rustls::RootCertStore::empty();
+            for certificate in rustls_native_certs::load_native_certs().certs {
+                let _ = roots.add(certificate);
+            }
+            let provider = Arc::new(rustls::crypto::ring::default_provider());
+            let config = rustls::ClientConfig::builder_with_provider(provider).with_safe_default_protocol_versions().map_err(|error| error.to_string())?;
+            Ok(Arc::new(config.with_root_certificates(roots).with_no_client_auth()))
+        })
+        .clone()
+}
+
 impl Ftp {
     pub fn new(server: &Server, password: &str) -> Self {
         Self { server: server.clone(), password: password.to_string(), open: Mutex::new(None) }
     }
 
-    fn connect(&self) -> Result<NativeTlsFtpStream, String> {
+    fn connect(&self) -> Result<FtpStream, String> {
         let host = self.server.host.trim().trim_start_matches("ftp://").trim_start_matches("ftps://").trim_end_matches('/');
         let port = if self.server.port == 0 { 21 } else { self.server.port };
         let address = (host, port).to_socket_addrs().map_err(|_| format!("{host} can't be found"))?.next().ok_or_else(|| format!("{host} can't be found"))?;
-        let mut stream = NativeTlsFtpStream::connect_timeout(address, WAIT).map_err(said)?;
+        let mut stream = FtpStream::connect_timeout(address, WAIT).map_err(said)?;
         if self.server.secure {
-            let tls = native_tls::TlsConnector::new().map_err(|error| error.to_string())?;
-            stream = stream.into_secure(NativeTlsConnector::from(tls), host).map_err(said)?;
+            stream = stream.into_secure(RustlsConnector::from(tls()?), host).map_err(said)?;
         }
         let user = if self.server.user.is_empty() { "anonymous" } else { self.server.user.as_str() };
         stream.login(user, &self.password).map_err(said)?;
@@ -70,7 +86,7 @@ impl Ftp {
     }
 
     /// Runs `work` on the connection, made again once when the one kept has dropped.
-    fn with<T>(&self, work: impl Fn(&mut NativeTlsFtpStream) -> Result<T, FtpError>) -> Result<T, String> {
+    fn with<T>(&self, work: impl Fn(&mut FtpStream) -> Result<T, FtpError>) -> Result<T, String> {
         let mut open = lock(&self.open);
         if let Some(stream) = open.as_mut() {
             match work(stream) {
@@ -97,7 +113,7 @@ impl Ftp {
         }
     }
 
-    fn rows(stream: &mut NativeTlsFtpStream, path: &str) -> Result<Vec<Item>, FtpError> {
+    fn rows(stream: &mut FtpStream, path: &str) -> Result<Vec<Item>, FtpError> {
         match stream.mlsd(Some(path)) {
             Ok(lines) => Ok(lines.iter().filter_map(|line| item_of(line, true)).collect()),
             Err(FtpError::UnexpectedResponse(response)) if response.status.code() / 100 == 5 => {
@@ -108,7 +124,7 @@ impl Ftp {
     }
 
     /// Deletes a folder with all it holds, as RMD takes only an empty one.
-    fn remove_tree(stream: &mut NativeTlsFtpStream, path: &str) -> Result<(), FtpError> {
+    fn remove_tree(stream: &mut FtpStream, path: &str) -> Result<(), FtpError> {
         for item in Self::rows(stream, path)? {
             let child = format!("{path}/{}", item.name);
             if item.folder { Self::remove_tree(stream, &child)? } else { stream.rm(&child)? }

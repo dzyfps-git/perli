@@ -16,6 +16,7 @@ mod phone;
 mod webdav;
 pub use phone::{import_plan, mark_imported, Batch};
 pub mod s3;
+mod sftp;
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
@@ -47,6 +48,7 @@ pub enum Kind {
     WebDav,
     /// FTP, or FTPS when the server says `secure`.
     Ftp,
+    Sftp,
 }
 
 /// Where a server is and who signs in to it.
@@ -380,6 +382,7 @@ fn server_service(kind: Kind, server: &Server, secret: &str) -> Result<Arc<dyn S
     match kind {
         Kind::WebDav => Ok(Arc::new(webdav::WebDav::new(server, secret)?)),
         Kind::Ftp => Ok(Arc::new(ftp::Ftp::new(server, secret))),
+        Kind::Sftp => Ok(Arc::new(sftp::Sftp::new(server, secret))),
         _ => Err("That isn't a server".into()),
     }
 }
@@ -391,14 +394,23 @@ fn server_account(server: &Server) -> String {
 }
 
 /// Looks at a server once, as the Add sheet's Test does, so a wrong address or password shows
-/// before it is added.
-pub fn test_server(kind: Kind, server: &Server, secret: &str) -> Result<(), String> {
-    server_service(kind, server, secret)?.list("").map(drop)
+/// before it is added. Gives the SSH host key it showed, `""` for other servers.
+pub fn test_server(kind: Kind, server: &Server, secret: &str) -> Result<String, String> {
+    if kind == Kind::Sftp {
+        let sftp = sftp::Sftp::new(server, secret);
+        sftp.list("")?;
+        return Ok(sftp.host_key().unwrap_or_default());
+    }
+    server_service(kind, server, secret)?.list("").map(|_| String::new())
 }
 
-/// Adds a server once a look at it works.
-pub fn add_server(kind: Kind, server: Server, secret: &str, name: &str) -> Result<Place, String> {
-    test_server(kind, &server, secret)?;
+/// Adds a server once a look at it works. An SFTP server's host key is taken now, unless the
+/// Test already showed the one to take.
+pub fn add_server(kind: Kind, mut server: Server, secret: &str, name: &str) -> Result<Place, String> {
+    let key = test_server(kind, &server, secret)?;
+    if server.host_key.is_empty() {
+        server.host_key = key;
+    }
     let account = server_account(&server);
     add_place(kind, name, account, None, Some(server), secret)
 }
@@ -411,7 +423,7 @@ pub fn sign_in(kind: Kind) -> Result<Place, String> {
         Kind::Google => (gdrive::Google::sign_in()?, "Google Drive"),
         Kind::S3 => return Err("S3 storage opens with a key, not a sign-in".into()),
         Kind::Phone => return Err("A phone shows here while it is plugged in".into()),
-        Kind::WebDav | Kind::Ftp => return Err("A server opens with a password, not a sign-in".into()),
+        Kind::WebDav | Kind::Ftp | Kind::Sftp => return Err("A server opens with a password, not a sign-in".into()),
     };
     add_place(kind, name, account, None, None, &refresh)
 }
@@ -473,7 +485,7 @@ fn service(place: &Place) -> Result<Arc<dyn Service>, String> {
         Kind::Dropbox => Arc::new(dropbox::Dropbox::new(&place.id, &secret)?),
         Kind::Google => Arc::new(gdrive::Google::new(&place.id, &secret, place.pdf)?),
         Kind::Phone => unreachable!("a phone is made above"),
-        Kind::WebDav | Kind::Ftp => server_service(place.kind, place.server.as_ref().ok_or("This place lost its settings")?, &secret)?,
+        Kind::WebDav | Kind::Ftp | Kind::Sftp => server_service(place.kind, place.server.as_ref().ok_or("This place lost its settings")?, &secret)?,
     };
     lock(services()).insert(place.id.clone(), made.clone());
     Ok(made)
