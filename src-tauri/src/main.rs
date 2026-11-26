@@ -1430,12 +1430,6 @@ async fn quick_access_pins() -> Result<Vec<String>, String> {
     off_main(places::quick_access_pins).await
 }
 
-/// Shows a phone's files in Explorer.
-#[tauri::command]
-async fn open_device(id: String) -> Result<(), String> {
-    async_runtime::spawn_blocking(move || places::open_device(&id)).await.map_err(|error| error.to_string())?
-}
-
 /// Asks for the key of a drive BitLocker keeps locked, in Windows' own prompt.
 #[tauri::command]
 fn unlock_drive(path: String) -> Result<(), String> {
@@ -1800,6 +1794,17 @@ fn reorder_places(ids: Vec<String>) -> Result<(), String> {
 #[tauri::command]
 fn set_cloud_pdf(id: String, pdf: bool) -> Result<(), String> {
     remote::set_pdf(&id, pdf)
+}
+
+/// A phone's new photos and videos, a batch for each day, each day's folder made in `into`.
+#[tauri::command]
+async fn phone_import_plan(path: PathBuf, into: PathBuf) -> Result<Vec<remote::Batch>, String> {
+    blocking(move || remote::import_plan(&path, &into)).await
+}
+
+#[tauri::command]
+async fn phone_mark_imported(paths: Vec<PathBuf>) -> Result<(), String> {
+    blocking(move || remote::mark_imported(&paths)).await
 }
 
 #[tauri::command]
@@ -3245,6 +3250,8 @@ fn main() {
             reorder_places,
             set_cloud_pdf,
             cloud_about,
+            phone_import_plan,
+            phone_mark_imported,
             share_link,
             cloud_versions,
             bring_back,
@@ -3313,7 +3320,6 @@ fn main() {
             eject_drive,
             mount_image,
             quick_access_pins,
-            open_device,
             unlock_drive,
             write_settings_file,
             read_settings_file,

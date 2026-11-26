@@ -30,6 +30,9 @@ import {
   openWindow,
   mountImage,
   quickAccessPins,
+  phoneImportPlan,
+  phoneMarkImported,
+  runJob,
   forgetSession,
   reopenWindow,
   restoreWindows,
@@ -892,6 +895,7 @@ export function App() {
             { label: "Sync this folder…", action: () => newSync(path) },
           ]
         : []),
+      ...(onPhone(path) ? [{ label: "Import new photos and videos", divider: true, action: () => quietly(importPhotos(path)) }] : []),
       ...(place && isPlaceRoot(path)
         ? [
             {
@@ -1606,6 +1610,31 @@ export function App() {
     const fresh = (await quickAccessPins()).filter((path) => !holds(pinned(), path));
     setPinned([...pinned(), ...fresh]);
     jobs.notify(fresh.length ? `Pinned ${fresh.length} folder${fresh.length === 1 ? "" : "s"} from Quick access` : "Nothing new to pin", fresh.length ? fresh.map((path) => baseName(path)).join(", ") : "Every Quick access folder is pinned already.");
+  }
+
+  /** Whether `path` is on a phone plugged in now. */
+  const onPhone = (path: string) => !!places()?.devices.some((device) => samePath(device.path, path) || isInside(path, device.path));
+
+  /** Copies the phone's photos and videos that no import brought in before into Pictures, a
+   *  folder for each day they were taken. Only those that came in are noted, so a stopped
+   *  import brings the rest next time. */
+  async function importPhotos(path: string) {
+    const pictures = places()?.folders.find((folder) => folder.kind === "pictures")?.path;
+    if (!pictures) return jobs.notify("No Pictures folder", "Windows names no Pictures folder to bring photos into.", true);
+    const batches = await phoneImportPlan(path, pictures);
+    if (!batches.length) return jobs.notify("No new photos", "Every photo and video here came in before.");
+    let count = 0;
+    for (const batch of batches) {
+      const end = await runJob({ kind: "copyPaths", paths: batch.paths, folder: batch.folder });
+      if (!end) continue;
+      const failed = new Set(end.failed.map((retry) => retry.source.toLowerCase()));
+      const made = new Set(end.created.map((made) => baseName(made).toLowerCase()));
+      const came = batch.paths.filter((one) => (end.cancelled ? made.has(baseName(one).toLowerCase()) : !failed.has(one.toLowerCase())));
+      await phoneMarkImported(came);
+      count += came.length;
+      if (end.cancelled) break;
+    }
+    jobs.notify(`Brought in ${count} ${count === 1 ? "photo or video" : "photos and videos"}`, `Into ${baseName(pictures)}, a folder for each day.`);
   }
 
   /** Mounts a disk image and opens the drive it becomes. */

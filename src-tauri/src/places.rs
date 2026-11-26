@@ -74,8 +74,10 @@ pub struct Drive {
 #[derive(Serialize)]
 pub struct Device {
     name: String,
-    /// What Windows calls it, which is also where Explorer finds it.
+    /// What Windows calls it.
     id: String,
+    /// Where Perli shows its files.
+    path: String,
 }
 
 /// A folder a sync app keeps, such as OneDrive.
@@ -138,9 +140,12 @@ pub fn read() -> Result<Places> {
         CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE).ok()?;
         let drives = read_drives();
         // A computer with no phone plugged in, or no service for them, just has none to show.
-        let devices = read_devices().unwrap_or_default();
+        let found = read_devices().unwrap_or_default();
         CoUninitialize();
         let clouds = read_clouds(NAMESPACE, CLASSES);
+        let pairs: Vec<(String, String)> = found.into_iter().map(|device| (device.id, device.name)).collect();
+        let saved = crate::remote::places();
+        let devices = crate::remote::phone_names(&pairs, &saved).into_iter().map(|(id, name)| Device { path: format!(r"{}\{name}", crate::remote::ROOT), name, id }).collect();
         Ok(Places { folders, drives, clouds, devices, linux: read_distros(LXSS), libraries: libraries() })
     }
 }
@@ -223,10 +228,14 @@ fn bus_of(drive: &str) -> Option<STORAGE_BUS_TYPE> {
     asked.is_ok().then_some(device.BusType)
 }
 
-/// Windows' own folder of drives and devices, which is where a phone's files are found.
-const THIS_PC: &str = "::{20D04FE0-3AEA-1069-A2D8-08002B30309D}";
 /// How Windows names a drive it also lists as a device. Those have a letter, and are drives here.
 const DRIVE_AS_DEVICE: &str = "wpdbusenum";
+
+/// Phones and the like plugged in now, as (id, name).
+pub fn phones() -> Vec<(String, String)> {
+    let _com = crate::ops::Com::enter();
+    unsafe { read_devices() }.unwrap_or_default().into_iter().map(|device| (device.id, device.name)).collect()
+}
 
 /// Phones and the like. COM must be set up on this thread.
 unsafe fn read_devices() -> Result<Vec<Device>> {
@@ -250,28 +259,10 @@ unsafe fn read_devices() -> Result<Vec<Device>> {
         CoTaskMemFree(Some(id.0.cast()));
         if named && !text.to_lowercase().contains(DRIVE_AS_DEVICE) {
             let end = name.iter().position(|&unit| unit == 0).unwrap_or(name.len());
-            devices.push(Device { name: String::from_utf16_lossy(&name[..end]), id: text });
+            devices.push(Device { name: String::from_utf16_lossy(&name[..end]), id: text, path: String::new() });
         }
     }
     Ok(devices)
-}
-
-/// Shows a device's files in Explorer, which is the one app that can browse them. Only a device
-/// that is plugged in now opens, so nothing else can be started through here.
-pub fn open_device(id: &str) -> std::result::Result<(), String> {
-    let known = read()
-        .map_err(|error| error.message())?
-        .devices
-        .iter()
-        .any(|device| device.id == id);
-    if !known {
-        return Err("This device is no longer connected".to_string());
-    }
-    Command::new("explorer.exe")
-        .arg(format!(r"{THIS_PC}\{id}"))
-        .spawn()
-        .map(drop)
-        .map_err(|error| error.to_string())
 }
 
 /// Starts Windows' own BitLocker prompt for a locked drive, as Explorer does on a double click.
@@ -593,7 +584,6 @@ mod tests {
         assert!(space.total > 0 && space.free <= space.total);
         assert!(!drive.network);
         assert!(!drive.removable, "the system drive can't be ejected");
-        assert!(open_device("no such device").is_err());
     }
 
     #[test]

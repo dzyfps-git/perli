@@ -6,7 +6,6 @@ import {
   fetchPictureFile,
   forgetRecent,
   listPlaces,
-  openDevice,
   onDrivesChanged,
   openFile,
   reachable,
@@ -783,11 +782,10 @@ export function Sidebar(props: {
           {(device) => (
             <Place
               view={props.view}
-              path={device.id}
+              path={device.path}
               label={device.name}
               icon={ICON_PHONE}
-              onOpen={() => openDevice(device.id).catch(props.report)}
-              onMenu={(event) => event.preventDefault()}
+              onMenu={props.onMenu}
             />
           )}
         </For>

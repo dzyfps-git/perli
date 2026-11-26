@@ -247,7 +247,9 @@ mod tests {
 
         let (data, extra, crc, time) = locked(SimpleFileOptions::default().with_deprecated_encryption(b"pw").unwrap(), long);
         assert_eq!(read(&data, &extra, b"pw", crc, time).unwrap(), (long.to_vec(), true));
-        assert!(matches!(read(&data, &extra, b"no", crc, time), Err(ZipError::InvalidPassword)));
+        // The old scheme checks a password by one byte, so one wrong one in 256 gets past it to
+        // fail on the CRC instead.
+        assert!(read(&data, &extra, b"no", crc, time).is_err());
     }
 
     #[test]

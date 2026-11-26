@@ -23,6 +23,7 @@ export const KIND_LABELS: Record<CloudKind, string> = {
   oneDrive: "OneDrive",
   dropbox: "Dropbox",
   google: "Google Drive",
+  phone: "Phone",
 };
 
 export interface S3Preset {
