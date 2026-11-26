@@ -29,6 +29,7 @@ import {
   setTagPaths,
   openWindow,
   mountImage,
+  quickAccessPins,
   forgetSession,
   reopenWindow,
   restoreWindows,
@@ -162,7 +163,7 @@ import {
 import { SelectPattern } from "./features/filelist/SelectPattern";
 import { COPIES_QUERY, FLAT_QUERY, type FolderView, type RowAt } from "./features/navigation/folderView";
 import { indexOptions } from "./features/settings/indexPrefs";
-import { BIN_PATH, THIS_PC_PATH, isBin, isDriveRoot, isArchiveName, isInside, join, parentOf, baseName, relativeTo, samePath, type Crumb } from "./features/navigation/path";
+import { BIN_PATH, THIS_PC_PATH, isBin, isLibrary, isDriveRoot, isArchiveName, isInside, join, parentOf, baseName, relativeTo, samePath, type Crumb } from "./features/navigation/path";
 import { Palette, type Command } from "./features/palette/Palette";
 import { wordsFor, type Verb } from "./features/palette/words";
 import { PaneDivider } from "./features/tabs/PaneDivider";
@@ -232,6 +233,7 @@ import {
   setBookmarksCompact,
   bookmarksCompact,
   setLook,
+  setPinned,
   setSidebarOpen,
   sidebarOpen,
   toggleBookmark,
@@ -585,7 +587,7 @@ export function App() {
   const refreshPlaces = () => listPlaces().then(setPlaces).catch(console.error);
   /** The picker offers the folders on show first. The Recycle Bin and archives are no place to save. */
   const pickerPanes = (): PickerPanes => {
-    const real = (view: FolderView | undefined) => (view && !view.isBin() && !view.isZip() ? view.folder()?.path : undefined);
+    const real = (view: FolderView | undefined) => (view && !view.isBin() && !view.isZip() && !isLibrary(view.folder()?.path) ? view.folder()?.path : undefined);
     const here = tabs.activeView();
     return { here: real(here), there: real(tabs.active().panes().find((other) => other !== here)), home: homePath };
   };
@@ -1599,6 +1601,13 @@ export function App() {
   const WRITE_WAIT_MS = 60_000;
   const writesIn = (view: FolderView) => writing?.view === view.id && Date.now() < writing.until;
 
+  /** Pins the folders pinned in File Explorer's Quick access that Perli hasn't pinned yet. */
+  async function importQuickAccess() {
+    const fresh = (await quickAccessPins()).filter((path) => !holds(pinned(), path));
+    setPinned([...pinned(), ...fresh]);
+    jobs.notify(fresh.length ? `Pinned ${fresh.length} folder${fresh.length === 1 ? "" : "s"} from Quick access` : "Nothing new to pin", fresh.length ? fresh.map((path) => baseName(path)).join(", ") : "Every Quick access folder is pinned already.");
+  }
+
   /** Mounts a disk image and opens the drive it becomes. */
   async function mountAndOpen(view: FolderView, path: string) {
     const drive = await mountImage(path);
@@ -1643,6 +1652,19 @@ export function App() {
           { label: "Filter…", action: () => setFiltering(view) },
           ...undo,
         ]
+      : isLibrary(view.folder()?.path)
+      ? [
+          // New files go into one of its folders, which open from here.
+          ...(places()?.libraries.find((library) => samePath(library.path, view.folder()?.path ?? ""))?.locations ?? []).map((location, at) => ({
+            label: `Open ${baseName(location)}${at === 0 ? " (new files go here)" : ""}`,
+            action: () => void view.open(location),
+          })),
+          { label: "Search here", divider: true, action: () => view.askSearch() },
+          { label: "Select by pattern…", action: () => setSelectingPattern(view) },
+          { label: "Invert selection", action: () => invertSelection(view) },
+          { label: "Filter…", action: () => setFiltering(view) },
+          ...undo,
+        ]
       : view.isBin()
       ? [
           {
@@ -1669,7 +1691,7 @@ export function App() {
           { label: "Time river", action: () => setRiverOn(view.folder()?.path) },
           { label: "Twins", action: () => void openTwins(view) },
         ];
-    const shellItems = view.isBin() || view.isZip() || isPerliCloud(view.folder()?.path ?? "") ? [] : shell.backgroundItems(view, { x, y });
+    const shellItems = view.isBin() || view.isZip() || isLibrary(view.folder()?.path) || isPerliCloud(view.folder()?.path ?? "") ? [] : shell.backgroundItems(view, { x, y });
     setMenu({ x, y, items: [...fileItems, ...viewItems(view), ...shellItems] });
   }
 
@@ -2159,6 +2181,7 @@ export function App() {
     smallerTiles: () => resizeTiles(here(), -TILE_STEP),
     hidden: toggleHidden,
     systemFiles: toggleSystem,
+    importQuickAccess: () => quietly(importQuickAccess()),
     filter: () => here().toggleChips(),
     filterMore: () => setFiltering(here()),
     selectPattern: () => setSelectingPattern(here()),

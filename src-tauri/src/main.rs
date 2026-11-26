@@ -1424,6 +1424,12 @@ async fn eject_drive(path: PathBuf, app: AppHandle) -> Result<eject::Ejected, St
     }
 }
 
+/// The folders pinned to File Explorer's Quick access, for Perli's pins to take in.
+#[tauri::command]
+async fn quick_access_pins() -> Result<Vec<String>, String> {
+    off_main(places::quick_access_pins).await
+}
+
 /// Shows a phone's files in Explorer.
 #[tauri::command]
 async fn open_device(id: String) -> Result<(), String> {
@@ -3306,6 +3312,7 @@ fn main() {
             open_paths_with_exe,
             eject_drive,
             mount_image,
+            quick_access_pins,
             open_device,
             unlock_drive,
             write_settings_file,

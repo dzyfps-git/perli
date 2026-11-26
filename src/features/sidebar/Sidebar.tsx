@@ -71,7 +71,8 @@ const ICON_CLOUD = "";
 const ICON_LOCK = "\uE72E";
 const ICON_ADD = "\uE710";
 const ICON_SYNC = "\uE895";
-const ICON_LINUX = "\uE756";
+const ICON_LIBRARY = "";
+const ICON_LINUX ="\uE756";
 const ICON_RUNNING = "\uE768";
 
 const FULL_SHARE = 0.9;
@@ -711,6 +712,22 @@ export function Sidebar(props: {
                 reach={reach()[server] ?? null}
                 about={reachText(reach()[server])}
                 onMenu={(event) => props.onServerMenu(event, server)}
+              />
+            )}
+          </For>
+        </Section>
+      </Show>
+      <Show when={places()?.libraries.length}>
+        <Section id="libraries" label="Libraries">
+          <For each={places()?.libraries}>
+            {(library) => (
+              <Place
+                view={props.view}
+                path={library.path}
+                label={library.name}
+                icon={ICON_LIBRARY}
+                about={`a library of ${library.locations.length} folder${library.locations.length === 1 ? "" : "s"}`}
+                onMenu={props.onMenu}
               />
             )}
           </For>

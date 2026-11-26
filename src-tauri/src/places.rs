@@ -6,7 +6,7 @@ use std::process::Command;
 use std::ptr;
 
 use serde::Serialize;
-use windows::core::{Owned, Result, GUID, HSTRING, PCWSTR, PWSTR};
+use windows::core::{Interface, Owned, Result, GUID, HSTRING, PCWSTR, PWSTR};
 use windows::Win32::Devices::PortableDevices::{IPortableDeviceManager, PortableDeviceManager};
 use windows::Win32::Storage::FileSystem::{
     BusTypeFileBackedVirtual, BusTypeUsb, CreateFileW, STORAGE_BUS_TYPE, GetDiskFreeSpaceExW, GetDriveTypeW, GetLogicalDrives, FILE_FLAGS_AND_ATTRIBUTES,
@@ -103,6 +103,7 @@ pub struct Places {
     clouds: Vec<Cloud>,
     devices: Vec<Device>,
     linux: Vec<Distro>,
+    libraries: Vec<Library>,
 }
 
 #[derive(Serialize)]
@@ -140,7 +141,7 @@ pub fn read() -> Result<Places> {
         let devices = read_devices().unwrap_or_default();
         CoUninitialize();
         let clouds = read_clouds(NAMESPACE, CLASSES);
-        Ok(Places { folders, drives, clouds, devices, linux: read_distros(LXSS) })
+        Ok(Places { folders, drives, clouds, devices, linux: read_distros(LXSS), libraries: libraries() })
     }
 }
 
@@ -367,6 +368,127 @@ pub fn is_disk_image(path: &Path) -> bool {
     path.extension().is_some_and(|extension| ["iso", "img", "vhd", "vhdx"].iter().any(|kind| extension.eq_ignore_ascii_case(kind)))
 }
 
+/// What every Windows library opens as in Perli, followed by its name.
+pub const LIBRARY_ROOT: &str = r"shell:Libraries\";
+
+/// A Windows library: one name over several folders, such as Documents.
+#[derive(Debug, PartialEq, Serialize)]
+pub struct Library {
+    name: String,
+    path: String,
+    /// Its folders, the one new files go to first.
+    locations: Vec<String>,
+}
+
+/// Where Windows keeps the user's libraries.
+fn libraries_folder() -> Option<std::path::PathBuf> {
+    Some(std::path::PathBuf::from(std::env::var_os("APPDATA")?).join(r"Microsoft\Windows\Libraries"))
+}
+
+/// The user's libraries that have a folder, in name order.
+pub fn libraries() -> Vec<Library> {
+    let Some(folder) = libraries_folder() else { return Vec::new() };
+    let mut found: Vec<Library> = std::fs::read_dir(folder)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if !path.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("library-ms")) {
+                return None;
+            }
+            let name = path.file_stem()?.to_string_lossy().into_owned();
+            let locations = library_locations(&std::fs::read_to_string(&path).ok()?);
+            (!locations.is_empty()).then(|| Library { path: format!("{LIBRARY_ROOT}{name}"), name, locations })
+        })
+        .collect();
+    found.sort_by_key(|library| library.name.to_lowercase());
+    found
+}
+
+/// The folders of the library `path` names, such as `shell:Libraries\Documents`.
+pub fn library_at(path: &str) -> Option<Vec<String>> {
+    let name = path.get(..LIBRARY_ROOT.len()).filter(|start| start.eq_ignore_ascii_case(LIBRARY_ROOT)).map(|_| &path[LIBRARY_ROOT.len()..])?;
+    let file = libraries_folder()?.join(format!("{name}.library-ms"));
+    Some(library_locations(&std::fs::read_to_string(file).ok()?))
+}
+
+/// The folders a `.library-ms` file lists, the default save location first. A folder named by a
+/// known folder's id is looked up; one that no longer exists is left out.
+fn library_locations(xml: &str) -> Vec<String> {
+    let mut reader = quick_xml::Reader::from_str(xml);
+    let (mut locations, mut is_default) = (Vec::<(bool, String)>::new(), false);
+    let mut text = String::new();
+    loop {
+        match reader.read_event() {
+            Ok(quick_xml::events::Event::Start(start)) => match start.local_name().as_ref() {
+                "searchConnectorDescription" => is_default = false,
+                "url" => text.clear(),
+                "isDefaultSaveLocation" => text.clear(),
+                _ => {}
+            },
+            Ok(quick_xml::events::Event::Text(part)) => text.push_str(&part.xml10_content()),
+            Ok(quick_xml::events::Event::End(end)) => match end.local_name().as_ref() {
+                "isDefaultSaveLocation" => is_default = text.trim() == "true",
+                "url" => {
+                    let url = text.trim();
+                    let folder = match url.strip_prefix("knownfolder:") {
+                        Some(id) => GUID::try_from(id.trim_matches(['{', '}'])).ok().and_then(|id| known_folder(&id)),
+                        None => Some(url.to_string()),
+                    };
+                    locations.extend(folder.filter(|folder| Path::new(folder).is_dir()).map(|folder| (false, folder)));
+                }
+                "searchConnectorDescription" => {
+                    if let Some(last) = locations.last_mut().filter(|_| is_default) {
+                        last.0 = true;
+                    }
+                }
+                _ => {}
+            },
+            Ok(quick_xml::events::Event::Eof) | Err(_) => break,
+            _ => {}
+        }
+    }
+    locations.sort_by_key(|(default, _)| !default);
+    locations.into_iter().map(|(_, folder)| folder).collect()
+}
+
+/// The folders pinned to File Explorer's Quick access, for Perli's own pins.
+pub fn quick_access_pins() -> Result<Vec<String>> {
+    use windows::Win32::UI::Shell::{BHID_EnumItems, IEnumShellItems, IShellItem, IShellItem2, SHCreateItemFromParsingName, SIGDN_FILESYSPATH};
+    use windows::Win32::UI::Shell::PropertiesSystem::PSGetPropertyKeyFromName;
+    unsafe {
+        CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE).ok()?;
+        let found = (|| -> Result<Vec<String>> {
+            let home: IShellItem = SHCreateItemFromParsingName(&HSTRING::from(QUICK_ACCESS), None)?;
+            let items: IEnumShellItems = home.BindToHandler(None, &BHID_EnumItems)?;
+            let mut pinned_key = Default::default();
+            PSGetPropertyKeyFromName(&HSTRING::from("System.Home.IsPinned"), &raw mut pinned_key)?;
+            let mut pins = Vec::new();
+            loop {
+                let mut item = [None];
+                if items.Next(&mut item, None).is_err() {
+                    break;
+                }
+                let Some(item) = item[0].take() else { break };
+                let pinned = item.cast::<IShellItem2>().and_then(|item| item.GetBool(&pinned_key)).is_ok_and(|pinned| pinned.as_bool());
+                let Ok(path) = item.GetDisplayName(SIGDN_FILESYSPATH) else { continue };
+                let text = path.to_string().unwrap_or_default();
+                CoTaskMemFree(Some(path.0.cast()));
+                if pinned && Path::new(&text).is_dir() {
+                    pins.push(text);
+                }
+            }
+            Ok(pins)
+        })();
+        CoUninitialize();
+        found
+    }
+}
+
+/// File Explorer's Quick access, which lists pinned and frequent folders.
+const QUICK_ACCESS: &str = "shell:::{679f85cb-0220-4080-b29b-5540cc05aab6}";
+
 /// Drives a file can be sent to, with the name Explorer shows and the path.
 pub fn removable_drives() -> Vec<(String, String)> {
     drive_paths()
@@ -398,6 +520,33 @@ pub fn display_name(path: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_library_lists_its_folders_the_save_location_first() {
+        let temp = std::env::temp_dir();
+        let missing = temp.join("perli no such library folder 51c");
+        let xml = format!(
+            r#"<?xml version="1.0"?><libraryDescription xmlns="http://schemas.microsoft.com/windows/2009/library"><searchConnectorDescriptionList>
+            <searchConnectorDescription><simpleLocation><url>{missing}</url></simpleLocation></searchConnectorDescription>
+            <searchConnectorDescription><simpleLocation><url>knownfolder:{{FDD39AD0-238F-46AF-ADB4-6C85480369C7}}</url></simpleLocation></searchConnectorDescription>
+            <searchConnectorDescription><isDefaultSaveLocation>true</isDefaultSaveLocation><simpleLocation><url>{temp}</url></simpleLocation></searchConnectorDescription>
+            </searchConnectorDescriptionList></libraryDescription>"#,
+            missing = missing.display(),
+            temp = temp.display(),
+        );
+        let found = library_locations(&xml);
+        assert_eq!(found.first().map(String::as_str), Some(temp.to_string_lossy().as_ref()), "the save location comes first");
+        assert_eq!(found.len(), 2, "the known folder is looked up, and the missing folder is left out");
+        assert_eq!(found[1], known_folder(&FOLDERID_Documents).unwrap());
+        assert_eq!(library_at(r"C:\Users"), None);
+    }
+
+    #[test]
+    #[ignore]
+    fn prints_this_pcs_libraries_and_quick_access_pins() {
+        println!("{:#?}", libraries());
+        println!("{:#?}", quick_access_pins());
+    }
 
     #[test]
     fn wsl_folders_turn_into_a_distro_and_a_linux_path() {

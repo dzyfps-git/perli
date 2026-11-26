@@ -670,6 +670,9 @@ impl Listing {
         if path == BIN_PATH {
             return Self::read_bin(order);
         }
+        if let Some(locations) = crate::places::library_at(path) {
+            return Self::read_library(path, &locations, order);
+        }
         let full = resolve(path)?;
         if let Some(rows) = remote::rows(Path::new(&full), true) {
             let rows = rows.map_err(|message| windows::core::Error::new(windows::Win32::Foundation::E_FAIL, message))?;
@@ -716,6 +719,19 @@ impl Listing {
             parents: Arc::new(parents),
             ..Self::default()
         };
+        Ok(listing.arrange(order))
+    }
+
+    /// A Windows library: what each of its folders holds, side by side, each row knowing which
+    /// folder it is in. A folder that can't be read is left out.
+    fn read_library(path: &str, locations: &[String], order: Order) -> Result<Self> {
+        let (mut entries, mut found_in) = (Vec::new(), Vec::new());
+        for location in locations {
+            let Ok(inside) = read_entries(location) else { continue };
+            found_in.resize(entries.len() + inside.len(), Arc::from(null_terminated(Path::new(location))));
+            entries.extend(inside);
+        }
+        let listing = Self { folder: path.into(), entries: Arc::new(entries), found_in: Arc::new(found_in), ..Self::default() };
         Ok(listing.arrange(order))
     }
 

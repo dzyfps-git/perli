@@ -8,6 +8,10 @@ export const BIN_PATH = "shell:RecycleBinFolder";
 
 export const isBin = (path: string | undefined) => path === BIN_PATH;
 
+/** A Windows library opens as this and its name: what each of its folders holds, side by side. */
+export const LIBRARY_ROOT = "shell:Libraries\\";
+export const isLibrary = (path: string | undefined) => !!path && path.toLowerCase().startsWith(LIBRARY_ROOT.toLowerCase());
+
 /** Stands for This PC, which opens as Perli's home page. */
 export const THIS_PC_PATH = "shell:MyComputerFolder";
 
@@ -42,6 +46,7 @@ export const isDriveRoot = (path: string) => /^[a-z]:\\$/i.test(path);
 /** Splits `C:\Users\me` into one crumb per folder, starting at the drive or the `\\server`. */
 export function toCrumbs(path: string): Crumb[] {
   if (isBin(path)) return [{ label: "Recycle Bin", path }];
+  if (isLibrary(path)) return [{ label: path.slice(LIBRARY_ROOT.length), path }];
   const parts = path.split("\\").filter(Boolean);
   const network = path.startsWith("\\\\");
   if (network) parts[0] = `\\\\${parts[0]}`;

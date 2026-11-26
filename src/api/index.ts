@@ -177,6 +177,8 @@ export interface Places {
   devices: { name: string; id: string }[];
   /** Folders a sync app keeps, such as OneDrive. */
   clouds: { name: string; path: string }[];
+  /** Windows libraries, each over its folders, the one new files go to first. */
+  libraries: { name: string; path: string; locations: string[] }[];
   /** WSL distros, whose files show as a share. */
   linux: { name: string; path: string; default: boolean; running: boolean }[];
 }
@@ -587,6 +589,8 @@ export type Ejected = { kind: "done" } | { kind: "busy"; reason: string };
 
 /** Ejects a card, a disc or a USB disk. A drive still in use says why, with no box from Windows. */
 export const ejectDrive = (path: string) => invoke<Ejected>("eject_drive", { path });
+/** The folders pinned to File Explorer's Quick access. */
+export const quickAccessPins = () => invoke<string[]>("quick_access_pins");
 /** Mounts an ISO, IMG, VHD or VHDX, and answers with its drive once Windows shows it. */
 export const mountImage = (path: string) => invoke<string | null>("mount_image", { path });
 
