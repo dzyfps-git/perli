@@ -1,4 +1,4 @@
-import type { CloudKind, CloudPlace, S3Setup } from "../../api";
+import type { CloudKind, CloudPlace, S3Setup, ServerSetup } from "../../api";
 
 /** Where Perli's own cloud places show, as a server shows its shares. */
 export const CLOUD_ROOT = "\\\\Perli Cloud";
@@ -24,6 +24,9 @@ export const KIND_LABELS: Record<CloudKind, string> = {
   dropbox: "Dropbox",
   google: "Google Drive",
   phone: "Phone",
+  webDav: "WebDAV",
+  ftp: "FTP",
+  sftp: "SFTP",
 };
 
 export interface S3Preset {
@@ -79,3 +82,45 @@ export function s3Missing(preset: S3Preset, fields: S3Fields, secret: string) {
   if (!fields.keyId.trim() || !secret) return "Type the access key and its secret";
   return undefined;
 }
+
+export type ServerProtocol = "sftp" | "ftp" | "ftps" | "webDav";
+
+export const SERVER_PROTOCOLS: { id: ServerProtocol; label: string; port: number; note: string }[] = [
+  { id: "sftp", label: "SFTP", port: 22, note: "Over SSH, as Linux servers and NAS boxes have" },
+  { id: "ftps", label: "FTPS", port: 21, note: "FTP over TLS" },
+  { id: "ftp", label: "FTP", port: 21, note: "Sent as plain text: for a home network or an old server" },
+  { id: "webDav", label: "WebDAV", port: 0, note: "Nextcloud, ownCloud, Synology or a NAS" },
+];
+
+export interface ServerFields {
+  host: string;
+  port: string;
+  user: string;
+  folder: string;
+  keyFile: string;
+}
+
+/** What still has to be typed before a server can be tried, or undefined when nothing does. */
+export function serverMissing(protocol: ServerProtocol, fields: ServerFields) {
+  if (!fields.host.trim()) return protocol === "webDav" ? "Type the address, such as https://cloud.example.com/remote.php/dav/files/me" : "Type the server's name or address";
+  const port = fields.port.trim();
+  if (port && !(/^\d+$/.test(port) && Number(port) > 0 && Number(port) < 65536)) return "A port is a number from 1 to 65535";
+  return undefined;
+}
+
+/** The kind and setup the server sheet's fields stand for. `hostKey` is the one a Test showed. */
+export function serverSetup(protocol: ServerProtocol, fields: ServerFields, hostKey = ""): { kind: CloudKind; server: ServerSetup } {
+  const server: ServerSetup = {
+    host: fields.host.trim(),
+    port: Number(fields.port.trim()) || 0,
+    user: fields.user.trim(),
+    folder: protocol === "webDav" ? "" : fields.folder.trim().replace(/\\/g, "/"),
+    secure: protocol === "ftps",
+    keyFile: protocol === "sftp" ? fields.keyFile.trim().replace(/^"|"$/g, "") : "",
+    hostKey: protocol === "sftp" ? hostKey : "",
+  };
+  return { kind: protocol === "ftps" ? "ftp" : protocol, server };
+}
+
+/** A name for a server place: its host, with no scheme or path. */
+export const serverName = (host: string) => host.trim().replace(/^[a-z]+:\/\//i, "").split(/[/:]/)[0] || "Server";

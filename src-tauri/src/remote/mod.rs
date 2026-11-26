@@ -5,6 +5,7 @@
 //! down into the cache.
 
 mod dropbox;
+mod ftp;
 mod gdrive;
 pub mod http;
 
@@ -12,8 +13,10 @@ pub mod http;
 pub const ON_THIS_PC: &str = "This works on files on this PC. Copy them here first.";
 mod onedrive;
 mod phone;
+mod webdav;
 pub use phone::{import_plan, mark_imported, Batch};
 pub mod s3;
+mod sftp;
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
@@ -42,6 +45,35 @@ pub enum Kind {
     Google,
     /// A phone, camera or player plugged in now, never saved.
     Phone,
+    WebDav,
+    /// FTP, or FTPS when the server says `secure`.
+    Ftp,
+    Sftp,
+}
+
+/// Where a server is and who signs in to it.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Server {
+    /// A host name, or for WebDAV the whole address.
+    pub host: String,
+    /// 0 for the protocol's own.
+    #[serde(default)]
+    pub port: u16,
+    #[serde(default)]
+    pub user: String,
+    /// The folder it opens at, `""` for the top.
+    #[serde(default)]
+    pub folder: String,
+    /// FTP over TLS.
+    #[serde(default)]
+    pub secure: bool,
+    /// An SSH key file to sign in with, the secret being its passphrase.
+    #[serde(default)]
+    pub key_file: String,
+    /// The SHA-256 of the SSH host key taken when the place was added, which it must show again.
+    #[serde(default)]
+    pub host_key: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -58,6 +90,8 @@ pub struct Place {
     /// Google's own Docs, Sheets and Slides come down as PDFs rather than Office files.
     #[serde(default)]
     pub pdf: bool,
+    #[serde(default)]
+    pub server: Option<Server>,
 }
 
 /// One file or folder of a place.
@@ -327,10 +361,10 @@ fn free_place_name(wanted: &str) -> String {
 }
 
 /// Adds a place, its secret kept by Windows. Gives it as saved.
-pub fn add_place(kind: Kind, name: &str, account: String, s3: Option<s3::Setup>, secret: &str) -> Result<Place, String> {
+pub fn add_place(kind: Kind, name: &str, account: String, s3: Option<s3::Setup>, server: Option<Server>, secret: &str) -> Result<Place, String> {
     let id = http::random_text(12);
     http::keep_secret(&id, secret)?;
-    let place = Place { id, name: free_place_name(name), kind, account, s3, pdf: false };
+    let place = Place { id, name: free_place_name(name), kind, account, s3, pdf: false, server };
     let mut all = places();
     all.push(place.clone());
     save_places(&all)?;
@@ -341,7 +375,44 @@ pub fn add_place(kind: Kind, name: &str, account: String, s3: Option<s3::Setup>,
 pub fn add_s3(setup: s3::Setup, secret: &str, name: &str) -> Result<Place, String> {
     s3::S3::new(setup.clone(), secret.to_string()).list("")?;
     let account = setup.bucket.clone();
-    add_place(Kind::S3, name, account, Some(setup), secret)
+    add_place(Kind::S3, name, account, Some(setup), None, secret)
+}
+
+fn server_service(kind: Kind, server: &Server, secret: &str) -> Result<Arc<dyn Service>, String> {
+    match kind {
+        Kind::WebDav => Ok(Arc::new(webdav::WebDav::new(server, secret)?)),
+        Kind::Ftp => Ok(Arc::new(ftp::Ftp::new(server, secret))),
+        Kind::Sftp => Ok(Arc::new(sftp::Sftp::new(server, secret))),
+        _ => Err("That isn't a server".into()),
+    }
+}
+
+/// Who a server place signs in as, shown under its name.
+fn server_account(server: &Server) -> String {
+    let host = server.host.split("://").last().unwrap_or(&server.host).trim_end_matches('/');
+    if server.user.is_empty() { host.to_string() } else { format!("{}@{host}", server.user) }
+}
+
+/// Looks at a server once, as the Add sheet's Test does, so a wrong address or password shows
+/// before it is added. Gives the SSH host key it showed, `""` for other servers.
+pub fn test_server(kind: Kind, server: &Server, secret: &str) -> Result<String, String> {
+    if kind == Kind::Sftp {
+        let sftp = sftp::Sftp::new(server, secret);
+        sftp.list("")?;
+        return Ok(sftp.host_key().unwrap_or_default());
+    }
+    server_service(kind, server, secret)?.list("").map(|_| String::new())
+}
+
+/// Adds a server once a look at it works. An SFTP server's host key is taken now, unless the
+/// Test already showed the one to take.
+pub fn add_server(kind: Kind, mut server: Server, secret: &str, name: &str) -> Result<Place, String> {
+    let key = test_server(kind, &server, secret)?;
+    if server.host_key.is_empty() {
+        server.host_key = key;
+    }
+    let account = server_account(&server);
+    add_place(kind, name, account, None, Some(server), secret)
 }
 
 /// Signs in to a service in the browser and adds the place it opens.
@@ -352,8 +423,9 @@ pub fn sign_in(kind: Kind) -> Result<Place, String> {
         Kind::Google => (gdrive::Google::sign_in()?, "Google Drive"),
         Kind::S3 => return Err("S3 storage opens with a key, not a sign-in".into()),
         Kind::Phone => return Err("A phone shows here while it is plugged in".into()),
+        Kind::WebDav | Kind::Ftp | Kind::Sftp => return Err("A server opens with a password, not a sign-in".into()),
     };
-    add_place(kind, name, account, None, &refresh)
+    add_place(kind, name, account, None, None, &refresh)
 }
 
 pub fn rename_place(id: &str, name: &str) -> Result<Place, String> {
@@ -413,6 +485,7 @@ fn service(place: &Place) -> Result<Arc<dyn Service>, String> {
         Kind::Dropbox => Arc::new(dropbox::Dropbox::new(&place.id, &secret)?),
         Kind::Google => Arc::new(gdrive::Google::new(&place.id, &secret, place.pdf)?),
         Kind::Phone => unreachable!("a phone is made above"),
+        Kind::WebDav | Kind::Ftp | Kind::Sftp => server_service(place.kind, place.server.as_ref().ok_or("This place lost its settings")?, &secret)?,
     };
     lock(services()).insert(place.id.clone(), made.clone());
     Ok(made)
@@ -464,11 +537,48 @@ fn edits_of(edits: &Edits, place: &str, folder: &str) -> u64 {
     }
 }
 
-/// A count that moves each time a job changes what the cloud folder at `path` shows, or the
-/// places when it is the cloud root. `None` outside the cloud.
+/// How long a watched folder goes before it is listed again to catch changes made elsewhere:
+/// on the web, by another app or on the phone itself. Each look costs the service a request.
+fn live_gap(kind: Kind) -> Duration {
+    match kind {
+        Kind::Phone => Duration::from_secs(10),
+        Kind::Sftp | Kind::Ftp | Kind::WebDav => Duration::from_secs(15),
+        Kind::S3 | Kind::OneDrive | Kind::Dropbox | Kind::Google => Duration::from_secs(30),
+    }
+}
+
+/// What each watched folder held when last listed for changes, as one number.
+static PRINTS: Mutex<BTreeMap<(String, String), (Instant, u64)>> = Mutex::new(BTreeMap::new());
+
+/// What the folder holds now, as one number, listed again once `live_gap` has gone by.
+/// The last known number while the place can't be asked.
+fn live_print(place: &Place, inner: &str) -> u64 {
+    let key = (place.id.clone(), inner.to_string());
+    let known = lock(&PRINTS).get(&key).map(|(read, print)| (read.elapsed(), *print));
+    if let Some((since, print)) = known {
+        if since < live_gap(place.kind) {
+            return print;
+        }
+    }
+    // The first look takes the listing the folder was just read with, at no extra request.
+    let fresh = service(place).ok().and_then(|service| {
+        let at = At { place: place.clone(), service, inner: inner.to_string() };
+        listed(&at, inner, known.is_some()).ok()
+    });
+    let mut known = lock(&PRINTS);
+    let print = match fresh {
+        Some(items) => hashed(&items.iter().map(|item| format!("{}|{}|{}|{}", item.name, item.size, item.modified, item.version)).collect::<Vec<_>>().join("/")),
+        None => known.get(&key).map_or(0, |(_, print)| *print),
+    };
+    known.insert(key, (Instant::now(), print));
+    print
+}
+
+/// A count that moves each time what the cloud folder at `path` shows changes, through a job
+/// here or anything else, or the places when it is the cloud root. `None` outside the cloud.
 pub fn edits(path: &Path) -> Option<u64> {
     match spot(path) {
-        Some(Ok((place, inner))) => Some(edits_of(&lock(&EDITS), &place.id, &inner)),
+        Some(Ok((place, inner))) => Some(edits_of(&lock(&EDITS), &place.id, &inner).wrapping_add(live_print(&place, &inner))),
         _ if is_remote(path) => Some(hashed(&places().iter().map(|place| place.name.as_str()).collect::<Vec<_>>().join("/"))),
         _ => None,
     }
@@ -877,10 +987,11 @@ mod tests {
             account: bucket.into(),
             s3: Some(s3::Setup { preset: String::new(), endpoint: endpoint.into(), region: String::new(), bucket: bucket.into(), path_style: false, key_id: String::new() }),
             pdf: false,
+            server: None,
         };
         assert!(same_store(&s3("a", "https://s3.example.com/", "photos"), &s3("b", "https://S3.example.com", "photos")));
         assert!(!same_store(&s3("a", "https://s3.example.com", "photos"), &s3("b", "https://s3.example.com", "films")));
-        let drive = |id: &str, account: &str| Place { id: id.into(), name: id.into(), kind: Kind::OneDrive, account: account.into(), s3: None, pdf: false };
+        let drive = |id: &str, account: &str| Place { id: id.into(), name: id.into(), kind: Kind::OneDrive, account: account.into(), s3: None, pdf: false, server: None };
         assert!(same_store(&drive("a", "me@example.com"), &drive("b", "Me@Example.com")));
         assert!(!same_store(&drive("a", "OneDrive"), &drive("b", "OneDrive")), "no address said is never the same");
         assert!(!same_store(&drive("a", "me@example.com"), &drive("b", "you@example.com")));

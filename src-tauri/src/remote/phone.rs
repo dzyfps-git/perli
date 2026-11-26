@@ -57,7 +57,7 @@ pub fn places(saved: &[Place]) -> Vec<Place> {
     let taken: Vec<&str> = saved.iter().map(|place| place.name.as_str()).collect();
     named(&devices, &taken)
         .into_iter()
-        .map(|(id, name)| Place { id, name, kind: Kind::Phone, account: "Phone".into(), s3: None, pdf: false })
+        .map(|(id, name)| Place { id, name, kind: Kind::Phone, account: "Phone".into(), s3: None, pdf: false, server: None })
         .collect()
 }
 

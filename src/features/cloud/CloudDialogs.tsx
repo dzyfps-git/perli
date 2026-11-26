@@ -1,7 +1,9 @@
 import { createResource, createSignal, For, onMount, Show } from "solid-js";
 import {
   addS3,
+  addServer,
   bringBack,
+  testServer,
   cancelSignIn,
   cloudVersions,
   filetimeToMs,
@@ -16,7 +18,19 @@ import { Switch } from "../../ui/Controls";
 import { isoText } from "../../ui/dates";
 import { formatSize } from "../../ui/format";
 import { openSheet } from "../../ui/sheet";
-import { KIND_LABELS, s3Missing, s3Setup, S3_PRESETS, type S3Fields } from "./cloud";
+import {
+  KIND_LABELS,
+  s3Missing,
+  s3Setup,
+  S3_PRESETS,
+  SERVER_PROTOCOLS,
+  serverMissing,
+  serverName,
+  serverSetup,
+  type S3Fields,
+  type ServerFields,
+  type ServerProtocol,
+} from "./cloud";
 import { cloudPlaceList, readCloudPlaces, setAddingPlace } from "./cloudState";
 import "../settings/settings.css";
 import "../fileops/fileops.css";
@@ -25,6 +39,8 @@ import "./cloud.css";
 
 const ICON_CLOUD = "";
 const ICON_STORAGE = "";
+const ICON_SERVER = "";
+const ICON_KEY = "";
 const SIGN_INS: { kind: CloudKind; note: string }[] = [
   { kind: "oneDrive", note: "Personal, work or school" },
   { kind: "dropbox", note: "Your own or your team's" },
@@ -36,7 +52,11 @@ const SIGN_INS: { kind: CloudKind; note: string }[] = [
  * for S3 storage. Keys are kept by Windows' Credential Manager, never in Perli's files.
  */
 export function AddPlace(props: { onAdded: (place: CloudPlace) => void }) {
-  const [step, setStep] = createSignal<"choose" | "waiting" | "s3">("choose");
+  const [step, setStep] = createSignal<"choose" | "waiting" | "s3" | "server">("choose");
+  const [protocol, setProtocol] = createSignal<ServerProtocol>("sftp");
+  const [server, setServer] = createSignal<ServerFields>({ host: "", port: "", user: "", folder: "", keyFile: "" });
+  /** What a Test found: the SSH host key the server showed, to take when it is added. */
+  const [tested, setTested] = createSignal<{ key: string; for: string }>();
   const [waitingFor, setWaitingFor] = createSignal<CloudKind>();
   const [failure, setFailure] = createSignal<string>();
   const [busy, setBusy] = createSignal(false);
@@ -93,6 +113,53 @@ export function AddPlace(props: { onAdded: (place: CloudPlace) => void }) {
     }
   }
 
+  const serverMissed = () => serverMissing(protocol(), server());
+  const serverField = (key: keyof ServerFields) => (event: { currentTarget: HTMLInputElement }) => {
+    setServer({ ...server(), [key]: event.currentTarget.value });
+    setTested(undefined);
+    setFailure(undefined);
+  };
+  /** Who the server is, so a key a Test showed is only taken for that same server. */
+  const serverId = () => `${protocol()}|${server().host.trim()}|${server().port.trim()}`;
+  const takenKey = () => (tested()?.for === serverId() ? tested()!.key : "");
+
+  async function tryServer() {
+    if (serverMissed() || busy()) return;
+    setBusy(true);
+    setFailure(undefined);
+    try {
+      const { kind, server: setup } = serverSetup(protocol(), server());
+      const key = await testServer(kind, setup, secret());
+      setTested({ key, for: serverId() });
+    } catch (reason) {
+      setTested(undefined);
+      setFailure(String(reason));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function addTheServer() {
+    if (serverMissed() || busy()) return;
+    setBusy(true);
+    setFailure(undefined);
+    try {
+      const { kind, server: setup } = serverSetup(protocol(), server(), takenKey());
+      added(await addServer(kind, setup, secret(), name().trim() || serverName(setup.host)));
+    } catch (reason) {
+      setFailure(String(reason));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const serverHint = () => {
+    if (tested()?.for === serverId()) return tested()!.key ? "It answered. Check the host key below, then Add." : "It answered, and its files list.";
+    if (serverMissed()) return serverMissed();
+    if (protocol() === "sftp" && !secret() && !server().keyFile.trim()) return "With no password or key file, the keys Windows' OpenSSH agent holds sign in.";
+    return "Perli looks at the server once before adding it.";
+  };
+
   onMount(() => {
     close = openSheet(dialog);
   });
@@ -106,7 +173,11 @@ export function AddPlace(props: { onAdded: (place: CloudPlace) => void }) {
         if (step() === "waiting") void cancelSignIn();
         setAddingPlace(false);
       }}
-      onKeyDown={(event) => event.key === "Enter" && step() === "s3" && (event.target as HTMLElement).tagName === "INPUT" && addBucket()}
+      onKeyDown={(event) => {
+        if (event.key !== "Enter" || (event.target as HTMLElement).tagName !== "INPUT") return;
+        if (step() === "s3") void addBucket();
+        if (step() === "server") void addTheServer();
+      }}
     >
       <h2>Add a cloud place</h2>
       <Show when={step() === "choose"}>
@@ -136,7 +207,105 @@ export function AddPlace(props: { onAdded: (place: CloudPlace) => void }) {
             <span class="cloud-kind-name">S3 storage</span>
             <span class="cloud-kind-note">Amazon, R2, B2, Wasabi, MinIO</span>
           </button>
+          <button
+            class="cloud-kind"
+            onClick={() => {
+              setFailure(undefined);
+              setStep("server");
+            }}
+          >
+            <span class="cloud-kind-icon" aria-hidden="true">
+              {ICON_SERVER}
+            </span>
+            <span class="cloud-kind-name">A server</span>
+            <span class="cloud-kind-note">SFTP, FTP, FTPS or WebDAV</span>
+          </button>
         </div>
+      </Show>
+      <Show when={step() === "server"}>
+        <div class="drive-fields">
+          <label class="rename-field">
+            Protocol
+            <select
+              value={protocol()}
+              onChange={(event) => {
+                setProtocol(event.currentTarget.value as ServerProtocol);
+                setTested(undefined);
+                setFailure(undefined);
+              }}
+            >
+              <For each={SERVER_PROTOCOLS}>{(one) => <option value={one.id}>{one.label}</option>}</For>
+            </select>
+          </label>
+          <p class="settings-note">{SERVER_PROTOCOLS.find((one) => one.id === protocol())!.note}</p>
+          <label class="rename-field">
+            Address
+            <input
+              spellcheck={false}
+              placeholder={protocol() === "webDav" ? "https://cloud.example.com/remote.php/dav/files/me" : "nas.local or 192.168.1.20"}
+              value={server().host}
+              onInput={serverField("host")}
+            />
+          </label>
+          <Show when={protocol() !== "webDav"}>
+            <label class="rename-field">
+              Port
+              <input
+                spellcheck={false}
+                inputmode="numeric"
+                placeholder={String(SERVER_PROTOCOLS.find((one) => one.id === protocol())!.port)}
+                value={server().port}
+                onInput={serverField("port")}
+              />
+            </label>
+          </Show>
+          <label class="rename-field">
+            User
+            <input spellcheck={false} autocomplete="off" placeholder={protocol() === "ftp" ? "anonymous" : ""} value={server().user} onInput={serverField("user")} />
+          </label>
+          <label class="rename-field">
+            {protocol() === "sftp" && server().keyFile.trim() ? "Key passphrase" : "Password"}
+            <input
+              type="password"
+              autocomplete="off"
+              value={secret()}
+              onInput={(event) => {
+                setSecret(event.currentTarget.value);
+                setTested(undefined);
+              }}
+            />
+          </label>
+          <Show when={protocol() === "sftp"}>
+            <label class="rename-field">
+              Key file
+              <input spellcheck={false} placeholder="C:\Users\you\.ssh\id_ed25519, or none" value={server().keyFile} onInput={serverField("keyFile")} />
+            </label>
+          </Show>
+          <Show when={protocol() !== "webDav"}>
+            <label class="rename-field">
+              Opens at
+              <input spellcheck={false} placeholder="The folder it signs in to" value={server().folder} onInput={serverField("folder")} />
+            </label>
+          </Show>
+          <label class="rename-field">
+            Name
+            <input spellcheck={false} placeholder={server().host.trim() ? serverName(server().host) : "As the server"} value={name()} onInput={(event) => setName(event.currentTarget.value)} />
+          </label>
+        </div>
+        <Show when={takenKey()}>
+          <div class="cloud-host-key" role="status">
+            <span class="cloud-kind-icon" aria-hidden="true">
+              {ICON_KEY}
+            </span>
+            <span>
+              <strong>Host key</strong>
+              <code>{takenKey()}</code>
+              <span class="settings-note">
+                Perli takes this key now and refuses the server if it ever shows another. If you can, check it matches the one the server's owner gives.
+              </span>
+            </span>
+          </div>
+        </Show>
       </Show>
       <Show when={step() === "waiting"}>
         <div class="cloud-waiting" role="status">
@@ -192,7 +361,8 @@ export function AddPlace(props: { onAdded: (place: CloudPlace) => void }) {
         </Show>
       </Show>
       <p class="drive-hint" classList={{ "properties-failure": !!failure() }} role="status">
-        {failure() ?? (step() === "s3" ? (missing() ?? "Perli looks at the bucket once before adding it.") : "")}
+        {failure() ??
+          (step() === "s3" ? (missing() ?? "Perli looks at the bucket once before adding it.") : step() === "server" ? serverHint() : "")}
       </p>
       <div class="confirm-buttons properties-buttons">
         <Show when={step() !== "choose"}>
@@ -214,6 +384,14 @@ export function AddPlace(props: { onAdded: (place: CloudPlace) => void }) {
         <Show when={step() === "s3"}>
           <button class="job-choice drive-confirm" disabled={!!missing() || busy()} onClick={addBucket}>
             {busy() ? "Looking…" : "Add"}
+          </button>
+        </Show>
+        <Show when={step() === "server"}>
+          <button class="job-choice" disabled={!!serverMissed() || busy()} onClick={tryServer}>
+            {busy() ? "Looking…" : "Test connection"}
+          </button>
+          <button class="job-choice drive-confirm" disabled={!!serverMissed() || busy()} onClick={addTheServer}>
+            Add
           </button>
         </Show>
       </div>
