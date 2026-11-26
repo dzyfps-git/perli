@@ -1386,6 +1386,25 @@ async fn open_file(path: String) -> Result<(), String> {
     off_main(move || shell::open(&path.to_string_lossy())).await
 }
 
+/// Mounts a disk image as a drive, and answers with the drive it got once Windows shows it, or
+/// none if it doesn't within a minute (a VHD waits on its admin prompt).
+#[tauri::command]
+async fn mount_image(path: PathBuf, app: AppHandle) -> Result<Option<String>, String> {
+    if !places::is_disk_image(&path) {
+        return Err("Only an ISO, IMG, VHD or VHDX file mounts".to_string());
+    }
+    let main = jobs::owner(&app);
+    let before: Vec<String> = places::drive_paths().collect();
+    off_main(move || menus::mount(path, main)).await?;
+    for _ in 0..240 {
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        if let Some(drive) = places::drive_paths().find(|drive| !before.contains(drive)) {
+            return Ok(Some(drive));
+        }
+    }
+    Ok(None)
+}
+
 /// Ejects a card, a disc or a USB disk. Only the top of a drive can be asked for.
 #[tauri::command]
 async fn eject_drive(path: PathBuf, app: AppHandle) -> Result<eject::Ejected, String> {
@@ -3286,6 +3305,7 @@ fn main() {
             open_paths_with,
             open_paths_with_exe,
             eject_drive,
+            mount_image,
             open_device,
             unlock_drive,
             write_settings_file,

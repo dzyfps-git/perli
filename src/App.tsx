@@ -28,6 +28,7 @@ import {
   fetchRows,
   setTagPaths,
   openWindow,
+  mountImage,
   forgetSession,
   reopenWindow,
   restoreWindows,
@@ -161,7 +162,7 @@ import {
 import { SelectPattern } from "./features/filelist/SelectPattern";
 import { COPIES_QUERY, FLAT_QUERY, type FolderView, type RowAt } from "./features/navigation/folderView";
 import { indexOptions } from "./features/settings/indexPrefs";
-import { BIN_PATH, isBin, isDriveRoot, isArchiveName, isInside, join, parentOf, baseName, relativeTo, samePath, type Crumb } from "./features/navigation/path";
+import { BIN_PATH, THIS_PC_PATH, isBin, isDriveRoot, isArchiveName, isInside, join, parentOf, baseName, relativeTo, samePath, type Crumb } from "./features/navigation/path";
 import { Palette, type Command } from "./features/palette/Palette";
 import { wordsFor, type Verb } from "./features/palette/words";
 import { PaneDivider } from "./features/tabs/PaneDivider";
@@ -721,6 +722,11 @@ export function App() {
     }
     comeForward().catch(console.error);
     setSettingsShown(false);
+    // This PC, from Win+E or a link, is the home page in a tab of its own.
+    if (folder === THIS_PC_PATH) {
+      if (await tabs.add([homePath ?? ""])) tabs.active().setHome(true);
+      return;
+    }
     // A tab showing search results there can't select by name, so it gets a plain tab instead.
     const shown =
       ask.select.length > 0 &&
@@ -844,7 +850,7 @@ export function App() {
             ...shell.placeItems(path, { x: event.clientX, y: event.clientY }),
             ...(isDriveRoot(path) ? networkItems() : []),
             ...(places()?.drives.some((drive) => drive.removable && samePath(drive.path, path))
-              ? [{ label: "Eject", divider: true, action: () => jobs.eject(path) }]
+              ? [{ label: places()?.drives.find((drive) => samePath(drive.path, path))?.mounted ? "Unmount" : "Eject", divider: true, action: () => jobs.eject(path) }]
               : []),
           ]),
     ];
@@ -1246,6 +1252,7 @@ export function App() {
     const items: MenuItem[] = [
       { label: "Open", action: () => openRow(view, row, false) },
       { label: "Quick preview", action: () => previewSelected(view) },
+      ...(!row.isDir && /\.(iso|img|vhdx?)$/i.test(row.name) ? [{ label: "Mount", action: () => quietly(mountAndOpen(view, path)) }] : []),
       ...(!row.isDir && WRITTEN.has(kindOf(row.name, false)) && view.list()?.selection().rows.length === 1
         ? [{ label: "Edit", action: () => (editWhenShown(path), previewSelected(view)) }]
         : []),
@@ -1591,6 +1598,13 @@ export function App() {
   /** A file that never got made, in a folder Perli can't write to, stops waiting after this. */
   const WRITE_WAIT_MS = 60_000;
   const writesIn = (view: FolderView) => writing?.view === view.id && Date.now() < writing.until;
+
+  /** Mounts a disk image and opens the drive it becomes. */
+  async function mountAndOpen(view: FolderView, path: string) {
+    const drive = await mountImage(path);
+    if (drive) await view.open(drive);
+    else jobs.notify("Mounting is taking a while", "The drive opens in the sidebar once Windows mounts it.");
+  }
 
   /** Opens the selected file in the preview, already editing. */
   function writeSelected(view: FolderView) {
@@ -2512,7 +2526,9 @@ export function App() {
     if (session) {
       tabs.restore(session);
     } else {
-      const opened = await tabs.activeView().open(start.folder ?? start.home ?? "");
+      const thisPc = start.folder === THIS_PC_PATH;
+      const opened = await tabs.activeView().open((thisPc ? undefined : start.folder) ?? start.home ?? "");
+      if (thisPc) tabs.active().setHome(true);
       if (opened) performance.mark("perli-folder-open", { detail: opened });
       if (opened && start.select.length > 0) await tabs.activeView().reload(start.select);
     }

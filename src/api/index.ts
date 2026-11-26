@@ -166,6 +166,8 @@ export interface Places {
     path: string;
     network: boolean;
     removable: boolean;
+    /** An ISO or VHD mounted as a drive, which ejecting unmounts. */
+    mounted: boolean;
     /** BitLocker keeps it encrypted. */
     encrypted: boolean;
     /** Encrypted and not unlocked yet. */
@@ -175,6 +177,8 @@ export interface Places {
   devices: { name: string; id: string }[];
   /** Folders a sync app keeps, such as OneDrive. */
   clouds: { name: string; path: string }[];
+  /** WSL distros, whose files show as a share. */
+  linux: { name: string; path: string; default: boolean; running: boolean }[];
 }
 
 /** Rows of one snapshot. */
@@ -583,6 +587,8 @@ export type Ejected = { kind: "done" } | { kind: "busy"; reason: string };
 
 /** Ejects a card, a disc or a USB disk. A drive still in use says why, with no box from Windows. */
 export const ejectDrive = (path: string) => invoke<Ejected>("eject_drive", { path });
+/** Mounts an ISO, IMG, VHD or VHDX, and answers with its drive once Windows shows it. */
+export const mountImage = (path: string) => invoke<string | null>("mount_image", { path });
 
 /** Shows a phone's files in File Explorer. */
 export const openDevice = (id: string) => invoke<void>("open_device", { id });

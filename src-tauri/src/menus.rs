@@ -723,17 +723,29 @@ pub fn show_properties(target: Target, main: isize, x: i32, y: i32) -> Result<()
 }
 
 /// Ejects a drive the way Explorer's own menu does, so Windows says so when a file is still open.
+/// A mounted ISO or VHD is unmounted.
 pub fn eject(drive: PathBuf, main: isize) -> Result<()> {
-    let target = Target::Items(vec![drive]);
+    shell_verb(drive, "eject", main)
+}
+
+/// Mounts an ISO, VHD or VHDX as a drive through Windows' own Mount, which asks for admin rights
+/// itself when a VHD needs them.
+pub fn mount(image: PathBuf, main: isize) -> Result<()> {
+    shell_verb(image, "mount", main)
+}
+
+fn shell_verb(path: PathBuf, verb: &'static str, main: isize) -> Result<()> {
+    let target = Target::Items(vec![path]);
     on_worker(move |owner| {
         let point = on_screen(HWND(main as _), 0, 0);
         let menu = target.context_menu(owner)?;
         let popup = unsafe { CreatePopupMenu() }?;
         let filled = unsafe { menu.QueryContextMenu(popup, 0, FIRST_COMMAND, LAST_COMMAND, CMF_NORMAL) };
-        let verb = (s!("eject"), w!("eject"));
-        let ejected = filled.ok().and_then(|()| invoke(&menu, owner, verb, point, &HSTRING::new()));
+        let (narrow, wide) = (format!("{verb} "), HSTRING::from(verb));
+        let verb = (PCSTR(narrow.as_ptr()), PCWSTR(wide.as_ptr()));
+        let done = filled.ok().and_then(|()| invoke(&menu, owner, verb, point, &HSTRING::new()));
         let _ = unsafe { DestroyMenu(popup) };
-        ejected
+        done
     })
 }
 

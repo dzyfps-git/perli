@@ -8,6 +8,9 @@ export const BIN_PATH = "shell:RecycleBinFolder";
 
 export const isBin = (path: string | undefined) => path === BIN_PATH;
 
+/** Stands for This PC, which opens as Perli's home page. */
+export const THIS_PC_PATH = "shell:MyComputerFolder";
+
 /** The names Perli opens as a folder of their own, the way Explorer does: a ZIP, a 7z (or a part
  *  of a split one), a RAR, a TAR however squeezed, and a CAB. A comic opens to be read instead. */
 const ARCHIVE = /\.(zip|7z|7z\.\d{3}|rar|tar|tgz|tar\.(gz|bz2|xz|zst)|tbz2?|txz|tzst|cab)$/i;

@@ -9,7 +9,7 @@ use serde::Serialize;
 use windows::core::{Owned, Result, GUID, HSTRING, PCWSTR, PWSTR};
 use windows::Win32::Devices::PortableDevices::{IPortableDeviceManager, PortableDeviceManager};
 use windows::Win32::Storage::FileSystem::{
-    BusTypeUsb, CreateFileW, GetDiskFreeSpaceExW, GetDriveTypeW, GetLogicalDrives, FILE_FLAGS_AND_ATTRIBUTES,
+    BusTypeFileBackedVirtual, BusTypeUsb, CreateFileW, STORAGE_BUS_TYPE, GetDiskFreeSpaceExW, GetDriveTypeW, GetLogicalDrives, FILE_FLAGS_AND_ATTRIBUTES,
     FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
 };
 use windows::Win32::System::Com::{
@@ -34,6 +34,10 @@ use crate::registry;
 /// Where sync apps list their folders for Explorer's side pane.
 const NAMESPACE: &str = r"Software\Microsoft\Windows\CurrentVersion\Explorer\Desktop\NameSpace";
 const CLASSES: &str = r"Software\Classes";
+/// Where Windows keeps the user's WSL distros.
+const LXSS: &str = r"Software\Microsoft\Windows\CurrentVersion\Lxss";
+/// What every distro's files are shared as.
+pub const WSL_ROOT: &str = r"\\wsl.localhost";
 
 const FOLDERS: [(&str, GUID); 7] = [
     ("home", FOLDERID_Profile),
@@ -58,6 +62,8 @@ pub struct Drive {
     network: bool,
     /// It can be ejected: a card, a disc, or a disk on a USB cable.
     removable: bool,
+    /// An ISO or VHD mounted as a drive, which ejecting unmounts.
+    mounted: bool,
     /// BitLocker keeps it encrypted.
     encrypted: bool,
     /// Encrypted and not unlocked yet.
@@ -79,12 +85,24 @@ pub struct Cloud {
     path: String,
 }
 
+/// A Linux distro of WSL, whose files show as a network share.
+#[derive(Debug, PartialEq, Serialize)]
+pub struct Distro {
+    name: String,
+    path: String,
+    /// The one `wsl` starts with no name given.
+    default: bool,
+    /// Running now. Opening its files starts it, which takes a moment.
+    running: bool,
+}
+
 #[derive(Serialize)]
 pub struct Places {
     folders: Vec<Folder>,
     drives: Vec<Drive>,
     clouds: Vec<Cloud>,
     devices: Vec<Device>,
+    linux: Vec<Distro>,
 }
 
 #[derive(Serialize)]
@@ -122,7 +140,7 @@ pub fn read() -> Result<Places> {
         let devices = read_devices().unwrap_or_default();
         CoUninitialize();
         let clouds = read_clouds(NAMESPACE, CLASSES);
-        Ok(Places { folders, drives, clouds, devices })
+        Ok(Places { folders, drives, clouds, devices, linux: read_distros(LXSS) })
     }
 }
 
@@ -136,7 +154,7 @@ pub fn known_folder(id: &GUID) -> Option<String> {
     }
 }
 
-fn drive_paths() -> impl Iterator<Item = String> {
+pub(crate) fn drive_paths() -> impl Iterator<Item = String> {
     let letters = unsafe { GetLogicalDrives() };
     (0..26)
         .filter(move |bit| letters & (1 << bit) != 0)
@@ -148,11 +166,12 @@ fn read_drives() -> Vec<Drive> {
         .map(|path| {
             let name = display_name(&path).unwrap_or_else(|| path.clone());
             let kind = unsafe { GetDriveTypeW(&HSTRING::from(&path)) };
-            let removable = kind == DRIVE_REMOVABLE || kind == DRIVE_CDROM || (kind == DRIVE_FIXED && is_usb(&path));
+            let mounted = matches!(kind, DRIVE_FIXED | DRIVE_CDROM) && is_mounted_image(&path);
+            let removable = mounted || kind == DRIVE_REMOVABLE || kind == DRIVE_CDROM || (kind == DRIVE_FIXED && is_usb(&path));
             let network = kind == DRIVE_REMOTE;
             // A server can be slow to answer, and BitLocker is about this PC's own disks.
             let protection = if network { None } else { bitlocker(&path) };
-            Drive { name, path, network, removable, encrypted: protection.is_some(), locked: protection == Some(LOCKED) }
+            Drive { name, path, network, removable, mounted, encrypted: protection.is_some(), locked: protection == Some(LOCKED) }
         })
         .collect()
 }
@@ -168,13 +187,20 @@ fn bitlocker(drive: &str) -> Option<i32> {
 
 /// True for a disk on a USB cable, which Windows calls fixed like the ones inside.
 pub(crate) fn is_usb(drive: &str) -> bool {
+    bus_of(drive) == Some(BusTypeUsb)
+}
+
+/// A disk Windows made from a file, as when an ISO or a VHD is mounted.
+fn is_mounted_image(drive: &str) -> bool {
+    bus_of(drive) == Some(BusTypeFileBackedVirtual)
+}
+
+fn bus_of(drive: &str) -> Option<STORAGE_BUS_TYPE> {
     let volume = HSTRING::from(format!(r"\\.\{}", drive.trim_end_matches('\\')));
     let share = FILE_SHARE_READ | FILE_SHARE_WRITE;
     // Asking for no access is enough for this question, and needs no rights.
     let opened = unsafe { CreateFileW(&volume, 0, share, None, OPEN_EXISTING, FILE_FLAGS_AND_ATTRIBUTES(0), None) };
-    let Ok(opened) = opened.map(|handle| unsafe { Owned::new(handle) }) else {
-        return false;
-    };
+    let opened = opened.map(|handle| unsafe { Owned::new(handle) }).ok()?;
     let query = STORAGE_PROPERTY_QUERY {
         PropertyId: StorageDeviceProperty,
         QueryType: PropertyStandardQuery,
@@ -193,7 +219,7 @@ pub(crate) fn is_usb(drive: &str) -> bool {
             None,
         )
     };
-    asked.is_ok() && device.BusType == BusTypeUsb
+    asked.is_ok().then_some(device.BusType)
 }
 
 /// Windows' own folder of drives and devices, which is where a phone's files are found.
@@ -285,6 +311,62 @@ fn read_clouds(namespace: &str, classes: &str) -> Vec<Cloud> {
         .collect()
 }
 
+/// The user's WSL distros. Only a PC with WSL has any, and only then is `wsl.exe` asked which
+/// are running.
+fn read_distros(key: &str) -> Vec<Distro> {
+    let default = registry::read_text(HKEY_CURRENT_USER, key, Some("DefaultDistribution")).unwrap_or_default();
+    let mut distros: Vec<Distro> = registry::subkeys(HKEY_CURRENT_USER, key)
+        .into_iter()
+        .filter_map(|id| {
+            let name = registry::read_text(HKEY_CURRENT_USER, &format!(r"{key}\{id}"), Some("DistributionName"))?;
+            Some(Distro { path: format!(r"{WSL_ROOT}\{name}"), default: id.eq_ignore_ascii_case(&default), running: false, name })
+        })
+        .collect();
+    if !distros.is_empty() {
+        let running = running_distros();
+        for distro in &mut distros {
+            distro.running = running.iter().any(|name| name.eq_ignore_ascii_case(&distro.name));
+        }
+    }
+    distros.sort_by_key(|distro| (!distro.default, distro.name.to_lowercase()));
+    distros
+}
+
+fn running_distros() -> Vec<String> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    Command::new("wsl.exe")
+        .args(["--list", "--running", "--quiet"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map(|output| names_from_wsl(&output.stdout))
+        .unwrap_or_default()
+}
+
+/// `wsl.exe` writes its lists in UTF-16, one name a line.
+fn names_from_wsl(bytes: &[u8]) -> Vec<String> {
+    let units: Vec<u16> = bytes.as_chunks::<2>().0.iter().map(|pair| u16::from_le_bytes(*pair)).collect();
+    String::from_utf16_lossy(&units)
+        .lines()
+        .map(|line| line.trim_matches(['\u{feff}', '\0', ' ', '\r']).to_string())
+        .filter(|name| !name.is_empty())
+        .collect()
+}
+
+/// A folder of a WSL distro as the distro and the Linux path, such as `Ubuntu` and `/home/ana`.
+pub fn linux_spot(folder: &str) -> Option<(String, String)> {
+    let lower = folder.to_ascii_lowercase();
+    let rest = [r"\\wsl.localhost\", r"\\wsl$\"].iter().find_map(|root| lower.starts_with(root).then(|| &folder[root.len()..]))?;
+    let (distro, inner) = rest.split_once('\\').unwrap_or((rest, ""));
+    let inner = inner.replace('\\', "/");
+    (!distro.is_empty()).then(|| (distro.to_string(), format!("/{}", inner.trim_end_matches('/'))))
+}
+
+/// A file Windows mounts as a drive.
+pub fn is_disk_image(path: &Path) -> bool {
+    path.extension().is_some_and(|extension| ["iso", "img", "vhd", "vhdx"].iter().any(|kind| extension.eq_ignore_ascii_case(kind)))
+}
+
 /// Drives a file can be sent to, with the name Explorer shows and the path.
 pub fn removable_drives() -> Vec<(String, String)> {
     drive_paths()
@@ -316,6 +398,29 @@ pub fn display_name(path: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wsl_folders_turn_into_a_distro_and_a_linux_path() {
+        assert_eq!(linux_spot(r"\\wsl.localhost\Ubuntu\home\ana"), Some(("Ubuntu".into(), "/home/ana".into())));
+        assert_eq!(linux_spot(r"\\WSL$\Debian"), Some(("Debian".into(), "/".into())));
+        assert_eq!(linux_spot(r"\\wsl.localhost\Ubuntu\"), Some(("Ubuntu".into(), "/".into())));
+        assert_eq!(linux_spot(r"\\server\share"), None);
+        assert_eq!(linux_spot(r"C:\Users"), None);
+        let listed: Vec<u8> = "\u{feff}Ubuntu\r\nDebian\r\n".encode_utf16().flat_map(u16::to_le_bytes).collect();
+        assert_eq!(names_from_wsl(&listed), ["Ubuntu", "Debian"]);
+    }
+
+    #[test]
+    fn distros_come_from_their_registry_keys_default_first() {
+        let key = r"Software\Perli\TestLxss";
+        registry::delete_tree(HKEY_CURRENT_USER, key);
+        registry::write_text(HKEY_CURRENT_USER, &format!(r"{key}\{{b}}"), "DistributionName", "Ubuntu").unwrap();
+        registry::write_text(HKEY_CURRENT_USER, &format!(r"{key}\{{a}}"), "DistributionName", "Alpine").unwrap();
+        registry::write_text(HKEY_CURRENT_USER, key, "DefaultDistribution", "{b}").unwrap();
+        let names: Vec<_> = read_distros(key).into_iter().map(|distro| (distro.name, distro.default)).collect();
+        registry::delete_tree(HKEY_CURRENT_USER, key);
+        assert_eq!(names, [("Ubuntu".to_string(), true), ("Alpine".to_string(), false)]);
+    }
 
     #[test]
     fn finds_the_home_folder_and_the_system_drive() {
