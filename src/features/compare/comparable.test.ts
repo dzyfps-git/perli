@@ -7,6 +7,8 @@ test("two pictures or two texts compare, other pairs don't", () => {
   assert.equal(compareKind(["a.txt", "b.ts"], ["text", "code"]), "text");
   assert.equal(compareKind(["a.csv", "b.json"], ["sheet", "data"]), "text");
   assert.equal(compareKind(["a.xlsx", "b.json"], ["sheet", "data"]), undefined);
+  assert.equal(compareKind(["a.docx", "b.DOC"], ["doc", "doc"]), "text");
+  assert.equal(compareKind(["a.odt", "b.md"], ["doc", "markdown"]), "text");
   assert.equal(compareKind(["a.jpg", "b.txt"], ["picture", "text"]), undefined);
   assert.equal(compareKind(["a.txt", "b"], ["text", "folder"]), undefined);
   assert.equal(compareKind(["a.txt"], ["text"]), undefined);

@@ -86,6 +86,12 @@ pub enum Preview {
     Picture,
     /// A file only in the cloud, so nothing of it is read. Windows' picture shows, if it has one.
     Cloud,
+    /// A Word, Excel or PowerPoint file, or a LibreOffice one: what Perli knows of it before it
+    /// is read, which Office's own previewer or Perli's reader then shows.
+    Office(crate::office::Facts),
+    /// A file Perli has no viewer for but Windows has a previewer for, such as a Visio drawing.
+    /// `marked` when it came from the internet, so the previewer waits to be asked for.
+    Windows { marked: bool },
 }
 
 /// How a text file's bytes stand for its letters.
@@ -289,6 +295,9 @@ pub fn whole_text(path: &Path) -> Result<Option<String>, String> {
     if size > COMPARE_BYTES {
         return Err(format!("It is over {} MB, too big to compare here.", COMPARE_BYTES / 1024 / 1024));
     }
+    if let Some(text) = crate::office::plain_text(path) {
+        return Ok(Some(text));
+    }
     let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
     Ok(as_text(&bytes, false))
 }
@@ -361,7 +370,13 @@ pub fn read(path: &Path, offset: u64) -> Preview {
             return Preview::Markdown { html, source, seen };
         }
     }
-    piece(path, offset).unwrap_or(Preview::Picture)
+    piece(path, offset).unwrap_or_else(|| {
+        if offset == 0 && crate::previewers::find(path).is_some() {
+            Preview::Windows { marked: crate::office::from_internet(path) }
+        } else {
+            Preview::Picture
+        }
+    })
 }
 
 /// A comic or a book that can't be read still shows what it holds, as any ZIP does.
@@ -388,6 +403,9 @@ fn inside_of(path: &Path) -> Option<Preview> {
         "ttf" | "otf" | "woff" | "woff2" | "ttc" | "otc" => crate::fonts::faces(path).ok().map(|faces| Preview::Font { faces }),
         "mp3" | "m4a" | "aac" | "wav" | "flac" | "ogg" | "oga" | "opus" | "weba" | "aif" | "aiff" | "aifc" => Some(Preview::Audio),
         "mp4" | "m4v" | "webm" | "mov" | "mkv" | "ogv" => Some(Preview::Video),
+        _ if crate::office::family_of(path).is_some() => crate::office::facts(path, crate::previewers::find(path).is_some()).map(Preview::Office),
+        // Windows' own previewer draws RTF as it is laid out, which its text alone is not.
+        "rtf" if crate::previewers::find(path).is_some() => Some(Preview::Windows { marked: crate::office::from_internet(path) }),
         _ if crate::packs::kind_of(path.file_name()?).is_some() => listed(),
         _ => None,
     }

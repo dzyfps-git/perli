@@ -40,6 +40,10 @@ export const [copyFacts, setCopyFacts] = stored("picture-copy-facts", saved("pic
 export const [copyNoPlace, setCopyNoPlace] = stored("picture-copy-no-place", saved("picture-copy-no-place") !== false);
 export const pictureKeep = () => ({ camera: copyFacts(), place: !copyNoPlace() });
 /** A PDF's own scripts run, such as a total that adds itself up, shut off from files and the web. */
+/** Office files show through Office's own previewer when Windows has it. */
+export const [officeHandlers, setOfficeHandlers] = stored("office-handlers", saved("office-handlers") !== false);
+/** A file from the internet opens in Perli's reader first, which runs nothing and fetches nothing. */
+export const [internetReader, setInternetReader] = stored("office-internet-reader", saved("office-internet-reader") !== false);
 export const [pdfScripts, setPdfScripts] = stored("pdf-scripts", saved("pdf-scripts") !== false);
 /** A small map of the whole picture, page or film shows while zoomed in. */
 export const [minimapShown, setMinimapShown] = stored("minimap", saved("minimap") !== false);
@@ -111,6 +115,10 @@ export const VIEWER_SETTINGS = {
     item("Markdown as written, not as a page", asSource, setAsSource),
     item("Books turn page by page", bookPaged, setBookPaged),
     item("Books in a serif font", bookSerif, setBookSerif),
+  ],
+  Office: [
+    item("Show through Office's own previewer when it is there", officeHandlers, setOfficeHandlers),
+    item("Files from the internet open in Perli's reader first", internetReader, setInternetReader),
   ],
   Comics: [
     item("Two pages side by side", spread, setSpread),

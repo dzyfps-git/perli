@@ -19,12 +19,14 @@ mod looks;
 mod mail;
 mod menus;
 mod network;
+mod office;
 mod ops;
 mod packs;
 mod parts;
 mod picked;
 mod picture;
 mod places;
+mod previewers;
 mod inside;
 mod midi;
 mod mini;
@@ -1851,6 +1853,68 @@ async fn preview_row(view: u32, request: u64, row: u32, offset: u64, views: Stat
         .map_err(|error| error.to_string())
 }
 
+/// Perli's own reading of a Word, Excel or PowerPoint row. A locked one takes its password once;
+/// it then stays open in memory until `office_forget`.
+#[tauri::command]
+async fn office_read(view: u32, request: u64, row: u32, password: Option<String>, session: u64, views: State<'_, Views>) -> Result<office::Reading, String> {
+    let path = row_file(&views, view, request, row).await?;
+    blocking(move || office::read_for(&path, password.as_deref(), Some(session))).await
+}
+
+/// A picture inside a document, `edge` device pixels on its longest side at most.
+#[tauri::command]
+async fn office_picture(view: u32, request: u64, row: u32, entry: String, edge: u32, session: u64, views: State<'_, Views>) -> Result<Response, String> {
+    let path = row_file(&views, view, request, row).await?;
+    let bytes = blocking(move || office::picture(&path, &entry, edge, Some(session))).await?;
+    Ok(Response::new(bytes))
+}
+
+/// Locks an unlocked document again, as its preview closes.
+#[tauri::command]
+async fn office_forget(session: u64) -> Result<(), String> {
+    office::forget(session);
+    Ok(())
+}
+
+/// Shows a row through Windows' own previewer, over `place` in physical pixels of the window.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+async fn previewer_open(
+    view: u32,
+    request: u64,
+    row: u32,
+    place: previewers::Place,
+    back: u32,
+    fore: u32,
+    ticket: u64,
+    window: tauri::WebviewWindow,
+    views: State<'_, Views>,
+) -> Result<(), String> {
+    let path = row_file(&views, view, request, row).await?;
+    blocking(move || previewers::open(&window, path, place, back, fore, ticket)).await
+}
+
+/// Moves the previewer with the page, or hides it while something covers it.
+#[tauri::command]
+async fn previewer_place(place: previewers::Place, shown: bool, app: AppHandle) -> Result<(), String> {
+    blocking(move || previewers::place(&app, place, shown)).await
+}
+
+/// What the previewer shows now, as a picture, to stand in while it is covered.
+#[tauri::command]
+async fn previewer_snapshot() -> Result<Response, String> {
+    blocking(previewers::snapshot).await.map(Response::new)
+}
+
+#[tauri::command]
+async fn previewer_close(ticket: u64, app: AppHandle) -> Result<(), String> {
+    blocking(move || {
+        previewers::close(&app, ticket);
+        Ok(())
+    })
+    .await
+}
+
 /// A picture inside a comic or a book, `edge` device pixels on its longest side at most.
 #[tauri::command]
 async fn archive_picture(
@@ -3285,6 +3349,13 @@ fn main() {
             picture_file,
             preview_row,
             archive_picture,
+            office_read,
+            office_picture,
+            office_forget,
+            previewer_open,
+            previewer_place,
+            previewer_snapshot,
+            previewer_close,
             book_chapter,
             model_file,
             open_streamed,

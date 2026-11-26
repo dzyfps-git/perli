@@ -4,12 +4,14 @@ import type { Kind } from "../filelist/fileKinds";
 const TEXTS = new Set<Kind>(["text", "markdown", "code", "web", "data", "script", "config", "log", "subtitle"]);
 /** Tables that are only text underneath. */
 const TEXT_TABLES = /\.(csv|tsv)$/i;
+/** Word documents, which compare by the text Perli reads out of them. */
+const WORD = /\.(docx|docm|dotx|dotm|odt|ott|doc|dot)$/i;
 
 /** How two files of `kinds` compare: as pictures, as texts, or not at all (folders, or kinds that are neither). */
 export function compareKind(names: string[], kinds: Kind[]) {
   if (names.length !== 2 || kinds.includes("folder")) return undefined;
   if (kinds.every((kind) => kind === "picture")) return "picture";
-  if (names.every((name, at) => TEXTS.has(kinds[at]) || TEXT_TABLES.test(name))) return "text";
+  if (names.every((name, at) => TEXTS.has(kinds[at]) || TEXT_TABLES.test(name) || WORD.test(name))) return "text";
   return undefined;
 }
 

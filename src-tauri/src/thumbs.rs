@@ -215,6 +215,18 @@ fn picture(path: &Path, edge: i32, own: bool) -> Result<Vec<u8>> {
     }
     let factory: IShellItemImageFactory = shell_item(path)?.cast()?;
     let size = SIZE { cx: edge, cy: edge };
+    // With no Office here, Windows has no picture of a document, but the document often saved
+    // one of itself.
+    if !is_online_only(path) && crate::office::family_of(path).is_some() {
+        if let Ok(bitmap) = unsafe { factory.GetImage(size, SIIGBF_THUMBNAILONLY) } {
+            let bytes = encode(bitmap);
+            let _ = unsafe { DeleteObject(bitmap.into()) };
+            return bytes;
+        }
+        if let Some(bytes) = crate::office::thumbnail(path, edge as u32) {
+            return Ok(bytes);
+        }
+    }
     let first = match (is_online_only(path), own) {
         (true, _) => SIIGBF_INCACHEONLY,
         (false, true) => SIIGBF_THUMBNAILONLY,
