@@ -49,8 +49,8 @@ impl Watch {
 }
 
 fn stamp(folder: &Path) -> Option<u64> {
-    // ponytail: a cloud folder moves only with Perli's own jobs; a change made on the web shows on
-    // the next visit, as asking the service every second would cost a request each time.
+    // ponytail: a cloud folder is listed again every 10 to 30 s rather than through each
+    // service's own feed of changes (Graph delta, Dropbox longpoll, Drive changes).
     if let Some(edits) = crate::remote::edits(folder) {
         return Some(edits);
     }

@@ -496,7 +496,24 @@ export const saveSession = (text: string) => invoke<void>("save_session", { text
 
 export const listPlaces = () => invoke<Places>("list_places");
 
-export type CloudKind = "s3" | "oneDrive" | "dropbox" | "google" | "phone";
+export type CloudKind = "s3" | "oneDrive" | "dropbox" | "google" | "phone" | "webDav" | "ftp" | "sftp";
+
+/** Where a server is and who signs in. Its password or key passphrase stays with Windows. */
+export interface ServerSetup {
+  /** A host name, or for WebDAV the whole address. */
+  host: string;
+  /** 0 for the protocol's own. */
+  port: number;
+  user: string;
+  /** The folder it opens at, "" for the top. */
+  folder: string;
+  /** FTP over TLS. */
+  secure: boolean;
+  /** An SSH key file to sign in with. */
+  keyFile: string;
+  /** The SSH host key taken when the place was added, as SHA256:... */
+  hostKey: string;
+}
 
 /** Where an S3 place's bucket is, and the key's id. Its secret stays with Windows. */
 export interface S3Setup {
@@ -518,6 +535,7 @@ export interface CloudPlace {
   s3: S3Setup | null;
   /** Google's Docs, Sheets and Slides come down as PDFs. */
   pdf: boolean;
+  server: ServerSetup | null;
 }
 
 export interface CloudAbout {
@@ -572,6 +590,10 @@ export const syncPreview = (pair: SyncPair) => invoke<SyncPreview>("sync_preview
 
 export const cloudPlaces = () => invoke<CloudPlace[]>("cloud_places");
 export const addS3 = (setup: S3Setup, secret: string, name: string) => invoke<CloudPlace>("add_s3", { setup, secret, name });
+/** Looks at a server once. Gives the SSH host key it showed, "" for other servers. */
+export const testServer = (kind: CloudKind, server: ServerSetup, secret: string) => invoke<string>("test_server", { kind, server, secret });
+export const addServer = (kind: CloudKind, server: ServerSetup, secret: string, name: string) =>
+  invoke<CloudPlace>("add_server", { kind, server, secret, name });
 export const signInCloud = (kind: CloudKind) => invoke<CloudPlace>("sign_in_cloud", { kind });
 export const cancelSignIn = () => invoke<void>("cancel_sign_in");
 export const renamePlace = (id: string, name: string) => invoke<CloudPlace>("rename_place", { id, name });

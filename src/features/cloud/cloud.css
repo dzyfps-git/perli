@@ -132,3 +132,40 @@
     animation-duration: 3s;
   }
 }
+
+/* The SSH host key a Test found, taken when the server is added. */
+.cloud-host-key {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-large);
+  background: var(--surface-hover);
+  animation: cloud-key-in var(--motion-spring) both;
+}
+
+.cloud-host-key > span:last-child {
+  display: grid;
+  gap: var(--space-1);
+}
+
+.cloud-host-key code {
+  font-family: var(--font-mono, Consolas, monospace);
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+
+@keyframes cloud-key-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cloud-host-key {
+    animation: none;
+  }
+}

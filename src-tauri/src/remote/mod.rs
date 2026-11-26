@@ -537,11 +537,48 @@ fn edits_of(edits: &Edits, place: &str, folder: &str) -> u64 {
     }
 }
 
-/// A count that moves each time a job changes what the cloud folder at `path` shows, or the
-/// places when it is the cloud root. `None` outside the cloud.
+/// How long a watched folder goes before it is listed again to catch changes made elsewhere:
+/// on the web, by another app or on the phone itself. Each look costs the service a request.
+fn live_gap(kind: Kind) -> Duration {
+    match kind {
+        Kind::Phone => Duration::from_secs(10),
+        Kind::Sftp | Kind::Ftp | Kind::WebDav => Duration::from_secs(15),
+        Kind::S3 | Kind::OneDrive | Kind::Dropbox | Kind::Google => Duration::from_secs(30),
+    }
+}
+
+/// What each watched folder held when last listed for changes, as one number.
+static PRINTS: Mutex<BTreeMap<(String, String), (Instant, u64)>> = Mutex::new(BTreeMap::new());
+
+/// What the folder holds now, as one number, listed again once `live_gap` has gone by.
+/// The last known number while the place can't be asked.
+fn live_print(place: &Place, inner: &str) -> u64 {
+    let key = (place.id.clone(), inner.to_string());
+    let known = lock(&PRINTS).get(&key).map(|(read, print)| (read.elapsed(), *print));
+    if let Some((since, print)) = known {
+        if since < live_gap(place.kind) {
+            return print;
+        }
+    }
+    // The first look takes the listing the folder was just read with, at no extra request.
+    let fresh = service(place).ok().and_then(|service| {
+        let at = At { place: place.clone(), service, inner: inner.to_string() };
+        listed(&at, inner, known.is_some()).ok()
+    });
+    let mut known = lock(&PRINTS);
+    let print = match fresh {
+        Some(items) => hashed(&items.iter().map(|item| format!("{}|{}|{}|{}", item.name, item.size, item.modified, item.version)).collect::<Vec<_>>().join("/")),
+        None => known.get(&key).map_or(0, |(_, print)| *print),
+    };
+    known.insert(key, (Instant::now(), print));
+    print
+}
+
+/// A count that moves each time what the cloud folder at `path` shows changes, through a job
+/// here or anything else, or the places when it is the cloud root. `None` outside the cloud.
 pub fn edits(path: &Path) -> Option<u64> {
     match spot(path) {
-        Some(Ok((place, inner))) => Some(edits_of(&lock(&EDITS), &place.id, &inner)),
+        Some(Ok((place, inner))) => Some(edits_of(&lock(&EDITS), &place.id, &inner).wrapping_add(live_print(&place, &inner))),
         _ if is_remote(path) => Some(hashed(&places().iter().map(|place| place.name.as_str()).collect::<Vec<_>>().join("/"))),
         _ => None,
     }
