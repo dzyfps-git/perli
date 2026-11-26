@@ -103,7 +103,9 @@ export function OfficeView(live: OfficeViewProps) {
       </header>
       <Show when={officeFailure()}>
         <p class="office-note" role="status">
-          {OFFICE_NAMES[props.facts.family]}'s previewer didn't show it ({officeFailure()}), so Perli's reader does.
+          {props.facts.marked
+            ? `${OFFICE_NAMES[props.facts.family]}'s previewer won't show files from the internet, so Perli's reader does.`
+            : `${OFFICE_NAMES[props.facts.family]}'s previewer didn't show it (${officeFailure()}), so Perli's reader does.`}
         </p>
       </Show>
       <Show
@@ -233,7 +235,7 @@ function SheetView(props: { sheets: OfficeSheet[]; keys: Keys }) {
           <div class="office-grid">
             <DataGrid
               head={head()}
-              rows={now.rows.map((row) => Array.from({ length: width() }, (_, column) => (row[column] ?? null) === null ? null : String(row[column])))}
+              rows={now.rows.map((row) => Array.from({ length: width() }, (_, column) => String(row[column] ?? "")))}
               note={note()}
               filtering={filtering()}
               body={(element) => (body = element)}

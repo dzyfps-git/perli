@@ -248,6 +248,7 @@ fn standard(info: &[u8], package: &[u8], password: &[u8]) -> Result<Vec<u8>, Ope
 mod tests {
     use super::*;
     use aes::cipher::BlockCipherEncrypt;
+    use std::io::Write;
 
     fn seal(key: &[u8], data: &[u8], start: Option<&[u8]>) -> Vec<u8> {
         let cipher: Box<dyn Fn(&mut aes::Block)> = if key.len() == 32 {
@@ -319,6 +320,36 @@ mod tests {
         let (info, sealed) = agile_locked(&secret, "kiwi");
         assert_eq!(agile(&info, &sealed, &password("kiwi")).ok(), Some(secret));
         assert!(matches!(agile(&info, &sealed, &password("pear")), Err(Opened::Failed(reason)) if reason == WRONG_PASSWORD));
+    }
+
+    /// A package locked as a whole file: the compound file Office writes, holding the lock and
+    /// the sealed package.
+    fn write_locked(path: &Path, package: &[u8], pass: &str) {
+        let (info, sealed) = agile_locked(package, pass);
+        let mut file = cfb::create(path).unwrap();
+        file.create_stream("/EncryptionInfo").unwrap().write_all(&info).unwrap();
+        file.create_stream("/EncryptedPackage").unwrap().write_all(&sealed).unwrap();
+        file.flush().unwrap();
+    }
+
+    #[test]
+    fn a_locked_file_opens_whole_with_its_password() {
+        let plain = super::super::tests::package("lockme.docx", &[("word/document.xml", b"<w:document/>")]);
+        let bytes = std::fs::read(&plain).unwrap();
+        let path = plain.with_file_name("locked.docx");
+        write_locked(&path, &bytes, "kiwi");
+        assert!(is_locked(&path));
+        assert_eq!(unlock(&path, "kiwi").ok(), Some(bytes));
+        assert!(matches!(unlock(&path, "pear"), Err(Opened::Failed(reason)) if reason == WRONG_PASSWORD));
+    }
+
+    /// Writes a locked copy of PERLI_LOCKED_IN to PERLI_LOCKED_OUT with the password "kiwi",
+    /// for the real-app check.
+    #[test]
+    #[ignore]
+    fn writes_a_locked_sample() {
+        let (Ok(from), Ok(to)) = (std::env::var("PERLI_LOCKED_IN"), std::env::var("PERLI_LOCKED_OUT")) else { return };
+        write_locked(Path::new(&to), &std::fs::read(from).unwrap(), "kiwi");
     }
 
     #[test]

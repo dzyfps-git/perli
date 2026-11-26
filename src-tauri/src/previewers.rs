@@ -23,7 +23,7 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_LOCAL_SERVER, COINIT_APARTMENTTHREADED, STGM_READ, STGM_SHARE_DENY_NONE};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Ole::IObjectWithSite;
-use windows::Win32::System::Registry::{RegGetValueW, HKEY_CLASSES_ROOT, RRF_RT_REG_SZ};
+use windows::Win32::System::Registry::{RegGetValueW, HKEY_CLASSES_ROOT, RRF_RT_ANY};
 use windows::Win32::UI::Input::KeyboardAndMouse::VK_ESCAPE;
 use windows::Win32::UI::Shell::PropertiesSystem::{IInitializeWithFile, IInitializeWithStream};
 use windows::Win32::UI::Shell::{
@@ -54,12 +54,14 @@ pub fn find(path: &Path) -> Option<GUID> {
     let end = text.iter().position(|&unit| unit == 0)?;
     let name = String::from_utf16_lossy(&text[..end]);
     let clsid = GUID::try_from(name.trim_matches(['{', '}'])).ok()?;
-    // An AppID is how a previewer says it may run out of process, in prevhost.exe.
-    let key = HSTRING::from(format!("CLSID\\{name}"));
-    let mut value = [0u16; 64];
-    let mut size = (value.len() * 2) as u32;
-    let isolated = unsafe { RegGetValueW(HKEY_CLASSES_ROOT, &key, &HSTRING::from("AppID"), RRF_RT_REG_SZ, None, Some(value.as_mut_ptr().cast()), Some(&raw mut size)) };
-    isolated.is_ok().then_some(clsid)
+    // A previewer runs out of process either as its own server, as Office's do, or through an
+    // AppID in prevhost.exe. One that only loads into the caller is left alone.
+    // An empty value name is the key's own value.
+    let has = |key: String, value: &str| {
+        let mut size = 0u32;
+        unsafe { RegGetValueW(HKEY_CLASSES_ROOT, &HSTRING::from(key), &HSTRING::from(value), RRF_RT_ANY, None, None, Some(&raw mut size)) }.is_ok()
+    };
+    (has(format!("CLSID\\{name}"), "AppID") || has(format!("CLSID\\{name}\\LocalServer32"), "")).then_some(clsid)
 }
 
 /// Where the preview sits, in physical pixels inside the window, and its colours.
@@ -419,7 +421,22 @@ fn show(path: &Path, clsid: GUID, host: HWND, (width, height): (i32, i32), back:
                 let stream = SHCreateStreamOnFileEx(&wide, (STGM_READ | STGM_SHARE_DENY_NONE).0, 0, false, None)?;
                 handler.cast::<IInitializeWithStream>()?.Initialize(&stream, STGM_READ.0)
             });
-        started?;
+        // A previewer that took the file and then failed still holds it until it is unloaded.
+        let shown = started.and_then(|()| present(&handler, host, (width, height), back, fore));
+        if shown.is_err() {
+            let _ = handler.Unload();
+            if let Ok(site) = handler.cast::<IObjectWithSite>() {
+                let _ = site.SetSite(None);
+            }
+        }
+        shown?;
+        SHOWN.with(|shown| *shown.borrow_mut() = Some(handler));
+        Ok(())
+    }
+}
+
+fn present(handler: &IPreviewHandler, host: HWND, (width, height): (i32, i32), back: u32, fore: u32) -> WinResult<()> {
+    unsafe {
         if let Ok(site) = handler.cast::<IObjectWithSite>() {
             let frame: IPreviewHandlerFrame = Frame.into();
             let _ = site.SetSite(&frame);
@@ -430,9 +447,7 @@ fn show(path: &Path, clsid: GUID, host: HWND, (width, height): (i32, i32), back:
         }
         let rect = RECT { left: 0, top: 0, right: width.max(1), bottom: height.max(1) };
         handler.SetWindow(host, &rect)?;
-        handler.DoPreview()?;
-        SHOWN.with(|shown| *shown.borrow_mut() = Some(handler));
-        Ok(())
+        handler.DoPreview()
     }
 }
 

@@ -4467,6 +4467,13 @@ th[aria-sort="descending"] .table-sort::after {
   border-top: 1px solid var(--border);
 }
 
+.office-tab-button,
+.office-slide-item {
+  border: 0;
+  background: none;
+  font: inherit;
+}
+
 .office-tab-button {
   padding: 3px 12px;
   border-radius: var(--radius);
