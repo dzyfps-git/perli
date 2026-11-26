@@ -67,14 +67,17 @@ export function HostedPreview(props: {
     return false;
   }
 
-  async function cover(now: boolean) {
-    if (now) {
-      // Read from the screen while Windows' window is still there, then hide it.
-      const picture = await previewerSnapshot().catch(() => null);
-      if (gone) return;
-      if (picture) draw(still, picture);
-      setCovered(true);
-    } else setCovered(false);
+  /** Counts each time the cover comes or goes, so a snapshot that ends late knows it is stale. */
+  let turn = 0;
+
+  /** Reads Windows' window from the screen while it is still there, then hides it, unless the
+   *  cover went away while the picture was being read. */
+  async function cover(mine: number) {
+    const picture = await previewerSnapshot().catch(() => null);
+    if (gone || mine !== turn) return;
+    if (picture) draw(still, picture);
+    setCovered(true);
+    await previewerPlace(placeOf(), false).catch(console.error);
   }
 
   function follow() {
@@ -87,13 +90,11 @@ export function HostedPreview(props: {
     if (key === last) return;
     const wasHidden = last.endsWith("true");
     last = key;
-    if (hidden && !wasHidden) {
-      void cover(true).then(() => {
-        if (!gone) void previewerPlace(place, false).catch(console.error);
-      });
-    } else {
+    if (hidden !== wasHidden) turn++;
+    if (hidden && !wasHidden) void cover(turn);
+    else {
       void previewerPlace(place, !hidden).catch(console.error);
-      if (!hidden && wasHidden) void cover(false);
+      if (!hidden && wasHidden) setCovered(false);
     }
   }
 

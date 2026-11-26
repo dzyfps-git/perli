@@ -1386,13 +1386,14 @@ export type OfficeDoc = (
   | { family: "slides"; slides: OfficeSlide[] }
 ) & { note: string | null };
 
-export const officeRead = (view: number, request: number, row: number, password?: string) =>
-  invoke<OfficeDoc>("office_read", { view, request, row, password: password ?? null });
+/** `session` is the preview's own key to what it unlocks; `officeForget` lets it go. */
+export const officeRead = (view: number, request: number, row: number, password: string | undefined, session: number) =>
+  invoke<OfficeDoc>("office_read", { view, request, row, password: password ?? null, session });
 
-export const officePicture = (view: number, request: number, row: number, entry: string, edge: number) =>
-  invoke<ArrayBuffer>("office_picture", { view, request, row, entry, edge }).then(decodeThumb);
+export const officePicture = (view: number, request: number, row: number, entry: string, edge: number, session: number) =>
+  invoke<ArrayBuffer>("office_picture", { view, request, row, entry, edge, session }).then(decodeThumb);
 
-export const officeForget = (view: number, request: number, row: number) => invoke<void>("office_forget", { view, request, row });
+export const officeForget = (session: number) => invoke<void>("office_forget", { session });
 
 /** Where a previewer sits, in physical pixels inside the window. */
 export interface PreviewerPlace {

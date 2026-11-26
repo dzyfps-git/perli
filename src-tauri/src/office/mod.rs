@@ -110,7 +110,7 @@ pub fn facts(path: &Path, handler: bool) -> Option<Facts> {
     let family = family_of(path)?;
     let marked = from_internet(path);
     let mut facts = Facts { family, facts: Vec::new(), macros: has_macro_name(path), locked: false, marked, handler };
-    match Package::open(path, None) {
+    match Package::open(path, None, None) {
         Ok(mut package) => {
             facts.facts = if is_open_document(path) { package.open_document_facts() } else { package.facts() };
             facts.macros |= package.has_macros();
@@ -136,8 +136,14 @@ fn has_macro_name(path: &Path) -> bool {
 /// The whole document, for Perli's own reader. A locked one needs its password once; it then
 /// stays open in memory until the preview lets it go.
 pub fn read(path: &Path, password: Option<&str>) -> Result<Reading, String> {
+    read_for(path, password, None)
+}
+
+/// Like `read`, for one preview: a document it unlocks stays open for that preview only, until
+/// `forget` lets it go.
+pub fn read_for(path: &Path, password: Option<&str>, session: Option<u64>) -> Result<Reading, String> {
     let family = family_of(path).ok_or("Perli doesn't read this kind of document")?;
-    let mut package = match Package::open(path, password) {
+    let mut package = match Package::open(path, password, session) {
         Ok(package) => package,
         Err(Opened::Compound) => return legacy::read(path, family),
         Err(Opened::Locked) => return Err(WRONG_PASSWORD.into()),
@@ -170,8 +176,9 @@ pub fn plain_text(path: &Path) -> Option<String> {
 }
 
 /// A picture inside a document, `edge` pixels on its longest side at most.
-pub fn picture(path: &Path, entry: &str, edge: u32) -> Result<Vec<u8>, String> {
-    let mut package = match Package::open(path, None) {
+/// A preview's `session` reaches what it unlocked.
+pub fn picture(path: &Path, entry: &str, edge: u32, session: Option<u64>) -> Result<Vec<u8>, String> {
+    let mut package = match Package::open(path, None, session) {
         Ok(package) => package,
         Err(Opened::Locked) => return Err("Unlock it first".into()),
         Err(Opened::Compound) => return Err("Old documents keep their pictures in a way Perli doesn't read".into()),
@@ -203,28 +210,51 @@ fn is_thumbnail(name: &str) -> bool {
         && [".png", ".jpg", ".jpeg", ".gif", ".bmp"].iter().any(|kind| name.ends_with(kind))
 }
 
-/// Lets go of an unlocked document kept in memory.
-pub fn forget(path: &Path) {
-    UNLOCKED.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).retain(|(kept, _, _)| kept != path);
+/// Lets go of what a preview unlocked, as it closes. An unlock still running for it is dropped
+/// when it ends.
+pub fn forget(session: u64) {
+    let mut kept = UNLOCKED.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    kept.open.retain(|unlocked| unlocked.session != session);
+    kept.closed.push(session);
+    if kept.closed.len() > MOST_CLOSED {
+        kept.closed.remove(0);
+    }
 }
 
-/// Documents unlocked with their password, by path and how the file stood, so a change to the
-/// file locks it again.
-type Unlocked = (PathBuf, Option<crate::ops::Seen>, Arc<Vec<u8>>);
-static UNLOCKED: Mutex<Vec<Unlocked>> = Mutex::new(Vec::new());
+/// A document unlocked with its password for one preview, with how the file stood, so a change
+/// to the file locks it again.
+struct Unlocked {
+    session: u64,
+    path: PathBuf,
+    seen: Option<crate::ops::Seen>,
+    bytes: Arc<Vec<u8>>,
+}
 
-fn unlocked(path: &Path) -> Option<Arc<Vec<u8>>> {
+struct Kept {
+    open: Vec<Unlocked>,
+    /// Previews that have closed, so an unlock that ends after its preview keeps nothing.
+    closed: Vec<u64>,
+}
+
+static UNLOCKED: Mutex<Kept> = Mutex::new(Kept { open: Vec::new(), closed: Vec::new() });
+/// Closed previews remembered; an unlock outlives its preview by seconds, not by this many.
+const MOST_CLOSED: usize = 256;
+
+fn unlocked(path: &Path, session: u64) -> Option<Arc<Vec<u8>>> {
     let seen = crate::ops::seen(path);
     let kept = UNLOCKED.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    kept.iter().find(|(kept, at, _)| kept == path && *at == seen).map(|(_, _, bytes)| bytes.clone())
+    kept.open.iter().find(|unlocked| unlocked.session == session && unlocked.path == path && unlocked.seen == seen).map(|unlocked| unlocked.bytes.clone())
 }
 
-fn keep_unlocked(path: &Path, bytes: Arc<Vec<u8>>) {
+fn keep_unlocked(path: &Path, session: u64, bytes: Arc<Vec<u8>>) {
     let mut kept = UNLOCKED.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    kept.retain(|(kept, _, _)| kept != path);
-    kept.push((path.to_path_buf(), crate::ops::seen(path), bytes));
-    if kept.len() > MOST_UNLOCKED {
-        kept.remove(0);
+    if kept.closed.contains(&session) {
+        return;
+    }
+    kept.open.retain(|unlocked| unlocked.session != session);
+    kept.open.push(Unlocked { session, path: path.to_path_buf(), seen: crate::ops::seen(path), bytes });
+    if kept.open.len() > MOST_UNLOCKED {
+        kept.open.remove(0);
     }
 }
 
@@ -252,8 +282,8 @@ pub(crate) struct Target {
 }
 
 impl Package {
-    pub(crate) fn open(path: &Path, password: Option<&str>) -> Result<Package, Opened> {
-        if let Some(bytes) = unlocked(path) {
+    pub(crate) fn open(path: &Path, password: Option<&str>, session: Option<u64>) -> Result<Package, Opened> {
+        if let Some(bytes) = session.and_then(|session| unlocked(path, session)) {
             return Self::from_bytes(Arc::unwrap_or_clone(bytes));
         }
         let mut file = File::open(path).map_err(|error| Opened::Failed(error.to_string()))?;
@@ -269,7 +299,9 @@ impl Package {
             }
             let bytes = locked::unlock(path, password)?;
             let package = Self::from_bytes(bytes.clone())?;
-            keep_unlocked(path, Arc::new(bytes));
+            if let Some(session) = session {
+                keep_unlocked(path, session, Arc::new(bytes));
+            }
             return Ok(package);
         }
         file.rewind().map_err(|error| Opened::Failed(error.to_string()))?;
@@ -526,6 +558,21 @@ pub(crate) mod tests {
         }
         zip.finish().unwrap();
         path
+    }
+
+    #[test]
+    fn an_unlocked_document_stays_with_its_own_preview() {
+        let path = package("session.docx", &[("word/document.xml", b"<w:document/>")]);
+        let bytes = Arc::new(std::fs::read(&path).unwrap());
+        keep_unlocked(&path, 901, bytes.clone());
+        assert!(unlocked(&path, 901).is_some());
+        assert!(unlocked(&path, 902).is_none(), "another preview needs the password too");
+        forget(901);
+        assert!(unlocked(&path, 901).is_none());
+        // An unlock that ends after its preview closed keeps nothing.
+        forget(903);
+        keep_unlocked(&path, 903, bytes);
+        assert!(unlocked(&path, 903).is_none());
     }
 
     #[test]

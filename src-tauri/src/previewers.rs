@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tauri::{AppHandle, Emitter, Manager};
 use windows::core::{implement, Interface, Result as WinResult, GUID, HSTRING, PWSTR};
@@ -85,7 +85,16 @@ struct Host {
     parent: isize,
     jobs: Sender<Job>,
     wake: isize,
+    /// Which host this is, so a timeout drops only its own.
+    id: u64,
+    /// Since when an open sent to its thread has had no answer.
+    waiting: Option<Instant>,
 }
+
+static HOSTS_MADE: AtomicU64 = AtomicU64::new(0);
+/// An open with no answer for this long is stuck: a new one goes to a new thread instead of
+/// queueing behind it.
+const STALLED: Duration = Duration::from_secs(2);
 
 static HOST: Mutex<Option<Host>> = Mutex::new(None);
 /// The page numbers each preview, so a close for one already replaced leaves the new one alone,
@@ -122,12 +131,18 @@ pub fn open(window: &tauri::WebviewWindow, path: PathBuf, place: Place, back: u3
     let _ = APP.set(app.clone());
     let parent = window.hwnd().map_err(failed)?.0 as isize;
     BACK.store(back, std::sync::atomic::Ordering::Relaxed);
-    let (jobs, wake, host) = {
+    let (jobs, wake, host, id) = {
         let mut kept = HOST.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if kept.as_ref().and_then(|host| host.waiting).is_some_and(|since| since.elapsed() > STALLED) {
+            if let Some(stuck) = kept.take() {
+                let_go(&app, stuck);
+            }
+        }
         if kept.is_none() {
             let window = on_main(&app, move || make_window(parent))?.map_err(failed)?;
             let (jobs, wake) = start_worker()?;
-            *kept = Some(Host { window, parent, jobs, wake });
+            let id = HOSTS_MADE.fetch_add(1, Ordering::SeqCst);
+            *kept = Some(Host { window, parent, jobs, wake, id, waiting: None });
         }
         let host = kept.as_mut().ok_or("No host")?;
         if host.parent != parent {
@@ -135,17 +150,30 @@ pub fn open(window: &tauri::WebviewWindow, path: PathBuf, place: Place, back: u3
             on_main(&app, move || unsafe { SetParent(HWND(window as _), Some(HWND(to as _))) }.is_ok())?;
             host.parent = parent;
         }
-        (host.jobs.clone(), host.wake, host.window)
+        host.waiting.get_or_insert_with(Instant::now);
+        (host.jobs.clone(), host.wake, host.window, host.id)
     };
     place_window(&app, host, place, true)?;
     let (done, answer) = channel();
     jobs.send(Job::Open { path, clsid, host, size: (place.width, place.height), back, fore, ticket, done }).map_err(failed)?;
     unsafe { PostMessageW(Some(HWND(wake as _)), WAKE, WPARAM(0), LPARAM(0)) }.map_err(failed)?;
-    match answer.recv_timeout(OPEN_WAIT) {
-        Ok(result) => result.inspect_err(|_| hide(&app)),
+    let answered = answer.recv_timeout(OPEN_WAIT);
+    let mut kept = HOST.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mine = kept.as_ref().is_some_and(|host| host.id == id);
+    match answered {
+        Ok(result) => {
+            if let (true, Some(host)) = (mine, kept.as_mut()) {
+                host.waiting = None;
+            }
+            drop(kept);
+            result.inspect_err(|_| if mine { hide(&app) })
+        }
         Err(_) => {
-            // Left behind: its thread ends once the previewer answers, if it ever does.
-            abandon(&app);
+            // Left behind: its thread ends once the previewer answers, if it ever does. A host
+            // already replaced is not this open's to drop.
+            if let Some(stuck) = kept.take_if(|host| host.id == id) {
+                let_go(&app, stuck);
+            }
             Err("The previewer took too long".into())
         }
     }
@@ -193,14 +221,12 @@ pub fn close(app: &AppHandle, ticket: u64) {
 
 /// Gives up on a previewer that hangs: its window is hidden and dropped with it, and the next
 /// preview gets a new window and a new thread.
-fn abandon(app: &AppHandle) {
-    if let Some(host) = HOST.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take() {
-        let window = host.window;
-        let _ = on_main(app, move || unsafe { ShowWindow(HWND(window as _), SW_HIDE) });
-        // Dropping the jobs ends the thread once it is free; it then destroys the window.
-        drop(host.jobs);
-        let _ = unsafe { PostMessageW(Some(HWND(host.wake as _)), WAKE, WPARAM(0), LPARAM(0)) };
-    }
+fn let_go(app: &AppHandle, host: Host) {
+    let window = host.window;
+    let _ = on_main(app, move || unsafe { ShowWindow(HWND(window as _), SW_HIDE) });
+    // Dropping the jobs ends the thread once it is free; it then destroys the window.
+    drop(host.jobs);
+    let _ = unsafe { PostMessageW(Some(HWND(host.wake as _)), WAKE, WPARAM(0), LPARAM(0)) };
 }
 
 /// What the preview shows now, as a picture in the thumbnail format the page draws, for a

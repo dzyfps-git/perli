@@ -16,8 +16,14 @@ export function cellOf(text: string) {
   return row >= 0 ? { row, column } : null;
 }
 
+/** A field as spreadsheets paste it: one with a tab, a line break or a quote goes in quotes. */
+const field = (cell: OfficeCell) => {
+  const text = cell === null ? "" : String(cell);
+  return /[\t\r\n"]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
+};
+
 /** A sheet's shown rows as tab-separated text, the way spreadsheets paste. */
-export const asTabs = (rows: OfficeCell[][]) => rows.map((row) => row.map((cell) => (cell === null ? "" : String(cell))).join("\t")).join("\n");
+export const asTabs = (rows: OfficeCell[][]) => rows.map((row) => row.map(field).join("\t")).join("\n");
 
 /** Whether Office's own previewer shows the file at first, or Perli's reader. */
 export function startsInOffice(facts: OfficeFacts, useOffice: boolean, internetFirst: boolean) {

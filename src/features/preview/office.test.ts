@@ -15,6 +15,7 @@ test("columns are named the way spreadsheets name them, and cells read back", ()
 
 test("shown rows copy as tab-separated text", () => {
   assert.equal(asTabs([["Name", 3, null], ["Ana", 1.5, "x"]]), "Name\t3\t\nAna\t1.5\tx");
+  assert.equal(asTabs([["a\tb", "two\nlines", 'say "hi"', "plain"]]), '"a\tb"\t"two\nlines"\t"say ""hi"""\tplain');
 });
 
 test("Office's previewer shows first only when it is safe and wanted", () => {

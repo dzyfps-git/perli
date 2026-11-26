@@ -46,17 +46,21 @@ export function OfficeView(live: OfficeViewProps) {
   const [inOffice, setInOffice] = createSignal(startsInOffice(props.facts, officeHandlers(), internetReader()));
   const [officeFailure, setOfficeFailure] = createSignal<string>();
   const [password, setPassword] = createSignal<string>();
+  /** This preview's own key to what it unlocks, which no other preview can use. */
+  const session = crypto.getRandomValues(new Uint32Array(2)).reduce((sum, part) => sum * 2 ** 21 + (part >>> 11), 0);
   const [unlocking, setUnlocking] = createSignal(props.facts.locked);
   const [reading] = createResource(
     () => (inOffice() ? false : { password: password() }),
-    ({ password }) => officeRead(props.view, props.place.shot, props.place.at, password),
+    ({ password }) => officeRead(props.view, props.place.shot, props.place.at, password, session),
   );
   const failure = () => (reading.error ? String(reading.error) : undefined);
   const wrong = () => (password() && failure()?.includes(WRONG_PASSWORD) ? WRONG_PASSWORD : undefined);
   createEffect(() => reading() && setUnlocking(false));
+  // A lock Perli can't open, such as an old Office one, says so at once instead of asking.
+  createEffect(() => failure() && !failure()!.includes(WRONG_PASSWORD) && setUnlocking(false));
   onCleanup(() => {
     props.keys(undefined);
-    if (props.facts.locked) void officeForget(props.view, props.place.shot, props.place.at).catch(console.error);
+    if (props.facts.locked) void officeForget(session).catch(console.error);
   });
 
   const tips = () => props.facts.facts.map(([label, value]) => `${label}: ${value}`).join("\n");
@@ -140,7 +144,7 @@ export function OfficeView(live: OfficeViewProps) {
                 <Show when={doc.note}>
                   <p class="office-note">{doc.note}</p>
                 </Show>
-                <Reader doc={doc} view={props.view} place={props.place} keys={props.keys} />
+                <Reader doc={doc} view={props.view} place={props.place} keys={props.keys} session={session} />
               </>
             )}
           </Show>
@@ -150,8 +154,8 @@ export function OfficeView(live: OfficeViewProps) {
   );
 }
 
-function Reader(props: RowPlace & { doc: OfficeDoc; keys: Keys }) {
-  const picture = (edge: number) => (entry: string) => officePicture(props.view, props.place.shot, props.place.at, entry, edge);
+function Reader(props: RowPlace & { doc: OfficeDoc; keys: Keys; session: number }) {
+  const picture = (edge: number) => (entry: string) => officePicture(props.view, props.place.shot, props.place.at, entry, edge, props.session);
   const doc = props.doc;
   if (doc.family === "word")
     return <MarkdownView html={doc.html} source={doc.text} fill={(article) => fillPictures(article, picture(PICTURE_EDGE))} keys={props.keys} />;
@@ -180,7 +184,9 @@ function SheetView(props: { sheets: OfficeSheet[]; keys: Keys }) {
   /** Scrolls to a cell such as B12 and lights it for a moment. */
   function goTo(text: string) {
     const cell = cellOf(text);
-    const found = cell && body?.querySelectorAll("tr")[cell.row]?.querySelectorAll("td")[cell.column + 1];
+    // Rows keep their workbook number in the first cell, however they are sorted or filtered.
+    const row = cell && [...(body?.querySelectorAll("tr") ?? [])].find((tr) => tr.firstElementChild?.textContent === String(cell.row + 1));
+    const found = cell && row?.querySelectorAll("td")[cell.column + 1];
     setMissing(!found);
     if (!found) return;
     found.scrollIntoView({ block: "center", inline: "center" });

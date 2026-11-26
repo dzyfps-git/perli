@@ -1856,24 +1856,23 @@ async fn preview_row(view: u32, request: u64, row: u32, offset: u64, views: Stat
 /// Perli's own reading of a Word, Excel or PowerPoint row. A locked one takes its password once;
 /// it then stays open in memory until `office_forget`.
 #[tauri::command]
-async fn office_read(view: u32, request: u64, row: u32, password: Option<String>, views: State<'_, Views>) -> Result<office::Reading, String> {
+async fn office_read(view: u32, request: u64, row: u32, password: Option<String>, session: u64, views: State<'_, Views>) -> Result<office::Reading, String> {
     let path = row_file(&views, view, request, row).await?;
-    blocking(move || office::read(&path, password.as_deref())).await
+    blocking(move || office::read_for(&path, password.as_deref(), Some(session))).await
 }
 
 /// A picture inside a document, `edge` device pixels on its longest side at most.
 #[tauri::command]
-async fn office_picture(view: u32, request: u64, row: u32, entry: String, edge: u32, views: State<'_, Views>) -> Result<Response, String> {
+async fn office_picture(view: u32, request: u64, row: u32, entry: String, edge: u32, session: u64, views: State<'_, Views>) -> Result<Response, String> {
     let path = row_file(&views, view, request, row).await?;
-    let bytes = blocking(move || office::picture(&path, &entry, edge)).await?;
+    let bytes = blocking(move || office::picture(&path, &entry, edge, Some(session))).await?;
     Ok(Response::new(bytes))
 }
 
 /// Locks an unlocked document again, as its preview closes.
 #[tauri::command]
-async fn office_forget(view: u32, request: u64, row: u32, views: State<'_, Views>) -> Result<(), String> {
-    let path = row_file(&views, view, request, row).await?;
-    office::forget(&path);
+async fn office_forget(session: u64) -> Result<(), String> {
+    office::forget(session);
     Ok(())
 }
 

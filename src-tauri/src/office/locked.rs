@@ -174,7 +174,9 @@ fn agile(info: &[u8], package: &[u8], password: &[u8]) -> Result<Vec<u8>, Opened
     let (Some(data), Some(key)) = (key_data, sealed) else { return Err(failed("Its lock looks damaged")) };
     let number = |text: &str| text.parse::<usize>().map_err(|_| failed("Its lock looks damaged"));
     let hash = Hash::named(&key[1]).ok_or_else(|| failed("It is locked in a way Perli doesn't know. Office opens it"))?;
-    let (key_bytes, block_size) = (number(&key[2])? / 8, number(&key[3])?);
+    // The file says how big its key and blocks are, and a size it makes up would size the
+    // buffers below, so only AES's own sizes pass.
+    let (key_bytes, block_size) = aes_sizes(number(&key[2])?, number(&key[3])?)?;
     let spins = (number(&key[4])? as u32).min(MOST_SPINS);
     let salt = base64(&key[0]);
     let mut digest = hash.of(&[&salt, password]);
@@ -191,8 +193,8 @@ fn agile(info: &[u8], package: &[u8], password: &[u8]) -> Result<Vec<u8>, Opened
     }
     let secret = Cipher::new(&key_for(&KEY_VALUE))?.chained(&base64(&key[7]), &start);
     let data_hash = Hash::named(&data[1]).unwrap_or(hash);
-    let data_key = secret.get(..number(&data[2])? / 8).ok_or_else(|| failed("Its lock looks damaged"))?;
-    let data_block = number(&data[3])?;
+    let (data_key_bytes, data_block) = aes_sizes(number(&data[2])?, number(&data[3])?)?;
+    let data_key = secret.get(..data_key_bytes).ok_or_else(|| failed("Its lock looks damaged"))?;
     let data_salt = base64(&data[0]);
     let cipher = Cipher::new(data_key)?;
     let size = u64::from_le_bytes(package.get(..8).and_then(|size| size.try_into().ok()).ok_or_else(|| failed("Its lock looks damaged"))?) as usize;
@@ -203,6 +205,14 @@ fn agile(info: &[u8], package: &[u8], password: &[u8]) -> Result<Vec<u8>, Opened
     }
     out.truncate(size);
     Ok(out)
+}
+
+/// Key bits and block size as bytes, if they are ones AES has.
+fn aes_sizes(key_bits: usize, block_size: usize) -> Result<(usize, usize), Opened> {
+    match (key_bits, block_size) {
+        (128 | 192 | 256, 16) => Ok((key_bits / 8, block_size)),
+        _ => Err(failed("It is locked in a way Perli doesn't know. Office opens it")),
+    }
 }
 
 fn standard(info: &[u8], package: &[u8], password: &[u8]) -> Result<Vec<u8>, Opened> {
@@ -312,6 +322,19 @@ mod tests {
             sealed.extend(seal(&secret, segment, Some(&start)));
         }
         (info, sealed)
+    }
+
+    #[test]
+    fn sizes_aes_lacks_are_refused_before_anything_is_made() {
+        assert_eq!(aes_sizes(256, 16).ok(), Some((32, 16)));
+        assert_eq!(aes_sizes(128, 16).ok(), Some((16, 16)));
+        assert!(aes_sizes(256, 4_000_000_000).is_err());
+        assert!(aes_sizes(8_000_000_000, 16).is_err());
+        assert!(aes_sizes(0, 16).is_err());
+        let secret = [1u8; 64];
+        let (info, sealed) = agile_locked(&secret, "kiwi");
+        let huge = String::from_utf8_lossy(&info).replacen(r#"blockSize="16""#, r#"blockSize="4000000000""#, 1);
+        assert!(matches!(agile(huge.as_bytes(), &sealed, &password("kiwi")), Err(Opened::Failed(reason)) if reason.contains("doesn't know")));
     }
 
     #[test]
