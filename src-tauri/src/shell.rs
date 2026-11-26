@@ -114,6 +114,12 @@ fn type_name(extension: &str) -> Option<String> {
 /// Opens a terminal in `folder`: Windows Terminal if there is one, or else PowerShell. `shell`
 /// asks for one by name, and only these names ever start anything.
 pub fn open_terminal(folder: &str, shell: Option<&str>) -> std::io::Result<()> {
+    // A WSL folder opens the distro's own shell there, in Windows Terminal when it is there.
+    if let Some((distro, inner)) = crate::places::linux_spot(folder) {
+        let args = ["-d", distro.as_str(), "--cd", inner.as_str()];
+        let terminal = Command::new("wt.exe").arg("wsl.exe").args(args).spawn();
+        return terminal.or_else(|_| Command::new("wsl.exe").args(args).creation_flags(CREATE_NEW_CONSOLE.0).spawn()).map(drop);
+    }
     let console = |program: &str| Command::new(program).current_dir(folder).creation_flags(CREATE_NEW_CONSOLE.0).spawn();
     let started = match shell {
         Some("cmd") => console("cmd.exe"),

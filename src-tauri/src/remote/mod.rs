@@ -11,6 +11,8 @@ pub mod http;
 /// Why a job that changes files in place refuses cloud ones.
 pub const ON_THIS_PC: &str = "This works on files on this PC. Copy them here first.";
 mod onedrive;
+mod phone;
+pub use phone::{import_plan, mark_imported, Batch};
 pub mod s3;
 
 use std::collections::{BTreeMap, HashMap};
@@ -38,6 +40,8 @@ pub enum Kind {
     OneDrive,
     Dropbox,
     Google,
+    /// A phone, camera or player plugged in now, never saved.
+    Phone,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -276,7 +280,9 @@ fn spot(path: &Path) -> Option<Result<(Place, String), String>> {
         return None;
     }
     let (name, inner) = rest.split_once('\\').unwrap_or((rest, ""));
-    let Some(place) = places().into_iter().find(|place| place.name.eq_ignore_ascii_case(name)) else {
+    let saved = places();
+    let phones = phone::places(&saved);
+    let Some(place) = saved.into_iter().chain(phones).find(|place| place.name.eq_ignore_ascii_case(name)) else {
         return Some(Err(format!("There is no cloud place called {name}")));
     };
     let inner = inner.split('\\').filter(|part| !part.is_empty()).collect::<Vec<_>>().join("/");
@@ -345,6 +351,7 @@ pub fn sign_in(kind: Kind) -> Result<Place, String> {
         Kind::Dropbox => (dropbox::Dropbox::sign_in()?, "Dropbox"),
         Kind::Google => (gdrive::Google::sign_in()?, "Google Drive"),
         Kind::S3 => return Err("S3 storage opens with a key, not a sign-in".into()),
+        Kind::Phone => return Err("A phone shows here while it is plugged in".into()),
     };
     add_place(kind, name, account, None, &refresh)
 }
@@ -394,12 +401,18 @@ fn service(place: &Place) -> Result<Arc<dyn Service>, String> {
     if let Some(known) = lock(services()).get(&place.id) {
         return Ok(known.clone());
     }
+    if place.kind == Kind::Phone {
+        let made: Arc<dyn Service> = Arc::new(phone::Phone::new(&place.id));
+        lock(services()).insert(place.id.clone(), made.clone());
+        return Ok(made);
+    }
     let secret = http::secret(&place.id).ok_or_else(|| format!("Sign in to {} again: Windows no longer holds its key", place.name))?;
     let made: Arc<dyn Service> = match place.kind {
         Kind::S3 => Arc::new(s3::S3::new(place.s3.clone().ok_or("This place lost its settings")?, secret)),
         Kind::OneDrive => Arc::new(onedrive::OneDrive::new(&place.id, &secret)?),
         Kind::Dropbox => Arc::new(dropbox::Dropbox::new(&place.id, &secret)?),
         Kind::Google => Arc::new(gdrive::Google::new(&place.id, &secret, place.pdf)?),
+        Kind::Phone => unreachable!("a phone is made above"),
     };
     lock(services()).insert(place.id.clone(), made.clone());
     Ok(made)
@@ -476,8 +489,17 @@ pub fn forget(paths: &[PathBuf]) {
 /// "Google Doc", or a place's account. `None` when it says nothing, or outside the cloud.
 pub fn note(path: &Path) -> Option<String> {
     let at = at(path)?.ok()?;
-    let note = if at.inner.is_empty() { at.place.account.clone() } else { at.item().ok()?.note };
+    let note = match (at.inner.is_empty(), at.place.kind) {
+        (true, Kind::Phone) => phone::Phone::new(&at.place.id).battery().map_or_else(|| at.place.account.clone(), |level| format!("Phone, battery {level}%")),
+        (true, _) => at.place.account.clone(),
+        _ => at.item().ok()?.note,
+    };
     Some(note).filter(|note| !note.is_empty())
+}
+
+/// Phones plugged in, as (id, name), named as their places are.
+pub fn phone_names(devices: &[(String, String)], saved: &[Place]) -> Vec<(String, String)> {
+    phone::named(devices, &saved.iter().map(|place| place.name.as_str()).collect::<Vec<_>>())
 }
 
 /// The rows of the cloud root: every place, as a folder.

@@ -46,7 +46,7 @@ import {
 } from "../filelist/prefs";
 import type { SavedPane } from "../tabs/session";
 import { historyList, jumped } from "./history";
-import { baseName, isBin, nextTrail, parentOf, samePath } from "./path";
+import { baseName, isBin, isLibrary, nextTrail, parentOf, samePath } from "./path";
 import { morph } from "../../ui/morph";
 
 export type FolderView = ReturnType<typeof createFolderView>;
@@ -235,7 +235,7 @@ export function createFolderView(id: number, saved?: SavedPane, fixed?: Filter) 
     // Rows of a search carry no tags, so a tag would leave none of them, and have no twins.
     filter: fixed ?? { ...toFilter(filterForm()), tags: query() ? [] : filterForm().tags, except: query() ? [] : except() },
     // Grouped rows don't nest, so the folders opened in place close.
-    expanded: query() || isBin(target) || shownGroupBy() !== "none" || !nests() ? [] : expanded(),
+    expanded: query() || isBin(target) || isLibrary(target) || shownGroupBy() !== "none" || !nests() ? [] : expanded(),
     ...grouped(shownGroupBy(), folded()),
   });
   /** A folder opens in its own order, even from a search. */

@@ -28,6 +28,11 @@ import {
   fetchRows,
   setTagPaths,
   openWindow,
+  mountImage,
+  quickAccessPins,
+  phoneImportPlan,
+  phoneMarkImported,
+  runJob,
   forgetSession,
   reopenWindow,
   restoreWindows,
@@ -161,7 +166,7 @@ import {
 import { SelectPattern } from "./features/filelist/SelectPattern";
 import { COPIES_QUERY, FLAT_QUERY, type FolderView, type RowAt } from "./features/navigation/folderView";
 import { indexOptions } from "./features/settings/indexPrefs";
-import { BIN_PATH, isBin, isDriveRoot, isArchiveName, isInside, join, parentOf, baseName, relativeTo, samePath, type Crumb } from "./features/navigation/path";
+import { BIN_PATH, THIS_PC_PATH, isBin, isLibrary, isDriveRoot, isArchiveName, isInside, join, parentOf, baseName, relativeTo, samePath, type Crumb } from "./features/navigation/path";
 import { Palette, type Command } from "./features/palette/Palette";
 import { wordsFor, type Verb } from "./features/palette/words";
 import { PaneDivider } from "./features/tabs/PaneDivider";
@@ -231,6 +236,7 @@ import {
   setBookmarksCompact,
   bookmarksCompact,
   setLook,
+  setPinned,
   setSidebarOpen,
   sidebarOpen,
   toggleBookmark,
@@ -584,7 +590,7 @@ export function App() {
   const refreshPlaces = () => listPlaces().then(setPlaces).catch(console.error);
   /** The picker offers the folders on show first. The Recycle Bin and archives are no place to save. */
   const pickerPanes = (): PickerPanes => {
-    const real = (view: FolderView | undefined) => (view && !view.isBin() && !view.isZip() ? view.folder()?.path : undefined);
+    const real = (view: FolderView | undefined) => (view && !view.isBin() && !view.isZip() && !isLibrary(view.folder()?.path) ? view.folder()?.path : undefined);
     const here = tabs.activeView();
     return { here: real(here), there: real(tabs.active().panes().find((other) => other !== here)), home: homePath };
   };
@@ -721,6 +727,11 @@ export function App() {
     }
     comeForward().catch(console.error);
     setSettingsShown(false);
+    // This PC, from Win+E or a link, is the home page in a tab of its own.
+    if (folder === THIS_PC_PATH) {
+      if (await tabs.add([homePath ?? ""])) tabs.active().setHome(true);
+      return;
+    }
     // A tab showing search results there can't select by name, so it gets a plain tab instead.
     const shown =
       ask.select.length > 0 &&
@@ -844,7 +855,7 @@ export function App() {
             ...shell.placeItems(path, { x: event.clientX, y: event.clientY }),
             ...(isDriveRoot(path) ? networkItems() : []),
             ...(places()?.drives.some((drive) => drive.removable && samePath(drive.path, path))
-              ? [{ label: "Eject", divider: true, action: () => jobs.eject(path) }]
+              ? [{ label: places()?.drives.find((drive) => samePath(drive.path, path))?.mounted ? "Unmount" : "Eject", divider: true, action: () => jobs.eject(path) }]
               : []),
           ]),
     ];
@@ -884,6 +895,7 @@ export function App() {
             { label: "Sync this folder…", action: () => newSync(path) },
           ]
         : []),
+      ...(onPhone(path) ? [{ label: "Import new photos and videos", divider: true, action: () => quietly(importPhotos(path)) }] : []),
       ...(place && isPlaceRoot(path)
         ? [
             {
@@ -1246,6 +1258,7 @@ export function App() {
     const items: MenuItem[] = [
       { label: "Open", action: () => openRow(view, row, false) },
       { label: "Quick preview", action: () => previewSelected(view) },
+      ...(!row.isDir && /\.(iso|img|vhdx?)$/i.test(row.name) ? [{ label: "Mount", action: () => quietly(mountAndOpen(view, path)) }] : []),
       ...(!row.isDir && WRITTEN.has(kindOf(row.name, false)) && view.list()?.selection().rows.length === 1
         ? [{ label: "Edit", action: () => (editWhenShown(path), previewSelected(view)) }]
         : []),
@@ -1592,6 +1605,45 @@ export function App() {
   const WRITE_WAIT_MS = 60_000;
   const writesIn = (view: FolderView) => writing?.view === view.id && Date.now() < writing.until;
 
+  /** Pins the folders pinned in File Explorer's Quick access that Perli hasn't pinned yet. */
+  async function importQuickAccess() {
+    const fresh = (await quickAccessPins()).filter((path) => !holds(pinned(), path));
+    setPinned([...pinned(), ...fresh]);
+    jobs.notify(fresh.length ? `Pinned ${fresh.length} folder${fresh.length === 1 ? "" : "s"} from Quick access` : "Nothing new to pin", fresh.length ? fresh.map((path) => baseName(path)).join(", ") : "Every Quick access folder is pinned already.");
+  }
+
+  /** Whether `path` is on a phone plugged in now. */
+  const onPhone = (path: string) => !!places()?.devices.some((device) => samePath(device.path, path) || isInside(path, device.path));
+
+  /** Copies the phone's photos and videos that no import brought in before into Pictures, a
+   *  folder for each day they were taken. Only those that came in are noted, so a stopped
+   *  import brings the rest next time. */
+  async function importPhotos(path: string) {
+    const pictures = places()?.folders.find((folder) => folder.kind === "pictures")?.path;
+    if (!pictures) return jobs.notify("No Pictures folder", "Windows names no Pictures folder to bring photos into.", true);
+    const batches = await phoneImportPlan(path, pictures);
+    if (!batches.length) return jobs.notify("No new photos", "Every photo and video here came in before.");
+    let count = 0;
+    for (const batch of batches) {
+      const end = await runJob({ kind: "copyPaths", paths: batch.paths, folder: batch.folder });
+      if (!end) continue;
+      const failed = new Set(end.failed.map((retry) => retry.source.toLowerCase()));
+      const made = new Set(end.created.map((made) => baseName(made).toLowerCase()));
+      const came = batch.paths.filter((one) => (end.cancelled ? made.has(baseName(one).toLowerCase()) : !failed.has(one.toLowerCase())));
+      await phoneMarkImported(came);
+      count += came.length;
+      if (end.cancelled) break;
+    }
+    jobs.notify(`Brought in ${count} ${count === 1 ? "photo or video" : "photos and videos"}`, `Into ${baseName(pictures)}, a folder for each day.`);
+  }
+
+  /** Mounts a disk image and opens the drive it becomes. */
+  async function mountAndOpen(view: FolderView, path: string) {
+    const drive = await mountImage(path);
+    if (drive) await view.open(drive);
+    else jobs.notify("Mounting is taking a while", "The drive opens in the sidebar once Windows mounts it.");
+  }
+
   /** Opens the selected file in the preview, already editing. */
   function writeSelected(view: FolderView) {
     writing = undefined;
@@ -1629,6 +1681,19 @@ export function App() {
           { label: "Filter…", action: () => setFiltering(view) },
           ...undo,
         ]
+      : isLibrary(view.folder()?.path)
+      ? [
+          // New files go into one of its folders, which open from here.
+          ...(places()?.libraries.find((library) => samePath(library.path, view.folder()?.path ?? ""))?.locations ?? []).map((location, at) => ({
+            label: `Open ${baseName(location)}${at === 0 ? " (new files go here)" : ""}`,
+            action: () => void view.open(location),
+          })),
+          { label: "Search here", divider: true, action: () => view.askSearch() },
+          { label: "Select by pattern…", action: () => setSelectingPattern(view) },
+          { label: "Invert selection", action: () => invertSelection(view) },
+          { label: "Filter…", action: () => setFiltering(view) },
+          ...undo,
+        ]
       : view.isBin()
       ? [
           {
@@ -1655,7 +1720,7 @@ export function App() {
           { label: "Time river", action: () => setRiverOn(view.folder()?.path) },
           { label: "Twins", action: () => void openTwins(view) },
         ];
-    const shellItems = view.isBin() || view.isZip() || isPerliCloud(view.folder()?.path ?? "") ? [] : shell.backgroundItems(view, { x, y });
+    const shellItems = view.isBin() || view.isZip() || isLibrary(view.folder()?.path) || isPerliCloud(view.folder()?.path ?? "") ? [] : shell.backgroundItems(view, { x, y });
     setMenu({ x, y, items: [...fileItems, ...viewItems(view), ...shellItems] });
   }
 
@@ -2145,6 +2210,7 @@ export function App() {
     smallerTiles: () => resizeTiles(here(), -TILE_STEP),
     hidden: toggleHidden,
     systemFiles: toggleSystem,
+    importQuickAccess: () => quietly(importQuickAccess()),
     filter: () => here().toggleChips(),
     filterMore: () => setFiltering(here()),
     selectPattern: () => setSelectingPattern(here()),
@@ -2512,7 +2578,9 @@ export function App() {
     if (session) {
       tabs.restore(session);
     } else {
-      const opened = await tabs.activeView().open(start.folder ?? start.home ?? "");
+      const thisPc = start.folder === THIS_PC_PATH;
+      const opened = await tabs.activeView().open((thisPc ? undefined : start.folder) ?? start.home ?? "");
+      if (thisPc) tabs.active().setHome(true);
       if (opened) performance.mark("perli-folder-open", { detail: opened });
       if (opened && start.select.length > 0) await tabs.activeView().reload(start.select);
     }

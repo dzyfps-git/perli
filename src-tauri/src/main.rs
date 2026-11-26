@@ -1386,6 +1386,25 @@ async fn open_file(path: String) -> Result<(), String> {
     off_main(move || shell::open(&path.to_string_lossy())).await
 }
 
+/// Mounts a disk image as a drive, and answers with the drive it got once Windows shows it, or
+/// none if it doesn't within a minute (a VHD waits on its admin prompt).
+#[tauri::command]
+async fn mount_image(path: PathBuf, app: AppHandle) -> Result<Option<String>, String> {
+    if !places::is_disk_image(&path) {
+        return Err("Only an ISO, IMG, VHD or VHDX file mounts".to_string());
+    }
+    let main = jobs::owner(&app);
+    let before: Vec<String> = places::drive_paths().collect();
+    off_main(move || menus::mount(path, main)).await?;
+    for _ in 0..240 {
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        if let Some(drive) = places::drive_paths().find(|drive| !before.contains(drive)) {
+            return Ok(Some(drive));
+        }
+    }
+    Ok(None)
+}
+
 /// Ejects a card, a disc or a USB disk. Only the top of a drive can be asked for.
 #[tauri::command]
 async fn eject_drive(path: PathBuf, app: AppHandle) -> Result<eject::Ejected, String> {
@@ -1405,10 +1424,10 @@ async fn eject_drive(path: PathBuf, app: AppHandle) -> Result<eject::Ejected, St
     }
 }
 
-/// Shows a phone's files in Explorer.
+/// The folders pinned to File Explorer's Quick access, for Perli's pins to take in.
 #[tauri::command]
-async fn open_device(id: String) -> Result<(), String> {
-    async_runtime::spawn_blocking(move || places::open_device(&id)).await.map_err(|error| error.to_string())?
+async fn quick_access_pins() -> Result<Vec<String>, String> {
+    off_main(places::quick_access_pins).await
 }
 
 /// Asks for the key of a drive BitLocker keeps locked, in Windows' own prompt.
@@ -1775,6 +1794,17 @@ fn reorder_places(ids: Vec<String>) -> Result<(), String> {
 #[tauri::command]
 fn set_cloud_pdf(id: String, pdf: bool) -> Result<(), String> {
     remote::set_pdf(&id, pdf)
+}
+
+/// A phone's new photos and videos, a batch for each day, each day's folder made in `into`.
+#[tauri::command]
+async fn phone_import_plan(path: PathBuf, into: PathBuf) -> Result<Vec<remote::Batch>, String> {
+    blocking(move || remote::import_plan(&path, &into)).await
+}
+
+#[tauri::command]
+async fn phone_mark_imported(paths: Vec<PathBuf>) -> Result<(), String> {
+    blocking(move || remote::mark_imported(&paths)).await
 }
 
 #[tauri::command]
@@ -3220,6 +3250,8 @@ fn main() {
             reorder_places,
             set_cloud_pdf,
             cloud_about,
+            phone_import_plan,
+            phone_mark_imported,
             share_link,
             cloud_versions,
             bring_back,
@@ -3286,7 +3318,8 @@ fn main() {
             open_paths_with,
             open_paths_with_exe,
             eject_drive,
-            open_device,
+            mount_image,
+            quick_access_pins,
             unlock_drive,
             write_settings_file,
             read_settings_file,

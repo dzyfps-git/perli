@@ -101,7 +101,8 @@ pub fn answers(path: &str) -> bool {
 /// Fails with a plain message when `path` is on another computer that isn't answering, so a
 /// folder open says so in seconds instead of waiting on Windows for a minute.
 pub fn must_answer(path: &str) -> Result<()> {
-    if !is_remote(path) || answers(path) {
+    // WSL's share is on this PC, and opening it starts its distro, which may take a while.
+    if !is_remote(path) || crate::places::linux_spot(path).is_some() || answers(path) {
         return Ok(());
     }
     Err(Error::new(E_FAIL, format!("{} isn't answering. It may be off, or out of reach of this PC.", place_of(path))))

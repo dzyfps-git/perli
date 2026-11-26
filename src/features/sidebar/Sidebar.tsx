@@ -6,7 +6,6 @@ import {
   fetchPictureFile,
   forgetRecent,
   listPlaces,
-  openDevice,
   onDrivesChanged,
   openFile,
   reachable,
@@ -71,6 +70,9 @@ const ICON_CLOUD = "";
 const ICON_LOCK = "\uE72E";
 const ICON_ADD = "\uE710";
 const ICON_SYNC = "\uE895";
+const ICON_LIBRARY = "";
+const ICON_LINUX ="\uE756";
+const ICON_RUNNING = "\uE768";
 
 const FULL_SHARE = 0.9;
 /** How long a drive's bar takes to make its wave. */
@@ -112,6 +114,8 @@ function Place(props: {
   wave?: boolean;
   /** Set for a drive that can be ejected. */
   onEject?: () => void;
+  /** Ejecting unmounts it: a mounted ISO or VHD. */
+  unmount?: boolean;
   /** Just ejected: it slides out before Windows takes the letter away. */
   ejected?: boolean;
   /** How full, from 0 to 1, as a ring round the icon. */
@@ -197,7 +201,7 @@ function Place(props: {
         </Show>
       </button>
       <Show when={props.onEject}>
-        <button class="place-eject" aria-label={`Eject ${props.label}`} onClick={() => props.onEject?.()}>
+        <button class="place-eject" aria-label={`${props.unmount ? "Unmount" : "Eject"} ${props.label}`} onClick={() => props.onEject?.()}>
           {ICON_EJECT}
         </button>
       </Show>
@@ -712,6 +716,39 @@ export function Sidebar(props: {
           </For>
         </Section>
       </Show>
+      <Show when={places()?.libraries.length}>
+        <Section id="libraries" label="Libraries">
+          <For each={places()?.libraries}>
+            {(library) => (
+              <Place
+                view={props.view}
+                path={library.path}
+                label={library.name}
+                icon={ICON_LIBRARY}
+                about={`a library of ${library.locations.length} folder${library.locations.length === 1 ? "" : "s"}`}
+                onMenu={props.onMenu}
+              />
+            )}
+          </For>
+        </Section>
+      </Show>
+      <Show when={places()?.linux.length}>
+        <Section id="linux" label="Linux">
+          <For each={places()?.linux}>
+            {(distro) => (
+              <Place
+                view={props.view}
+                path={distro.path}
+                label={distro.name}
+                icon={ICON_LINUX}
+                badge={distro.running ? ICON_RUNNING : undefined}
+                about={`WSL${distro.default ? ", the default distro" : ""}, ${distro.running ? "running" : "starts when opened"}`}
+                onMenu={props.onMenu}
+              />
+            )}
+          </For>
+        </Section>
+      </Show>
       <Section id="drives" label="Drives">
         <For each={places()?.drives}>
           {(drive) => (
@@ -736,6 +773,7 @@ export function Sidebar(props: {
               space={spaces()[drive.path]}
               wave={waving().includes(drive.path)}
               onEject={drive.removable ? () => props.onEject(drive.path) : undefined}
+              unmount={drive.mounted}
               ejected={ejected().some((root) => samePath(root, drive.path))}
             />
           )}
@@ -744,11 +782,10 @@ export function Sidebar(props: {
           {(device) => (
             <Place
               view={props.view}
-              path={device.id}
+              path={device.path}
               label={device.name}
               icon={ICON_PHONE}
-              onOpen={() => openDevice(device.id).catch(props.report)}
-              onMenu={(event) => event.preventDefault()}
+              onMenu={props.onMenu}
             />
           )}
         </For>

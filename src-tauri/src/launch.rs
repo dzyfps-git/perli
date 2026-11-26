@@ -25,6 +25,9 @@ const BIN_NAMES: [&str; 3] = [
     "::{645FF040-5081-101B-9F08-00AA002F954E}",
     "shell:::{645FF040-5081-101B-9F08-00AA002F954E}",
 ];
+/// Perli's own name for This PC, whose page is Perli's home page.
+pub const THIS_PC: &str = "shell:MyComputerFolder";
+const THIS_PC_NAMES: [&str; 3] = [THIS_PC, "::{20D04FE0-3AEA-1069-A2D8-08002B30309D}", "shell:::{20D04FE0-3AEA-1069-A2D8-08002B30309D}"];
 /// More than any command line holds.
 const LONGEST_ASK: u64 = 256 * 1024;
 const ERROR_PIPE_BUSY: i32 = 231;
@@ -92,6 +95,10 @@ impl Ask {
         };
         if BIN_NAMES.iter().any(|name| name.eq_ignore_ascii_case(&folder)) {
             self.folder = Some(BIN.into());
+            return Ok(self);
+        }
+        if THIS_PC_NAMES.iter().any(|name| name.eq_ignore_ascii_case(&folder)) {
+            self.folder = Some(THIS_PC.into());
             return Ok(self);
         }
         if is_shell_place(&folder) {
@@ -234,9 +241,11 @@ mod tests {
     }
 
     #[test]
-    fn places_without_a_path_go_to_explorer_and_the_bin_stays() {
+    fn places_without_a_path_go_to_explorer_but_the_bin_and_this_pc_stay() {
         let settled = |folder: &str| parsed(&[folder]).settle();
-        assert_eq!(settled("::{20D04FE0-3AEA-1069-A2D8-08002B30309D}").unwrap_err(), "::{20D04FE0-3AEA-1069-A2D8-08002B30309D}");
+        assert_eq!(settled("::{20d04fe0-3aea-1069-a2d8-08002b30309d}").unwrap().folder.as_deref(), Some(THIS_PC));
+        assert_eq!(settled("shell:MyComputerFolder").unwrap().folder.as_deref(), Some(THIS_PC));
+        assert!(settled("::{21EC2020-3AEA-1069-A2DD-08002B30309D}").is_err(), "Control Panel goes to Explorer");
         assert!(settled("Shell:Downloads").is_err());
         assert!(settled(r"C:\no such folder here 7f3a").is_err());
         assert_eq!(settled("::{645ff040-5081-101b-9f08-00aa002f954e}").unwrap().folder.as_deref(), Some(BIN));

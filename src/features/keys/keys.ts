@@ -70,6 +70,7 @@ export const KEYS: KeyCommand[] = [
   { id: "smallerTiles", label: "Smaller tiles", group: "View", keys: ["Ctrl+-"] },
   { id: "hidden", label: "Show hidden files", group: "View", keys: ["Ctrl+H"] },
   { id: "systemFiles", label: "Show protected system files", group: "View", keys: [] },
+  { id: "importQuickAccess", label: "Pin File Explorer's Quick access folders", group: "Go", keys: [] },
   { id: "filter", label: "Quick filters", group: "View", keys: ["Ctrl+Shift+F"] },
   { id: "filterMore", label: "Filter by more…", group: "View", keys: [] },
   { id: "selectPattern", label: "Select by pattern", group: "View", keys: ["Ctrl+Shift+A"] },

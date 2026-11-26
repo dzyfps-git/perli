@@ -166,15 +166,22 @@ export interface Places {
     path: string;
     network: boolean;
     removable: boolean;
+    /** An ISO or VHD mounted as a drive, which ejecting unmounts. */
+    mounted: boolean;
     /** BitLocker keeps it encrypted. */
     encrypted: boolean;
     /** Encrypted and not unlocked yet. */
     locked: boolean;
   }[];
   /** Phones and the like, which have no drive letter. Explorer shows their files. */
-  devices: { name: string; id: string }[];
+  /** Phones and the like plugged in now, each shown under `path` as a place. */
+  devices: { name: string; id: string; path: string }[];
   /** Folders a sync app keeps, such as OneDrive. */
   clouds: { name: string; path: string }[];
+  /** Windows libraries, each over its folders, the one new files go to first. */
+  libraries: { name: string; path: string; locations: string[] }[];
+  /** WSL distros, whose files show as a share. */
+  linux: { name: string; path: string; default: boolean; running: boolean }[];
 }
 
 /** Rows of one snapshot. */
@@ -489,7 +496,7 @@ export const saveSession = (text: string) => invoke<void>("save_session", { text
 
 export const listPlaces = () => invoke<Places>("list_places");
 
-export type CloudKind = "s3" | "oneDrive" | "dropbox" | "google";
+export type CloudKind = "s3" | "oneDrive" | "dropbox" | "google" | "phone";
 
 /** Where an S3 place's bucket is, and the key's id. Its secret stays with Windows. */
 export interface S3Setup {
@@ -583,9 +590,21 @@ export type Ejected = { kind: "done" } | { kind: "busy"; reason: string };
 
 /** Ejects a card, a disc or a USB disk. A drive still in use says why, with no box from Windows. */
 export const ejectDrive = (path: string) => invoke<Ejected>("eject_drive", { path });
+/** The folders pinned to File Explorer's Quick access. */
+export const quickAccessPins = () => invoke<string[]>("quick_access_pins");
+
+/** One day's new photos on a phone, and the folder made for them. */
+export interface PhoneBatch {
+  folder: string;
+  paths: string[];
+}
+/** A phone's photos and videos no import brought in before, a batch for each day, its folder made in `into`. */
+export const phoneImportPlan = (path: string, into: string) => invoke<PhoneBatch[]>("phone_import_plan", { path, into });
+export const phoneMarkImported = (paths: string[]) => invoke<void>("phone_mark_imported", { paths });
+/** Mounts an ISO, IMG, VHD or VHDX, and answers with its drive once Windows shows it. */
+export const mountImage = (path: string) => invoke<string | null>("mount_image", { path });
 
 /** Shows a phone's files in File Explorer. */
-export const openDevice = (id: string) => invoke<void>("open_device", { id });
 
 /** Opens Windows' own BitLocker prompt for a locked drive. */
 export const unlockDrive = (path: string) => invoke<void>("unlock_drive", { path });
