@@ -5,6 +5,7 @@
 //! down into the cache.
 
 mod dropbox;
+mod ftp;
 mod gdrive;
 pub mod http;
 
@@ -44,6 +45,8 @@ pub enum Kind {
     /// A phone, camera or player plugged in now, never saved.
     Phone,
     WebDav,
+    /// FTP, or FTPS when the server says `secure`.
+    Ftp,
 }
 
 /// Where a server is and who signs in to it.
@@ -376,6 +379,7 @@ pub fn add_s3(setup: s3::Setup, secret: &str, name: &str) -> Result<Place, Strin
 fn server_service(kind: Kind, server: &Server, secret: &str) -> Result<Arc<dyn Service>, String> {
     match kind {
         Kind::WebDav => Ok(Arc::new(webdav::WebDav::new(server, secret)?)),
+        Kind::Ftp => Ok(Arc::new(ftp::Ftp::new(server, secret))),
         _ => Err("That isn't a server".into()),
     }
 }
@@ -407,7 +411,7 @@ pub fn sign_in(kind: Kind) -> Result<Place, String> {
         Kind::Google => (gdrive::Google::sign_in()?, "Google Drive"),
         Kind::S3 => return Err("S3 storage opens with a key, not a sign-in".into()),
         Kind::Phone => return Err("A phone shows here while it is plugged in".into()),
-        Kind::WebDav => return Err("A server opens with a password, not a sign-in".into()),
+        Kind::WebDav | Kind::Ftp => return Err("A server opens with a password, not a sign-in".into()),
     };
     add_place(kind, name, account, None, None, &refresh)
 }
@@ -469,7 +473,7 @@ fn service(place: &Place) -> Result<Arc<dyn Service>, String> {
         Kind::Dropbox => Arc::new(dropbox::Dropbox::new(&place.id, &secret)?),
         Kind::Google => Arc::new(gdrive::Google::new(&place.id, &secret, place.pdf)?),
         Kind::Phone => unreachable!("a phone is made above"),
-        Kind::WebDav => server_service(place.kind, place.server.as_ref().ok_or("This place lost its settings")?, &secret)?,
+        Kind::WebDav | Kind::Ftp => server_service(place.kind, place.server.as_ref().ok_or("This place lost its settings")?, &secret)?,
     };
     lock(services()).insert(place.id.clone(), made.clone());
     Ok(made)
